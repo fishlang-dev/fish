@@ -20,10 +20,15 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 export type Method = { name: string; params: Type[]; returns: Type };
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[] };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType;
+// A type parameter, as seen while a generic body is checked at its definition: it stands
+// for any type satisfying its bound, and offers only the bound's fields. Each instance of
+// the body is checked again with concrete types, so a parameter never reaches codegen.
+export type ParamType = { kind: "param"; name: string; bound: ObjectType | InterfaceType | undefined; fields: Field[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType;
 
 const interned = new Map<string, ObjectType>();
-const keys = new Map<ObjectType | ClassType | InterfaceType, string>();
+const keys = new Map<Exclude<Type, string>, string>();
 let declared = 0;
 
 // A class's key is unique to its declaration, since two programs may reuse a class name.
@@ -39,10 +44,21 @@ export function interfaceType(name: string): InterfaceType {
   return t;
 }
 
+export function typeParameter(name: string, bound: ObjectType | InterfaceType | undefined): ParamType {
+  const t: ParamType = { kind: "param", name, bound, fields: bound?.fields ?? [] };
+  keys.set(t, `param ${declared++}`);
+  return t;
+}
+
+// A string that is the same exactly when two types are, for keying instances.
+export function keyOf(t: Type): string {
+  return typeof t === "string" ? t : `{${keys.get(t)}}`;
+}
+
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
-  const key = sorted.map((f) => `${JSON.stringify(f.name)}:${typeof f.type === "string" ? f.type : `{${keys.get(f.type)}}`}`).join(",");
+  const key = sorted.map((f) => `${JSON.stringify(f.name)}:${keyOf(f.type)}`).join(",");
   let t = interned.get(key);
   if (!t) {
     t = { kind: "object", fields: sorted };
@@ -53,7 +69,7 @@ export function objectType(fields: Field[]): ObjectType {
 }
 
 // A field of an object, or of an instance or the bases it embeds.
-export function field(t: ObjectType | ClassType | InterfaceType, name: string): Field | undefined {
+export function field(t: Exclude<Type, string>, name: string): Field | undefined {
   const own = t.fields.find((f) => f.name === name);
   return own ?? (t.kind === "class" && t.base ? field(t.base, name) : undefined);
 }
@@ -82,6 +98,7 @@ export function fits(from: Type, to: Type): boolean {
   if (from === to) return true;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
+  // A type parameter fits through its bound's fields, as any instance of it would.
   return to.fields.every((f) => {
     const found = field(from, f.name);
     return found !== undefined && (found.access ?? "public") === "public" && fits(found.type, f.type);

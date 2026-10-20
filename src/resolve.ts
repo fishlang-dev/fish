@@ -37,9 +37,21 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
   const resolved = new Map<TypeAlias, Type>();
   const resolving = new Set<TypeAlias>();
   const traits = new Map<Interface, InterfaceType>();
+  // The type parameters in scope, bound to what they stand for in the body being checked.
+  let scope = new Map<string, Type>();
   aliases.forEach(aliasType);
   interfaces.forEach(interfaceOf);
-  return { resolveType, paramType };
+  return { resolveType, paramType, withScope };
+
+  function withScope<T>(bindings: Map<string, Type>, f: () => T): T {
+    const outer = scope;
+    scope = bindings;
+    try {
+      return f();
+    } finally {
+      scope = outer;
+    }
+  }
 
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
   // constructor's parameters may carry modifiers, which make them parameter properties.
@@ -61,6 +73,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
     if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
+    const bound = scope.get(t.name);
+    if (bound && t.args.length === 0) return bound;
     if (t.args.length > 0) throw unsupported("generic types", t);
     if (t.name === "i64" || t.name === "boolean" || t.name === "void") return t.name;
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);

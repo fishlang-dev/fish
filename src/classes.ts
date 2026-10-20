@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
@@ -11,6 +11,8 @@ export type Body = Span & {
   params: Param[];
   body: Stmt[];
   returnType: TypeNode | undefined;
+  // A generic function's type parameters; each set of type arguments gets its own instance.
+  typeParams?: TypeParam[];
   self?: { type: ClassType; constructor: boolean; mutable: boolean };
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;

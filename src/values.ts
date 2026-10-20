@@ -1,8 +1,8 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
-import { unsatisfied } from "./interfaces.ts";
+import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
+import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, derives, field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -30,10 +30,12 @@ export type Context = {
   setters: Map<Expr, Instance>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
-  returnOf(f: Body, at: Span): Type;
+  members: Members;
+  returnOf(instance: Instance, at: Span): Type;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body): Instance;
-  paramType(p: Param, property?: boolean): Type;
+  instantiate(f: Body, typeArgs: TypeNode[], argTypes: Type[], at: Span): Instance;
+  paramTypes(instance: Instance): Type[];
   lookup(name: string): Local | undefined;
   self: Body["self"];
   // The class whose constructor or method this is, which may reach its non-public members.
@@ -45,7 +47,8 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, instanceOf, paramType, lookup, self, owner, superCall, thisReady } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
+  const { self, owner, superCall, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -54,35 +57,64 @@ export function expressions(ctx: Context) {
     else value(e);
   }
 
-  // Checks a call's arguments; returns the user function it calls, or undefined for print.
-  function call(e: Call): Body | undefined {
+  // Checks a call: what it returns, and how a message names what it calls.
+  function call(e: Call): { type: Type; what: string } {
     const { callee } = e;
     if (e.optional || (callee.kind === "member" && callee.optional)) throw unsupported("optional calls", e);
-    if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
     if (callee.kind === "super") {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = classOf(self!.type.base!);
       types.set(callee, base.type);
-      args(e.args, base.constructor, e);
-      calls.set(e, instanceOf(base.constructor));
-      return base.constructor;
+      const instance = instanceOf(base.constructor);
+      args(e.args, e.args.map(value), instance, e);
+      calls.set(e, instance);
+      return { type: "void", what: "'super'" };
     }
     if (isPrint(callee)) {
       for (const a of e.args) {
-        if (a.kind !== "string" && typeof value(a) !== "string") {
-          throw new CompileError("printing an object is not supported yet; print its fields", a.start, a.end);
-        }
+        const type = a.kind === "string" ? "void" : value(a);
+        if (typeof type === "string") continue;
+        throw new CompileError(type.kind === "param" ? `a value of type '${type.name}' can't be printed`
+          : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
-      return undefined;
+      return { type: "void", what: "printing" };
     }
+    if (callee.kind === "member" && onParameter(callee)) return traitCall(e, callee);
     const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee) : undefined;
-    if (target) {
-      args(e.args, target, e);
-      calls.set(e, instanceOf(target));
-      return target;
+    if (!target) {
+      const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
+      throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
-    const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
-    throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+    const argTypes = e.args.map(value);
+    const instance = instantiate(target, e.typeArgs, argTypes, e);
+    args(e.args, argTypes, instance, e);
+    calls.set(e, instance);
+    return { type: returnOf(instance, e), what: `'${target.name}'` };
+  }
+
+  // Whether a member call's receiver is a value of a type parameter.
+  function onParameter(callee: Extract<Expr, { kind: "member" }>): boolean {
+    const { object } = callee;
+    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return false;
+    const type = value(object);
+    return typeof type !== "string" && type.kind === "param";
+  }
+
+  // A method of a type parameter's bound, called while checking a generic body at its
+  // definition. Each instance resolves the call to its concrete type's method.
+  function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const param = types.get(callee.object) as Extract<Type, { kind: "param" }>;
+    const found = param.bound?.kind === "interface" ? param.bound.methods.find((m) => m.name === callee.name) : undefined;
+    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${param.name}'`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError("expected 0 type arguments", e.start, e.end);
+    if (e.args.length !== found.params.length) {
+      throw new CompileError(`expected ${found.params.length} argument${found.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    }
+    e.args.forEach((a, i) => {
+      const type = value(a);
+      coerce(a, type, found.params[i]!, `argument of type '${show(type)}' is not assignable to parameter of type '${show(found.params[i]!)}'`);
+    });
+    return { type: found.returns, what: `'${callee.name}'` };
   }
 
   // The method a member call names: a static one on a class name, or an instance one, whose
@@ -136,14 +168,13 @@ export function expressions(ctx: Context) {
     return t.fields.some((f) => f.name === name) || !t.base ? t : declaring(t.base, name);
   }
 
-  function args(list: Expr[], target: Body, at: Span) {
-    const expected = target.params.length;
-    if (list.length !== expected) {
-      throw new CompileError(`expected ${expected} argument${expected === 1 ? "" : "s"}, but got ${list.length}`, at.start, at.end);
+  function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
+    const params = paramTypes(target);
+    if (list.length !== params.length) {
+      throw new CompileError(`expected ${params.length} argument${params.length === 1 ? "" : "s"}, but got ${list.length}`, at.start, at.end);
     }
     list.forEach((a, i) => {
-      const type = value(a);
-      const expected = paramType(target.params[i]!, target.self?.constructor);
+      const [type, expected] = [argTypes[i]!, params[i]!];
       coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);
     });
   }
@@ -184,7 +215,7 @@ export function expressions(ctx: Context) {
         if (getter) {
           visible(getter.access, getter.owner!, e.name, e);
           calls.set(e, instanceOf(getter));
-          return returnOf(getter, e);
+          return returnOf(instanceOf(getter), e);
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
@@ -202,16 +233,13 @@ export function expressions(ctx: Context) {
         const c = e.callee.kind === "ident" ? classes.get(e.callee.name) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
         if (e.typeArgs.length > 0) throw unsupported("type arguments on 'new'", e);
-        args(e.args ?? [], c.constructor, e);
+        const list = e.args ?? [];
+        args(list, list.map(value), instanceOf(c.constructor), e);
         return c.type;
       }
       case "call": {
-        const target = call(e);
-        const type = target ? returnOf(target, e) : "void";
-        if (type === "void") {
-          const what = target ? `'${target.name}'` : "printing";
-          throw new CompileError(`${what} does not return a value`, e.start, e.end);
-        }
+        const { type, what } = call(e);
+        if (type === "void") throw new CompileError(`${what} does not return a value`, e.start, e.end);
         return type;
       }
       case "unary": {
@@ -259,7 +287,7 @@ export function expressions(ctx: Context) {
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
     if (typeof to !== "string" && to.kind === "interface") {
-      const reason = unsatisfied(type, to, { classOf, returnOf, paramType }, e);
+      const reason = unsatisfied(type, to, members, e);
       if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
       excess(e, to);
       return;
@@ -334,7 +362,7 @@ export function expressions(ctx: Context) {
       changeable(target, "assign to");
       return type;
     }
-    const type = paramType(setter.params[0]!);
+    const type = paramTypes(instanceOf(setter))[0]!;
     if (reads && value(target) !== type) {
       throw new CompileError(`the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
     }

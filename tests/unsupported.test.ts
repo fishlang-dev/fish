@@ -88,7 +88,6 @@ for (const [decl, what, part] of CLASSES) {
 const SIGNATURES: [string, string, string][] = [
   ["(x: i64): x is i64", "type predicates", "x is i64"],
   ["(this: i64)", "'this' parameters", "this: i64"],
-  ["<T>(x: i64)", "generic functions", "T"],
   ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
@@ -129,7 +128,6 @@ const EXPRESSIONS: [string, string][] = [
   ["f?.()", "optional calls"],
   ["a?.b", "optional chains"],
   ["console?.log(1)", "optional calls"],
-  ["f<i64>()", "type arguments on calls"],
   ["1 as i64", "'as' expressions"],
   ["1 satisfies i64", "'satisfies' expressions"],
   ["<i64>1", "type assertions"],
