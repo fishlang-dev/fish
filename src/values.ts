@@ -81,8 +81,10 @@ export function expressions(ctx: Context) {
       }
       return { type: "void", what: "printing" };
     }
-    if (callee.kind === "member" && onParameter(callee)) return traitCall(e, callee);
-    const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee) : undefined;
+    // The receiver is checked once, however its call is resolved.
+    const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param") return traitCall(e, callee);
+    const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined;
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
@@ -94,12 +96,11 @@ export function expressions(ctx: Context) {
     return { type: returnOf(instance, e), what: `'${target.name}'` };
   }
 
-  // Whether a member call's receiver is a value of a type parameter.
-  function onParameter(callee: Extract<Expr, { kind: "member" }>): boolean {
+  // The type of a member call's receiver, unless it is `super` or a class's name.
+  function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
-    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return false;
-    const type = value(object);
-    return typeof type !== "string" && type.kind === "param";
+    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return undefined;
+    return value(object);
   }
 
   // A method of a type parameter's bound, called while checking a generic body at its
@@ -121,7 +122,7 @@ export function expressions(ctx: Context) {
 
   // The method a member call names: a static one on a class name, or an instance one, whose
   // receiver must be able to change when the method changes it.
-  function method(callee: Extract<Expr, { kind: "member" }>): Body {
+  function method(callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
     const { object, name } = callee;
     const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
     if (named) {
@@ -131,7 +132,7 @@ export function expressions(ctx: Context) {
       return found;
     }
     if (object.kind === "super") return superMethod(callee);
-    const type = value(object);
+    const type = receiver!;
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
     visible(found.access, found.owner!, name, callee);
