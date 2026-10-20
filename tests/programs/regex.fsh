@@ -14,3 +14,11 @@ function f() {
   let call = check(/x/, /y/g)
   let parens = (/a/)
 }
+function noSpaces() {
+  f(a,/'/)
+  let x = a ? b :/"/
+  if (b)/"/.test("x")
+  g(a,/`/)
+  let shifted = a >>>= 1
+  let left = a <<= 1
+}

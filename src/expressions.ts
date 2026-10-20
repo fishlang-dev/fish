@@ -124,6 +124,9 @@ function assignOperator(c: Cursor): [AssignOp, number] | undefined {
   const t = c.peek();
   if (t.kind !== "punct") return undefined;
   if (ASSIGN_OPERATORS.has(t.text)) return [t.text as AssignOp, 1];
+  // Only these start a rejoined operator. Looking ahead from anything else could lex past a
+  // regex, as in `f(a,/'/)`.
+  if (t.text !== "<" && t.text !== ">") return undefined;
   let text = "";
   for (let i = 0; i < 4; i++) {
     const n = c.peek(i);
