@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, holdsRef, keyOf, lower, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, holdsRef, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -113,6 +113,8 @@ type Checker = {
 export function instancing({ resolveType, paramType, withScope, members, checking, classParams }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, ObjectType | InterfaceType>>();
+  // Which implicit parameters are references to their type, and whether mutable.
+  const lent = new Map<Body, Map<number, boolean>>();
   const definitions = new Map<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
@@ -126,7 +128,13 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // type, which is what an interface's method signature is compared with.
   function declaredParams(f: Body): Type[] {
     const implicit = implicitOf(f);
-    return withScope(f.scope ?? new Map(), () => f.params.map((p, i) => implicit.get(i) ?? paramType(p, f.self?.constructor)));
+    return withScope(f.scope ?? new Map(), () => f.params.map((p, i) => lentAs(f, i, implicit.get(i)) ?? paramType(p, f.self?.constructor)));
+  }
+
+  // An implicit parameter's type, borrowed when the parameter is a reference to it.
+  function lentAs(f: Body, i: number, t: Type | undefined): Type | undefined {
+    const mutable = lent.get(f)?.get(i);
+    return t && mutable !== undefined ? refType(t, mutable) : t;
   }
 
   // A generic body is checked once at its definition, with placeholders for its type
@@ -196,7 +204,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
-    for (const [i, bound] of implicitOf(f)) own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound));
+    for (const [i, bound] of implicitOf(f)) own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound, lent.get(f)!.has(i)));
     const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
@@ -212,7 +220,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const f = instance.body;
     const implicit = implicitOf(f);
     return withScope(scope, () => f.params.map((p, i) =>
-      scope.get(`#${i}`) ?? implicit.get(i) ?? paramType(p, f.self?.constructor)));
+      lentAs(f, i, scope.get(`#${i}`) ?? implicit.get(i)) ?? paramType(p, f.self?.constructor)));
   }
 
   // What a concrete instance's body sees: each of its type parameters, and those of a generic
@@ -251,13 +259,20 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
+    const borrows = new Map<number, boolean>();
+    lent.set(f, borrows);
     withScope(scope, () => f.params.forEach((p, i) => {
-      const type = p.type && resolveType(p.type);
+      const written = p.type && resolveType(p.type);
+      // A reference to an interface or object type is one over what it borrows.
+      const type = written && typeof written !== "string" && written.kind === "ref" ? written.to : written;
       if (!type || typeof type === "string" || p.modifiers.length > 0) return;
       if (f.accessor && type.kind === "interface") {
         throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
       }
-      if (!f.accessor && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) found!.set(i, type);
+      if (!f.accessor && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) {
+        found!.set(i, type);
+        if (written !== type) borrows.set(i, (written as RefType).mutable);
+      }
     }));
     return found;
   }
@@ -265,8 +280,10 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // What an implicit type parameter stands for in a call: the argument's own type, which must
   // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
   // it gets TypeScript's excess property check.
-  function implicitArgument(arg: Expr, type: Type, bound: ObjectType | InterfaceType): Type {
-    if (typeof type !== "string" && type.kind === "ref") {
+  function implicitArgument(arg: Expr, type: Type, bound: ObjectType | InterfaceType, borrowed: boolean): Type {
+    // A borrowed argument stands for what it is, or what it refers to.
+    if (borrowed && typeof type !== "string" && type.kind === "ref") type = type.to;
+    else if (typeof type !== "string" && type.kind === "ref") {
       throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
     }
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;

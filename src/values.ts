@@ -432,6 +432,10 @@ export function expressions(ctx: Context) {
     if (typeof type !== "string" && type.kind === "class" && typeof to !== "string" && to.kind === "class" && derives(type, to)) {
       throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
     }
+    if (typeof type !== "string" && type.kind === "ref" && typeof to !== "string" && to.kind === "ref" && !fits(type, to)) {
+      const reason = type.mutable || !to.mutable ? "a reference can only lend the exact type it points to, which may be wider here" : "a shared reference can't lend itself as mutable";
+      throw new CompileError(`${message}: ${reason}`, e.start, e.end);
+    }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
     // An instance's concrete class may give a field its bound declares with a getter, which
     // copying field by field can't read, so that copy is rejected in the instance.

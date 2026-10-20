@@ -6,7 +6,7 @@ function own(i: Inner): i64 {
 }
 
 function take(r: Ref<P>): i64 {
-  const l: Ref<P> = r
+  const l = r
   return own(l.inner)
 }
 
