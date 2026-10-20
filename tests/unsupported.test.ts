@@ -120,7 +120,16 @@ const STATEMENTS: [string, string][] = [
   ["function inner() {}", "nested functions"],
   ["{ print(1) }", "block statements"],
   ["debugger", "'debugger' statements"],
+  ["let a = 1, b = 2", "declarations of several variables at once"],
 ];
+
+test("let x: i64", () => {
+  const src = "function main() {\n  let x: i64\n}";
+  const start = src.indexOf("x: i64");
+  expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    message: "declarations without an initializer are not supported yet", start, end: start + 6,
+  }));
+});
 
 for (const [stmt, what] of STATEMENTS) {
   test(stmt, () => {

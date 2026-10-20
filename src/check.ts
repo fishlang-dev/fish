@@ -98,12 +98,16 @@ export function check(program: Stmt[]): Checked {
           value(s.expr);
           throw new CompileError("only calls are supported as statements so far", s.start, s.end);
         case "let": {
-          const annotated = s.type && resolveType(s.type);
-          const type = value(s.init);
+          if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
+          if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
+          const d = s.declarations[0]!;
+          if (!d.init) throw unsupported("declarations without an initializer", d);
+          const annotated = d.type && resolveType(d.type);
+          const type = value(d.init);
           if (annotated && annotated !== type) {
-            throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, s.init.start, s.init.end);
+            throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, d.init.start, d.init.end);
           }
-          declare(s.name, type, s.mutable, false, s);
+          declare(d.target.name, type, s.keyword === "let", false, s);
           return;
         }
         case "assign": {

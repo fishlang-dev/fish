@@ -244,7 +244,7 @@ function parseExpr(expr: string): Expr {
   const [f] = parse(src);
   const [s] = f?.kind === "function" ? f.body : [];
   if (s?.kind !== "let") throw new Error("expected a let statement");
-  return s.init;
+  return s.declarations[0]!.init!;
 }
 
 const EXPRESSIONS: [string, string][] = [

@@ -174,7 +174,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       case "let": {
         const local = resolved(s);
         allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
-        emit(`store ${LLVM[local.type]} ${value(s.init)}, ptr ${slot(local)}`);
+        emit(`store ${LLVM[local.type]} ${value(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
         return;
       }
       case "assign": {

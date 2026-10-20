@@ -81,7 +81,7 @@ export type Expr = Span & (
 
 export type Stmt = Span & (
   | { kind: "expr"; expr: Expr }
-  | { kind: "let"; name: string; mutable: boolean; type: TypeNode | undefined; init: Expr }
+  | { kind: "let"; keyword: "let" | "const" | "var"; declarations: Declarator[] }
   // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
   | { kind: "assign"; target: Expr; op: ArithmeticOp | "="; value: Expr }
   | { kind: "return"; value: Expr | undefined }
@@ -115,6 +115,12 @@ export type ObjectProp = Span & (
 );
 
 export type Param = Span & { name: string; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined };
+
+export type Pattern = Span & (
+  | { kind: "ident"; name: string }
+);
+
+export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; init: Expr | undefined };
 
 export type TypeParam = Span & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
 
@@ -317,14 +323,12 @@ function whileStatement(c: Cursor): Stmt {
 
 function simpleStatement(c: Cursor): Stmt {
   const start = c.peek().start;
-  if (c.at("var")) throw new CompileError("'var' is not supported; use 'let' or 'const'", start, c.peek().end);
-  if (c.at("let") || c.at("const")) {
-    const mutable = c.next().text === "let";
-    const name = c.ident().text;
-    const type = c.at(":") ? annotation(c) : undefined;
-    if (!c.eat("=")) throw c.error("expected '=' (declarations need an initializer for now)");
-    const init = expression(c);
-    return { kind: "let", name, mutable, type, init, start, end: init.end };
+  if (c.at("let") || c.at("const") || c.at("var")) {
+    const keyword = c.next().text as "let" | "const" | "var";
+    const declarations: Declarator[] = [];
+    do declarations.push(declarator(c));
+    while (c.eat(","));
+    return { kind: "let", keyword, declarations, start, end: c.end() };
   }
   if (c.at("return")) {
     const end = c.next().end;
@@ -338,6 +342,15 @@ function simpleStatement(c: Cursor): Stmt {
   const op = expr.kind === "assign" ? ASSIGNMENT[expr.op] : undefined;
   if (expr.kind === "assign" && op) return { kind: "assign", target: expr.target, op, value: expr.value, start, end: expr.end };
   return { kind: "expr", expr, start, end: expr.end };
+}
+
+function declarator(c: Cursor): Declarator {
+  const start = c.peek().start;
+  const name = c.ident();
+  const target: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
+  const type = c.at(":") ? annotation(c) : undefined;
+  const init = c.eat("=") ? expression(c) : undefined;
+  return { target, type, init, start, end: c.end() };
 }
 
 // `type` is contextual: only a name following on the same line makes it a declaration.
