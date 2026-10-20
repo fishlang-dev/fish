@@ -50,8 +50,6 @@ export type Context = {
   paramTypes(instance: Instance): Type[];
   lookup(name: string): Local | undefined;
   self: Body["self"];
-  // The type a field of `this`'s class reads as in this body, when that differs from its own.
-  fieldView(name: string): Type | undefined;
   // The class whose constructor or method this is, which may reach its non-public members.
   owner: ClassType | undefined;
   // A derived constructor's `super(...)`, the one place a base constructor may be called.
@@ -69,7 +67,7 @@ export type Context = {
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, fieldView } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -286,7 +284,7 @@ export function expressions(ctx: Context) {
           returnOf(instance, e);
           calls.set(e, instance);
         }
-        return (object === self?.type && fieldView(e.name)) || found.type;
+        return found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));

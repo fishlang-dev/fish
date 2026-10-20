@@ -248,16 +248,16 @@ export function check(program: Stmt[]): Checked {
     const superCall = f.self?.constructor && f.self.type.base ? (f.body[0] as Extract<Stmt, { kind: "expr" }>).expr : undefined;
     if (superCall) unset.add(SUPER);
 
+    // In a member of a generic class's instance, `this` is the class made from the type
+    // parameters as this body sees them, so it reads through their bounds as the definition did.
+    const generic = f.self?.type.generic;
+    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
+    const self = f.self && { ...f.self, type: viewed ?? f.self.type };
+
     const { value, condition, effect, coerce } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup,
-      self: f.self,
-      // In a generic class's member, its own fields read as their annotations do here, through
-      // the class's type parameters.
-      fieldView: (name) => {
-        const decl = f.scope?.size ? classOf(f.self!.type).fields.find((d) => d.name === name) : undefined;
-        return decl?.type && resolveType(decl.type);
-      },
-      owner: f.owner,
+      self,
+      owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
       thisReady: (e) => unset.size === 0 || e === exempt,
       proves,
