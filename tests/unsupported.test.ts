@@ -60,6 +60,7 @@ const EXPRESSIONS: [string, string][] = [
   ["null", "'null' values"],
   ["this", "'this' expressions"],
   ["super", "'super' expressions"],
+  ["/a+/g", "regular expressions"],
   ["`a${1}b`", "template literals"],
   ["tag`a`", "tagged templates"],
 ];

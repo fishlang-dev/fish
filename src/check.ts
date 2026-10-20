@@ -287,6 +287,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   null: "'null' values",
   this: "'this' expressions",
   super: "'super' expressions",
+  regex: "regular expressions",
   template: "template literals",
   tagged: "tagged templates",
 };

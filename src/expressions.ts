@@ -84,6 +84,11 @@ function template(c: Cursor): Expr {
 
 export function primary(c: Cursor): Expr {
   if (c.peek().kind === "template" || c.peek().kind === "templateHead") return template(c);
+  if (c.at("/") || c.at("/=")) {
+    const t = c.regex();
+    const close = t.text.lastIndexOf("/");
+    return { kind: "regex", pattern: t.text.slice(1, close), flags: t.text.slice(close + 1), start: t.start, end: t.end };
+  }
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {

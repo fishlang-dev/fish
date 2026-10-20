@@ -4,13 +4,15 @@ export type Token = {
   // An `int` is an integer in any base; a `float` has a fraction or exponent; a `bigint` ends in `n`.
   // A template with substitutions arrives in pieces: a head ending in `${`, middles between
   // `}` and `${`, and a tail from `}` to the closing backtick.
-  kind: "ident" | "int" | "float" | "bigint" | "string" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
+  kind: "ident" | "int" | "float" | "bigint" | "string" | "regex" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
   // Source text; for strings and templates, the decoded value. Keywords are idents, since most TS keywords are contextual.
   text: string;
   start: number;
   end: number;
   // Drives automatic semicolon insertion.
   newlineBefore: boolean;
+  // On `/` and `/=`: the template substitutions open there, for rescanning it as a regex.
+  substitutions?: number[];
 };
 
 // Matches punctuation and keywords, never a literal with the same text.
@@ -97,21 +99,56 @@ function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
   return [end, kind];
 }
 
-export function lex(src: string): Token[] {
-  const tokens: Token[] = [];
+export type Lexer = {
+  next(): Token;
+  // Scans again from `slash`, a `/` or `/=` token, reading a regular expression instead.
+  regex(slash: Token): Token;
+};
+
+// Tokens are produced on demand, because only the parser knows whether a `/` divides or
+// starts a regular expression, and lexing past an unrecognised regex could fail.
+export function lexer(src: string): Lexer {
   let i = 0;
   let newlineBefore = false;
   // For each template substitution we are inside, how many `{` it has open, so the `}` that
   // closes the substitution can be told from one that closes a block or an object.
-  const substitutions: number[] = [];
-  const push = (kind: Token["kind"], text: string, start: number) => {
-    tokens.push({ kind, text, start, end: i, newlineBefore });
+  let substitutions: number[] = [];
+  const token = (kind: Token["kind"], text: string, start: number): Token => {
+    const t: Token = { kind, text, start, end: i, newlineBefore };
     newlineBefore = false;
+    return t;
   };
 
-  while (i < src.length) {
-    const c = src[i]!;
+  return {
+    next() {
+      for (;;) {
+        const t = scan();
+        if (t) return t;
+      }
+    },
+    regex(slash) {
+      i = slash.start;
+      newlineBefore = slash.newlineBefore;
+      substitutions = [...slash.substitutions!];
+      let inClass = false;
+      for (i++; src[i] !== "/" || inClass; i++) {
+        const c = src[i];
+        if (c === undefined || c === "\n" || c === "\r") throw new CompileError("unterminated regular expression", slash.start, i);
+        if (c === "\\") i++;
+        else if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+      }
+      i++;
+      while (i < src.length && /[\p{ID_Continue}$]/u.test(src[i]!)) i++;
+      return token("regex", src.slice(slash.start, i), slash.start);
+    },
+  };
+
+  // The next token, or undefined after skipping whitespace or a comment.
+  function scan(): Token | undefined {
     const start = i;
+    const c = src[i];
+    if (c === undefined) return token("eof", "", start);
     if (c === "\n") {
       newlineBefore = true;
       i++;
@@ -126,21 +163,20 @@ export function lex(src: string): Token[] {
       i = close + 2;
     } else if (/[\p{ID_Start}_$]/u.test(c)) {
       while (i < src.length && /[\p{ID_Continue}$\u200c\u200d]/u.test(src[i]!)) i++;
-      push("ident", src.slice(start, i), start);
+      return token("ident", src.slice(start, i), start);
     } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] ?? ""))) {
       const [end, kind] = number(src, i);
       i = end;
-      push(kind, src.slice(start, i), start);
+      return token(kind, src.slice(start, i), start);
     } else if (c === "`" || (c === "}" && substitutions.at(-1) === 0)) {
       const [value, end, more] = template(src, i + 1);
       i = end;
       if (c === "`") {
         if (more) substitutions.push(0);
-        push(more ? "templateHead" : "template", value, start);
-      } else {
-        if (!more) substitutions.pop();
-        push(more ? "templateMiddle" : "templateTail", value, start);
+        return token(more ? "templateHead" : "template", value, start);
       }
+      if (!more) substitutions.pop();
+      return token(more ? "templateMiddle" : "templateTail", value, start);
     } else if (c === '"' || c === "'") {
       let value = "";
       i++;
@@ -155,15 +191,16 @@ export function lex(src: string): Token[] {
         }
       }
       i++;
-      push("string", value, start);
+      return token("string", value, start);
     } else {
       const p = PUNCT.find((p) => src.startsWith(p, i));
       if (!p) throw new CompileError(`unexpected character '${c}'`, i);
       i += p.length;
       if (substitutions.length > 0 && (p === "{" || p === "}")) substitutions[substitutions.length - 1]! += p === "{" ? 1 : -1;
-      push("punct", p, start);
+      const t = token("punct", p, start);
+      if (p === "/" || p === "/=") t.substitutions = [...substitutions];
+      return t;
     }
+    return undefined;
   }
-  push("eof", "", i);
-  return tokens;
 }

@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { expression } from "./expressions.ts";
-import { isToken, lex, type Token } from "./lexer.ts";
+import { isToken, lexer, type Token } from "./lexer.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
 export type Span = { start: number; end: number };
@@ -36,6 +36,7 @@ export type Expr = Span & (
   | { kind: "float"; value: number }
   | { kind: "bigint"; value: bigint }
   | { kind: "null" } | { kind: "this" } | { kind: "super" }
+  | { kind: "regex"; pattern: string; flags: string }
   // Decoded text; `quasis` has one more entry than `exprs`.
   | { kind: "template"; quasis: string[]; exprs: Expr[] }
   | { kind: "tagged"; tag: Expr; typeArgs: TypeNode[]; template: Expr }
@@ -117,9 +118,14 @@ export type Cursor = {
   list<T>(item: () => T, close: string): T[];
   // Where the last consumed token ended.
   end(): number;
+  // Takes the `/` or `/=` at the cursor as the start of a regular expression instead.
+  regex(): Token;
 };
 
-function cursor(tokens: Token[]): Cursor {
+function cursor(src: string): Cursor {
+  const lex = lexer(src);
+  // Every token lexed so far; lookahead and backtracking move `pos` within it.
+  const tokens: Token[] = [];
   const describe = (t: Token) => {
     if (t.kind === "eof") return "end of file";
     if (t.kind === "string") return "a string literal";
@@ -128,8 +134,15 @@ function cursor(tokens: Token[]): Cursor {
   const c: Cursor = {
     pos: 0,
     conditionalAllowed: true,
-    peek: (offset = 0) => tokens[Math.min(c.pos + offset, tokens.length - 1)]!,
-    next: () => tokens[c.pos++]!,
+    peek: (offset = 0) => {
+      while (tokens.length <= c.pos + offset && tokens.at(-1)?.kind !== "eof") tokens.push(lex.next());
+      return tokens[Math.min(c.pos + offset, tokens.length - 1)]!;
+    },
+    next: () => {
+      const t = c.peek();
+      c.pos++;
+      return t;
+    },
     at: (text) => isToken(c.peek(), text),
     eat: (text) => {
       if (!c.at(text)) return false;
@@ -156,12 +169,18 @@ function cursor(tokens: Token[]): Cursor {
       return items;
     },
     end: () => tokens[c.pos - 1]!.end,
+    regex: () => {
+      const slash = c.peek();
+      tokens.length = c.pos;
+      tokens.push(lex.regex(slash));
+      return c.next();
+    },
   };
   return c;
 }
 
 export function parse(src: string): Item[] {
-  const c = cursor(lex(src));
+  const c = cursor(src);
   const items: Item[] = [];
   while (c.peek().kind !== "eof") {
     if (c.at("function")) {
