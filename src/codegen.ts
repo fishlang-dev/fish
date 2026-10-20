@@ -187,7 +187,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "switch": {
         const subject = value(s.discriminant);
-        const subjectType = types.get(s.discriminant)!;
+        const subjectType = valueType(s.discriminant);
         const type = llvm(subjectType);
         const bodies = s.cases.map(() => label());
         const end = label();
@@ -198,7 +198,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           const test = value(c.test);
           // Anything but two values of one primitive type, such as a union or an enum member,
           // compares by value.
-          const testType = types.get(c.test)!;
+          const testType = valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType;
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
           const next = label();
@@ -261,7 +261,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) {
-        print(e.args, builder, value, (a) => types.get(a)!, convert);
+        print(e.args, builder, value, valueType, convert);
         return undefined;
       }
       // The compiler's `clone()`: no value owns heap memory yet, so a copy of its bits is deep.
@@ -331,12 +331,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return to ? convert(result, type, to) : result;
   }
 
-  // A pointer to a value lent to a reference: where a place lives, or a slot holding a
-  // temporary converted to the type borrowed.
+  // The type of what `value` gives for an expression: its own, or what it is converted to.
+  function valueType(e: Expr): Type {
+    return coercions.get(e) ?? types.get(e)!;
+  }
+
+  // A pointer to a value lent to a reference: where a place holding exactly that type lives,
+  // or else a slot holding a copy converted to it.
   function borrowed(e: Expr, to: Type): string {
-    let root = e;
-    while (root.kind === "member" && !calls.has(root)) root = root.object;
-    if (root.kind === "ident" || root.kind === "this") return address(e);
+    if (types.get(e) === to && lendable(e)) return address(e);
     const slot = alloca(llvm(to));
     emit(`store ${llvm(to)} ${convert(evaluate(e), types.get(e)!, to)}, ptr ${slot}`);
     return slot;
@@ -452,7 +455,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
-        const tested = test(e, value, (x) => types.get(x)!);
+        const tested = test(e, value, valueType);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
@@ -509,6 +512,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
     emit(`${result} = getelementptr ${llvm(object)}, ptr ${base}, i32 0, ${path}`);
     return result;
+  }
+
+  // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
+  // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
+  function lendable(e: Expr): boolean {
+    for (; e.kind === "member" && !calls.has(e); e = e.object) {
+      const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
+      if (!object || (typeof object !== "string" && object.kind === "union")) return false;
+    }
+    if (e.kind === "this") return true;
+    const local = e.kind === "ident" ? locals.get(e) : undefined;
+    const type = types.get(e);
+    return local !== undefined && (type === local.type || typeof type === "string" || type?.kind !== "union");
   }
 
   // The type a place is stored as. Read through a type parameter's bound, a field may have a

@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, holdsRef, isCopy, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, ClassType, Field, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -72,7 +72,7 @@ export function expressions(ctx: Context) {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, condition, effect, coerce };
+  return { value, read, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
@@ -352,7 +352,7 @@ export function expressions(ctx: Context) {
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
-        const assigned = value(e.value);
+        const assigned = op === "=" ? value(e.value) : read(e.value);
         const type = op === "=" ? assigned : binaryType(op, target, widen(e.value, assigned), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         return target;
@@ -365,7 +365,23 @@ export function expressions(ctx: Context) {
       case "conditional": {
         condition(e.cond);
         const proven = proves(e.cond);
-        const [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
+        let [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
+        if (then === otherwise) return then;
+        // Two references lend shared what both point to, or a type both fit; otherwise a side
+        // that borrows gives its value.
+        const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
+        if (isRef(then) && isRef(otherwise)) {
+          const [a, b] = [(then as RefType).to, (otherwise as RefType).to];
+          const bound = (t: Type) => (typeof t !== "string" && t.kind === "param" ? t.bound : undefined);
+          const common = [a, b, bound(a), bound(b)].find((t) => t && fits(a, t) && fits(b, t));
+          if (common) {
+            const shared = refType(common, false);
+            coerce(e.then, then, shared, "");
+            coerce(e.else, otherwise, shared, "");
+            return shared;
+          }
+        }
+        if (isRef(then) || isRef(otherwise)) [then, otherwise] = [loaded(e.then, then), loaded(e.else, otherwise)];
         if (then === otherwise) return then;
         return bothSides(e, then, otherwise, coerce);
       }
@@ -433,7 +449,12 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
     }
     if (typeof type !== "string" && type.kind === "ref" && typeof to !== "string" && to.kind === "ref" && !fits(type, to)) {
-      const reason = type.mutable || !to.mutable ? "a reference can only lend the exact type it points to, which may be wider here" : "a shared reference can't lend itself as mutable";
+      // A shared reference to something narrower lends a copy of what this one points to.
+      if (!to.mutable && fits(type.to, to.to)) {
+        coercions.set(e, to);
+        return;
+      }
+      const reason = !type.mutable && to.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${show(to.to)}' can be lent mutably`;
       throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
@@ -449,8 +470,15 @@ export function expressions(ctx: Context) {
   // mutably needs a place that could be assigned.
   function borrow(e: Expr, type: Type, to: RefType, message: string) {
     const exact = lower(type) === lower(to.to);
-    if (place(e) ? !exact : !exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
-    if (to.mutable && place(e)) changeable(e, "mutably borrow");
+    if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
+    if (to.mutable && place(e)) {
+      // A shared borrow of anything else lends a copy, but a mutable one must reach the place.
+      const local = e.kind === "ident" ? locals.get(e) : undefined;
+      if (!exact || (local && local.type !== type && typeof type !== "string" && type.kind === "union")) {
+        throw new CompileError(`${message}: only a place holding exactly '${show(to.to)}' can be lent mutably`, e.start, e.end);
+      }
+      changeable(e, "mutably borrow");
+    }
     coercions.set(e, to);
   }
 
@@ -518,6 +546,7 @@ export function expressions(ctx: Context) {
   // an assignment that also reads, like `+=`, needs the getter too.
   function assignable(target: Expr, reads: boolean): Type {
     const setter = target.kind === "member" ? accessor(target) : undefined;
+    intoMember(target, types);
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       value(target);
@@ -566,8 +595,14 @@ export function expressions(ctx: Context) {
   // temporary.
   // A getter's result is a temporary, so a path through one isn't a place.
   function place(e: Expr): boolean {
-    while (e.kind === "member" && !e.optional && !calls.has(e)) e = e.object;
-    return e.kind === "ident" || e.kind === "this";
+    while (e.kind === "member" && !e.optional && !calls.has(e)) {
+      // An enum's member, and a field every member of a union shares, are values, not places.
+      const object = types.get(e.object);
+      const held = typeof object !== "string" && object?.kind === "ref" ? object.to : object;
+      if (!held || (typeof held !== "string" && held.kind === "union")) return false;
+      e = e.object;
+    }
+    return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
   }
 
   // Checks that a place, already typed, may change. `const` is deeply immutable, so no field
@@ -588,7 +623,7 @@ export function expressions(ctx: Context) {
     const local = locals.get(root)!;
     // A shared reference never changes what it points to; changing through a mutable one
     // comes later.
-    if (typeof local.type !== "string" && local.type.kind === "ref") {
+    if (path && typeof local.type !== "string" && local.type.kind === "ref") {
       if (local.type.mutable) throw unsupported("changes through 'Mut' references", target);
       throw new CompileError(`cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
@@ -625,7 +660,11 @@ export function expressions(ctx: Context) {
 
   // A value that is only read, seen through a reference to it.
   function read(e: Expr): Type {
-    const type = value(e);
+    return loaded(e, value(e));
+  }
+
+  // A checked value of `type`, loaded from where it points when it is a reference.
+  function loaded(e: Expr, type: Type): Type {
     if (typeof type === "string" || type.kind !== "ref") return type;
     coercions.set(e, type.to);
     return type.to;

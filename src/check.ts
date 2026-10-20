@@ -254,7 +254,7 @@ export function check(program: Stmt[]): Checked {
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     const self = f.self && { ...f.self, type: viewed ?? f.self.type };
 
-    const { value, condition, effect, coerce } = expressions({
+    const { value, read, condition, effect, coerce } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -388,7 +388,7 @@ export function check(program: Stmt[]): Checked {
           condition(s.cond);
           return;
         case "switch": {
-          const type = value(s.discriminant);
+          const type = read(s.discriminant);
           const union = typeof type !== "string" && type.kind === "union" ? type : undefined;
           if (typeof type !== "string" && !union && type.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);

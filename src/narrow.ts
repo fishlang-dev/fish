@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { unionType, type Type } from "./typing.ts";
+import { refType, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -83,10 +83,15 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const local = subject.kind === "ident" ? locals.get(subject) : undefined;
     const type = types.get(subject);
     if (!local || !type || !narrowable(local)) return nothing;
-    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    // A reference narrows to a reference to fewer members; a mutable one only to a single
+    // member, which it can point to inside the union.
+    const ref = typeof type !== "string" && type.kind === "ref" ? type : undefined;
+    const held = ref ? ref.to : type;
+    const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
     const facts = (keep: string): Facts => {
       const left = members.filter((m) => check(m) !== keep);
-      return new Map(left.length > 0 ? [[local, unionType(left)]] : []);
+      if (left.length === 0 || (ref?.mutable && left.length > 1)) return new Map();
+      return new Map([[local, ref ? refType(unionType(left), ref.mutable) : unionType(left)]]);
     };
     const [yes, no] = [facts("no"), facts("yes")];
     return positive ? { yes, no } : { yes: no, no: yes };

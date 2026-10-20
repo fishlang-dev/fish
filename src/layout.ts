@@ -150,7 +150,7 @@ export function conversions(b: Slots) {
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     if (typeof from !== "string" && from.kind === "ref") {
-      if (typeof to !== "string" && to.kind === "ref") return v;
+      if (typeof to !== "string" && to.kind === "ref") return lend(v, from.to, to.to);
       const loaded = temp();
       emit(`${loaded} = load ${llvm(from.to)}, ptr ${v}`);
       return convert(loaded, from.to, to);
@@ -183,6 +183,22 @@ export function conversions(b: Slots) {
       insert(convert(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
     });
     return result;
+  }
+
+  // A pointer to a `from` lent as one to a `to`: the same pointer, its payload when `to` is
+  // one member of the union `from`, or else a slot holding a copy converted to `to`.
+  function lend(v: string, from: Type, to: Type): string {
+    if (from === to) return v;
+    if (typeof from !== "string" && from.kind === "union" && from.members.includes(to)) {
+      const at = temp();
+      emit(`${at} = getelementptr ${llvm(from)}, ptr ${v}, i32 0, i32 1`);
+      return at;
+    }
+    const loaded = temp();
+    emit(`${loaded} = load ${llvm(from)}, ptr ${v}`);
+    const slot = alloca(llvm(to));
+    emit(`store ${llvm(to)} ${convert(loaded, from, to)}, ptr ${slot}`);
+    return slot;
   }
 
   // Sets the tag of the member `from` goes into, and stores its value as the payload.
