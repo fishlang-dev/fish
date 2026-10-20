@@ -1,25 +1,25 @@
-import { CompileError } from "./diag.ts";
-import type { Expr, Func } from "./parser.ts";
+import { isPrint, type Checked, type Local, type Type } from "./check.ts";
+import type { Expr, Stmt } from "./parser.ts";
 
-const I64_MAX = (1n << 63n) - 1n;
+const LLVM: Record<Type, string> = { i64: "i64" };
 
-// Lowers the program to LLVM IR text. The module names no target triple, so clang uses the host's.
+// Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
-export function codegen(funcs: Func[]): string {
-  const defined = new Set<string>();
-  for (const f of funcs) {
-    if (defined.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
-    defined.add(f.name);
-  }
-  if (!defined.has("main")) throw new CompileError("no main() function; execution starts there", 0, 0);
-
+export function codegen({ funcs, locals }: Checked): string {
+  const userFuncs = new Set(funcs.map((f) => f.name));
   const globals: string[] = [];
-  const body: string[] = [];
+  const out: string[] = [];
+  // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
+  let allocas: string[] = [];
+  let body: string[] = [];
+  let temps = 0;
 
   for (const f of funcs) {
-    body.push(`define void @"fsh.${f.name}"() {`, "entry:");
-    for (const s of f.body) body.push(`  ${call(s.expr)}`);
-    body.push("  ret void", "}", "");
+    allocas = [];
+    body = [];
+    temps = 0;
+    f.body.forEach(statement);
+    out.push(`define void @"fsh.${f.name}"() {`, "entry:", ...allocas, ...body, "  ret void", "}", "");
   }
 
   return [
@@ -27,7 +27,7 @@ export function codegen(funcs: Func[]): string {
     "",
     "declare i32 @printf(ptr, ...)",
     "",
-    ...body,
+    ...out,
     "define i32 @main() {",
     '  call void @"fsh.main"()',
     "  ret i32 0",
@@ -35,39 +35,73 @@ export function codegen(funcs: Func[]): string {
     "",
   ].join("\n");
 
-  function call(e: Expr): string {
-    if (e.kind !== "call") throw new CompileError("only calls are supported as statements so far", e.start, e.end);
-    const { callee } = e;
-    if (callee.kind === "ident" && defined.has(callee.name)) {
-      if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
-      return `call void @"fsh.${callee.name}"()`;
+  function emit(line: string) {
+    body.push(`  ${line}`);
+  }
+
+  function temp(): string {
+    return `%t${temps++}`;
+  }
+
+  function slot(local: Local): string {
+    return `%${local.name}.${local.id}`;
+  }
+
+  function resolved(node: Expr | Stmt): Local {
+    const local = locals.get(node);
+    if (!local) throw new Error("internal error: unresolved name");
+    return local;
+  }
+
+  function statement(s: Stmt) {
+    switch (s.kind) {
+      case "expr":
+        if (s.expr.kind === "call") call(s.expr.callee, s.expr.args);
+        return;
+      case "let": {
+        const local = resolved(s);
+        allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
+        emit(`store ${LLVM[local.type]} ${value(s.init)}, ptr ${slot(local)}`);
+        return;
+      }
     }
-    const isConsoleLog =
-      callee.kind === "member" && callee.name === "log" &&
-      callee.object.kind === "ident" && callee.object.name === "console";
-    if (isConsoleLog || (callee.kind === "ident" && callee.name === "print")) return print(e.args);
-    const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
-    throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+  }
+
+  function call(callee: Expr, args: Expr[]) {
+    if (callee.kind === "ident" && userFuncs.has(callee.name)) emit(`call void @"fsh.${callee.name}"()`);
+    else if (isPrint(callee)) print(args);
+  }
+
+  function value(e: Expr): string {
+    switch (e.kind) {
+      case "int":
+        return String(e.value);
+      case "ident": {
+        const local = resolved(e);
+        const t = temp();
+        emit(`${t} = load ${LLVM[local.type]}, ptr ${slot(local)}`);
+        return t;
+      }
+      default:
+        throw new Error(`internal error: no lowering for ${e.kind}`);
+    }
   }
 
   // `console.log` and `print` are the same: arguments joined by spaces, then a newline.
   // String literals are folded into the printf format at compile time.
-  function print(args: Expr[]): string {
+  function print(args: Expr[]) {
     let format = "";
     const values: string[] = [];
     args.forEach((a, i) => {
       if (i > 0) format += " ";
       if (a.kind === "string") {
         format += a.value.replaceAll("%", "%%");
-      } else if (a.kind === "int") {
-        if (a.value > I64_MAX) throw new CompileError("integer literal does not fit in i64", a.start, a.end);
-        format += "%lld";
-        values.push(`, i64 ${a.value}`);
       } else {
-        throw new CompileError("only string and integer literals can be printed so far", a.start, a.end);
+        format += "%lld";
+        values.push(`, i64 ${value(a)}`);
       }
     });
-    return `call i32 (ptr, ...) @printf(ptr ${cString(format + "\n")}${values.join("")})`;
+    emit(`call i32 (ptr, ...) @printf(ptr ${cString(format + "\n")}${values.join("")})`);
   }
 
   function cString(s: string): string {

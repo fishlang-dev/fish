@@ -2,12 +2,13 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs } from "node:util";
+import { check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { parse } from "./parser.ts";
 
 export function compile(src: string): string {
-  return codegen(parse(src));
+  return codegen(check(parse(src)));
 }
 
 // Compiles `file` to a native executable at `out`, piping the IR through clang.

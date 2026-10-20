@@ -1,7 +1,9 @@
 import { CompileError } from "./diag.ts";
 import { lex, type Token } from "./lexer.ts";
 
-type Span = { start: number; end: number };
+export type Span = { start: number; end: number };
+
+export type TypeRef = Span & { name: string };
 
 export type Expr = Span & (
   | { kind: "int"; value: bigint }
@@ -11,9 +13,20 @@ export type Expr = Span & (
   | { kind: "call"; callee: Expr; args: Expr[] }
 );
 
-export type Stmt = { kind: "expr"; expr: Expr };
+export type Stmt = Span & (
+  | { kind: "expr"; expr: Expr }
+  | { kind: "let"; name: string; mutable: boolean; type: TypeRef | undefined; init: Expr }
+);
 
 export type Func = Span & { name: string; body: Stmt[] };
+
+// Reserved in strict-mode JavaScript, so never usable as names.
+const RESERVED = new Set([
+  "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
+  "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if",
+  "import", "in", "instanceof", "let", "new", "null", "return", "static", "super", "switch",
+  "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
+]);
 
 // Recursive descent; expressions will grow into a Pratt loop as operators arrive.
 export function parse(src: string): Func[] {
@@ -33,6 +46,7 @@ export function parse(src: string): Func[] {
   };
   const ident = () => {
     if (peek().kind !== "ident") throw error("expected an identifier");
+    if (RESERVED.has(peek().text)) throw error("expected a name");
     return next();
   };
 
@@ -60,11 +74,33 @@ export function parse(src: string): Func[] {
     const stmts: Stmt[] = [];
     while (!at("}")) {
       if (peek().kind === "eof") throw error("expected '}'");
-      stmts.push({ kind: "expr", expr: expression() });
+      stmts.push(statement());
       endStatement();
     }
     next();
     return stmts;
+  }
+
+  function statement(): Stmt {
+    const start = peek().start;
+    if (at("var")) throw new CompileError("'var' is not supported; use 'let' or 'const'", start, peek().end);
+    if (at("let") || at("const")) {
+      const mutable = next().text === "let";
+      const name = ident().text;
+      let type: TypeRef | undefined;
+      if (at(":")) {
+        next();
+        if (peek().kind !== "ident") throw error("expected a type");
+        const t = next();
+        type = { name: t.text, start: t.start, end: t.end };
+      }
+      if (!at("=")) throw error("expected '=' (declarations need an initializer for now)");
+      next();
+      const init = expression();
+      return { kind: "let", name, mutable, type, init, start, end: init.end };
+    }
+    const expr = expression();
+    return { kind: "expr", expr, start, end: expr.end };
   }
 
   // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.
@@ -103,6 +139,7 @@ export function parse(src: string): Func[] {
       case "string":
         return { kind: "string", value: t.text, ...span };
       case "ident":
+        if (RESERVED.has(t.text)) break;
         return { kind: "ident", name: t.text, ...span };
     }
     if (t.text === "(") {
