@@ -29,6 +29,9 @@ export type ClassInfo = {
   required: Set<string>;
   methods: Map<string, Body>;
   statics: Map<string, Body>;
+  // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
+  getters: Map<string, Body>;
+  setters: Map<string, Body>;
 };
 
 // Collects a class declaration's fields and builds the constructor it compiles to.
@@ -47,10 +50,16 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
   const type = classType(node.name);
   const methods = new Map<string, Body>();
   const statics = new Map<string, Body>();
+  const getters = new Map<string, Body>();
+  const setters = new Map<string, Body>();
   for (const m of node.members) {
     if (m.kind === "constructor") continue;
     if (m.kind === "method") {
       method(m);
+      continue;
+    }
+    if (m.kind === "get" || m.kind === "set") {
+      accessor(m);
       continue;
     }
     if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], m);
@@ -68,9 +77,13 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     return add({ name: p.pattern.name, type: p.type, init: undefined, access, start: p.start, end: p.end });
   });
 
-  for (const name of methods.keys()) {
+  for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
     const clash = fields.find((f) => f.name === name);
     if (clash) throw new CompileError(`duplicate property '${name}'`, clash.start, clash.end);
+    if (methods.has(name) && (getters.has(name) || setters.has(name))) {
+      const m = methods.get(name)!;
+      throw new CompileError(`duplicate property '${name}'`, m.start, m.end);
+    }
   }
   const prelude = [
     ...fields.filter((f) => f.init).map((f) => assignField(f.name, f.init!, f)),
@@ -87,7 +100,29 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     end: (ctor ?? node).end,
   };
   const required = new Set(fields.filter((f) => !f.init && !properties.includes(f)).map((f) => f.name));
-  return { type, fields, constructor, required, methods, statics };
+  return { type, fields, constructor, required, methods, statics, getters, setters };
+
+  function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
+    if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
+    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    const access = modifiers(m.modifiers, m, m.name);
+    if (!m.body) throw unsupported("accessors without a body", m);
+    const table = m.kind === "get" ? getters : setters;
+    if (table.has(m.name)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
+    if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
+    if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
+    table.set(m.name, {
+      name: `${node.name}.${m.kind} ${m.name}`,
+      params: m.params,
+      body: m.body,
+      returnType: m.returnType,
+      self: { type, constructor: false, mutable: m.kind === "set" },
+      owner: type,
+      access,
+      start: m.start,
+      end: m.end,
+    });
+  }
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
@@ -155,9 +190,7 @@ function span(nodes: Span[]): Span {
 }
 
 // What each kind of class member besides a field and the constructor is called when rejected.
-const MEMBER_FORMS: Record<Exclude<ClassMember["kind"], "field" | "constructor" | "method">, string> = {
-  get: "accessors",
-  set: "accessors",
+const MEMBER_FORMS: Record<Exclude<ClassMember["kind"], "field" | "constructor" | "method" | "get" | "set">, string> = {
   index: "index signatures",
   staticBlock: "static blocks",
 };

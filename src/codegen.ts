@@ -1,4 +1,4 @@
-import type { Checked, Local, Type } from "./check.ts";
+import type { Body, Checked, Local, Type } from "./check.ts";
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -48,7 +48,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, calls, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
+export function codegen({ funcs, calls, setters, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -265,16 +265,21 @@ export function codegen({ funcs, calls, types, locals, returns, coercions, jumps
       if (isPrint(e.callee)) print(e.args);
       return undefined;
     }
+    const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    return invoke(target, e.callee.kind === "member" ? e.callee.object : undefined, values);
+  }
+
+  // Calls a function with its arguments' values, after its receiver when it is a method.
+  function invoke(target: Body, object: Expr | undefined, args: string[]): string | undefined {
     const type = returnType(target.name);
-    const values = target.self && e.callee.kind === "member" ? [`ptr ${receiver(e.callee.object)}`] : [];
-    for (const a of e.args) values.push(`${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-    const invoke = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
+    const values = target.self && object ? [`ptr ${receiver(object)}`, ...args] : args;
+    const call = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
     if (type === "void") {
-      emit(invoke);
+      emit(call);
       return undefined;
     }
     const result = temp();
-    emit(`${result} = ${invoke}`);
+    emit(`${result} = ${call}`);
     return result;
   }
 
@@ -324,6 +329,8 @@ export function codegen({ funcs, calls, types, locals, returns, coercions, jumps
         return t;
       }
       case "member": {
+        const getter = calls.get(e);
+        if (getter) return invoke(getter, e.object, [])!;
         const object = types.get(e.object) as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldIndex(object, e.name)}`);
@@ -427,6 +434,11 @@ export function codegen({ funcs, calls, types, locals, returns, coercions, jumps
   }
 
   function store(target: Expr, result: string) {
+    const setter = setters.get(target);
+    if (setter && target.kind === "member") {
+      invoke(setter, target.object, [`${llvm(types.get(target)!)} ${result}`]);
+      return;
+    }
     emit(`store ${llvm(types.get(target)!)} ${result}, ptr ${address(target)}`);
   }
 

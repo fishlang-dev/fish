@@ -17,8 +17,11 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 export type Checked = {
   // Every function to compile: the top-level ones, then each class's constructor and methods.
   funcs: Body[];
-  // The function each call of a user function or method runs.
+  // The function each call of a user function or method runs, and the getter each read of
+  // an accessor runs.
   calls: Map<Expr, Body>;
+  // The setter each assignment to an accessor runs.
+  setters: Map<Expr, Body>;
   // Every value expression's type.
   types: Map<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
@@ -86,6 +89,7 @@ export function check(program: Stmt[]): Checked {
   const jumps = new Map<Stmt, Stmt>();
   const coercions = new Map<Expr, Type>();
   const calls = new Map<Expr, Body>();
+  const setters = new Map<Expr, Body>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -99,11 +103,13 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`class '${c.type.name}' contains itself, so it would have infinite size`, c.constructor.start, c.constructor.end);
     }
   });
-  const bodies: Body[] = [...funcs, ...[...classes.values()].flatMap((c) => [c.constructor, ...c.methods.values(), ...c.statics.values()])];
+  const bodies: Body[] = [...funcs, ...[...classes.values()].flatMap((c) => [
+    c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(),
+  ])];
   bodies.forEach(checkBody);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  return { funcs: bodies, calls, types, locals, returns, coercions, jumps };
+  return { funcs: bodies, calls, setters, types, locals, returns, coercions, jumps };
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
@@ -153,7 +159,7 @@ export function check(program: Stmt[]): Checked {
     let exempt: Expr | undefined;
 
     const { value, condition, effect, coerce } = expressions({
-      types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup,
+      types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup,
       self: f.self,
       owner: f.owner,
       thisReady: (e) => unset.size === 0 || e === exempt,

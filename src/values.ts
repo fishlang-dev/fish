@@ -26,6 +26,7 @@ export type Context = {
   locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
   coercions: Map<Expr, Type>;
   calls: Map<Expr, Body>;
+  setters: Map<Expr, Body>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   returnOf(f: Body, at: Span): Type;
@@ -40,7 +41,7 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup, self, owner, thisReady } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup, self, owner, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -144,9 +145,15 @@ export function expressions(ctx: Context) {
         const object = value(e.object);
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" ? undefined : field(object, e.name);
-        if (!found && typeof object !== "string" && object.kind === "class" && classOf(object).methods.has(e.name)) {
-          throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
+        const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
+        const getter = !found ? c?.getters.get(e.name) : undefined;
+        if (getter) {
+          visible(getter.access, getter.owner!, e.name, e);
+          calls.set(e, getter);
+          return returnOf(getter, e);
         }
+        if (!found && c?.methods.has(e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
+        if (!found && c?.setters.has(e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, object, e.name, e);
         return found.type;
@@ -184,14 +191,14 @@ export function expressions(ctx: Context) {
       case "assign": {
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-        const target = assignable(e.target);
+        const target = assignable(e.target, op !== "=");
         const assigned = value(e.value);
         const type = op === "=" ? assigned : binaryType(op, target, assigned, e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         return target;
       }
       case "update": {
-        const target = assignable(e.operand);
+        const target = assignable(e.operand, true);
         if (target !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return "i64";
       }
@@ -252,11 +259,38 @@ export function expressions(ctx: Context) {
 
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
   // `const` is deeply immutable, so no field of a constant can change.
-  function assignable(target: Expr): Type {
+  // The type an assignment stores. Through an accessor that is the setter's parameter, and
+  // an assignment that also reads, like `+=`, needs the getter too.
+  function assignable(target: Expr, reads: boolean): Type {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
-    const type = value(target);
+    const setter = target.kind === "member" ? accessor(target) : undefined;
+    if (!setter || target.kind !== "member") {
+      const type = value(target);
+      changeable(target, "assign to");
+      return type;
+    }
+    const type = paramType(setter.params[0]!);
+    if (reads && value(target) !== type) {
+      throw new CompileError(`the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
+    }
     changeable(target, "assign to");
+    setters.set(target, setter);
+    types.set(target, type);
     return type;
+  }
+
+  // The setter an assignment to a class member runs, if it is an accessor. A getter alone
+  // makes the property read-only.
+  function accessor(target: Extract<Expr, { kind: "member" }>): Body | undefined {
+    const object = value(target.object);
+    if (typeof object === "string" || object.kind !== "class" || field(object, target.name)) return undefined;
+    const c = classOf(object);
+    const setter = c.setters.get(target.name);
+    if (!setter && c.getters.has(target.name)) {
+      throw new CompileError(`cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
+    }
+    if (setter) visible(setter.access, object, target.name, target);
+    return setter;
   }
 
   // A variable, `this`, or a field inside one: somewhere a value lives, rather than a
