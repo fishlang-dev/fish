@@ -309,7 +309,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // Builds a value of `to` from the matching fields of a wider value of `from`.
   function project(v: string, from: Type, to: Type): string {
-    if (from === to || typeof from === "string" || typeof to === "string") return v;
+    if (from === to) return v;
+    // A literal's value is known, so leaving one makes a constant, and entering one keeps nothing.
+    if (typeof from !== "string" && from.kind === "literal") return String(from.value);
+    if (typeof to !== "string" && to.kind === "literal") return "zeroinitializer";
+    if (typeof from === "string" || typeof to === "string") return v;
     if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param") {
       throw new Error("internal error: an interface or a type parameter reached codegen");
     }
@@ -336,6 +340,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return String(e.value);
       case "bool":
         return String(e.value);
+      // A string literal on its own has only its literal type, which takes no space.
+      case "string":
+        return "zeroinitializer";
       case "ident": {
         const local = resolved(e);
         const t = temp();
@@ -428,8 +435,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
         if (!condition) return operate(e.op, a, b, e);
+        // An operand keeps a literal type only when both are the same string literal.
+        const type = coercions.get(e.left) ?? types.get(e.left)!;
+        if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
-        emit(`${result} = icmp ${condition} ${llvm(types.get(e.left)!)} ${a}, ${b}`);
+        emit(`${result} = icmp ${condition} ${llvm(type)} ${a}, ${b}`);
         return result;
       }
       default:

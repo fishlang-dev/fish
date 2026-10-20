@@ -21,8 +21,9 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 
 // The result of a binary operator, or an error when its operands don't suit it.
 export function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Type {
-  // Value equality comes through Eq, which objects don't have yet.
-  if ((op === "===" || op === "!==") && (typeof left !== "string" || typeof right !== "string")) {
+  // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
+  const comparable = (t: Type) => typeof t === "string" || t.kind === "literal";
+  if ((op === "===" || op === "!==") && (!comparable(left) || !comparable(right))) {
     throw unsupported("comparisons of objects", at);
   }
   if (op === "===" || op === "!==") {

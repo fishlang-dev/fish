@@ -35,9 +35,14 @@ export function print(args: Expr[], { emit, temp, cString }: Builder, value: (e:
   const values: string[] = [];
   args.forEach((a, i) => {
     if (i > 0) format += " ";
+    const type = typeOf(a);
     if (a.kind === "string") {
       format += a.value.replaceAll("%", "%%");
-    } else if (typeOf(a) === "boolean") {
+    } else if (typeof type !== "string" && type.kind === "literal") {
+      // A literal's value is known, though what produces it still runs.
+      value(a);
+      format += String(type.value).replaceAll("%", "%%");
+    } else if (type === "boolean") {
       const text = temp();
       emit(`${text} = select i1 ${value(a)}, ptr @.true, ptr @.false`);
       format += "%s";

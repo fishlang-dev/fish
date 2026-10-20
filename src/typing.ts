@@ -26,9 +26,14 @@ export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; 
 // the body is checked again with concrete types, so a parameter never reaches codegen.
 export type ParamType = { kind: "param"; name: string; bound: ObjectType | InterfaceType | undefined; fields: Field[] };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType;
+// A literal type has one value, known at compile time, so on its own it takes no space: it
+// has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
+export type LiteralType = { kind: "literal"; value: string | bigint | boolean; fields: Field[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType;
 
 const interned = new Map<string, ObjectType>();
+const literals = new Map<string, LiteralType>();
 const keys = new Map<Exclude<Type, string>, string>();
 let declared = 0;
 
@@ -43,6 +48,22 @@ export function interfaceType(name: string): InterfaceType {
   const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
   keys.set(t, `interface ${declared++}`);
   return t;
+}
+
+export function literalType(value: string | bigint | boolean): LiteralType {
+  const key = `literal ${typeof value} ${value}`;
+  let t = literals.get(key);
+  if (!t) {
+    t = { kind: "literal", value, fields: [] };
+    literals.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// The type a literal's value belongs to, if Fish has it yet.
+export function baseOf(t: LiteralType): "i64" | "boolean" | undefined {
+  return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : undefined;
 }
 
 export function typeParameter(name: string, bound: ObjectType | InterfaceType | undefined): ParamType {
@@ -97,6 +118,7 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
   if (from === to) return true;
+  if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
   // A type parameter fits through its bound's fields, as any instance of it would.
@@ -109,6 +131,7 @@ export function fits(from: Type, to: Type): boolean {
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
   if (typeof t === "string") return t;
+  if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

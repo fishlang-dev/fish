@@ -5,8 +5,6 @@ import { parse } from "../src/parser.ts";
 // Each type form that parses but has no meaning yet, and the rejection it gets.
 const TYPES: [string, string][] = [
   ["Array<i64>", "array types"],
-  ["'a'", "literal types"],
-  ["-1", "literal types"],
   ["i64[]", "array types"],
   ["i64 | boolean", "union types"],
   ["A & B", "intersection types"],

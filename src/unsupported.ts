@@ -36,8 +36,7 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
 };
 
 // What each type form is called when the checker rejects it.
-export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object">, string> = {
-  literal: "literal types",
+export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal">, string> = {
   array: "array types",
   tuple: "tuple types",
   union: "union types",

@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
-import type { Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import { placeholders } from "./generics.ts";
-import { interfaceType, keyOf, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
+import { interfaceType, keyOf, literalType, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -77,6 +77,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
+    if (t.kind === "literal") return literal(t.value);
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
@@ -95,6 +96,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
+  }
+
+  function literal(e: Expr): Type {
+    if (e.kind === "string" || e.kind === "bool") return literalType(e.value);
+    const negative = e.kind === "unary" && e.op === "-";
+    const digits = negative ? e.operand : e;
+    if (digits.kind !== "int") throw unsupported("literal types of this kind", e);
+    const value = negative ? -digits.value : digits.value;
+    if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
+    return literalType(value);
   }
 
   // The interface is registered before its members resolve, so a member may name it.
@@ -158,6 +169,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return { name: m.name, type: storable(resolveType(m.type), m) };
   }
 }
+
+const I64_MAX = (1n << 63n) - 1n;
 
 const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number"]);
 

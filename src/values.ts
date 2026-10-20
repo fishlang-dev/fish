@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, derives, field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 
@@ -19,6 +19,13 @@ export function isPrint(callee: Expr): boolean {
   if (callee.kind === "ident") return callee.name === "print";
   return callee.kind === "member" && callee.name === "log" &&
     callee.object.kind === "ident" && callee.object.name === "console";
+}
+
+// The value a literal expression writes, if it is one.
+function literalValue(e: Expr): string | bigint | boolean | undefined {
+  if (e.kind === "string" || e.kind === "bool" || e.kind === "int") return e.value;
+  if (e.kind === "unary" && e.op === "-" && e.operand.kind === "int") return -e.operand.value;
+  return undefined;
 }
 
 // What expression checking needs from the program and the function it is in.
@@ -75,7 +82,7 @@ export function expressions(ctx: Context) {
     if (isPrint(callee)) {
       for (const a of e.args) {
         const type = a.kind === "string" ? "void" : value(a);
-        if (typeof type === "string") continue;
+        if (typeof type === "string" || type.kind === "literal") continue;
         throw new CompileError(type.kind === "param" ? `a value of type '${type.name}' can't be printed`
           : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
@@ -209,8 +216,9 @@ export function expressions(ctx: Context) {
         locals.set(e, local);
         return local.type;
       }
+      // Its literal type: Fish has no runtime strings yet, but a literal's value is known.
       case "string":
-        throw new CompileError("strings can only be passed straight to print for now", e.start, e.end);
+        return literalType(e.value);
       case "member": {
         if (e.optional) throw unsupported("optional chains", e);
         const object = value(e.object);
@@ -252,7 +260,7 @@ export function expressions(ctx: Context) {
       }
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-        const type = value(e.operand);
+        const type = operand(e.operand);
         if (type !== (e.op === "!" ? "boolean" : "i64")) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
         }
@@ -263,7 +271,7 @@ export function expressions(ctx: Context) {
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
         const assigned = value(e.value);
-        const type = op === "=" ? assigned : binaryType(op, target, assigned, e);
+        const type = op === "=" ? assigned : binaryType(op, target, widen(e.value, assigned), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         return target;
       }
@@ -284,7 +292,7 @@ export function expressions(ctx: Context) {
         // The migration lint rewrites loose equality to strict, so native code never uses it.
         if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-        return binaryType(e.op, value(e.left), value(e.right), e);
+        return binaryType(e.op, operand(e.left), operand(e.right), e);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
     }
@@ -294,6 +302,12 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
+    // A literal type takes exactly its value, so only a literal expression of that value fits.
+    if (typeof to !== "string" && to.kind === "literal") {
+      if (literalValue(e) !== to.value) throw new CompileError(message, e.start, e.end);
+      coercions.set(e, to);
+      return;
+    }
     if (typeof to !== "string" && to.kind === "interface") {
       const reason = unsatisfied(type, to, members, e);
       if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
@@ -427,9 +441,21 @@ export function expressions(ctx: Context) {
     }
   }
 
+  // An operator works on a literal's base type, so `1` adds like any i64.
+  function operand(e: Expr): Type {
+    return widen(e, value(e));
+  }
+
+  function widen(e: Expr, type: Type): Type {
+    const base = typeof type !== "string" && type.kind === "literal" ? baseOf(type) : undefined;
+    if (!base) return type;
+    coercions.set(e, base);
+    return base;
+  }
+
   // Fish has no truthiness: a condition is a boolean, never a number tested against zero.
   function condition(e: Expr) {
-    const type = value(e);
+    const type = operand(e);
     if (type !== "boolean") {
       throw new CompileError(`condition must be a boolean, not '${show(type)}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
     }
