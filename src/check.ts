@@ -130,7 +130,7 @@ export function check(program: Stmt[]): Checked {
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
-  const { instanceOf, instantiate, paramTypes, declaredParams, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
+  const { instanceOf, instantiate, paramTypes, declaredParams, implicitOf, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -215,10 +215,13 @@ export function check(program: Stmt[]): Checked {
       assume,
       narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
       reachable: (l) => !caseOnly.has(l),
+      boundOf: (l) => bounds.get(l),
     });
 
     const params = paramTypes(instance);
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
+    // A parameter typed with an interface or object type, and what that type declares.
+    const bounds = new Map([...implicitOf(f)].map(([i, bound]) => [locals.get(f.params[i]!)!, bound]));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
     statements(f.body, (s, check) => {

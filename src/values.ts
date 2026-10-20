@@ -5,7 +5,7 @@ import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, baseOf, derives, field, fits, literalType, objectType, show, widenEnum } from "./typing.ts";
-import type { Access, ClassType, Field, Type } from "./typing.ts";
+import type { Access, ClassType, Field, InterfaceType, ObjectType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -60,11 +60,14 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
+  // The interface or object type a parameter was declared with, when it is an implicit type
+  // parameter; its instances may hold a narrower concrete type.
+  boundOf(l: Local): ObjectType | InterfaceType | undefined;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, boundOf } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -260,7 +263,12 @@ export function expressions(ctx: Context) {
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
-        return found.type;
+        // Through an interface or object parameter, a field has the type its bound declares,
+        // which a narrower concrete field converts to, so each instance checks as the
+        // definition did.
+        const bound = e.object.kind === "ident" ? boundOf(locals.get(e.object)!) : undefined;
+        const declared = bound && field(bound, e.name)?.type;
+        return declared && fits(found.type, declared) ? declared : found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));

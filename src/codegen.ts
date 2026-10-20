@@ -341,7 +341,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const object = shared as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
-        return result;
+        // A field read through an interface or object parameter takes the type its bound declares.
+        return convert(result, field(object, e.name)!.type, types.get(e)!);
       }
       case "object": {
         const type = types.get(e) as ObjectType;
