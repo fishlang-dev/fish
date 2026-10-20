@@ -23,7 +23,9 @@ export type Stmt = Span & (
   | { kind: "return"; value: Expr | undefined }
 );
 
-export type Func = Span & { name: string; returnType: TypeRef | undefined; body: Stmt[] };
+export type Param = Span & { name: string; type: TypeRef | undefined };
+
+export type Func = Span & { name: string; params: Param[]; returnType: TypeRef | undefined; body: Stmt[] };
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative.
 const PRECEDENCE = { "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 } as const;
@@ -79,10 +81,17 @@ export function parse(src: string): Func[] {
     const start = expect("function").start;
     const name = ident().text;
     expect("(");
-    expect(")");
+    const params: Param[] = [];
+    while (!at(")")) {
+      const t = ident();
+      const type = at(":") ? annotation() : undefined;
+      params.push({ name: t.text, type, start: t.start, end: type?.end ?? t.end });
+      if (!at(")")) expect(",");
+    }
+    next();
     const returnType = at(":") ? annotation() : undefined;
     const body = block();
-    return { name, returnType, body, start, end: tokens[pos - 1]!.end };
+    return { name, params, returnType, body, start, end: tokens[pos - 1]!.end };
   }
 
   function block(): Stmt[] {

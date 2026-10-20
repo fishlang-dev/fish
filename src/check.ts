@@ -1,16 +1,16 @@
 import { CompileError } from "./diag.ts";
-import type { Expr, Func, Span, Stmt, TypeRef } from "./parser.ts";
+import type { Expr, Func, Param, Span, Stmt, TypeRef } from "./parser.ts";
 
 export type Type = "i64" | "void";
 
-export type Local = { name: string; type: Type; mutable: boolean; id: number };
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
 
 export type Checked = {
   funcs: Func[];
   // Every value expression's type.
   types: Map<Expr, Type>;
-  // The binding each name use and declaration refers to, after shadowing.
-  locals: Map<Expr | Stmt, Local>;
+  // The binding each name use, declaration and parameter refers to, after shadowing.
+  locals: Map<Expr | Stmt | Param, Local>;
   // Each function's return type, written or inferred.
   returns: Map<string, Type>;
 };
@@ -37,12 +37,13 @@ export function check(funcs: Func[]): Checked {
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   const types = new Map<Expr, Type>();
-  const locals = new Map<Expr | Stmt, Local>();
+  const locals = new Map<Expr | Stmt | Param, Local>();
   const returns = new Map<string, Type>();
   const inProgress = new Set<Func>();
   let nextId = 0;
 
   funcs.forEach(checkBody);
+  if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   return { funcs, types, locals, returns };
 
@@ -62,6 +63,7 @@ export function check(funcs: Func[]): Checked {
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
 
+    for (const p of f.params) declare(p.name, paramType(p), false, true, p);
     f.body.forEach(statement);
     const type = declared ?? inferred ?? "void";
     if (type !== "void" && !alwaysReturns(f.body)) {
@@ -83,17 +85,16 @@ export function check(funcs: Func[]): Checked {
           if (annotated && annotated !== type) {
             throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, s.init.start, s.init.end);
           }
-          const scope = scopes[scopes.length - 1]!;
-          if (scope.has(s.name)) throw new CompileError(`cannot redeclare '${s.name}' in the same scope`, s.start, s.end);
-          const local = { name: s.name, type, mutable: s.mutable, id: nextId++ };
-          scope.set(s.name, local);
-          locals.set(s, local);
+          declare(s.name, type, s.mutable, false, s);
           return;
         }
         case "assign": {
           if (s.target.kind !== "ident") throw new CompileError("can only assign to a variable", s.target.start, s.target.end);
           value(s.target);
           const local = locals.get(s.target)!;
+          if (local.param) {
+            throw new CompileError("assigning to a parameter is not supported yet; copy it into a 'let'", s.target.start, s.target.end);
+          }
           if (!local.mutable) {
             throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
           }
@@ -122,7 +123,11 @@ export function check(funcs: Func[]): Checked {
       const { callee } = e;
       const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
       if (target) {
-        if (e.args.length > 0) throw new CompileError(`'${target.name}' takes no arguments`, e.start, e.end);
+        const expected = target.params.length;
+        if (e.args.length !== expected) {
+          throw new CompileError(`expected ${expected} argument${expected === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+        }
+        e.args.forEach((a) => value(a));
         return target;
       }
       if (isPrint(callee)) {
@@ -174,6 +179,14 @@ export function check(funcs: Func[]): Checked {
       }
     }
 
+    function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param) {
+      const scope = scopes[scopes.length - 1]!;
+      if (scope.has(name)) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
+      const local = { name, type, mutable, param, id: nextId++ };
+      scope.set(name, local);
+      locals.set(node, local);
+    }
+
     function lookup(name: string): Local | undefined {
       for (let i = scopes.length - 1; i >= 0; i--) {
         const local = scopes[i]!.get(name);
@@ -181,6 +194,12 @@ export function check(funcs: Func[]): Checked {
       }
       return undefined;
     }
+  }
+
+  // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all.
+  function paramType(p: Param): Type {
+    if (!p.type) throw new CompileError(`parameter '${p.name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
+    return resolveType(p.type);
   }
 
   function resolveType(t: TypeRef): Type {

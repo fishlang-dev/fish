@@ -1,6 +1,6 @@
 import { isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
-import type { BinaryOp, Expr, Span, Stmt } from "./parser.ts";
+import type { BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
 
 const LLVM: Record<Type, string> = { i64: "i64", void: "void" };
 
@@ -46,7 +46,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, locals, returns }: Checked, { src, file, release }: Options): string {
+export function codegen({ funcs, types, locals, returns }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -63,10 +63,17 @@ export function codegen({ funcs, locals, returns }: Checked, { src, file, releas
     temps = 0;
     labels = 0;
     const type = returnType(f.name);
+    // Parameters are copied into slots like any other binding.
+    const params = f.params.map((p) => {
+      const local = resolved(p);
+      allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
+      emit(`store ${LLVM[local.type]} %${p.name}.arg, ptr ${slot(local)}`);
+      return `${LLVM[local.type]} %${p.name}.arg`;
+    });
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
-    out.push(`define ${LLVM[type]} @"fsh.${f.name}"() {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
+    out.push(`define ${LLVM[type]} @"fsh.${f.name}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
   }
 
   return [
@@ -104,7 +111,7 @@ export function codegen({ funcs, locals, returns }: Checked, { src, file, releas
     return type;
   }
 
-  function resolved(node: Expr | Stmt): Local {
+  function resolved(node: Expr | Stmt | Param): Local {
     const local = locals.get(node);
     if (!local) throw new Error("internal error: unresolved name");
     return local;
@@ -140,7 +147,8 @@ export function codegen({ funcs, locals, returns }: Checked, { src, file, releas
   function call(callee: Expr, args: Expr[]): string | undefined {
     if (callee.kind === "ident" && returns.has(callee.name)) {
       const type = returnType(callee.name);
-      const invoke = `call ${LLVM[type]} @"fsh.${callee.name}"()`;
+      const values = args.map((a) => `${LLVM[types.get(a)!]} ${value(a)}`);
+      const invoke = `call ${LLVM[type]} @"fsh.${callee.name}"(${values.join(", ")})`;
       if (type === "void") {
         emit(invoke);
         return undefined;
