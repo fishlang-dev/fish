@@ -4,11 +4,12 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, membersFor, objectType, show } from "./typing.ts";
-import type { Access, ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, objectType, show } from "./typing.ts";
+import type { Access, ClassType, Field, Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
-import { literalValue, TYPEOF, typeofTest, type Facts, type Guard } from "./narrow.ts";
+import { literalValue, type Facts, type Guard } from "./narrow.ts";
+import { intoUnion, typeofComparison, unionComparison, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -60,6 +61,7 @@ export type Context = {
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed } = ctx;
+  const unions: Union = { types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to) };
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -302,7 +304,7 @@ export function expressions(ctx: Context) {
           return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = typeofComparison(e) ?? unionComparison(e);
+          const special = typeofComparison(e, unions) ?? unionComparison(e, unions);
           if (special) return special;
         }
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
@@ -317,7 +319,7 @@ export function expressions(ctx: Context) {
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
     if (typeof to !== "string" && to.kind === "union") {
-      intoUnion(e, type, to, message);
+      intoUnion(e, type, to, message, unions);
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
@@ -360,27 +362,6 @@ export function expressions(ctx: Context) {
       }
     }
     return true;
-  }
-
-  // A value goes into the one union member it is or fits; a literal expression may also be a
-  // literal member with its value. A union goes into a wider one member by member.
-  function intoUnion(e: Expr, type: Type, to: UnionType, message: string) {
-    const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
-    for (const source of sources) {
-      const value = literalValue(e);
-      const literal = to.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === value);
-      if (literal && sources.length === 1 && baseOf(literal as LiteralType) === type) {
-        types.set(e, literal);
-        break;
-      }
-      const into = membersFor(source, to);
-      if (into.length === 0) throw new CompileError(message, e.start, e.end);
-      if (into.length > 1) {
-        throw new CompileError(`type '${show(source)}' fits more than one member of '${show(to)}': ${into.map((m) => `'${show(m)}'`).join(" and ")}`, e.start, e.end);
-      }
-      if (sources.length === 1) excess(e, into[0]!);
-    }
-    coercions.set(e, to);
   }
 
   function excess(e: Expr, to: Type) {
@@ -478,33 +459,6 @@ export function expressions(ctx: Context) {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError(`cannot ${action} ${what} is a constant`, target.start, target.end);
     }
-  }
-
-  // `typeof x === "number"` checks which kind of value x holds, which for a union is its tag.
-  function typeofComparison(e: Expr): Type | undefined {
-    const test = typeofTest(e);
-    if (!test) return undefined;
-    value(test.operand);
-    if (test.name.kind !== "string" || !TYPEOF.has(test.name.value)) {
-      throw new CompileError(`'typeof' can only be compared with ${[...TYPEOF].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
-    }
-    return "boolean";
-  }
-
-  // `x === v` with x a union is true when x holds v: its member for a literal, or the member
-  // v's type goes into holding the same primitive value.
-  function unionComparison(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
-    const [left, right] = [value(e.left), value(e.right)];
-    const [union, other, otherType] = typeof left !== "string" && left.kind === "union" ? [left, e.right, right]
-      : typeof right !== "string" && right.kind === "union" ? [right, e.left, left] : [];
-    if (!union) return undefined;
-    const literal = literalValue(other!);
-    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-      ?? membersFor(otherType!, union).find((m) => typeof m === "string");
-    if (!member) {
-      throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
-    }
-    return "boolean";
   }
 
   // An operator works on a literal's base type, so `1` adds like any i64.

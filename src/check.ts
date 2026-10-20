@@ -5,8 +5,9 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { guard, type Facts } from "./narrow.ts";
 import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import { addAlias, paramName, resolver, storable, typeName } from "./resolve.ts";
-import { fits, show, type ClassType, type Type } from "./typing.ts";
+import { registry } from "./registry.ts";
+import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
+import { show, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -102,17 +103,18 @@ export function check(program: Stmt[]): Checked {
   const main = byName.get("main");
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
-  // Every class and generic class instance by its type, and those not yet laid out and checked.
-  const infoOf = new Map<ClassType, ClassInfo>();
-  const unsettled: ClassInfo[] = [];
-  classes.forEach(register);
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
   // which need each other, it reaches what is set up below lazily.
   const members: Members = {
-    classOf,
+    classOf: (t) => classOf(t),
     returnOf: (b, at) => returnOf(definition(b), at),
     paramTypesOf: (b) => declaredParams(b),
   };
+  const { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled } = registry({
+    classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
+  });
+  classes.forEach(register);
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
@@ -127,10 +129,8 @@ export function check(program: Stmt[]): Checked {
   const inProgress = new Set<Instance>();
   let nextId = 0;
 
-  const linked = new Set<ClassInfo>();
   classes.forEach((c) => link(c, new Set()));
   classes.forEach(checkOverrides);
-  const laidOut = new Set<ClassInfo>();
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
   infoOf.forEach(layout);
@@ -145,78 +145,6 @@ export function check(program: Stmt[]): Checked {
   if (instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
   return { instances: all().filter((i) => i.concrete && compiled.has(i.body)) };
-
-  function register(c: ClassInfo) {
-    infoOf.set(c.type, c);
-    unsettled.push(c);
-  }
-
-  // Lays out a class, checks what it claims, and checks each of its members at its definition.
-  function settle(c: ClassInfo) {
-    layout(c);
-    implemented(c);
-    if (contains(c.type, c.type, new Set())) {
-      throw new CompileError(`class '${c.type.name}' contains itself, so it would have infinite size`, c.constructor.start, c.constructor.end);
-    }
-    bodiesOf(c).forEach((f) => checkBody(definition(f)));
-  }
-
-  function bodiesOf(c: ClassInfo): Body[] {
-    return [c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values()];
-  }
-
-  // Bases are linked first, since a derived constructor may take its base's parameters.
-  function link(c: ClassInfo, path: Set<ClassInfo>) {
-    if (linked.has(c) || c.baseName === undefined) return;
-    if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
-    const base = classes.get(c.baseName);
-    if (!base) throw new CompileError(`cannot find class '${c.baseName}'`, c.node.extends!.start, c.node.extends!.end);
-    link(base, path.add(c));
-    extend(c, base);
-    linked.add(c);
-  }
-
-  // Resolves a class's field types. An unannotated field takes its initializer's type, which
-  // is checked as the body of a function that returns it, so it may use other classes.
-  function layout(c: ClassInfo) {
-    if (laidOut.has(c)) return;
-    laidOut.add(c);
-    if (c.base) layout(c.base);
-    c.type.fields = c.fields.map((f) => {
-      if (f.type) return { name: f.name, type: storable(withScope(c.scope, () => resolveType(f.type!)), f), access: f.access };
-      const name = `${c.type.name}.${f.name} initializer`;
-      const initializer: Body = {
-        name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
-        owner: c.type, scope: c.scope, start: f.start, end: f.end,
-      };
-      const instance = instanceOf(initializer);
-      checkBody(instance);
-      return { name: f.name, type: instance.returns, access: f.access };
-    });
-  }
-
-  // `implements` is optional, since satisfying an interface is by shape, but checked when written.
-  function implemented(c: ClassInfo) {
-    for (const node of c.node.implements) {
-      const trait = withScope(c.scope, () => resolveType(node));
-      const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
-        : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
-      if (reason) throw new CompileError(`class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
-    }
-  }
-
-  function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
-    if (typeof t === "string" || seen.has(t)) return false;
-    seen.add(t);
-    const parts = [...t.fields.map((f) => f.type), ...(t.kind === "class" && t.base ? [t.base] : [])];
-    return parts.some((p) => p === inner || contains(p, inner, seen));
-  }
-
-  function classOf(t: ClassType): ClassInfo {
-    const c = infoOf.get(t)!;
-    layout(c);
-    return c;
-  }
 
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
