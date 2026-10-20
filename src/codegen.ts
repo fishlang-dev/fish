@@ -2,7 +2,7 @@ import { isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
-import { field, type ObjectType } from "./typing.ts";
+import { field, type ClassType, type ObjectType } from "./typing.ts";
 
 const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
 
@@ -40,7 +40,7 @@ const RUNTIME = [
   "}",
 ];
 
-const fieldIndex = (t: ObjectType, name: string) => t.fields.findIndex((f) => f.name === name);
+const fieldIndex = (t: ObjectType | ClassType, name: string) => t.fields.findIndex((f) => f.name === name);
 
 export type Options = { src: string; file: string; release: boolean };
 
@@ -77,6 +77,8 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
       return `${llvm(local.type)} %${local.name}.arg`;
     });
+    // A constructor works on its instance through a pointer.
+    if (f.self) params.unshift("ptr %this");
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
@@ -306,7 +308,7 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
         return t;
       }
       case "member": {
-        const object = types.get(e.object) as ObjectType;
+        const object = types.get(e.object) as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldIndex(object, e.name)}`);
         return result;
@@ -321,6 +323,22 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
           emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${values.get(f.name)}, ${i}`);
           result = next;
         });
+        return result;
+      }
+      case "this": {
+        const result = temp();
+        emit(`${result} = load ${llvm(types.get(e)!)}, ptr %this`);
+        return result;
+      }
+      case "new": {
+        // The constructor fills in a slot, which then holds the new instance.
+        const type = types.get(e) as ClassType;
+        const instance = temp();
+        allocas.push(`  ${instance} = alloca ${llvm(type)}`);
+        const values = (e.args ?? []).map((a) => `, ${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+        emit(`call void @"fsh.${type.name}.constructor"(ptr ${instance}${values.join("")})`);
+        const result = temp();
+        emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
         return result;
       }
       case "call": {
@@ -398,8 +416,9 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
 
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
+    if (target.kind === "this") return "%this";
     if (target.kind !== "member") return slot(resolved(target));
-    const object = types.get(target.object) as ObjectType;
+    const object = types.get(target.object) as ObjectType | ClassType;
     const result = temp();
     emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, i32 ${fieldIndex(object, target.name)}`);
     return result;

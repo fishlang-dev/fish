@@ -1,13 +1,13 @@
 import { CompileError } from "./diag.ts";
 import type { Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { objectType, type Field, type Type } from "./typing.ts";
+import { objectType, type ClassType, type Field, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
 
-export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias) {
-  if (BUILT_IN_TYPES.has(s.name)) throw new CompileError(`'${s.name}' is a built-in type`, s.start, s.end);
-  if (aliases.has(s.name)) throw new CompileError(`duplicate type name '${s.name}'`, s.start, s.end);
+// Aliases and classes share one namespace of type names.
+export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, classes: Map<string, unknown>) {
+  typeName(s.name, s, aliases, classes);
   if (s.typeParams.length > 0) {
     throw unsupported("generic type aliases", { start: s.typeParams[0]!.start, end: s.typeParams.at(-1)!.end });
   }
@@ -19,21 +19,27 @@ export function paramName(p: Param): string {
   return p.pattern.name;
 }
 
+export function typeName(name: string, at: Span, aliases: Map<string, unknown>, classes: Map<string, unknown>) {
+  if (BUILT_IN_TYPES.has(name)) throw new CompileError(`'${name}' is a built-in type`, at.start, at.end);
+  if (aliases.has(name) || classes.has(name)) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
+}
+
 // Resolves every alias up front, so an unused one is still checked.
-export function resolver(aliases: Map<string, TypeAlias>) {
+export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, ClassType>) {
   const resolved = new Map<TypeAlias, Type>();
   const resolving = new Set<TypeAlias>();
   aliases.forEach(aliasType);
   return { resolveType, paramType };
 
-  // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all.
-  function paramType(p: Param): Type {
+  // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
+  // constructor's parameters may carry modifiers, which make them parameter properties.
+  function paramType(p: Param, property = false): Type {
     if (p.rest) throw unsupported("rest parameters", p);
     if (p.optional) throw unsupported("optional parameters", p);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.comptime) throw unsupported("comptime parameters", p);
-    if (p.modifiers.length > 0) throw unsupported("parameter properties", p);
+    if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
@@ -51,6 +57,8 @@ export function resolver(aliases: Map<string, TypeAlias>) {
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
     const alias = aliases.get(t.name);
     if (alias) return aliasType(alias);
+    const named = classes.get(t.name);
+    if (named) return named;
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
 

@@ -1,52 +1,66 @@
-#!/usr/bin/env fish
-// mode: parse
-class Counter<T> extends Base<T> implements Countable, Comparable<Counter<T>> {
-  #count = 0
-  label: string
-  items: T[] = []
-  constructor(label: string) {
-    super(label)
-    this.label = label
-  }
-  get count(): i64 {
-    return this.#count
-  }
-  set count(value: i64) {
-    this.#count = value
-  }
-  *[Symbol.iterator]() {
-    yield* this.items
-  }
-  #bump() {
-    this.#count++
-  }
-  static isCounter(value: unknown): value is Counter<unknown> {
-    return #count in value
+type HasX = { x: i64 }
+
+class Point {
+  x: i64
+  y: i64
+
+  constructor(x: i64, y: i64) {
+    this.x = x
+    this.y = y
   }
 }
-abstract class Shape {}
-let Anonymous = class {}
-let Named = class Point extends mixin(A, B) { x = 0; y = 0 }
-abstract class Repository<T extends { id: i64 }> {
-  static #instances = 0
-  static {
-    Repository.#instances = 0
+
+class Counter {
+  count = 0
+  step: i64 = 1
+  limit: i64
+  origin = new Point(0, 0)
+
+  constructor(limit: i64) {
+    this.limit = limit
+    // Every field is set, so `this` is usable from here on.
+    this.count = this.limit - this.step
   }
-  [key: string]: unknown
-  declare readonly name: string
-  protected items!: Map<i64, T>
-  optional?: T
-  constructor(private readonly db: Database, public label = "repo") {
-    super()
-  }
-  abstract find(id: i64): T | undefined
-  find(id: i64, strict: boolean): T
-  find(id: i64, strict?: boolean): T | undefined { return undefined }
-  protected async *stream(): AsyncGenerator<T> {}
-  public override toString(): string { return "" }
-  accessor cache = new Map()
-  abstract get size(): i64
 }
-function overload(x: string): string
-function overload(x: i64): i64
-function overload(x: unknown) { return x }
+
+class Pair {
+  constructor(public left: i64, public right: boolean) {}
+}
+
+class Empty {}
+
+function shift(p: Point, by: i64): Point {
+  let moved = p
+  moved.x += by
+  return moved
+}
+
+function readX(h: HasX): i64 {
+  return h.x
+}
+
+function main() {
+  const p = new Point(1, 2)
+  print(p.x, p.y)
+  const c = new Counter(10)
+  print(c.count, c.step, c.limit, c.origin.y)
+  const pair = new Pair(3, true)
+  print(pair.left, pair.right)
+  const q = shift(p, 5)
+  print(q.x, p.x)
+  // An instance fits a structural type through its fields.
+  print(readX(q))
+  let r = new Point(7, 8)
+  r.y = 9
+  r.x++
+  print(r.x, r.y)
+  const e = new Empty()
+  print(new Point(4, 5).y)
+}
+// expect: 1 2
+// expect: 9 1 10 0
+// expect: 3 true
+// expect: 6 1
+// expect: 6
+// expect: 8 9
+// expect: 5

@@ -1,11 +1,13 @@
 import { CompileError } from "./diag.ts";
 import type { Expr, Func as Declared, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import { addAlias, fields, paramName, resolver } from "./resolve.ts";
-import { field, fits, objectType, show, type Field, type Type } from "./typing.ts";
+import { declareClass, type Body, type ClassInfo } from "./classes.ts";
+import { addAlias, fields, paramName, resolver, typeName } from "./resolve.ts";
+import { field, fits, objectType, show, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported, unsupportedDeclaration } from "./unsupported.ts";
 
 export type { Type } from "./typing.ts";
+export type { Body } from "./classes.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
@@ -13,7 +15,8 @@ type Func = Declared & { body: Stmt[] };
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
 
 export type Checked = {
-  funcs: Func[];
+  // Every function to compile: the top-level ones, then each class's constructor.
+  funcs: Body[];
   // Every value expression's type.
   types: Map<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
@@ -49,9 +52,15 @@ export function isPrint(callee: Expr): boolean {
 export function check(program: Stmt[]): Checked {
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();
+  const classes = new Map<string, ClassInfo>();
   for (const s of program) {
     if (s.kind === "typeAlias") {
-      addAlias(aliases, s);
+      addAlias(aliases, s, classes);
+      continue;
+    }
+    if (s.kind === "class" && s.name !== undefined) {
+      typeName(s.name, s, aliases, classes);
+      classes.set(s.name, declareClass({ ...s, name: s.name }));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -71,13 +80,13 @@ export function check(program: Stmt[]): Checked {
     if (f.typeParams.length > 0) {
       throw unsupported("generic functions", { start: f.typeParams[0]!.start, end: f.typeParams.at(-1)!.end });
     }
-    if (byName.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
+    if (byName.has(f.name) || classes.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
   const main = byName.get("main");
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
-  const { resolveType, paramType } = resolver(aliases);
+  const { resolveType, paramType } = resolver(aliases, new Map([...classes].map(([name, c]) => [name, c.type])));
   const types = new Map<Expr, Type>();
   const locals = new Map<Expr | Stmt | Param | ObjectProp, Local>();
   const returns = new Map<string, Type>();
@@ -87,15 +96,48 @@ export function check(program: Stmt[]): Checked {
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
-  const inProgress = new Set<Func>();
+  const inProgress = new Set<Body>();
   let nextId = 0;
 
-  funcs.forEach(checkBody);
+  const laidOut = new Set<ClassInfo>();
+  classes.forEach(layout);
+  classes.forEach((c) => {
+    if (contains(c.type, c.type, new Set())) {
+      throw new CompileError(`class '${c.type.name}' contains itself, so it would have infinite size`, c.constructor.start, c.constructor.end);
+    }
+  });
+  const bodies: Body[] = [...funcs, ...[...classes.values()].map((c) => c.constructor)];
+  bodies.forEach(checkBody);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  return { funcs, types, locals, returns, coercions, jumps };
+  return { funcs: bodies, types, locals, returns, coercions, jumps };
 
-  function returnOf(f: Func, at: Span): Type {
+  // Resolves a class's field types. An unannotated field takes its initializer's type, which
+  // is checked as the body of a function that returns it, so it may use other classes.
+  function layout(c: ClassInfo) {
+    if (laidOut.has(c)) return;
+    laidOut.add(c);
+    c.type.fields = c.fields.map((f) => {
+      if (f.type) return { name: f.name, type: resolveType(f.type) };
+      const name = `${c.type.name}.${f.name} initializer`;
+      checkBody({ name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, start: f.start, end: f.end });
+      return { name: f.name, type: returns.get(name)! };
+    });
+  }
+
+  function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
+    if (typeof t === "string" || seen.has(t)) return false;
+    seen.add(t);
+    return t.fields.some((f) => f.type === inner || contains(f.type, inner, seen));
+  }
+
+  function classOf(t: ClassType): ClassInfo {
+    const c = [...classes.values()].find((c) => c.type === t)!;
+    layout(c);
+    return c;
+  }
+
+  function returnOf(f: Body, at: Span): Type {
     if (f.returnType) return resolveType(f.returnType);
     if (inProgress.has(f)) {
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
@@ -104,7 +146,7 @@ export function check(program: Stmt[]): Checked {
     return returns.get(f.name)!;
   }
 
-  function checkBody(f: Func) {
+  function checkBody(f: Body) {
     if (returns.has(f.name)) return;
     inProgress.add(f);
     const declared = f.returnType && resolveType(f.returnType);
@@ -112,8 +154,23 @@ export function check(program: Stmt[]): Checked {
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
 
-    for (const p of f.params) declare(paramName(p), paramType(p), false, true, p);
-    f.body.forEach(statement);
+    // A constructor's fields are unset until assigned, so until then `this` may only appear as
+    // the target of an assignment to one of them, and the constructor can't return.
+    const unset = new Set(f.self?.constructor ? classOf(f.self.type).required : []);
+    let exempt: Expr | undefined;
+
+    for (const p of f.params) declare(paramName(p), paramType(p, f.self?.constructor), false, true, p);
+    for (const s of f.body) {
+      const assigned = unset.size > 0 ? fieldAssignment(s) : undefined;
+      exempt = assigned?.object;
+      statement(s);
+      exempt = undefined;
+      if (assigned) unset.delete(assigned.name);
+    }
+    if (unset.size > 0) {
+      const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
+      throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
+    }
     const type = declared ?? inferred ?? "void";
     if (type !== "void" && !alwaysReturns(f.body)) {
       const at = f.returnType ?? f;
@@ -219,6 +276,7 @@ export function check(program: Stmt[]): Checked {
         case "try":
           throw unsupported("'try' statements", s);
         case "return": {
+          if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
@@ -228,6 +286,13 @@ export function check(program: Stmt[]): Checked {
           return;
         }
       }
+    }
+
+    // The `this.x` a statement assigns, when it is a plain assignment to a field.
+    function fieldAssignment(s: Stmt): Extract<Expr, { kind: "member" }> | undefined {
+      if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
+      const target = s.expr.target;
+      return target.kind === "member" && target.object.kind === "this" ? target : undefined;
     }
 
     function within(target: Target, check: () => void) {
@@ -263,15 +328,7 @@ export function check(program: Stmt[]): Checked {
       if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
       const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
       if (target) {
-        const expected = target.params.length;
-        if (e.args.length !== expected) {
-          throw new CompileError(`expected ${expected} argument${expected === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
-        }
-        e.args.forEach((a, i) => {
-          const type = value(a);
-          const expected = paramType(target.params[i]!);
-          coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);
-        });
+        args(e.args, target, e);
         return target;
       }
       if (isPrint(callee)) {
@@ -284,6 +341,18 @@ export function check(program: Stmt[]): Checked {
       }
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+    }
+
+    function args(list: Expr[], target: Body, at: Span) {
+      const expected = target.params.length;
+      if (list.length !== expected) {
+        throw new CompileError(`expected ${expected} argument${expected === 1 ? "" : "s"}, but got ${list.length}`, at.start, at.end);
+      }
+      list.forEach((a, i) => {
+        const type = value(a);
+        const expected = paramType(target.params[i]!, target.self?.constructor);
+        coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);
+      });
     }
 
     function value(e: Expr): Type {
@@ -302,7 +371,9 @@ export function check(program: Stmt[]): Checked {
         case "ident": {
           const local = lookup(e.name);
           if (!local) {
-            const message = byName.has(e.name) ? `functions can't be used as values yet` : `cannot find name '${e.name}'`;
+            const message = byName.has(e.name) ? "functions can't be used as values yet"
+              : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
+              : `cannot find name '${e.name}'`;
             throw new CompileError(message, e.start, e.end);
           }
           locals.set(e, local);
@@ -313,12 +384,24 @@ export function check(program: Stmt[]): Checked {
         case "member": {
           if (e.optional) throw unsupported("optional chains", e);
           const object = value(e.object);
+          if (typeof object !== "string" && object.kind === "class") classOf(object);
           const found = typeof object === "string" ? undefined : field(object, e.name);
           if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
           return found.type;
         }
         case "object":
           return objectType(fields(e.props.map(property), e.props));
+        case "this":
+          if (!f.self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
+          if (unset.size > 0 && e !== exempt) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);
+          return f.self.type;
+        case "new": {
+          const c = e.callee.kind === "ident" ? classes.get(e.callee.name) : undefined;
+          if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+          if (e.typeArgs.length > 0) throw unsupported("type arguments on 'new'", e);
+          args(e.args ?? [], c.constructor, e);
+          return c.type;
+        }
         case "call": {
           const target = call(e);
           const type = target ? returnOf(target, e) : "void";
@@ -414,6 +497,7 @@ export function check(program: Stmt[]): Checked {
         path = `.${root.name}${path}`;
         root = root.object;
       }
+      if (root.kind === "this") return value(target);
       if (root.kind !== "ident") throw new CompileError("can only assign to a variable or a field", target.start, target.end);
       const type = value(target);
       const local = locals.get(root)!;

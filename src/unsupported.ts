@@ -4,11 +4,10 @@ import type { Expr, Span, Stmt, TypeNode } from "./parser.ts";
 // The forms that parse but have no meaning yet, and the errors that reject them.
 
 // What each expression form is called when the checker rejects it.
-export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object">, string> = {
+export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new">, string> = {
   float: "floating-point numbers",
   bigint: "bigint literals",
   null: "'null' values",
-  this: "'this' expressions",
   super: "'super' expressions",
   regex: "regular expressions",
   spread: "spread elements",
@@ -18,7 +17,6 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
   class: "class expressions",
   privateName: "private names",
   index: "indexed access expressions",
-  new: "'new' expressions",
   instantiation: "instantiation expressions",
   meta: "meta properties",
   import: "dynamic imports",
@@ -62,7 +60,7 @@ export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
     case "interface":
       return unsupported("interfaces", s);
     case "class":
-      return unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
+      return unsupported(s.decorators.length > 0 ? "decorators" : "local classes", s);
     case "enum":
       return unsupported("enums", s);
     case "namespace":
