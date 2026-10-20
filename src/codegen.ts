@@ -23,6 +23,17 @@ const DIVISION: Record<"/" | "%", [string, string, string]> = {
   "%": ["srem", "attempt to calculate the remainder with a divisor of zero", "attempt to calculate the remainder with overflow"],
 };
 
+// The instruction and the direction named in the overflow panic. A shift by a negative
+// amount or by 64 or more panics in debug builds and uses the amount's low six bits in
+// release, as Rust's do.
+const SHIFTS: Record<"<<" | ">>" | ">>>", [string, string]> = {
+  "<<": ["shl", "left"],
+  ">>": ["ashr", "right"],
+  ">>>": ["lshr", "right"],
+};
+
+const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^": "xor" };
+
 // A panic prints its location and reason to stderr and exits with 101, like a Rust panic
 // on the main thread. With nothing to unwind yet, that is all panic=unwind does. stdout is
 // flushed first so earlier output stays ahead of the message even when piped.
@@ -297,13 +308,16 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         const operand = value(e.operand);
         if (e.op === "-") return arithmetic("-", "0", operand, e, "negate");
         const result = temp();
-        emit(`${result} = xor i1 ${operand}, true`);
+        emit(e.op === "~" ? `${result} = xor i64 ${operand}, -1` : `${result} = xor i1 ${operand}, true`);
         return result;
       }
       case "assign": {
         const op = ASSIGNMENTS[e.op]!;
-        // The target is read before the right-hand side runs, as in JavaScript.
-        const result = op === "=" ? value(e.value) : arithmetic(op, value(e.target), value(e.value), e);
+        // The target is read before the right-hand side runs, as in JavaScript. `&&=` and `||=`
+        // skip the right side as `&&` and `||` do, and storing the unchanged value is harmless.
+        const result = op === "=" ? value(e.value)
+          : op === "&&" || op === "||" ? logical(op, e.target, e.value)
+          : operate(op, value(e.target), value(e.value), e);
         store(e.target, result);
         return result;
       }
@@ -334,7 +348,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
-        if (!condition) return arithmetic(e.op as ArithmeticOp, a, b, e);
+        if (!condition) return operate(e.op, a, b, e);
         const result = temp();
         emit(`${result} = icmp ${condition} ${LLVM[types.get(e.left)!]} ${a}, ${b}`);
         return result;
@@ -363,6 +377,31 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
     startBlock(end);
     const result = temp();
     emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
+    return result;
+  }
+
+  function operate(op: BinaryOp, a: string, b: string, at: Span): string {
+    if (op === "<<" || op === ">>" || op === ">>>") return shift(op, a, b, at);
+    const bitwise = BITWISE[op];
+    if (!bitwise) return arithmetic(op as ArithmeticOp, a, b, at);
+    const result = temp();
+    emit(`${result} = ${bitwise} i64 ${a}, ${b}`);
+    return result;
+  }
+
+  function shift(op: keyof typeof SHIFTS, a: string, b: string, at: Span): string {
+    const [instruction, direction] = SHIFTS[op];
+    let amount = b;
+    if (release) {
+      amount = temp();
+      emit(`${amount} = and i64 ${b}, 63`);
+    } else {
+      const overflow = temp();
+      emit(`${overflow} = icmp ugt i64 ${b}, 63`);
+      panicIf(overflow, `attempt to shift ${direction} with overflow`, at);
+    }
+    const result = temp();
+    emit(`${result} = ${instruction} i64 ${a}, ${amount}`);
     return result;
   }
 

@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { ArithmeticOp, AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
@@ -306,9 +306,9 @@ export function check(program: Stmt[]): Checked {
           return type;
         }
         case "unary": {
-          if (e.op !== "-" && e.op !== "!") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
+          if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
           const type = value(e.operand);
-          if (type !== (e.op === "-" ? "i64" : "boolean")) {
+          if (type !== (e.op === "!" ? "boolean" : "i64")) {
             throw new CompileError(`operator '${e.op}' cannot be applied to type '${type}'`, e.start, e.end);
           }
           return type;
@@ -425,6 +425,10 @@ export function check(program: Stmt[]): Checked {
       if (left === right) return "boolean";
       throw new CompileError(`this comparison appears to be unintentional because the types '${left}' and '${right}' have no overlap`, at.start, at.end);
     }
+    const logical = BITWISE_ON_BOOLEANS[op];
+    if (logical && left === "boolean" && right === "boolean") {
+      throw new CompileError(`operator '${op}' can't be applied to booleans; use '${logical}'`, at.start, at.end);
+    }
     // Only booleans, so `&&` and `||` always produce a boolean rather than one of their operands.
     const operand = op === "&&" || op === "||" ? "boolean" : "i64";
     if (left !== operand || right !== operand) {
@@ -464,10 +468,18 @@ export function check(program: Stmt[]): Checked {
 }
 
 // The binary operators that have a meaning so far.
-const SUPPORTED_OPERATORS = new Set<BinaryOp>(["||", "&&", "===", "!==", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]);
+const SUPPORTED_OPERATORS = new Set<BinaryOp>([
+  "||", "&&", "===", "!==", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>",
+]);
+
+// TypeScript rejects these on booleans, suggesting the logical operator meant instead.
+const BITWISE_ON_BOOLEANS: Partial<Record<BinaryOp, string>> = { "&": "&&", "|": "||", "^": "!==" };
 
 // The assignment operators that have a meaning so far, and the operator each applies.
-export const ASSIGNMENTS: Partial<Record<AssignOp, ArithmeticOp | "=">> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
+export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
+  "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%", "&=": "&", "|=": "|", "^=": "^",
+  "<<=": "<<", ">>=": ">>", ">>>=": ">>>", "&&=": "&&", "||=": "||",
+};
 
 // What each expression form is called when the checker rejects it.
 const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional">, string> = {
