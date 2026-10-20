@@ -75,6 +75,9 @@ export type Expr = Span & (
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
   | { kind: "conditional"; cond: Expr; then: Expr; else: Expr }
   | { kind: "assign"; op: AssignOp; target: Expr; value: Expr }
+  // `value |> body`, where `body` refers to `value` as `%`.
+  | { kind: "pipe"; value: Expr; body: Expr }
+  | { kind: "topic" }
   // `[a, b] = [b, a]`: an assignment whose left side is a pattern.
   | { kind: "destructure"; pattern: Pattern; value: Expr }
   // `a, b`; only where a full expression is allowed, never as an argument or element.
@@ -251,6 +254,8 @@ export type Cursor = {
   // False only directly inside a `for` initializer, so `for (x in y)` isn't read as an
   // expression; any bracket, list or block allows `in` again, as in TypeScript.
   inAllowed: boolean;
+  // Set while parsing the right side of `|>`, recording whether it used the topic `%`.
+  topic: { used: boolean } | undefined;
   // The token `offset` places ahead of the current one.
   peek(offset?: number): Token;
   next(): Token;
@@ -284,6 +289,7 @@ function cursor(src: string): Cursor {
     pos: 0,
     conditionalAllowed: true,
     inAllowed: true,
+    topic: undefined,
     peek: (offset = 0) => {
       while (tokens.length <= c.pos + offset && tokens.at(-1)?.kind !== "eof") tokens.push(lex.next());
       return tokens[Math.min(c.pos + offset, tokens.length - 1)]!;
@@ -320,12 +326,13 @@ function cursor(src: string): Cursor {
     }),
     end: () => tokens[c.pos - 1]!.end,
     attempt: (parse) => {
-      const [pos, conditionalAllowed, inAllowed] = [c.pos, c.conditionalAllowed, c.inAllowed];
+      const [pos, conditionalAllowed, inAllowed, topic, used] = [c.pos, c.conditionalAllowed, c.inAllowed, c.topic, c.topic?.used];
       try {
         return parse();
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
-        [c.pos, c.conditionalAllowed, c.inAllowed] = [pos, conditionalAllowed, inAllowed];
+        [c.pos, c.conditionalAllowed, c.inAllowed, c.topic] = [pos, conditionalAllowed, inAllowed, topic];
+        if (topic && used !== undefined) topic.used = used;
         return undefined;
       }
     },

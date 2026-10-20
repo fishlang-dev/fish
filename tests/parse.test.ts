@@ -239,6 +239,10 @@ function showExpr(e: Expr): string {
       return `(<${show(e.type)}>${showExpr(e.expr)})`;
     case "destructure":
       return `(${showPattern(e.pattern)} = ${showExpr(e.value)})`;
+    case "pipe":
+      return `(${showExpr(e.value)} |> ${showExpr(e.body)})`;
+    case "topic":
+      return "%";
     case "class":
       return showClass(e);
     case "arrow": {
@@ -295,6 +299,16 @@ const EXPRESSIONS: [string, string][] = [
   ["a in b instanceof c", "((a in b) instanceof c)"],
   ["a << b + c", "(a << (b + c))"],
   ["a <<= b << c", "(a <<= (b << c))"],
+  ["a |> f(%) |> g(%)", "((a |> f(%)) |> g(%))"],
+  ["x |> % ? a : b", "(x |> (% ? a : b))"],
+  ["x |> % % 2", "(x |> (% % 2))"],
+  ["a ? b : c |> f(%)", "(a ? b : (c |> f(%)))"],
+  ["(a ? b : c) |> f(%)", "((a ? b : c) |> f(%))"],
+  ["y = x |> f(%)", "(y = (x |> f(%)))"],
+  ["x |> f(%, y |> g(%))", "(x |> f(%, (y |> g(%))))"],
+  ["x |> [%, %]", "(x |> [%, %])"],
+  ["x |> % + 1 |> % * 2", "((x |> (% + 1)) |> (% * 2))"],
+  ["a || b |> f(%)", "((a || b) |> f(%))"],
   ["a < < b", "error"],
   ["a + b * c", "(a + (b * c))"],
   ["a - b - c", "((a - b) - c)"],
@@ -367,6 +381,9 @@ for (const [src, shape] of EXPRESSIONS) {
   if (shape === "error") test(src, () => expect(() => parseExpr(src)).toThrow());
   else test(src, () => expect(showExpr(parseExpr(src))).toBe(shape));
 }
+
+test("'%' outside a pipe", () => expect(() => parseExpr("% + 1")).toThrow("'%' is only valid on the right of '|>'"));
+test("a pipe body without '%'", () => expect(() => parseExpr("x |> f(y)")).toThrow("the right side of '|>' must use the topic '%'"));
 
 for (const src of ["-a ** b", "typeof a ** b", "a * -b ** c"]) {
   test(`${src} is rejected`, () => expect(() => parseExpr(src)).toThrow("parenthesise the left side of '**'"));

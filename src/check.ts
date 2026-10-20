@@ -367,6 +367,8 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   conditional: "conditional expressions",
   assign: "assignment expressions",
   destructure: "destructuring assignments",
+  pipe: "'|>' expressions",
+  topic: "topic references",
   sequence: "comma expressions",
   yield: "'yield' expressions",
   as: "'as' expressions",

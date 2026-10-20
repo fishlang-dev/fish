@@ -44,7 +44,7 @@ export function expression(c: Cursor): Expr {
   if (c.at("yield")) return yieldExpression(c);
   const arrow = atArrow(c) ? arrowFunction(c) : undefined;
   if (arrow) return arrow;
-  const target = conditional(c);
+  const target = pipeline(c);
   const [op, width] = assignOperator(c) ?? [];
   if (!op || !width) return target;
   c.pos += width;
@@ -90,6 +90,22 @@ function arrowHead(c: Cursor) {
   if (c.peek().newlineBefore) throw c.error("expected '=>'");
   c.expect("=>");
   return { async, typeParams, params, returnType };
+}
+
+// Hack-style pipes, as in the TC39 proposal: left-associative, looser than `? :`, with `%`
+// standing for the value on the left. A right side that never uses `%` is an error there too.
+function pipeline(c: Cursor): Expr {
+  let value = conditional(c);
+  while (c.eat("|>")) {
+    const outer = c.topic;
+    c.topic = { used: false };
+    const body = conditional(c);
+    const used = c.topic.used;
+    c.topic = outer;
+    if (!used) throw new CompileError("the right side of '|>' must use the topic '%'", body.start, body.end);
+    value = { kind: "pipe", value, body, start: value.start, end: body.end };
+  }
+  return value;
 }
 
 function conditional(c: Cursor): Expr {
@@ -295,6 +311,12 @@ function template(c: Cursor): Expr {
 
 export function primary(c: Cursor): Expr {
   if (c.peek().kind === "template" || c.peek().kind === "templateHead") return template(c);
+  if (c.at("%")) {
+    const t = c.next();
+    if (!c.topic) throw new CompileError("'%' is only valid on the right of '|>'", t.start, t.end);
+    c.topic.used = true;
+    return { kind: "topic", start: t.start, end: t.end };
+  }
   if (c.at("/") || c.at("/=")) {
     const t = c.regex();
     const close = t.text.lastIndexOf("/");
