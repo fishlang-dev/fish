@@ -10,7 +10,7 @@ import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, instanceofCheck, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, instanceofCheck, intoMember, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -415,6 +415,7 @@ export function expressions(ctx: Context) {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const type = value(target);
+      intoMember(target, types);
       changeable(target, "assign to");
       return type;
     }

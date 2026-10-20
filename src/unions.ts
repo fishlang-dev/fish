@@ -15,6 +15,17 @@ export type Union = {
   classNamed(name: string): ClassType | undefined;
 };
 
+// A field write must reach one member: through a union, which may hold any of several, the
+// field could sit anywhere, so the union has to be narrowed to one member first.
+export function intoMember(target: Expr, types: Map<Expr, Type>) {
+  for (let e = target; e.kind === "member"; e = e.object) {
+    const object = types.get(e.object);
+    if (typeof object !== "string" && object?.kind === "union") {
+      throw new CompileError(`can't assign to '${e.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
+    }
+  }
+}
+
 // A field every member of a union has, read without narrowing first: its type is the union
 // of the members' field types. This is how a discriminant like `x.kind` is read.
 export function unionField(union: UnionType, name: string, at: Span): Type | undefined {
