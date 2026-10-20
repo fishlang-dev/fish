@@ -4,13 +4,13 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, objectType, show, unionType } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, objectType, show } from "./typing.ts";
 import type { Access, ClassType, Field, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { instanceofCheck, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, instanceofCheck, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -305,15 +305,7 @@ export function expressions(ctx: Context) {
         const proven = proves(e.cond);
         const [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
         if (then === otherwise) return then;
-        // Different sides make a union of both, as in TypeScript.
-        const both = [then, otherwise];
-        if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
-          throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
-        }
-        const union = unionType(both);
-        coerce(e.then, then, union, `type '${show(then)}' is not assignable to type '${show(union)}'`);
-        coerce(e.else, otherwise, union, `type '${show(otherwise)}' is not assignable to type '${show(union)}'`);
-        return union;
+        return bothSides(e, then, otherwise, coerce);
       }
       case "binary":
         // The migration lint rewrites loose equality to strict, so native code never uses it.

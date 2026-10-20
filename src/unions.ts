@@ -33,6 +33,20 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
   return "boolean";
 }
 
+// A `?:` whose sides have different types makes the union of both, as in TypeScript.
+export function bothSides(e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
+  const both = [then, otherwise];
+  if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
+    throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
+  }
+  const union = unionType(both);
+  coerce(e.then, then, union, `type '${show(then)}' is not assignable to type '${show(union)}'`);
+  coerce(e.else, otherwise, union, `type '${show(otherwise)}' is not assignable to type '${show(union)}'`);
+  return union;
+}
+
+type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
+
 // Whether a `switch` over a union may compare it with a case of this type.
 export function caseFits(union: UnionType, test: Expr, type: Type): boolean {
   const literal = literalValue(test);
