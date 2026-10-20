@@ -2,8 +2,9 @@ import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
 import {
   block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
-  type TypeParam, type UnaryOp,
+  type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
+import { toPattern } from "./patterns.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
@@ -48,6 +49,9 @@ export function expression(c: Cursor): Expr {
   c.pos += width;
   // Right-associative: `a = b = c` is `a = (b = c)`.
   const value = expression(c);
+  if (op === "=" && (target.kind === "object" || target.kind === "array")) {
+    return { kind: "destructure", pattern: toPattern(target), value, start: target.start, end: value.end };
+  }
   return { kind: "assign", op, target, value, start: target.start, end: value.end };
 }
 
@@ -74,7 +78,8 @@ function arrowHead(c: Cursor) {
   let returnType: TypeNode | undefined;
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
     const name = c.ident();
-    params = [{ name: name.text, type: undefined, optional: false, rest: false, default: undefined, start: name.start, end: name.end }];
+    const pattern: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
+    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, start: name.start, end: name.end }];
   } else {
     typeParams = typeParameters(c);
     params = parameters(c);
@@ -380,7 +385,8 @@ function objectProp(c: Cursor): ObjectProp {
     return { kind: "property", key, value, start, end: value.end };
   }
   if (keyToken.kind !== "ident" || RESERVED.has(keyToken.text)) throw c.error("expected ':'");
-  return { kind: "shorthand", name: keyToken.text, start, end: keyToken.end };
+  const fallback = c.eat("=") ? expression(c) : undefined;
+  return { kind: "shorthand", name: keyToken.text, default: fallback, start, end: c.end() };
 }
 
 // `async` starts an async function only when `next` follows on the same line.

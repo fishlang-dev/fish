@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
+import { bindingPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
 export type Span = { start: number; end: number };
@@ -70,6 +71,8 @@ export type Expr = Span & (
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
   | { kind: "conditional"; cond: Expr; then: Expr; else: Expr }
   | { kind: "assign"; op: AssignOp; target: Expr; value: Expr }
+  // `[a, b] = [b, a]`: an assignment whose left side is a pattern.
+  | { kind: "destructure"; pattern: Pattern; value: Expr }
   // `a, b`; only where a full expression is allowed, never as an argument or element.
   | { kind: "sequence"; exprs: Expr[] }
   | { kind: "yield"; value: Expr | undefined; delegate: boolean }
@@ -107,18 +110,30 @@ export type TypeMember = Span & (
 
 export type ObjectProp = Span & (
   | { kind: "property"; key: PropertyName; value: Expr }
-  | { kind: "shorthand"; name: string }
+  // A default, as in `{ a = 1 }`, is only valid once the literal turns out to be a pattern.
+  | { kind: "shorthand"; name: string; default: Expr | undefined }
   | { kind: "spread"; value: Expr }
   | { kind: "method"; key: PropertyName; async: boolean; generator: boolean; typeParams: TypeParam[];
       params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
   | { kind: "get" | "set"; key: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
 );
 
-export type Param = Span & { name: string; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined };
+// `this` is an identifier pattern named "this".
+export type Param = Span & { pattern: Pattern; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined };
 
 export type Pattern = Span & (
   | { kind: "ident"; name: string }
+  | { kind: "object"; props: PatternProp[]; rest: Pattern | undefined }
+  // A hole, as in `[, b]`, is undefined.
+  | { kind: "array"; elements: (Pattern | undefined)[]; rest: Pattern | undefined }
+  // `target = value`: a default inside a pattern.
+  | { kind: "default"; target: Pattern; value: Expr }
+  // Only in assignment patterns: a target such as `obj.prop` or `list[0]`.
+  | { kind: "expr"; expr: Expr }
 );
+
+// In `{ a }` the value is the identifier pattern `a`.
+export type PatternProp = Span & { key: PropertyName; value: Pattern };
 
 export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; init: Expr | undefined };
 
@@ -346,8 +361,7 @@ function simpleStatement(c: Cursor): Stmt {
 
 function declarator(c: Cursor): Declarator {
   const start = c.peek().start;
-  const name = c.ident();
-  const target: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
+  const target = bindingPattern(c);
   const type = c.at(":") ? annotation(c) : undefined;
   const init = c.eat("=") ? expression(c) : undefined;
   return { target, type, init, start, end: c.end() };

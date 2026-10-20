@@ -76,8 +76,8 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     const params = f.params.map((p) => {
       const local = resolved(p);
       allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
-      emit(`store ${LLVM[local.type]} %${p.name}.arg, ptr ${slot(local)}`);
-      return `${LLVM[local.type]} %${p.name}.arg`;
+      emit(`store ${LLVM[local.type]} %${local.name}.arg, ptr ${slot(local)}`);
+      return `${LLVM[local.type]} %${local.name}.arg`;
     });
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.

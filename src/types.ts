@@ -1,6 +1,7 @@
 import { expression, primary, templateParts, unary } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
-import type { Cursor, Param, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { Cursor, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import { bindingPattern } from "./patterns.ts";
 
 // The type grammar, and the parameter lists that functions and function types share.
 
@@ -29,11 +30,12 @@ export function parameters(c: Cursor): Param[] {
 function parameter(c: Cursor): Param {
   const start = c.peek().start;
   const rest = c.eat("...");
-  const name = c.at("this") ? c.next().text : c.ident().text;
+  const t = c.peek();
+  const pattern: Pattern = c.eat("this") ? { kind: "ident", name: "this", start: t.start, end: t.end } : bindingPattern(c);
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { name, type, optional, rest, default: fallback, start, end: c.end() };
+  return { pattern, type, optional, rest, default: fallback, start, end: c.end() };
 }
 
 // `: Type` after a declaration or parameter list.
@@ -92,8 +94,20 @@ function atFunctionType(c: Cursor): boolean {
   if (!c.at("(")) return false;
   const [a, b, d] = [c.peek(1), c.peek(2), c.peek(3)];
   if (isToken(a, ")") || isToken(a, "...")) return true;
+  const paramFollows = (t: Token) => [":", ",", "?", "="].some((text) => isToken(t, text));
+  if (isToken(a, "{") || isToken(a, "[")) {
+    // A destructured first parameter: read the pattern on trial, then look past it.
+    const before = c.pos;
+    c.next();
+    const follows = c.attempt(() => {
+      bindingPattern(c);
+      return paramFollows(c.peek()) || (c.at(")") && isToken(c.peek(1), "=>"));
+    });
+    c.pos = before;
+    return follows === true;
+  }
   if (a.kind !== "ident") return false;
-  return [":", ",", "?", "="].some((text) => isToken(b, text)) || (isToken(b, ")") && isToken(d, "=>"));
+  return paramFollows(b) || (isToken(b, ")") && isToken(d, "=>"));
 }
 
 function functionType(c: Cursor): TypeNode {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parse, type Expr, type Param, type PropertyName, type TypeMember, type TypeNode } from "../src/parser.ts";
+import { parse, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
 function show(t: TypeNode): string {
@@ -75,7 +75,7 @@ function showName(name: PropertyName): string {
 
 function showParams(params: Param[]): string {
   return params.map((p) => {
-    const name = `${p.rest ? "..." : ""}${p.name}${p.optional ? "?" : ""}`;
+    const name = `${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
     const fallback = p.default ? ` = ${showExpr(p.default)}` : "";
     return `${p.type ? `${name}: ${show(p.type)}` : name}${fallback}`;
   }).join(", ");
@@ -161,6 +161,9 @@ const SHAPES: [string, string][] = [
   ["`a${B}c`", "`a${B}c`"],
   ["`${A | B}-${`x${C}`}`", "`${(A | B)}-${`x${C}`}`"],
   ["`plain`", "`plain`"],
+  ["({ a }: A) => B", "(({ a: a }: A) => B)"],
+  ["([a, b]: [A, B], c) => B", "(([a, b]: [A, B], c) => B)"],
+  ["({ a } | B)", "({ property a } | B)"],
   ["1.5 | 0xff | 1n | -1.5", "(1.5 | 0xff | 1n | -1.5)"],
 ];
 
@@ -230,6 +233,8 @@ function showExpr(e: Expr): string {
       return `(${showExpr(e.expr)} ${e.kind} ${show(e.type)})`;
     case "assertion":
       return `(<${show(e.type)}>${showExpr(e.expr)})`;
+    case "destructure":
+      return `(${showPattern(e.pattern)} = ${showExpr(e.value)})`;
     case "arrow": {
       const typeParams = e.typeParams.length ? `<${e.typeParams.map((p) => p.name).join(", ")}>` : "";
       const returns = e.returnType ? `: ${show(e.returnType)}` : "";
@@ -346,6 +351,8 @@ const EXPRESSIONS: [string, string][] = [
   ["f(x => x + 1, (a, b) => a)", "f(((x) => (x + 1)), ((a, b) => a))"],
   ["a = () => b", "(a = (() => b))"],
   ["(a) + 1", "(a + 1)"],
+  ["({ a, b: [c] }, ...[d]) => a", "(({ a: a, b: [c] }, ...[d]) => a)"],
+  ["({ a } = {}) => a", "(({ a: a } = {}) => a)"],
 ];
 
 for (const [src, shape] of EXPRESSIONS) {
@@ -360,3 +367,55 @@ for (const src of ["-a ** b", "typeof a ** b", "a * -b ** c"]) {
 test("a newline before => ends the expression", () => {
   expect(() => parseExpr("(a)\n  => a")).toThrow("expected an expression, found '=>'");
 });
+
+// Prints a pattern with every default parenthesised and every property written `key: value`.
+function showPattern(p: Pattern): string {
+  const rest = (r: Pattern | undefined, any: boolean) => (r ? `${any ? ", " : ""}...${showPattern(r)}` : "");
+  switch (p.kind) {
+    case "ident":
+      return p.name;
+    case "object":
+      return `{ ${p.props.map((x) => `${showName(x.key)}: ${showPattern(x.value)}`).join(", ")}${rest(p.rest, p.props.length > 0)} }`;
+    case "array":
+      return `[${p.elements.map((x) => (x ? showPattern(x) : "")).join(", ")}${rest(p.rest, p.elements.length > 0)}]`;
+    case "default":
+      return `(${showPattern(p.target)} = ${showExpr(p.value)})`;
+    case "expr":
+      return showExpr(p.expr);
+  }
+}
+
+function parseStatement(stmt: string): Stmt {
+  src = `function f() {\n  ${stmt}\n}`;
+  const [f] = parse(src);
+  const [s] = f?.kind === "function" ? f.body : [];
+  if (!s) throw new Error("expected a statement");
+  return s;
+}
+
+const PATTERNS: [string, string][] = [
+  ["let { a, b: { c = 1 }, ...rest } = x", "{ a: a, b: { c: (c = 1) }, ...rest }"],
+  ["let [a, , [b, c] = d, ...e] = x", "[a, , ([b, c] = d), ...e]"],
+  ["let { 'quoted': q, [key]: k, 0: zero } = x", "{ quoted: q, [key]: k, 0: zero }"],
+  ["let [, , third] = x", "[, , third]"],
+  ["let {} = x", "{  }"],
+];
+
+for (const [stmt, shape] of PATTERNS) {
+  test(stmt, () => {
+    const s = parseStatement(stmt);
+    if (s.kind !== "let") throw new Error("expected a declaration");
+    expect(showPattern(s.declarations[0]!.target)).toBe(shape);
+  });
+}
+
+const DESTRUCTURING: [string, string][] = [
+  ["[a, b] = [b, a]", "([a, b] = [b, a])"],
+  ["({ a, b: c.d, e = 1, ...f } = obj)", "({ a: a, b: c.d, e: (e = 1), ...f } = obj)"],
+  ["[x.y, z[0] = 1, ...[w]] = v", "([x.y, (z[0] = 1), ...[w]] = v)"],
+  ["[a] = [b] = c", "([a] = ([b] = c))"],
+];
+
+for (const [expr, shape] of DESTRUCTURING) {
+  test(expr, () => expect(showExpr(parseExpr(expr))).toBe(shape));
+}

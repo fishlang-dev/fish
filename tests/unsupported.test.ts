@@ -42,6 +42,7 @@ const SIGNATURES: [string, string, string][] = [
   ["(this: i64)", "'this' parameters", "this: i64"],
   ["<T>(x: i64)", "generic functions", "T"],
   ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
+  ["({ a }: i64)", "destructuring patterns", "{ a }"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {
@@ -121,6 +122,7 @@ const STATEMENTS: [string, string][] = [
   ["{ print(1) }", "block statements"],
   ["debugger", "'debugger' statements"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
+  ["[a] = [1]", "destructuring assignments"],
 ];
 
 test("let x: i64", () => {

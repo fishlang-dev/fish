@@ -77,7 +77,7 @@ export function check(program: Stmt[]): Checked {
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
 
-    for (const p of f.params) declare(p.name, paramType(p), false, true, p);
+    for (const p of f.params) declare(paramName(p), paramType(p), false, true, p);
     f.body.forEach(statement);
     const type = declared ?? inferred ?? "void";
     if (type !== "void" && !alwaysReturns(f.body)) {
@@ -101,6 +101,7 @@ export function check(program: Stmt[]): Checked {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
           const d = s.declarations[0]!;
+          if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           const annotated = d.type && resolveType(d.type);
           const type = value(d.init);
@@ -291,10 +292,16 @@ export function check(program: Stmt[]): Checked {
   function paramType(p: Param): Type {
     if (p.rest) throw unsupported("rest parameters", p);
     if (p.optional) throw unsupported("optional parameters", p);
-    if (p.name === "this") throw unsupported("'this' parameters", p);
+    const name = paramName(p);
+    if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
-    if (!p.type) throw new CompileError(`parameter '${p.name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
+    if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     return resolveType(p.type);
+  }
+
+  function paramName(p: Param): string {
+    if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
+    return p.pattern.name;
   }
 
   function resolveType(t: TypeNode): Type {
@@ -333,6 +340,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   update: "increment and decrement expressions",
   conditional: "conditional expressions",
   assign: "assignment expressions",
+  destructure: "destructuring assignments",
   sequence: "comma expressions",
   yield: "'yield' expressions",
   as: "'as' expressions",
