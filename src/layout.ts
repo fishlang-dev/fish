@@ -1,7 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
-import { category, literalValue, typeofTest } from "./narrow.ts";
+import { category, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { field, fieldPath, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -42,7 +42,7 @@ export type Slots = Builder & { alloca(type: string): string };
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca } = b;
-  return { convert, test, matches, unionField };
+  return { convert, test, equals, unionField };
 
   // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
   // its payload when v isn't a literal. Undefined for any other comparison.
@@ -67,8 +67,7 @@ export function conversions(b: Slots) {
       const unionLeft = typeof left !== "string" && left.kind === "union";
       if (!unionLeft && (typeof right === "string" || right.kind !== "union")) return undefined;
       const [u, o] = [value(e.left), value(e.right)];
-      const [union, v, other, otherType] = (unionLeft ? [left, u, e.right, right] : [right, o, e.left, left]) as [UnionType, string, Expr, Type];
-      result = matches(v, union, other, unionLeft ? o : u, otherType);
+      result = equals(u, left, o, right);
     }
     if (e.op === "===") return result;
     const negated = temp();
@@ -76,13 +75,23 @@ export function conversions(b: Slots) {
     return negated;
   }
 
-  // Whether union `v` holds the value of `other`: its literal member, or the primitive member
-  // the other value's type goes into, holding the same value.
-  function matches(v: string, union: UnionType, other: Expr, o: string, otherType: Type): string {
-    const literal = literalValue(other);
-    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-      ?? (typeof otherType !== "string" && otherType.kind === "literal" && union.members.includes(otherType) ? otherType : undefined);
-    return member ? holds(v, union, [member]) : holdsValue(v, union, membersFor(otherType, union).find((m) => typeof m === "string")!, o);
+  // Whether two values are equal, as JavaScript's `===` would find them. A union is compared
+  // by the member it holds, so only that member's payload is read; literals compare by value,
+  // so two enum members that share a value are equal.
+  function equals(a: string, aType: Type, b: string, bType: Type): string {
+    if (typeof aType !== "string" && aType.kind === "union") {
+      return eachMember(a, aType, "boolean", (part, m) => equals(part, m, b, bType));
+    }
+    if (typeof bType !== "string" && bType.kind === "union") return equals(b, bType, a, aType);
+    const value = (t: Type, v: string) => (typeof t !== "string" && t.kind === "literal" ? String(t.value) : v);
+    const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
+    if (typeof aType !== "string" && aType.kind === "literal" && typeof bType !== "string" && bType.kind === "literal") {
+      return String(aType.value === bType.value);
+    }
+    if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
+    const result = temp();
+    emit(`${result} = icmp eq ${llvm(base(aType))} ${value(aType, a)}, ${value(bType, b)}`);
+    return result;
   }
 
   // A field every member of the union has, read from whichever member it holds.
@@ -130,15 +139,6 @@ export function conversions(b: Slots) {
     return result;
   }
 
-  // Whether a union holds this primitive member with value `o`. The payload is compared only
-  // when the tag matches, since another member's payload may be partly undefined.
-  function holdsValue(v: string, union: UnionType, member: Type, o: string): string {
-    const is = holds(v, union, [member]);
-    const [same, result] = [temp(), temp()];
-    emit(`${same} = icmp eq ${llvm(member)} ${payload(v, union, member)}, ${o}`);
-    emit(`${result} = select i1 ${is}, i1 ${same}, i1 false`);
-    return result;
-  }
 
   // `v`, a value of `from`, as a value of `to`: copied down to fewer fields, built into a class,
   // put into a union, taken out of one, or moved between unions. The checker has made sure

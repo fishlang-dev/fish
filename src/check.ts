@@ -4,7 +4,7 @@ import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, S
 import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
-import { caseFits } from "./unions.ts";
+import { comparable } from "./unions.ts";
 import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
@@ -328,7 +328,7 @@ export function check(program: Stmt[]): Checked {
         case "switch": {
           const type = value(s.discriminant);
           const union = typeof type !== "string" && type.kind === "union" ? type : undefined;
-          if (typeof type !== "string" && !union) throw unsupported("comparisons of objects", s.discriminant);
+          if (typeof type !== "string" && !union && type.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);
           if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
           // The case bodies share one scope, as in JavaScript.
@@ -339,7 +339,7 @@ export function check(program: Stmt[]): Checked {
             let falling: Facts | null = null;
             for (const c of s.cases) {
               const test = c.test && value(c.test);
-              if (test && (union ? !caseFits(union, c.test!, test) : test !== type)) {
+              if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               const tested: Facts = c.test ? proves({ kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();

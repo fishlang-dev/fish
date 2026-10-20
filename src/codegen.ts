@@ -39,7 +39,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
   const { operate, arithmetic } = lowering(builder, src, file, release);
-  const { convert, test, matches, unionField } = conversions(builder);
+  const { convert, test, equals, unionField } = conversions(builder);
 
   for (const instance of instances) {
     current = instance;
@@ -191,9 +191,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         s.cases.forEach((c, i) => {
           if (!c.test) return;
           const test = value(c.test);
-          const equal = typeof subjectType !== "string" && subjectType.kind === "union"
-            ? matches(subject, subjectType, c.test, test, types.get(c.test)!)
-            : compare(type, subject, test);
+          // Anything but two values of one primitive type, such as a union or an enum member,
+          // compares by value.
+          const testType = types.get(c.test)!;
+          const primitive = typeof subjectType === "string" && testType === subjectType;
+          const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
           const next = label();
           emit(`br i1 ${equal}, label %${bodies[i]}, label %${next}`);
           startBlock(next);

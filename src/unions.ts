@@ -47,13 +47,6 @@ export function bothSides(e: Extract<Expr, { kind: "conditional" }>, then: Type,
 
 type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 
-// Whether a `switch` over a union may compare it with a case of this type.
-export function caseFits(union: UnionType, test: Expr, type: Type): boolean {
-  const literal = literalValue(test);
-  return union.members.some((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-    || membersFor(type, union).some((m) => typeof m === "string" || m.kind === "literal");
-}
-
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
 export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { types, coercions, excess }: Union) {
@@ -87,18 +80,25 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
   return "boolean";
 }
 
-// `x === v` with x a union is true when x holds v: its member for a literal, or the member
-// v's type goes into holding the same primitive value.
+// `x === v` with x a union compares the member x holds with v, so it needs a member v might
+// equal.
 export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }: Union): Type | undefined {
   const [left, right] = [value(e.left), value(e.right)];
-  const [union, other, otherType] = typeof left !== "string" && left.kind === "union" ? [left, e.right, right]
-    : typeof right !== "string" && right.kind === "union" ? [right, e.left, left] : [];
-  if (!union) return undefined;
-  const literal = literalValue(other!);
-  const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-    ?? membersFor(otherType!, union).find((m) => typeof m === "string" || m.kind === "literal");
-  if (!member) {
+  const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union";
+  if (!isUnion(left) && !isUnion(right)) return undefined;
+  if (!comparable(left, right)) {
     throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
+}
+
+// Whether a value of `a` might equal one of `b`: the same primitive, a literal and its base,
+// or two literals of one value, for any members of either when it is a union.
+export function comparable(a: Type, b: Type): boolean {
+  const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+  const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
+  return members(a).some((x) => members(b).some((y) => {
+    if (typeof x !== "string" && x.kind === "literal" && typeof y !== "string" && y.kind === "literal") return x.value === y.value;
+    return base(x) === base(y) && typeof base(x) === "string";
+  }));
 }
