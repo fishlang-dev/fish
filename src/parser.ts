@@ -114,6 +114,11 @@ export type Stmt = Span & (
   // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
   | { kind: "declare"; body: Stmt }
+  // `named` is undefined without braces; `attributes` is the object after `with`.
+  | { kind: "import"; typeOnly: boolean; default: string | undefined; namespace: string | undefined;
+      named: Specifier[] | undefined; module: string; attributes: Expr | undefined }
+  // `import x = require("m")` sets `require`; `import x = A.B` sets `entity`.
+  | { kind: "importEquals"; typeOnly: boolean; name: string; require: string | undefined; entity: string | undefined }
 ) | TypeAlias | Interface | Func | (ClassNode & { kind: "class" });
 
 export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
@@ -181,6 +186,9 @@ export type Pattern = Span & (
 
 // In `{ a }` the value is the identifier pattern `a`.
 export type PatternProp = Span & { key: PropertyName; value: Pattern };
+
+// `name` may be a string, as in `import { "a-b" as ab }`.
+export type Specifier = Span & { name: string; alias: string | undefined; typeOnly: boolean };
 
 export type EnumMember = Span & { name: string; init: Expr | undefined };
 

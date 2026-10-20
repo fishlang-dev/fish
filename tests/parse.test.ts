@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parse, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
+import { parse, type Specifier, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
 function show(t: TypeNode): string {
@@ -445,6 +445,17 @@ function showStmt(s: Stmt): string {
       return `do { ${s.body.length} statements } while (${showExpr(s.cond)})`;
     case "function":
       return `function ${s.name}(${showParams(s.params)})${s.body ? ` { ${s.body.length} }` : ";"}`;
+    case "import": {
+      const clauses = [
+        s.default,
+        s.namespace && `* as ${s.namespace}`,
+        s.named && `{ ${s.named.map(showSpecifier).join(", ")} }`,
+      ].filter(Boolean);
+      const from = clauses.length ? `${clauses.join(", ")} from ` : "";
+      return `import ${s.typeOnly ? "type " : ""}${from}"${s.module}"${s.attributes ? ` with ${showExpr(s.attributes)}` : ""}`;
+    }
+    case "importEquals":
+      return `import ${s.typeOnly ? "type " : ""}${s.name} = ${s.require ? `require("${s.require}")` : s.entity}`;
     case "switch": {
       const cases = s.cases.map((k) => `${k.test ? `case ${showExpr(k.test)}` : "default"}: ${k.body.map(showStmt).join("; ")}`);
       return `switch (${showExpr(s.discriminant)}) { ${cases.join(" | ")} }`;
@@ -589,3 +600,34 @@ test("class expressions", () => {
   expect(showExpr(parseExpr("#x in obj"))).toBe("(#x in obj)");
   expect(showExpr(parseExpr("@dec class {}"))).toBe("@dec class {  }");
 });
+
+function showSpecifier(x: Specifier): string {
+  return `${x.typeOnly ? "type " : ""}${x.name}${x.alias ? ` as ${x.alias}` : ""}`;
+}
+
+const MODULES: [string, string][] = [
+  ["import x from 'm'", 'import x from "m"'],
+  ["import * as ns from 'm'", 'import * as ns from "m"'],
+  ["import { a, b as c, type T, default as d, 'a-b' as ab } from 'm'", 'import { a, b as c, type T, default as d, a-b as ab } from "m"'],
+  ["import x, { a } from 'm'", 'import x, { a } from "m"'],
+  ["import x, * as ns from 'm'", 'import x, * as ns from "m"'],
+  ["import 'side-effect'", 'import "side-effect"'],
+  ["import type X from 'm'", 'import type X from "m"'],
+  ["import type { A, B } from 'm'", 'import type { A, B } from "m"'],
+  ["import type * as ns from 'm'", 'import type * as ns from "m"'],
+  ["import type from 'm'", 'import type from "m"'],
+  ["import from from 'm'", 'import from from "m"'],
+  ["import { type } from 'm'", 'import { type } from "m"'],
+  ["import { type as x, type y, type as as z } from 'm'", 'import { type as x, type y, type as as z } from "m"'],
+  ["import data from './data.json' with { type: 'json' }", "import data from \"./data.json\" with { type: 'json' }"],
+  ["import fs = require('fs')", 'import fs = require("fs")'],
+  ["import type T = require('t')", 'import type T = require("t")'],
+  ["import Alias = A.B.C", "import Alias = A.B.C"],
+  ["import('m')", "import('m')"],
+  ["import.meta.url", "import.meta.url"],
+  ["import {} from 'm'", 'import {  } from "m"'],
+];
+
+for (const [stmt, shape] of MODULES) {
+  test(stmt, () => expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape));
+}

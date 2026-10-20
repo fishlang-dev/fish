@@ -178,3 +178,12 @@ test("a function without a body", () => {
     message: "functions without a body are not supported yet", start: 0, end: "function f(): void".length,
   }));
 });
+
+for (const decl of ["import x from 'm'", "import fs = require('fs')"]) {
+  test(decl, () => {
+    const src = `${decl}\nfunction main() {}`;
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: "imports are not supported yet", start: 0, end: decl.length,
+    }));
+  });
+}

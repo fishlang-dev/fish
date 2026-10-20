@@ -2,7 +2,7 @@ import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import {
   block, endStatement, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
-  type PropertyName, type Stmt,
+  type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, type, typeParameters, typeReference } from "./types.ts";
 
@@ -16,6 +16,8 @@ export function atDeclarationKeyword(c: Cursor): Stmt | undefined {
   const next = c.peek(1);
   const sameLine = !next.newlineBefore;
   if (c.at("enum") || (c.at("const") && isToken(next, "enum"))) return enumDeclaration(c);
+  // `import(` and `import.meta` start expressions.
+  if (c.at("import") && !isToken(next, "(") && !isToken(next, ".")) return importDeclaration(c);
   if ((c.at("namespace") || c.at("module")) && sameLine && (next.kind === "ident" || (c.at("module") && next.kind === "string"))) {
     return namespaceDeclaration(c);
   }
@@ -187,4 +189,82 @@ function memberName(c: Cursor): PropertyName {
 function endMember(c: Cursor) {
   if (c.eat(";") || c.at("}") || c.peek().newlineBefore) return;
   throw c.error("expected ';'");
+}
+
+function importDeclaration(c: Cursor): Stmt {
+  const start = c.expect("import").start;
+  const typeOnly = atTypeModifier(c) && c.eat("type");
+  if (c.peek().kind === "ident" && isToken(c.peek(1), "=")) {
+    const name = c.ident().text;
+    c.expect("=");
+    const required = c.at("require") && isToken(c.peek(1), "(");
+    let module: string | undefined;
+    let entity: string | undefined;
+    if (required) {
+      c.next();
+      c.expect("(");
+      module = moduleName(c);
+      c.expect(")");
+    } else {
+      entity = c.ident().text;
+      while (c.eat(".")) entity += "." + c.next().text;
+    }
+    endStatement(c);
+    return { kind: "importEquals", typeOnly, name, require: module, entity, start, end: c.end() };
+  }
+  let fallback: string | undefined;
+  let namespace: string | undefined;
+  let named: Specifier[] | undefined;
+  if (c.peek().kind !== "string") {
+    if ((c.peek().kind === "ident" && !c.at("from")) || (c.at("from") && isToken(c.peek(1), "from"))) {
+      fallback = c.ident().text;
+      c.eat(",");
+    }
+    if (c.eat("*")) {
+      c.expect("as");
+      namespace = c.ident().text;
+    } else if (c.at("{")) {
+      named = specifiers(c);
+    }
+    c.expect("from");
+  }
+  const module = moduleName(c);
+  const attributes = c.eat("with") || (c.at("assert") && !c.peek().newlineBefore && c.eat("assert")) ? expression(c) : undefined;
+  endStatement(c);
+  return { kind: "import", typeOnly, default: fallback, namespace, named, module, attributes, start, end: c.end() };
+}
+
+// `import type from "m"` imports a default named `type`; `type` modifies only when an import
+// clause follows it.
+function atTypeModifier(c: Cursor): boolean {
+  if (!c.at("type")) return false;
+  const next = c.peek(1);
+  if (isToken(next, "{") || isToken(next, "*")) return true;
+  return next.kind === "ident" && !(isToken(next, "from") && c.peek(2).kind === "string") && !isToken(next, "=");
+}
+
+export function specifiers(c: Cursor): Specifier[] {
+  c.expect("{");
+  return c.list((): Specifier => {
+    const start = c.peek().start;
+    // `{ type as x }` renames `type`; `{ type x }` and `{ type as as x }` are type-only.
+    const [next, after] = [c.peek(1), c.peek(2)];
+    const named = next.kind === "ident" || next.kind === "string";
+    const typeOnly = c.at("type") && named && !(isToken(next, "as") && after.kind === "ident" && !isToken(after, "as")) && c.eat("type");
+    const name = specifierName(c);
+    const alias = c.eat("as") ? specifierName(c) : undefined;
+    return { name, alias, typeOnly, start, end: c.end() };
+  }, "}");
+}
+
+// Specifier names may be reserved words, as in `default as d`, or strings.
+function specifierName(c: Cursor): string {
+  const t = c.next();
+  if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a name", t);
+  return t.text;
+}
+
+export function moduleName(c: Cursor): string {
+  if (c.peek().kind !== "string") throw c.error("expected a module name");
+  return c.next().text;
 }
