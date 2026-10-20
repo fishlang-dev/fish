@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
-import { expression } from "./expressions.ts";
+import { expression, primary, unary } from "./expressions.ts";
+import { isToken } from "./lexer.ts";
 import { RESERVED, type Cursor, type Expr, type Pattern, type PatternProp } from "./parser.ts";
 import { propertyName } from "./types.ts";
 
@@ -99,4 +100,32 @@ export function toPattern(e: Expr): Pattern {
     }
   }
   throw new CompileError("invalid destructuring target", e.start, e.end);
+}
+
+// A pattern after `case` in a `match`.
+export function matchPattern(c: Cursor): Pattern {
+  const t = c.peek();
+  const numeric = (kind: string) => ["int", "float", "bigint"].includes(kind);
+  if (t.kind === "string" || numeric(t.kind) || c.at("true") || c.at("false") || c.at("null")) {
+    return { kind: "literal", value: primary(c), start: t.start, end: t.end };
+  }
+  if (c.at("-") && numeric(c.peek(1).kind)) {
+    const value = unary(c);
+    return { kind: "literal", value, start: value.start, end: value.end };
+  }
+  if (c.at("_") && !isToken(c.peek(1), ".") && !isToken(c.peek(1), "(")) {
+    return { kind: "wildcard", start: t.start, end: c.next().end };
+  }
+  let name = c.ident().text;
+  let dotted = false;
+  // Later segments may be reserved words, as in `Status.default`.
+  while (c.eat(".")) {
+    const segment = c.next();
+    if (segment.kind !== "ident") throw c.error("expected a name", segment);
+    name += "." + segment.text;
+    dotted = true;
+  }
+  const args = c.eat("(") ? c.list(() => matchPattern(c), ")") : undefined;
+  if (!args && !dotted) return { kind: "ident", name, start: t.start, end: c.end() };
+  return { kind: "variant", name, args, start: t.start, end: c.end() };
 }

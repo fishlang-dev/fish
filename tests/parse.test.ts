@@ -245,6 +245,14 @@ function showExpr(e: Expr): string {
       return "%";
     case "comptime":
       return `(comptime ${showExpr(e.expr)})`;
+    case "match": {
+      const arms = e.arms.map((a) => {
+        const guard = a.guard ? ` if ${showExpr(a.guard)}` : "";
+        const body = Array.isArray(a.body) ? `{ ${a.body.length} statements }` : showExpr(a.body);
+        return `case ${showPattern(a.pattern)}${guard} => ${body}`;
+      });
+      return `match (${showExpr(e.subject)}) { ${arms.join(", ")} }`;
+    }
     case "class":
       return showClass(e);
     case "arrow": {
@@ -321,6 +329,20 @@ const EXPRESSIONS: [string, string][] = [
   ["comptime`x`", "comptime`x`"],
   ["comptime in x", "(comptime in x)"],
   ["comptime as T", "(comptime as T)"],
+  ["match (x) { case Some(v) => v, case None => 0 }", "match (x) { case Some(v) => v, case None => 0 }"],
+  ["match (n) { case x if x > 10 => 'big', case _ => 'small', }", "match (n) { case x if (x > 10) => 'big', case _ => 'small' }"],
+  ["match (r) { case Ok(v) => v, case Err(e) => { log(e); return 0 } }", "match (r) { case Ok(v) => v, case Err(e) => { 2 statements } }"],
+  ["match (x) { case 1 => 'one', case -1 => 'minus', case 'a' => 'a', case true => 1, case null => 0, case 1n => 2 }",
+    "match (x) { case 1 => 'one', case (-1) => 'minus', case 'a' => 'a', case true => 1, case null => 0, case 1n => 2 }"],
+  ["match (e) { case ApiError.NotFound => 404, case Shape.Circle(r) => r, case Pair(A.B, _) => 1 }",
+    "match (e) { case ApiError.NotFound => 404, case Shape.Circle(r) => r, case Pair(A.B, _) => 1 }"],
+  ["match (x) { case x if (a) => b }", "match (x) { case x if a => b }"],
+  ["match (x) { case _ => (y) => y }", "match (x) { case _ => ((y) => y) }"],
+  ["match(x)", "match(x)"],
+  ["match (x)\n  {}", "match(x)"],
+  ["match (a, b) { case _ => 1 }", "match ((a, b)) { case _ => 1 }"],
+  ["match (x) {}", "match (x) {  }"],
+  ["f(match (x) { case _ => 1 }, 2)", "f(match (x) { case _ => 1 }, 2)"],
   ["a < < b", "error"],
   ["a + b * c", "(a + (b * c))"],
   ["a - b - c", "((a - b) - c)"],
@@ -420,6 +442,12 @@ function showPattern(p: Pattern): string {
       return `(${showPattern(p.target)} = ${showExpr(p.value)})`;
     case "expr":
       return showExpr(p.expr);
+    case "wildcard":
+      return "_";
+    case "literal":
+      return showExpr(p.value);
+    case "variant":
+      return `${p.name}${p.args ? `(${p.args.map(showPattern).join(", ")})` : ""}`;
   }
 }
 

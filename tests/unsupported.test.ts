@@ -73,6 +73,7 @@ const EXPRESSIONS: [string, string][] = [
   ["(x: i64) => x", "arrow functions"],
   ["1 |> % + 1", "'|>' expressions"],
   ["comptime 1", "comptime expressions"],
+  ["match (1) { case _ => 2 }", "match expressions"],
   ["class {}", "class expressions"],
   ["a[0]", "indexed access expressions"],
   ["new C()", "'new' expressions"],

@@ -375,6 +375,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   pipe: "'|>' expressions",
   topic: "topic references",
   comptime: "comptime expressions",
+  match: "match expressions",
   sequence: "comma expressions",
   yield: "'yield' expressions",
   as: "'as' expressions",

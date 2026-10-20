@@ -2,10 +2,10 @@ import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
 import {
   allowingIn, block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
-  type Pattern, type TypeParam, type UnaryOp,
+  type MatchArm, type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
 import { classNode, decoratorList } from "./declarations.ts";
-import { toPattern } from "./patterns.ts";
+import { matchPattern, toPattern } from "./patterns.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
@@ -342,6 +342,11 @@ export function primary(c: Cursor): Expr {
   if (c.at("{")) return object(c);
   if (c.at("function") || atAsync(c, "function")) return functionExpression(c);
   if (c.at("import")) return importExpression(c);
+  if (c.at("match")) {
+    const start = c.peek().start;
+    const subject = c.attempt(() => matchHead(c));
+    if (subject) return matchExpression(c, start, subject);
+  }
   if (c.at("class") || c.at("@")) {
     const start = c.peek().start;
     const decorators = decoratorList(c);
@@ -386,6 +391,34 @@ function importExpression(c: Cursor): Expr {
   c.expect("(");
   const args = c.list(() => expression(c), ")");
   return { kind: "import", args, start, end: c.end() };
+}
+
+// `match (subject)` followed by `{` on the same line. In TypeScript that is a syntax error, so
+// anything else is a call to a function named `match`.
+function matchHead(c: Cursor): Expr {
+  c.expect("match");
+  c.expect("(");
+  const subject = allowingIn(c, true, () => sequence(c));
+  c.expect(")");
+  if (!c.at("{") || c.peek().newlineBefore) throw c.error("expected '{'");
+  return subject;
+}
+
+function matchExpression(c: Cursor, start: number, subject: Expr): Expr {
+  c.expect("{");
+  const arms = c.list(() => matchArm(c), "}");
+  return { kind: "match", subject, arms, start, end: c.end() };
+}
+
+// `case P if guard => body`. The guard is parsed below the arrow and conditional levels, so in
+// `case x if (a) => b` the `(a)` is the guard rather than an arrow's parameters.
+function matchArm(c: Cursor): MatchArm {
+  const start = c.expect("case").start;
+  const pattern = matchPattern(c);
+  const guard = c.eat("if") ? binary(c) : undefined;
+  c.expect("=>");
+  const body = c.at("{") ? block(c) : expression(c);
+  return { pattern, guard, body, start, end: c.end() };
 }
 
 // An array element or a call argument: an expression, or `...` and one.

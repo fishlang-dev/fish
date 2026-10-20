@@ -78,6 +78,7 @@ export type Expr = Span & (
   // `value |> body`, where `body` refers to `value` as `%`.
   | { kind: "pipe"; value: Expr; body: Expr }
   | { kind: "topic" }
+  | { kind: "match"; subject: Expr; arms: MatchArm[] }
   // `comptime expr`: evaluated while compiling.
   | { kind: "comptime"; expr: Expr }
   // `[a, b] = [b, a]`: an assignment whose left side is a pattern.
@@ -198,7 +199,18 @@ export type Pattern = Span & (
   | { kind: "default"; target: Pattern; value: Expr }
   // Only in assignment patterns: a target such as `obj.prop` or `list[0]`.
   | { kind: "expr"; expr: Expr }
+  // The rest appear only in `match` patterns.
+  | { kind: "wildcard" }
+  // A string, number, bigint, boolean or null literal, or a negated number.
+  | { kind: "literal"; value: Expr }
+  // `Some(v)`, or a dotted name such as `ApiError.NotFound`; `args` is undefined without
+  // parentheses. A bare name such as `None` stays an `ident`: binding or variant is the
+  // checker's call.
+  | { kind: "variant"; name: string; args: Pattern[] | undefined }
 );
+
+// `body` reads like an arrow function's: an expression, or a block's statements.
+export type MatchArm = Span & { pattern: Pattern; guard: Expr | undefined; body: Expr | Stmt[] };
 
 // In `{ a }` the value is the identifier pattern `a`.
 export type PatternProp = Span & { key: PropertyName; value: Pattern };
