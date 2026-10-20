@@ -52,7 +52,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, types, locals, returns }: Checked, { src, file, release }: Options): string {
+export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -63,6 +63,8 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   let currentFunction = "";
+  // Where a `break` and a `continue` go for each statement they can name.
+  const exits = new Map<Stmt, { exit: string; next?: string }>();
 
   for (const f of funcs) {
     currentFunction = f.name;
@@ -164,6 +166,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         startBlock(test);
         emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
         startBlock(loop);
+        exits.set(s, { exit: end, next: test });
         s.body.forEach(statement);
         emit(`br label %${test}`);
         startBlock(end);
@@ -176,6 +179,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         startBlock(test);
         emit(s.test ? `br i1 ${value(s.test)}, label %${loop}, label %${end}` : `br label %${loop}`);
         startBlock(loop);
+        exits.set(s, { exit: end, next });
         s.body.forEach(statement);
         emit(`br label %${next}`);
         startBlock(next);
@@ -188,11 +192,27 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         const [loop, test, end] = [label(), label(), label()];
         emit(`br label %${loop}`);
         startBlock(loop);
+        exits.set(s, { exit: end, next: test });
         s.body.forEach(statement);
         emit(`br label %${test}`);
         startBlock(test);
         emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
         startBlock(end);
+        return;
+      }
+      case "labeled": {
+        const end = label();
+        exits.set(s, { exit: end });
+        statement(s.body);
+        emit(`br label %${end}`);
+        startBlock(end);
+        return;
+      }
+      case "break":
+      case "continue": {
+        const target = exits.get(jumps.get(s)!)!;
+        emit(`br label %${s.kind === "break" ? target.exit : target.next}`);
+        startBlock(label());
         return;
       }
       case "return":

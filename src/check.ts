@@ -16,7 +16,15 @@ export type Checked = {
   locals: Map<Expr | Stmt | Param, Local>;
   // Each function's return type, written or inferred.
   returns: Map<string, Type>;
+  // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
+  jumps: Map<Stmt, Stmt>;
 };
+
+type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
+
+// What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
+// `loop` is the loop it labels, if any.
+type Target = { stmt: Stmt; kind: "loop" | "switch" | "label"; label?: string; loop?: Stmt };
 
 type Call = Extract<Expr, { kind: "call" }>;
 
@@ -59,13 +67,17 @@ export function check(program: Stmt[]): Checked {
   const types = new Map<Expr, Type>();
   const locals = new Map<Expr | Stmt | Param, Local>();
   const returns = new Map<string, Type>();
+  const jumps = new Map<Stmt, Stmt>();
+  // The targets some `break` leaves, and the loops some `continue` repeats.
+  const broken = new Set<Stmt>();
+  const continued = new Set<Stmt>();
   const inProgress = new Set<Func>();
   let nextId = 0;
 
   funcs.forEach(checkBody);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  return { funcs, types, locals, returns };
+  return { funcs, types, locals, returns, jumps };
 
   function returnOf(f: Func, at: Span): Type {
     if (f.returnType) return resolveType(f.returnType);
@@ -82,6 +94,7 @@ export function check(program: Stmt[]): Checked {
     const declared = f.returnType && resolveType(f.returnType);
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
+    const targets: Target[] = [];
 
     for (const p of f.params) declare(paramName(p), paramType(p), false, true, p);
     f.body.forEach(statement);
@@ -121,7 +134,7 @@ export function check(program: Stmt[]): Checked {
           return;
         case "while":
           condition(s.cond);
-          scoped(s.body);
+          within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           return;
         case "function":
           throw unsupported("nested functions", s);
@@ -140,7 +153,7 @@ export function check(program: Stmt[]): Checked {
           if (s.init) statement(s.init);
           if (s.test) condition(s.test);
           if (s.update) effect(s.update);
-          scoped(s.body);
+          within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           scopes.pop();
           return;
         case "forIn":
@@ -148,17 +161,28 @@ export function check(program: Stmt[]): Checked {
         case "forOf":
           throw unsupported(s.await ? "'for await...of' loops" : "'for...of' loops", s);
         case "doWhile":
-          scoped(s.body);
+          within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           condition(s.cond);
           return;
         case "switch":
           throw unsupported("'switch' statements", s);
-        case "labeled":
-          throw unsupported("labeled statements", s);
+        case "labeled": {
+          if (targets.some((t) => t.label === s.label)) {
+            throw new CompileError(`duplicate label '${s.label}'`, s.start, s.start + s.label.length);
+          }
+          let body = s.body;
+          while (body.kind === "labeled") body = body.body;
+          const loop = ["while", "doWhile", "for", "forIn", "forOf"].includes(body.kind) ? body : undefined;
+          within({ stmt: s, kind: "label", label: s.label, loop }, () => statement(s.body));
+          return;
+        }
         case "break":
-          throw unsupported("'break' statements", s);
-        case "continue":
-          throw unsupported("'continue' statements", s);
+        case "continue": {
+          const target = jumpTarget(s);
+          jumps.set(s, target);
+          (s.kind === "break" ? broken : continued).add(target);
+          return;
+        }
         case "throw":
           throw unsupported("'throw' statements", s);
         case "try":
@@ -174,6 +198,26 @@ export function check(program: Stmt[]): Checked {
           return;
         }
       }
+    }
+
+    function within(target: Target, check: () => void) {
+      targets.push(target);
+      check();
+      targets.pop();
+    }
+
+    function jumpTarget(s: Jump): Stmt {
+      if (s.label === undefined) {
+        const target = targets.findLast((t) => t.kind === "loop" || (s.kind === "break" && t.kind === "switch"));
+        if (target) return target.stmt;
+        const message = s.kind === "break" ? "'break' can only be used inside a loop or 'switch'" : "'continue' can only be used inside a loop";
+        throw new CompileError(message, s.start, s.end);
+      }
+      const target = targets.findLast((t) => t.label === s.label);
+      if (!target) throw new CompileError(`cannot find label '${s.label}'`, s.start, s.end);
+      if (s.kind === "break") return target.stmt;
+      if (!target.loop) throw new CompileError("'continue' can only jump to a label on a loop", s.start, s.end);
+      return target.loop;
     }
 
     // Only a statement may call a function that returns nothing.
@@ -323,6 +367,32 @@ export function check(program: Stmt[]): Checked {
     }
   }
 
+  // Whether control never reaches the end of these statements. A loop whose condition is
+  // always true never finishes unless a `break` leaves it.
+  function alwaysReturns(stmts: Stmt[]): boolean {
+    return stmts.some((s) => {
+      switch (s.kind) {
+        case "return":
+          return true;
+        case "if":
+          return s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else);
+        case "block":
+          return alwaysReturns(s.body);
+        case "labeled":
+          return !broken.has(s) && alwaysReturns([s.body]);
+        case "while":
+          return isTrue(s.cond) && !broken.has(s);
+        case "for":
+          return (s.test === undefined || isTrue(s.test)) && !broken.has(s);
+        case "doWhile":
+          // A `continue` skips the rest of the body to test the condition.
+          return !broken.has(s) && (isTrue(s.cond) || (alwaysReturns(s.body) && !continued.has(s)));
+        default:
+          return false;
+      }
+    });
+  }
+
   function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Type {
     if (op === "===" || op === "!==") {
       if (left === right) return "boolean";
@@ -459,29 +529,6 @@ const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
 function unsupported(what: string, at: Span): CompileError {
   return new CompileError(`${what} are not supported yet`, at.start, at.end);
-}
-
-// A loop whose condition is always true never finishes, since there is no `break` yet, so
-// nothing after it runs.
-function alwaysReturns(stmts: Stmt[]): boolean {
-  return stmts.some((s) => {
-    switch (s.kind) {
-      case "return":
-        return true;
-      case "if":
-        return s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else);
-      case "block":
-        return alwaysReturns(s.body);
-      case "while":
-        return isTrue(s.cond);
-      case "doWhile":
-        return alwaysReturns(s.body) || isTrue(s.cond);
-      case "for":
-        return s.test === undefined || isTrue(s.test);
-      default:
-        return false;
-    }
-  });
 }
 
 const isTrue = (e: Expr) => e.kind === "bool" && e.value;
