@@ -89,6 +89,7 @@ export function check(items: Item[]): Checked {
             call(s.expr);
             return;
           }
+          if (s.expr.kind === "assign") throw new CompileError(`operator '${s.expr.op}' is not supported yet`, s.expr.start, s.expr.end);
           value(s.expr);
           throw new CompileError("only calls are supported as statements so far", s.start, s.end);
         case "let": {
@@ -312,6 +313,13 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   import: "dynamic imports",
   nonNull: "non-null assertions",
   update: "increment and decrement expressions",
+  conditional: "conditional expressions",
+  assign: "assignment expressions",
+  sequence: "comma expressions",
+  yield: "'yield' expressions",
+  as: "'as' expressions",
+  satisfies: "'satisfies' expressions",
+  assertion: "type assertions",
   template: "template literals",
   tagged: "tagged templates",
 };

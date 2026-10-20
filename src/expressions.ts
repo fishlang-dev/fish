@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
-import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode, type UnaryOp } from "./parser.ts";
+import { block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode, type UnaryOp } from "./parser.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
@@ -25,20 +25,86 @@ const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE,
 
 const UNARY = new Set(["-", "+", "!", "~", "typeof", "void", "delete", "await"]);
 
-export function expression(c: Cursor, minPrecedence = 0): Expr {
+// A full expression, commas included, as in a statement, a condition or parentheses.
+export function sequence(c: Cursor): Expr {
+  const first = expression(c);
+  if (!c.at(",")) return first;
+  const exprs = [first];
+  while (c.eat(",")) exprs.push(expression(c));
+  return { kind: "sequence", exprs, start: first.start, end: c.end() };
+}
+
+// One expression without a top-level comma: an argument, an element, an initializer.
+export function expression(c: Cursor): Expr {
+  if (c.at("yield")) return yieldExpression(c);
+  const target = conditional(c);
+  const [op, width] = assignOperator(c) ?? [];
+  if (!op || !width) return target;
+  c.pos += width;
+  // Right-associative: `a = b = c` is `a = (b = c)`.
+  const value = expression(c);
+  return { kind: "assign", op, target, value, start: target.start, end: value.end };
+}
+
+function conditional(c: Cursor): Expr {
+  const cond = binary(c);
+  if (!c.eat("?")) return cond;
+  const then = expression(c);
+  c.expect(":");
+  const otherwise = expression(c);
+  return { kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
+}
+
+const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", "&=", "|=", "^=", "&&=", "||=", "??="]);
+
+// Like `>>`, `>>=` and `>>>=` arrive as separate adjacent tokens and are rejoined here.
+function assignOperator(c: Cursor): [AssignOp, number] | undefined {
+  const t = c.peek();
+  if (t.kind !== "punct") return undefined;
+  if (ASSIGN_OPERATORS.has(t.text)) return [t.text as AssignOp, 1];
+  let text = "";
+  for (let i = 0; i < 4; i++) {
+    const n = c.peek(i);
+    if (n.kind !== "punct" || (i > 0 && n.start !== c.peek(i - 1).end)) break;
+    text += n.text;
+    if (text === ">>=" || text === ">>>=") return [text, i + 1];
+  }
+  return undefined;
+}
+
+// `yield` with nothing after it on the line yields undefined.
+function yieldExpression(c: Cursor): Expr {
+  const start = c.expect("yield").start;
+  const delegate = c.eat("*");
+  const t = c.peek();
+  const ends = t.newlineBefore || t.kind === "eof" || [")", "]", "}", ",", ";", ":"].some((text) => c.at(text));
+  const value = delegate || !ends ? expression(c) : undefined;
+  return { kind: "yield", value, delegate, start, end: c.end() };
+}
+
+function binary(c: Cursor, minPrecedence = 0): Expr {
   const startsUnary = UNARY.has(c.peek().text) && (c.peek().kind === "punct" || c.peek().kind === "ident");
   let left = unary(c);
   for (;;) {
     const [op, width] = binaryOperator(c) ?? [];
+    if (atTypeOperator(c) && minPrecedence < PRECEDENCE["<"]) {
+      const kind = c.next().text as "as" | "satisfies";
+      const t = type(c);
+      left = { kind, expr: left, type: t, start: left.start, end: t.end };
+      continue;
+    }
     if (!op || !width || PRECEDENCE[op] <= minPrecedence) return left;
     // TypeScript rejects `-a ** b` rather than pick a meaning for it.
     if (op === "**" && startsUnary && left.kind === "unary") throw c.error("parenthesise the left side of '**'");
     c.pos += width;
     // Right-associative: `a ** b ** c` is `a ** (b ** c)`.
-    const right = expression(c, op === "**" ? PRECEDENCE[op] - 1 : PRECEDENCE[op]);
+    const right = binary(c, op === "**" ? PRECEDENCE[op] - 1 : PRECEDENCE[op]);
     left = { kind: "binary", op, left, right, start: left.start, end: right.end };
   }
 }
+
+// `as` and `satisfies` bind like relational operators, and only on the same line.
+const atTypeOperator = (c: Cursor) => (c.at("as") || c.at("satisfies")) && !c.peek().newlineBefore;
 
 // The operator at the cursor and how many tokens it spans. The lexer emits `>` alone so that
 // `A<B<C>>` closes two generics; `>>`, `>>>` and `>=` are rejoined here from adjacent tokens.
@@ -57,6 +123,12 @@ function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
 
 export function unary(c: Cursor): Expr {
   const t = c.peek();
+  if (c.eat("<")) {
+    const asserted = type(c);
+    c.expect(">");
+    const expr = unary(c);
+    return { kind: "assertion", type: asserted, expr, start: t.start, end: expr.end };
+  }
   if (c.at("++") || c.at("--")) {
     c.next();
     const operand = unary(c);
@@ -84,7 +156,7 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
     const t = c.peek();
     const optional = calls && c.eat("?.");
     if (c.eat("[")) {
-      const index = expression(c);
+      const index = sequence(c);
       e = { kind: "index", object: e, index, optional, start, end: c.expect("]").end };
     } else if (c.eat(".") || (optional && !c.at("(") && !c.at("<"))) {
       e = { kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
@@ -161,7 +233,7 @@ export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: s
 }
 
 function template(c: Cursor): Expr {
-  const { quasis, parts, start, end } = templateParts(c, (c) => expression(c));
+  const { quasis, parts, start, end } = templateParts(c, (c) => sequence(c));
   return { kind: "template", quasis, exprs: parts, start, end };
 }
 
@@ -194,7 +266,7 @@ export function primary(c: Cursor): Expr {
       return { kind: "ident", name: t.text, ...span };
   }
   if (t.text === "(") {
-    const e = expression(c);
+    const e = sequence(c);
     c.expect(")");
     return e;
   }

@@ -216,6 +216,19 @@ function showExpr(e: Expr): string {
       return e.prefix ? `(${e.op}${showExpr(e.operand)})` : `(${showExpr(e.operand)}${e.op})`;
     case "binary":
       return `(${showExpr(e.left)} ${e.op} ${showExpr(e.right)})`;
+    case "conditional":
+      return `(${showExpr(e.cond)} ? ${showExpr(e.then)} : ${showExpr(e.else)})`;
+    case "assign":
+      return `(${showExpr(e.target)} ${e.op} ${showExpr(e.value)})`;
+    case "sequence":
+      return `(${e.exprs.map(showExpr).join(", ")})`;
+    case "yield":
+      return `(yield${e.delegate ? "*" : ""}${e.value ? ` ${showExpr(e.value)}` : ""})`;
+    case "as":
+    case "satisfies":
+      return `(${showExpr(e.expr)} ${e.kind} ${show(e.type)})`;
+    case "assertion":
+      return `(<${show(e.type)}>${showExpr(e.expr)})`;
   }
 }
 
@@ -280,6 +293,32 @@ const EXPRESSIONS: [string, string][] = [
   ["-a++", "(-(a++))"],
   ["a+++b", "((a++) + b)"],
   ["- -a", "(-(-a))"],
+  ["a = b = c", "(a = (b = c))"],
+  ["a += b ?? c", "(a += (b ?? c))"],
+  ["a >>= 1", "(a >>= 1)"],
+  ["a >>>= b > c", "(a >>>= (b > c))"],
+  ["a ||= b &&= c", "(a ||= (b &&= c))"],
+  ["a ? b : c ? d : e", "(a ? b : (c ? d : e))"],
+  ["a || b ? c : d", "((a || b) ? c : d)"],
+  ["a ? b = 1 : c", "(a ? (b = 1) : c)"],
+  ["a ? b : c = d", "(a ? b : (c = d))"],
+  ["(a, b, c)", "(a, b, c)"],
+  ["f((a, b), c)", "f((a, b), c)"],
+  ["x as A as B", "((x as A) as B)"],
+  ["x as const", "(x as const)"],
+  ["a + b as T", "((a + b) as T)"],
+  ["a < b as T", "((a < b) as T)"],
+  ["a as T > b", "((a as T) > b)"],
+  ["a && b as T", "(a && (b as T))"],
+  ["x satisfies Config", "(x satisfies Config)"],
+  ["<T>x.y", "(<T>x.y)"],
+  ["<T>x + 1", "((<T>x) + 1)"],
+  ["<A<B>>x", "(<A<B>>x)"],
+  ["yield", "(yield)"],
+  ["(yield a, b)", "((yield a), b)"],
+  ["yield* g()", "(yield* g())"],
+  ["yield a ? b : c", "(yield (a ? b : c))"],
+  ["a[b, c]", "a[(b, c)]"],
 ];
 
 for (const [src, shape] of EXPRESSIONS) {

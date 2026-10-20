@@ -75,6 +75,11 @@ const EXPRESSIONS: [string, string][] = [
   ["f?.()", "optional calls"],
   ["f<i64>()", "type arguments on calls"],
   ["i++", "increment and decrement expressions"],
+  ["a ? 1 : 2", "conditional expressions"],
+  ["y = 1", "assignment expressions"],
+  ["1 as i64", "'as' expressions"],
+  ["1 satisfies i64", "'satisfies' expressions"],
+  ["<i64>1", "type assertions"],
   ["tag`a`", "tagged templates"],
 ];
 
@@ -99,3 +104,12 @@ for (const expr of ["2 ** 3", "1 | 2", "1 << 2", "a ?? b", "a in b", "typeof 1",
     }));
   });
 }
+
+// Parentheses aren't part of the node, so the span covers what is inside them.
+test("(1, 2)", () => {
+  const src = "function main() {\n  let x = (1, 2)\n}";
+  const start = src.indexOf("1, 2");
+  expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    message: "comma expressions are not supported yet", start, end: start + 4,
+  }));
+});

@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import { expression } from "./expressions.ts";
+import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
@@ -65,6 +65,15 @@ export type Expr = Span & (
   | { kind: "unary"; op: UnaryOp; operand: Expr }
   | { kind: "update"; op: "++" | "--"; prefix: boolean; operand: Expr }
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
+  | { kind: "conditional"; cond: Expr; then: Expr; else: Expr }
+  | { kind: "assign"; op: AssignOp; target: Expr; value: Expr }
+  // `a, b`; only where a full expression is allowed, never as an argument or element.
+  | { kind: "sequence"; exprs: Expr[] }
+  | { kind: "yield"; value: Expr | undefined; delegate: boolean }
+  // `as const` is an `as` whose type is a ref named "const".
+  | { kind: "as" | "satisfies"; expr: Expr; type: TypeNode }
+  // `<T>x`
+  | { kind: "assertion"; type: TypeNode; expr: Expr }
 );
 
 export type Stmt = Span & (
@@ -120,8 +129,12 @@ export type UnaryOp = "-" | "+" | "!" | "~" | "typeof" | "void" | "delete" | "aw
 
 export type ArithmeticOp = "+" | "-" | "*" | "/" | "%";
 
-// Each assignment operator and the binary operator it applies, if any.
-const ASSIGNMENT: Record<string, ArithmeticOp | "="> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
+export type AssignOp =
+  | "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | ">>>="
+  | "&=" | "|=" | "^=" | "&&=" | "||=" | "??=";
+
+// The assignments a statement can make so far, and the operator each applies.
+const ASSIGNMENT: Partial<Record<AssignOp, ArithmeticOp | "=">> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
 
 // Reserved in strict-mode JavaScript, so never usable as names.
 export const RESERVED = new Set([
@@ -280,7 +293,7 @@ function statement(c: Cursor): Stmt {
 function ifStatement(c: Cursor): Stmt {
   const start = c.next().start;
   c.expect("(");
-  const cond = expression(c);
+  const cond = sequence(c);
   c.expect(")");
   const then = body(c);
   const otherwise = c.eat("else") ? body(c) : undefined;
@@ -290,7 +303,7 @@ function ifStatement(c: Cursor): Stmt {
 function whileStatement(c: Cursor): Stmt {
   const start = c.next().start;
   c.expect("(");
-  const cond = expression(c);
+  const cond = sequence(c);
   c.expect(")");
   const loop = body(c);
   return { kind: "while", cond, body: loop, start, end: c.end() };
@@ -311,18 +324,13 @@ function simpleStatement(c: Cursor): Stmt {
     const end = c.next().end;
     // A newline after `return` ends the statement, as in JavaScript.
     if (c.at(";") || c.at("}") || c.peek().newlineBefore || c.peek().kind === "eof") return { kind: "return", value: undefined, start, end };
-    const value = expression(c);
+    const value = sequence(c);
     return { kind: "return", value, start, end: value.end };
   }
-  const expr = expression(c);
+  const expr = sequence(c);
   if (expr.kind === "update") return increment(expr);
-  const t = c.peek();
-  const op = t.kind === "punct" ? ASSIGNMENT[t.text] : undefined;
-  if (op) {
-    c.next();
-    const value = expression(c);
-    return { kind: "assign", target: expr, op, value, start, end: value.end };
-  }
+  const op = expr.kind === "assign" ? ASSIGNMENT[expr.op] : undefined;
+  if (expr.kind === "assign" && op) return { kind: "assign", target: expr.target, op, value: expr.value, start, end: expr.end };
   return { kind: "expr", expr, start, end: expr.end };
 }
 
