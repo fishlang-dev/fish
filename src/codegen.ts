@@ -4,11 +4,19 @@ import type { BinaryOp, Expr, Span, Stmt } from "./parser.ts";
 
 const LLVM: Record<Type, string> = { i64: "i64" };
 
+const I64_MIN = -(1n << 63n);
+
 // The wrapping instruction, the checked intrinsic and the verb for each panic message.
-const ARITHMETIC: Record<BinaryOp, [string, string, string]> = {
+const ARITHMETIC: Record<"+" | "-" | "*", [string, string, string]> = {
   "+": ["add", "sadd", "add"],
   "-": ["sub", "ssub", "subtract"],
   "*": ["mul", "smul", "multiply"],
+};
+
+// LLVM leaves x / 0 and MIN / -1 undefined, so both panic in every build, as in Rust.
+const DIVISION: Record<"/" | "%", [string, string, string]> = {
+  "/": ["sdiv", "attempt to divide by zero", "attempt to divide with overflow"],
+  "%": ["srem", "attempt to calculate the remainder with a divisor of zero", "attempt to calculate the remainder with overflow"],
 };
 
 // A panic prints its location and reason to stderr and exits with 101, like a Rust panic
@@ -130,8 +138,9 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
     }
   }
 
-  function arithmetic(op: BinaryOp, a: string, b: string, at: Span, verb = ARITHMETIC[op][2]): string {
-    const [wrapping, checked] = ARITHMETIC[op];
+  function arithmetic(op: BinaryOp, a: string, b: string, at: Span, verb?: string): string {
+    if (op === "/" || op === "%") return division(op, a, b, at);
+    const [wrapping, checked, opVerb] = ARITHMETIC[op];
     const result = temp();
     if (release) {
       emit(`${result} = ${wrapping} i64 ${a}, ${b}`);
@@ -142,7 +151,22 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
     emit(`${pair} = call { i64, i1 } @llvm.${checked}.with.overflow.i64(i64 ${a}, i64 ${b})`);
     emit(`${result} = extractvalue { i64, i1 } ${pair}, 0`);
     emit(`${overflow} = extractvalue { i64, i1 } ${pair}, 1`);
-    panicIf(overflow, `attempt to ${verb} with overflow`, at);
+    panicIf(overflow, `attempt to ${verb ?? opVerb} with overflow`, at);
+    return result;
+  }
+
+  function division(op: "/" | "%", a: string, b: string, at: Span): string {
+    const [instruction, byZero, overflow] = DIVISION[op];
+    const zero = temp();
+    emit(`${zero} = icmp eq i64 ${b}, 0`);
+    panicIf(zero, byZero, at);
+    const [min, minusOne, both] = [temp(), temp(), temp()];
+    emit(`${min} = icmp eq i64 ${a}, ${I64_MIN}`);
+    emit(`${minusOne} = icmp eq i64 ${b}, -1`);
+    emit(`${both} = and i1 ${min}, ${minusOne}`);
+    panicIf(both, overflow, at);
+    const result = temp();
+    emit(`${result} = ${instruction} i64 ${a}, ${b}`);
     return result;
   }
 

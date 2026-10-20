@@ -23,7 +23,7 @@ export type Stmt = Span & (
 export type Func = Span & { name: string; body: Stmt[] };
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative.
-const PRECEDENCE = { "+": 5, "-": 5, "*": 6 } as const;
+const PRECEDENCE = { "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 } as const;
 
 export type BinaryOp = keyof typeof PRECEDENCE;
 
