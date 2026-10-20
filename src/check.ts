@@ -9,7 +9,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { show, widenEnum, type Type } from "./typing.ts";
+import { lower, lowersClasses, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -127,10 +127,11 @@ export function check(program: Stmt[]): Checked {
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums);
+  lowersClasses((c, args) => classNamed(c.generic!.name, args, { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
-  const { instanceOf, instantiate, paramTypes, declaredParams, implicitOf, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
+  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -154,6 +155,28 @@ export function check(program: Stmt[]): Checked {
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
   return { instances: all().filter((i) => i.concrete && compiled.has(i.body)) };
 
+  // Codegen sees each type parameter as the concrete type it stands for.
+  function lowerTables(instance: Instance) {
+    for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
+    for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
+    for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
+    instance.returns = lower(instance.returns);
+  }
+
+  // A member of a generic class made from a type parameter runs as the same member of the
+  // class made from what the parameter stands for. Both come from one template, so their
+  // members are in the same order.
+  function counterpart(target: Instance): Instance {
+    const owner = target.body.owner;
+    const to = owner && (lower(owner) as ClassType);
+    if (!owner || to === owner) return target;
+    const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(target.body)]!;
+    // A parameter of type `T` there may be an object type here, which is an implicit one.
+    const params = paramTypes(target);
+    const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`) ?? lower(params[i]!)]);
+    return instanceOf(body, new Map([...body.scope!, ...implicit]));
+  }
+
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
     const declared = f.returnType && withScope(instance.bindings, () => resolveType(f.returnType!));
@@ -171,7 +194,7 @@ export function check(program: Stmt[]): Checked {
     const outer = checking;
     checking = instance;
     try {
-      withScope(instance.bindings, () => checkInstance(instance));
+      withScope(scopeOf(instance), () => checkInstance(instance));
     } finally {
       checking = outer;
     }
@@ -215,13 +238,10 @@ export function check(program: Stmt[]): Checked {
       assume,
       narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
       reachable: (l) => !caseOnly.has(l),
-      boundOf: (l) => bounds.get(l),
     });
 
-    const params = paramTypes(instance);
+    const params = paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
-    // A parameter typed with an interface or object type, and what that type declares.
-    const bounds = new Map([...implicitOf(f)].map(([i, bound]) => [locals.get(f.params[i]!)!, bound]));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
     statements(f.body, (s, check) => {
@@ -245,6 +265,7 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
     instance.returns = type;
+    if (instance.concrete) lowerTables(instance);
     done.add(instance);
     inProgress.delete(instance);
 

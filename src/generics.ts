@@ -3,14 +3,15 @@ import { declareClass, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, keyOf, show, typeParameter, widenEnum, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, keyOf, lower, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
 
 // A bound must be an interface or an object type. Classes are nominal and embed rather than
-// subclass, so a class bound could only ever mean that one class.
-export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
+// subclass, so a class bound could only ever mean that one class. In an instance, each
+// parameter also holds the concrete type `concrete` gives it.
+export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
   const scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError(`'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
@@ -23,7 +24,7 @@ export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: 
       }
       bound = t;
     }
-    scope.set(p.name, typeParameter(p.name, bound));
+    scope.set(p.name, concrete ? wrapped(p.name, bound, concrete(p.name)) : typeParameter(p.name, bound));
   }
   return scope;
 }
@@ -33,7 +34,7 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
     arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
-    if (earlier && earlier !== arg) {
+    if (earlier && lower(earlier) !== lower(arg)) {
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);
     }
     bindings.set(node.name, arg);
@@ -97,7 +98,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // Instances still to check.
   const pending: Instance[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
-  return { instanceOf, instantiate, paramTypes, declaredParams, implicitOf, definition, pending, all };
+  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all };
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
   // type, which is what an interface's method signature is compared with.
@@ -169,18 +170,33 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       }
     }
     withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
-    const ordered = new Map([...(f.scope ?? []), ...params.map((p): [string, Type] => [p.name, bindings.get(p.name)!])]);
-    for (const [i, bound] of implicitOf(f)) ordered.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound));
+    // An argument from inside another instance may be one of its type parameters; the instance
+    // is keyed by what that stands for.
+    const ordered = new Map([...(f.scope ?? []), ...params.map((p): [string, Type] => [p.name, lower(bindings.get(p.name)!)])]);
+    for (const [i, bound] of implicitOf(f)) ordered.set(`#${i}`, lower(implicitArgument(args[i]!, argTypes[i]!, bound)));
     const instance = instanceOf(f, ordered);
     if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     return instance;
   }
 
-  function paramTypes(instance: Instance): Type[] {
+  // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
+  // body sees.
+  function paramTypes(instance: Instance, scope = instance.bindings): Type[] {
     const f = instance.body;
     const implicit = implicitOf(f);
-    return withScope(instance.bindings, () => f.params.map((p, i) =>
-      instance.bindings.get(`#${i}`) ?? implicit.get(i) ?? paramType(p, f.self?.constructor)));
+    return withScope(scope, () => f.params.map((p, i) =>
+      scope.get(`#${i}`) ?? implicit.get(i) ?? paramType(p, f.self?.constructor)));
+  }
+
+  // What a concrete instance's body sees: each of its type parameters offering only its bound,
+  // as at the definition, while holding the concrete type for codegen.
+  function scopeOf(instance: Instance): Map<string, Type> {
+    const f = instance.body;
+    if (!instance.concrete || !generic(f)) return instance.bindings;
+    const own = placeholders(f.typeParams ?? [], (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)), (name) => instance.bindings.get(name)!);
+    const scope = new Map([...(f.scope ?? []), ...own]);
+    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), bound, instance.bindings.get(`#${i}`)!));
+    return scope;
   }
 
   function generic(f: Body): boolean {

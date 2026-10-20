@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, objectType, show, widenEnum } from "./typing.ts";
-import type { Access, ClassType, Field, InterfaceType, ObjectType, Type } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import type { Access, ClassType, Field, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -60,14 +60,11 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
-  // The interface or object type a parameter was declared with, when it is an implicit type
-  // parameter; its instances may hold a narrower concrete type.
-  boundOf(l: Local): ObjectType | InterfaceType | undefined;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, boundOf } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -142,7 +139,20 @@ export function expressions(ctx: Context) {
       const type = value(a);
       coerce(a, type, found.params[i]!, `argument of type '${show(type)}' is not assignable to parameter of type '${show(found.params[i]!)}'`);
     });
+    const stored = receiver.kind === "param" ? receiver.concrete : undefined;
+    if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, found.returns), what: `'${callee.name}'` };
     return { type: found.returns, what: `'${callee.name}'` };
+  }
+
+  // In an instance, a call through a type parameter runs its concrete class's method. An
+  // interface it returns is, as for any call, the one concrete type the method returns.
+  function concreteMethod(e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type): Type {
+    const target = inherited(classOf(c), "methods", callee.name)!;
+    if (target.self!.mutable && place(callee.object)) changeable(callee.object, `call '${callee.name}' on`);
+    const instance = instantiate(target, [], e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
+    calls.set(e, instance);
+    if (typeof returns === "string" || returns.kind !== "interface") return returns;
+    return wrapped(returns.name, returns, lower(returnOf(instance, e)));
   }
 
   // The method a member call names: a static one on a class name, or an instance one, whose
@@ -263,12 +273,15 @@ export function expressions(ctx: Context) {
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
-        // Through an interface or object parameter, a field has the type its bound declares,
-        // which a narrower concrete field converts to, so each instance checks as the
-        // definition did.
-        const bound = e.object.kind === "ident" ? boundOf(locals.get(e.object)!) : undefined;
-        const declared = bound && field(bound, e.name)?.type;
-        return declared && fits(found.type, declared) ? declared : found.type;
+        // Through a type parameter the field has its bound's type, and in an instance the
+        // concrete class may give it with a getter.
+        const stored = lower(object);
+        if (stored !== object && typeof stored !== "string" && stored.kind === "class" && !field(stored, e.name)) {
+          const instance = instanceOf(inherited(classOf(stored), "getters", e.name)!);
+          returnOf(instance, e);
+          calls.set(e, instance);
+        }
+        return found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));
@@ -370,6 +383,9 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
     }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
+    // An instance's concrete class may give a field its bound declares with a getter, which
+    // copying field by field can't read, so that copy is rejected in the instance.
+    if (lower(type) !== type && !fits(lower(type), lower(to))) throw new CompileError(message, e.start, e.end);
     excess(e, to);
     coercions.set(e, to);
   }
@@ -440,9 +456,11 @@ export function expressions(ctx: Context) {
     const setter = target.kind === "member" ? accessor(target) : undefined;
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
-      const type = value(target);
+      value(target);
       intoMember(target, types);
       changeable(target, "assign to");
+      const type = stored(target);
+      types.set(target, type);
       return type;
     }
     const type = paramTypes(instanceOf(setter))[0]!;
@@ -455,10 +473,18 @@ export function expressions(ctx: Context) {
     return type;
   }
 
+  // The type a write stores. Read through a type parameter, a field has its bound's type, but
+  // in an instance it is stored as the concrete type's field, which may be narrower.
+  function stored(target: Expr): Type {
+    if (target.kind !== "member") return types.get(target)!;
+    const object = lower(stored(target.object));
+    return (typeof object !== "string" && field(object, target.name)?.type) || types.get(target)!;
+  }
+
   // The setter an assignment to a class member runs, if it is an accessor. A getter alone
   // makes the property read-only.
   function accessor(target: Extract<Expr, { kind: "member" }>): Body | undefined {
-    const object = value(target.object);
+    const object = lower(value(target.object));
     if (typeof object === "string" || object.kind !== "class" || field(object, target.name)) return undefined;
     const c = classOf(object);
     const setter = inherited(c, "setters", target.name);

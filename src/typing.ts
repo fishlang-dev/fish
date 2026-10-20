@@ -21,10 +21,11 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 export type Method = { name: string; params: Type[]; returns: Type };
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[] };
 
-// A type parameter, as seen while a generic body is checked at its definition: it stands
-// for any type satisfying its bound, and offers only the bound's fields. Each instance of
-// the body is checked again with concrete types, so a parameter never reaches codegen.
-export type ParamType = { kind: "param"; name: string; bound: ObjectType | InterfaceType | undefined; fields: Field[] };
+// A type parameter: it stands for any type satisfying its bound, and offers only the bound's
+// fields. At the definition it stands for nothing in particular. In an instance it also holds
+// the concrete type it stands for, so the instance checks exactly as the definition did while
+// codegen lays the value out as its concrete type; `lower` removes it before codegen.
+export type ParamType = { kind: "param"; name: string; bound: ObjectType | InterfaceType | undefined; fields: Field[]; concrete?: Type };
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
@@ -113,6 +114,43 @@ export function typeParameter(name: string, bound: ObjectType | InterfaceType | 
   return t;
 }
 
+// A type parameter as an instance sees it: standing for `concrete`, which has no type
+// parameter in it.
+export function wrapped(name: string, bound: ObjectType | InterfaceType | undefined, concrete: Type): ParamType {
+  const key = `param ${name} ${bound ? keyOf(bound) : ""} as ${keyOf(concrete)}`;
+  let t = wrappers.get(key);
+  if (!t) {
+    t = { kind: "param", name, bound, fields: bound?.fields ?? [], concrete };
+    wrappers.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+const wrappers = new Map<string, ParamType>();
+
+// A type with each instance's type parameter replaced by the concrete type it stands for. A
+// generic class made from one becomes the class made from what it stands for.
+export function lower(t: Type): Type {
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface") return t;
+  if (t.kind === "param") return t.concrete ?? t;
+  let found = lowered.get(t);
+  if (!found) {
+    if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
+    else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
+    lowered.set(t, found);
+  }
+  return found;
+}
+
+const lowered = new WeakMap<ObjectType | UnionType | ClassType, Type>();
+
+// The class a generic class's type arguments make, which only the checker can declare.
+let instanceClass = (c: ClassType, _args: Type[]): ClassType => c;
+export function lowersClasses(f: typeof instanceClass) {
+  instanceClass = f;
+}
+
 // A string that is the same exactly when two types are, for keying instances.
 export function keyOf(t: Type): string {
   return typeof t === "string" ? t : `{${keys.get(t)}}`;
@@ -158,7 +196,8 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // Whether a value of `from` fits where `to` is declared: the same type, or an object or
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
-  if (from === to) return true;
+  // In an instance, a type parameter and the concrete type it stands for are one value.
+  if (from === to || lower(from) === lower(to)) return true;
   if (typeof to !== "string" && to.kind === "union") {
     if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
     return to.members.some((m) => fits(from, m));

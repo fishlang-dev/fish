@@ -261,7 +261,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.self && object ? thisPointer(target, object) : undefined;
     const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-    return invoke(target, pointer, values);
+    const result = invoke(target, pointer, values);
+    // A call through a type parameter returns what its bound's method declares.
+    return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
   }
 
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
@@ -333,7 +335,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "member": {
         const getter = calls.get(e);
-        if (getter) return invoke(getter, thisPointer(getter, e.object), [])!;
+        if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
         // An enum member's value is known, and the enum's name is no value to evaluate.
         if (!types.has(e.object)) return "zeroinitializer";
         const shared = types.get(e.object)!;
@@ -473,11 +475,18 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       emit(`${payload} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
       return payload;
     }
-    const object = types.get(target.object) as ObjectType | ClassType;
+    const object = stored(target.object) as ObjectType | ClassType;
     const result = temp();
     const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
     emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, ${path}`);
     return result;
+  }
+
+  // The type a place is stored as. Read through a type parameter's bound, a field may have a
+  // wider type than the one it is stored with.
+  function stored(e: Expr): Type {
+    if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
+    return field(stored(e.object) as ObjectType | ClassType, e.name)!.type;
   }
 
   // The right side runs only when the left side does not already decide the result.
