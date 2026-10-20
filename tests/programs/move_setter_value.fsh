@@ -1,5 +1,4 @@
-// An assignment through a setter, used as a value, hands over what was assigned, not the
-// property.
+// A setter keeps the value assigned to it, so the assignment can't also hand it on.
 type P = { x: i64 }
 
 class Holder {
@@ -21,4 +20,4 @@ function main() {
   const r: P = { x: 4 }
   print(keep(h.p = r), h.p.x)
 }
-// expect: 4 4
+// error: 'h.p' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone

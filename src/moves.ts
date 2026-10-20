@@ -186,8 +186,12 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         if (e.op !== "=") expr(e.target);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         assign(e.target);
-        // An assignment used as a value hands over what it just stored.
-        if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined && !setters.has(e.target)) use(e.target, consume);
+        // An assignment used as a value hands over what it just stored. A setter keeps what it
+        // was given, with no place to hand it back from.
+        if (consume && !isCopy(types.get(e)!) && setters.has(e.target)) {
+          throw new CompileError(`'${text(e.target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
+        }
+        if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
         return;
       }
       case "conditional": {
