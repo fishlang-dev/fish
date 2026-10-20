@@ -7,13 +7,13 @@ import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { parse } from "./parser.ts";
 
-export function compile(src: string): string {
-  return codegen(check(parse(src)));
+export function compile(src: string, file: string, release = false): string {
+  return codegen(check(parse(src)), { src, file, release });
 }
 
 // Compiles `file` to a native executable at `out`, piping the IR through clang.
 export function build(file: string, out: string, release = false) {
-  const ir = compile(readFileSync(file, "utf8"));
+  const ir = compile(readFileSync(file, "utf8"), file, release);
   const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-o", out, release ? "-O2" : "-O0"], {
     stdin: new TextEncoder().encode(ir),
   });
@@ -35,7 +35,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8")));
+    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release));
     else build(file, values.out ?? basename(file, ".fsh"), values.release);
   } catch (e) {
     if (e instanceof CompileError) console.error(formatError(e, file, readFileSync(file, "utf8")));

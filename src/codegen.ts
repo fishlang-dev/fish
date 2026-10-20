@@ -1,11 +1,44 @@
 import { isPrint, type Checked, type Local, type Type } from "./check.ts";
-import type { Expr, Stmt } from "./parser.ts";
+import { locate } from "./diag.ts";
+import type { BinaryOp, Expr, Span, Stmt } from "./parser.ts";
 
 const LLVM: Record<Type, string> = { i64: "i64" };
 
+// The wrapping instruction, the checked intrinsic and the verb for each panic message.
+const ARITHMETIC: Record<BinaryOp, [string, string, string]> = {
+  "+": ["add", "sadd", "add"],
+  "-": ["sub", "ssub", "subtract"],
+  "*": ["mul", "smul", "multiply"],
+};
+
+// A panic prints its location and reason to stderr and exits with 101, like a Rust panic
+// on the main thread. With nothing to unwind yet, that is all panic=unwind does. stdout is
+// flushed first so earlier output stays ahead of the message even when piped.
+const RUNTIME = [
+  "declare i32 @printf(ptr, ...)",
+  "declare i32 @dprintf(i32, ptr, ...)",
+  "declare i32 @fflush(ptr)",
+  "declare void @exit(i32) noreturn",
+  "declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)",
+  "declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)",
+  "declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)",
+  "",
+  '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
+  "",
+  'define internal void @"fsh.panic"(ptr %message) noreturn cold {',
+  "  call i32 @fflush(ptr null)",
+  "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.panic.format, ptr %message)",
+  "  call void @exit(i32 101)",
+  "  unreachable",
+  "}",
+];
+
+export type Options = { src: string; file: string; release: boolean };
+
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
-export function codegen({ funcs, locals }: Checked): string {
+// Release builds wrap on overflow; debug builds panic.
+export function codegen({ funcs, locals }: Checked, { src, file, release }: Options): string {
   const userFuncs = new Set(funcs.map((f) => f.name));
   const globals: string[] = [];
   const out: string[] = [];
@@ -13,11 +46,13 @@ export function codegen({ funcs, locals }: Checked): string {
   let allocas: string[] = [];
   let body: string[] = [];
   let temps = 0;
+  let labels = 0;
 
   for (const f of funcs) {
     allocas = [];
     body = [];
     temps = 0;
+    labels = 0;
     f.body.forEach(statement);
     out.push(`define void @"fsh.${f.name}"() {`, "entry:", ...allocas, ...body, "  ret void", "}", "");
   }
@@ -25,7 +60,7 @@ export function codegen({ funcs, locals }: Checked): string {
   return [
     ...globals,
     "",
-    "declare i32 @printf(ptr, ...)",
+    ...RUNTIME,
     "",
     ...out,
     "define i32 @main() {",
@@ -41,6 +76,10 @@ export function codegen({ funcs, locals }: Checked): string {
 
   function temp(): string {
     return `%t${temps++}`;
+  }
+
+  function label(): string {
+    return `L${labels++}`;
   }
 
   function slot(local: Local): string {
@@ -82,9 +121,40 @@ export function codegen({ funcs, locals }: Checked): string {
         emit(`${t} = load ${LLVM[local.type]}, ptr ${slot(local)}`);
         return t;
       }
+      case "unary":
+        return arithmetic("-", "0", value(e.operand), e, "negate");
+      case "binary":
+        return arithmetic(e.op, value(e.left), value(e.right), e);
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
+  }
+
+  function arithmetic(op: BinaryOp, a: string, b: string, at: Span, verb = ARITHMETIC[op][2]): string {
+    const [wrapping, checked] = ARITHMETIC[op];
+    const result = temp();
+    if (release) {
+      emit(`${result} = ${wrapping} i64 ${a}, ${b}`);
+      return result;
+    }
+    const pair = temp();
+    const overflow = temp();
+    emit(`${pair} = call { i64, i1 } @llvm.${checked}.with.overflow.i64(i64 ${a}, i64 ${b})`);
+    emit(`${result} = extractvalue { i64, i1 } ${pair}, 0`);
+    emit(`${overflow} = extractvalue { i64, i1 } ${pair}, 1`);
+    panicIf(overflow, `attempt to ${verb} with overflow`, at);
+    return result;
+  }
+
+  function panicIf(condition: string, reason: string, at: Span) {
+    const fail = label();
+    const ok = label();
+    const { line, col } = locate(src, at.start);
+    emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
+    body.push(`${fail}:`);
+    emit(`call void @"fsh.panic"(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
+    emit("unreachable");
+    body.push(`${ok}:`);
   }
 
   // `console.log` and `print` are the same: arguments joined by spaces, then a newline.

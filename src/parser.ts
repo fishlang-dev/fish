@@ -11,6 +11,8 @@ export type Expr = Span & (
   | { kind: "ident"; name: string }
   | { kind: "member"; object: Expr; name: string }
   | { kind: "call"; callee: Expr; args: Expr[] }
+  | { kind: "unary"; op: "-"; operand: Expr }
+  | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
 );
 
 export type Stmt = Span & (
@@ -20,6 +22,13 @@ export type Stmt = Span & (
 
 export type Func = Span & { name: string; body: Stmt[] };
 
+// Binding power of each binary operator, as in TypeScript. All are left-associative.
+const PRECEDENCE = { "+": 5, "-": 5, "*": 6 } as const;
+
+export type BinaryOp = keyof typeof PRECEDENCE;
+
+const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE, text);
+
 // Reserved in strict-mode JavaScript, so never usable as names.
 const RESERVED = new Set([
   "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
@@ -28,7 +37,7 @@ const RESERVED = new Set([
   "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
 ]);
 
-// Recursive descent; expressions will grow into a Pratt loop as operators arrive.
+// Recursive descent, with Pratt parsing for binary operators.
 export function parse(src: string): Func[] {
   const tokens = lex(src);
   let pos = 0;
@@ -109,7 +118,25 @@ export function parse(src: string): Func[] {
     else if (!at("}") && !peek().newlineBefore && peek().kind !== "eof") throw error("expected ';'");
   }
 
-  function expression(): Expr {
+  function expression(minPrecedence = 0): Expr {
+    let left = unary();
+    for (;;) {
+      const t = peek();
+      if (t.kind !== "punct" || !isBinaryOp(t.text) || PRECEDENCE[t.text] <= minPrecedence) return left;
+      next();
+      const right = expression(PRECEDENCE[t.text]);
+      left = { kind: "binary", op: t.text, left, right, start: left.start, end: right.end };
+    }
+  }
+
+  function unary(): Expr {
+    if (!at("-")) return postfix();
+    const op = next();
+    const operand = unary();
+    return { kind: "unary", op: "-", operand, start: op.start, end: operand.end };
+  }
+
+  function postfix(): Expr {
     let e = primary();
     for (;;) {
       if (at(".")) {

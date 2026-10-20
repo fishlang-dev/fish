@@ -107,6 +107,11 @@ export function check(funcs: Func[]): Checked {
       case "call":
         call(e);
         throw new CompileError("this call does not return a value", e.start, e.end);
+      case "unary":
+        return value(e.operand);
+      case "binary":
+        value(e.left);
+        return value(e.right);
     }
   }
 
