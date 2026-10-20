@@ -102,9 +102,25 @@ export function toPattern(e: Expr): Pattern {
   throw new CompileError("invalid destructuring target", e.start, e.end);
 }
 
-// A pattern after `case` in a `match`.
+// A pattern after `case` in a `match`: alternatives separated by `|`.
 export function matchPattern(c: Cursor): Pattern {
+  const first = singlePattern(c);
+  if (!c.at("|")) return first;
+  const patterns = [first];
+  while (c.eat("|")) patterns.push(singlePattern(c));
+  return { kind: "or", patterns, start: first.start, end: c.end() };
+}
+
+// Object and array patterns here hold match patterns, so `{ status: 200 }` tests a field.
+function singlePattern(c: Cursor): Pattern {
   const t = c.peek();
+  if (c.eat("(")) {
+    const inner = matchPattern(c);
+    c.expect(")");
+    return inner;
+  }
+  if (c.at("{")) return matchObject(c);
+  if (c.at("[")) return matchArray(c);
   const numeric = (kind: string) => ["int", "float", "bigint"].includes(kind);
   if (t.kind === "string" || numeric(t.kind) || c.at("true") || c.at("false") || c.at("null")) {
     return { kind: "literal", value: primary(c), start: t.start, end: t.end };
@@ -128,4 +144,44 @@ export function matchPattern(c: Cursor): Pattern {
   const args = c.eat("(") ? c.list(() => matchPattern(c), ")") : undefined;
   if (!args && !dotted) return { kind: "ident", name, start: t.start, end: c.end() };
   return { kind: "variant", name, args, start: t.start, end: c.end() };
+}
+
+function matchObject(c: Cursor): Pattern {
+  const start = c.expect("{").start;
+  const props: PatternProp[] = [];
+  let rest: Pattern | undefined;
+  while (!c.eat("}")) {
+    if (c.eat("...")) {
+      rest = singlePattern(c);
+    } else {
+      const keyStart = c.peek();
+      const key = propertyName(c);
+      let value: Pattern;
+      if (c.eat(":")) {
+        value = matchPattern(c);
+      } else {
+        if (typeof key !== "string" || keyStart.kind !== "ident" || RESERVED.has(key)) throw c.error("expected ':'");
+        value = { kind: "ident", name: key, start: keyStart.start, end: keyStart.end };
+      }
+      props.push({ key, value, start: keyStart.start, end: c.end() });
+    }
+    if (!c.at("}")) c.expect(",");
+  }
+  return { kind: "object", props, rest, start, end: c.end() };
+}
+
+function matchArray(c: Cursor): Pattern {
+  const start = c.expect("[").start;
+  const elements: (Pattern | undefined)[] = [];
+  let rest: Pattern | undefined;
+  while (!c.eat("]")) {
+    if (c.eat(",")) {
+      elements.push(undefined);
+      continue;
+    }
+    if (c.eat("...")) rest = singlePattern(c);
+    else elements.push(matchPattern(c));
+    if (!c.at("]")) c.expect(",");
+  }
+  return { kind: "array", elements, rest, start, end: c.end() };
 }

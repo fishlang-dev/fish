@@ -343,6 +343,13 @@ const EXPRESSIONS: [string, string][] = [
   ["match (a, b) { case _ => 1 }", "match ((a, b)) { case _ => 1 }"],
   ["match (x) {}", "match (x) {  }"],
   ["f(match (x) { case _ => 1 }, 2)", "f(match (x) { case _ => 1 }, 2)"],
+  ["match (r) { case { status: 200, body } | [_, ...rest] => 1 }", "match (r) { case ({ status: 200, body: body } | [_, ...rest]) => 1 }"],
+  ["match (x) { case 0 | 1 => 'small', case Some({ id, name: n }) => n, case [first, ...rest] => first, case ApiError.NotFound => 404, case _ => 0, }",
+    "match (x) { case (0 | 1) => 'small', case Some({ id: id, name: n }) => n, case [first, ...rest] => first, case ApiError.NotFound => 404, case _ => 0 }"],
+  ["match (x) { case (A | B) | C => 1 }", "match (x) { case ((A | B) | C) => 1 }"],
+  ["match (x) { case [, b, ..._] => b }", "match (x) { case [, b, ..._] => b }"],
+  ["match (x) { case { a: { b: [1, 'two'] } } => 1 }", "match (x) { case { a: { b: [1, 'two'] } } => 1 }"],
+  ["match (x) { case Some(1 | 2) => 1 }", "match (x) { case Some((1 | 2)) => 1 }"],
   ["a < < b", "error"],
   ["a + b * c", "(a + (b * c))"],
   ["a - b - c", "((a - b) - c)"],
@@ -448,6 +455,8 @@ function showPattern(p: Pattern): string {
       return showExpr(p.value);
     case "variant":
       return `${p.name}${p.args ? `(${p.args.map(showPattern).join(", ")})` : ""}`;
+    case "or":
+      return `(${p.patterns.map(showPattern).join(" | ")})`;
   }
 }
 

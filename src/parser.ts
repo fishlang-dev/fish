@@ -207,6 +207,8 @@ export type Pattern = Span & (
   // parentheses. A bare name such as `None` stays an `ident`: binding or variant is the
   // checker's call.
   | { kind: "variant"; name: string; args: Pattern[] | undefined }
+  // `P | Q`: either matches.
+  | { kind: "or"; patterns: Pattern[] }
 );
 
 // `body` reads like an arrow function's: an expression, or a block's statements.
