@@ -75,7 +75,7 @@ function showName(name: PropertyName): string {
 
 function showParams(params: Param[]): string {
   return params.map((p) => {
-    const name = `${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
+    const name = `${p.modifiers.map((m) => `${m} `).join("")}${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
     const fallback = p.default ? ` = ${showExpr(p.default)}` : "";
     return `${p.type ? `${name}: ${show(p.type)}` : name}${fallback}`;
   }).join(", ");
@@ -250,7 +250,7 @@ function showExpr(e: Expr): string {
 function parseExpr(expr: string): Expr {
   src = `function f() {\n  let x = ${expr}\n}`;
   const [f] = parse(src);
-  const [s] = f?.kind === "function" ? f.body : [];
+  const [s] = f?.kind === "function" ? f.body ?? [] : [];
   if (s?.kind !== "let") throw new Error("expected a let statement");
   return s.declarations[0]!.init!;
 }
@@ -391,7 +391,7 @@ function showPattern(p: Pattern): string {
 function parseStatement(stmt: string): Stmt {
   src = `function f() {\n  ${stmt}\n}`;
   const [f] = parse(src);
-  const [s] = f?.kind === "function" ? f.body : [];
+  const [s] = f?.kind === "function" ? f.body ?? [] : [];
   if (!s) throw new Error("expected a statement");
   return s;
 }
@@ -443,6 +443,8 @@ function showStmt(s: Stmt): string {
     }
     case "doWhile":
       return `do { ${s.body.length} statements } while (${showExpr(s.cond)})`;
+    case "function":
+      return `function ${s.name}(${showParams(s.params)})${s.body ? ` { ${s.body.length} }` : ";"}`;
     case "switch": {
       const cases = s.cases.map((k) => `${k.test ? `case ${showExpr(k.test)}` : "default"}: ${k.body.map(showStmt).join("; ")}`);
       return `switch (${showExpr(s.discriminant)}) { ${cases.join(" | ")} }`;
@@ -467,7 +469,7 @@ function showStmt(s: Stmt): string {
 function parseStatements(stmts: string): Stmt[] {
   src = `function f() {\n  ${stmts}\n}`;
   const [f] = parse(src);
-  return f?.kind === "function" ? f.body : [];
+  return f?.kind === "function" ? f.body ?? [] : [];
 }
 
 const STATEMENTS: [string, string][] = [
@@ -506,6 +508,11 @@ for (const [stmt, shape] of STATEMENTS) {
     expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape);
   });
 }
+
+test("function overloads", () => {
+  const stmts = parseStatements("function f(x: string): void\n  function f(x: i64): void;\n  function f(x) {}");
+  expect(stmts.map(showStmt).join("; ")).toBe("function f(x: string);; function f(x: i64);; function f(x) { 0 }");
+});
 
 test("do x(); while (y) z()", () => {
   expect(parseStatements("do x(); while (y) z()").map(showStmt).join("; ")).toBe("do { 1 statements } while (y); z()");
@@ -548,6 +555,20 @@ const CLASSES: [string, string][] = [
   ["class A { *gen() {} 'quoted'() {} [key]() {} 42 = 1 }", "class A { method *gen() { 0 }; method quoted() { 0 }; method [key]() { 0 }; field 42 = 1 }"],
   ["class A { get = 1; set() {} constructor = 2 }", "class A { field get = 1; method set() { 0 }; field constructor = 2 }"],
   ["class A { ;; }", "class A {  }"],
+  ["class A { static x = 1; private readonly y: T; protected abstract m(): void; public static async *g() {} }",
+    "class A { static field x = 1; private readonly field y: T; protected abstract method m();; public static async method *g() { 0 } }"],
+  ["class A { static() {} get: i64; readonly?: T; async = 1; declare: boolean }",
+    "class A { method static() { 0 }; field get: i64; field readonly?: T; field async = 1; field declare: boolean }"],
+  ["class A { declare x: i64; override m() {} accessor y = 1 }", "class A { declare field x: i64; override method m() { 0 }; accessor field y = 1 }"],
+  ["class A { static { init() } static x }", "class A { static block { 1 }; static field x }"],
+  ["class A { [key: string]: unknown; static readonly [i: number]: T }",
+    "class A { index [key: string]: unknown; static readonly index [i: number]: T }"],
+  ["class A { x?: i64; y!: i64; m?(): void }", "class A { field x?: i64; field y!: i64; method m?(); }"],
+  ["class A { constructor(private readonly x: i64, public y?: T, z) {} }",
+    "class A { constructor(private readonly x: i64, public y?: T, z) { 0 } }"],
+  ["class A { m(): void; m(x?: i64): void {} abstract get v(): i64 }",
+    "class A { method m();; method m(x?: i64) { 0 }; abstract get v(); }"],
+  ["class A { declare\n  x: i64 }", "class A { field declare; field x: i64 }"],
 ];
 
 for (const [stmt, shape] of CLASSES) {

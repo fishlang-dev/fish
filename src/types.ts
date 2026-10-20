@@ -1,6 +1,6 @@
 import { expression, primary, templateParts, unary } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
-import type { Cursor, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { Cursor, Modifier, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { bindingPattern } from "./patterns.ts";
 
 // The type grammar, and the parameter lists that functions and function types share.
@@ -22,21 +22,31 @@ function typeParameter(c: Cursor): TypeParam {
   return { name, constraint, default: fallback, modifiers, start, end: c.end() };
 }
 
-export function parameters(c: Cursor): Param[] {
-  c.expect("(");
-  return c.list(() => parameter(c), ")");
+// Parameters in parentheses, or after an index signature's `[`, up to `close`.
+export function parameters(c: Cursor, close = ")"): Param[] {
+  if (close === ")") c.expect("(");
+  return c.list(() => parameter(c), close);
 }
+
+// A parameter property's modifiers, each followed on the same line by what it modifies.
+const PARAMETER_MODIFIERS = ["public", "private", "protected", "readonly", "override"];
 
 function parameter(c: Cursor): Param {
   const start = c.peek().start;
+  const modifiers: Modifier[] = [];
+  while (PARAMETER_MODIFIERS.some((m) => c.at(m)) && !c.peek(1).newlineBefore && startsBinding(c.peek(1))) {
+    modifiers.push(c.next().text as Modifier);
+  }
   const rest = c.eat("...");
   const t = c.peek();
   const pattern: Pattern = c.eat("this") ? { kind: "ident", name: "this", start: t.start, end: t.end } : bindingPattern(c);
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { pattern, type, optional, rest, default: fallback, start, end: c.end() };
+  return { pattern, type, optional, rest, default: fallback, modifiers, decorators: [], start, end: c.end() };
 }
+
+const startsBinding = (t: Token) => t.kind === "ident" || isToken(t, "{") || isToken(t, "[");
 
 // `: Type` after a declaration or parameter list.
 export function annotation(c: Cursor): TypeNode {

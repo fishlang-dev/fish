@@ -157,7 +157,11 @@ export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } &
 );
 
 // `this` is an identifier pattern named "this".
-export type Param = Span & { pattern: Pattern; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined };
+// `modifiers` make a constructor parameter a parameter property, as in `private readonly x`.
+export type Param = Span & {
+  pattern: Pattern; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined;
+  modifiers: Modifier[]; decorators: Expr[];
+};
 
 export type Pattern = Span & (
   | { kind: "ident"; name: string }
@@ -186,7 +190,8 @@ export type Interface = Span & { kind: "interface"; name: string; typeParams: Ty
 
 export type Func = Span & {
   kind: "function"; name: string; async: boolean; generator: boolean;
-  typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[];
+  // Undefined for an overload signature or a `declare function`.
+  typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined;
 };
 
 export type BinaryOp =
@@ -336,7 +341,10 @@ function func(c: Cursor): Func {
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);
-  const body = block(c);
+  // An overload signature or a `declare function` ends where its body would start.
+  let body: Stmt[] | undefined;
+  if (c.at("{")) body = block(c);
+  else endStatement(c);
   return { kind: "function", name, async, generator, typeParams, params, returnType, body, start, end: c.end() };
 }
 

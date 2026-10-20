@@ -43,6 +43,7 @@ const SIGNATURES: [string, string, string][] = [
   ["<T>(x: i64)", "generic functions", "T"],
   ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
+  ["(private x: i64)", "parameter properties", "private x: i64"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {
@@ -165,3 +166,10 @@ for (const [decl, what] of [["async function f() {}", "async functions"], ["func
     }));
   });
 }
+
+test("a function without a body", () => {
+  const src = "function f(): void\nfunction main() {}";
+  expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    message: "functions without a body are not supported yet", start: 0, end: "function f(): void".length,
+  }));
+});

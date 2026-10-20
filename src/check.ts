@@ -1,5 +1,8 @@
 import { CompileError } from "./diag.ts";
-import type { BinaryOp, Expr, Func, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
+
+// A function with a body; overload signatures and `declare function` are rejected first.
+type Func = Declared & { body: Stmt[] };
 
 export type Type = "i64" | "boolean" | "void";
 
@@ -36,6 +39,7 @@ export function check(program: Stmt[]): Checked {
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    if (!hasBody(s)) throw unsupported("functions without a body", s);
     funcs.push(s);
   }
   const byName = new Map<string, Func>();
@@ -316,6 +320,7 @@ export function check(program: Stmt[]): Checked {
     if (p.rest) throw unsupported("rest parameters", p);
     if (p.optional) throw unsupported("optional parameters", p);
     const name = paramName(p);
+    if (p.modifiers.length > 0) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
@@ -392,6 +397,8 @@ const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "functio
   mapped: "mapped types",
   template: "template literal types",
 };
+
+const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
 function unsupported(what: string, at: Span): CompileError {
   return new CompileError(`${what} are not supported yet`, at.start, at.end);

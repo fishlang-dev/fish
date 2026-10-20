@@ -80,7 +80,7 @@ function arrowHead(c: Cursor) {
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
     const name = c.ident();
     const pattern: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
-    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, start: name.start, end: name.end }];
+    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], start: name.start, end: name.end }];
   } else {
     typeParams = typeParameters(c);
     params = parameters(c);
