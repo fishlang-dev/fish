@@ -36,7 +36,7 @@ export function check(program: Stmt[]): Checked {
     const declaration = unsupportedDeclaration(s);
     if (declaration) throw declaration;
     if (s.kind === "empty") continue;
-    // Top-level code with side effects belongs in main(), as migration rule G7 says.
+    // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind === "comptime") throw unsupported("comptime blocks", s);
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     if (s.macro) throw unsupported("macros", s);
@@ -192,7 +192,7 @@ export function check(program: Stmt[]): Checked {
     // Checks a call's arguments; returns the user function it calls, or undefined for print.
     function call(e: Call): Func | undefined {
       const { callee } = e;
-      if (e.optional) throw unsupported("optional calls", e);
+      if (e.optional || (callee.kind === "member" && callee.optional)) throw unsupported("optional calls", e);
       if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
       const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
       if (target) {
@@ -261,7 +261,7 @@ export function check(program: Stmt[]): Checked {
           return type;
         }
         case "binary":
-          // Migration rule A3 rewrites loose equality to strict, so native code never uses it.
+          // The migration lint rewrites loose equality to strict, so native code never uses it.
           if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
           if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
           return binaryType(e.op, value(e.left), value(e.right), e);

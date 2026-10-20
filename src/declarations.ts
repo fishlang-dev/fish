@@ -203,6 +203,8 @@ function endMember(c: Cursor) {
 function importDeclaration(c: Cursor): Stmt {
   const start = c.expect("import").start;
   const typeOnly = atTypeModifier(c) && c.eat("type");
+  // `import defer * as ns` loads the module on first use; `import defer from` is a default.
+  const defer = c.at("defer") && isToken(c.peek(1), "*") && c.eat("defer");
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=")) {
     const name = c.ident().text;
     c.expect("=");
@@ -227,7 +229,7 @@ function importDeclaration(c: Cursor): Stmt {
   if (c.peek().kind !== "string") {
     if ((c.peek().kind === "ident" && !c.at("from")) || (c.at("from") && isToken(c.peek(1), "from"))) {
       fallback = c.ident().text;
-      c.eat(",");
+      if (!c.at("from")) c.expect(",");
     }
     if (c.eat("*")) {
       c.expect("as");
@@ -240,7 +242,7 @@ function importDeclaration(c: Cursor): Stmt {
   const module = moduleName(c);
   const attributes = c.eat("with") || (c.at("assert") && !c.peek().newlineBefore && c.eat("assert")) ? expression(c) : undefined;
   endStatement(c);
-  return { kind: "import", typeOnly, default: fallback, namespace, named, module, attributes, start, end: c.end() };
+  return { kind: "import", typeOnly, defer, default: fallback, namespace, named, module, attributes, start, end: c.end() };
 }
 
 // `import type from "m"` imports a default named `type`; `type` modifies only when an import

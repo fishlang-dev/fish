@@ -82,6 +82,7 @@ const EXPRESSIONS: [string, string][] = [
   ["import('m')", "dynamic imports"],
   ["a!", "non-null assertions"],
   ["f?.()", "optional calls"],
+  ["console?.log(1)", "optional calls"],
   ["f<i64>()", "type arguments on calls"],
   ["i++", "increment and decrement expressions"],
   ["a ? 1 : 2", "conditional expressions"],

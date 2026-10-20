@@ -526,7 +526,7 @@ function showStmt(s: Stmt): string {
         s.named && `{ ${s.named.map(showSpecifier).join(", ")} }`,
       ].filter(Boolean);
       const from = clauses.length ? `${clauses.join(", ")} from ` : "";
-      return `import ${s.typeOnly ? "type " : ""}${from}"${s.module}"${s.attributes ? ` with ${showExpr(s.attributes)}` : ""}`;
+      return `import ${s.typeOnly ? "type " : ""}${s.defer ? "defer " : ""}${from}"${s.module}"${s.attributes ? ` with ${showExpr(s.attributes)}` : ""}`;
     }
     case "export":
       return `export ${showStmt(s.body)}`;
@@ -723,6 +723,9 @@ const MODULES: [string, string][] = [
   ["import('m')", "import('m')"],
   ["import.meta.url", "import.meta.url"],
   ["import {} from 'm'", 'import {  } from "m"'],
+  ["import defer * as ns from 'm'", 'import defer * as ns from "m"'],
+  ["import defer from 'm'", 'import defer from "m"'],
+  ["import a { b } from 'm'", "error"],
   ["export const x = 1", "export const x = 1"],
   ["export function f() {}", "export function f() { 0 }"],
   ["export default function () {}", "export default function () { 0 }"],
@@ -754,7 +757,8 @@ const MODULES: [string, string][] = [
 ];
 
 for (const [stmt, shape] of MODULES) {
-  test(stmt, () => expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape));
+  if (shape === "error") test(stmt, () => expect(() => parseStatements(stmt)).toThrow("expected ','"));
+  else test(stmt, () => expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape));
 }
 
 // The design doc's bootstrap path: the compiler's own TypeScript is already valid Fish.

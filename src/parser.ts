@@ -122,7 +122,7 @@ export type Stmt = Span & (
   | { kind: "declare"; body: Stmt }
   | { kind: "comptime"; body: Stmt[] }
   // `named` is undefined without braces; `attributes` is the object after `with`.
-  | { kind: "import"; typeOnly: boolean; default: string | undefined; namespace: string | undefined;
+  | { kind: "import"; typeOnly: boolean; defer: boolean; default: string | undefined; namespace: string | undefined;
       named: Specifier[] | undefined; module: string; attributes: Expr | undefined }
   // `import x = require("m")` sets `require`; `import x = A.B` sets `entity`.
   | { kind: "importEquals"; typeOnly: boolean; name: string; require: string | undefined; entity: string | undefined }
