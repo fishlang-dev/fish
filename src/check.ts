@@ -164,8 +164,24 @@ export function check(program: Stmt[]): Checked {
           within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           condition(s.cond);
           return;
-        case "switch":
-          throw unsupported("'switch' statements", s);
+        case "switch": {
+          const type = value(s.discriminant);
+          const defaults = s.cases.filter((c) => !c.test);
+          if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
+          // The case bodies share one scope, as in JavaScript.
+          scopes.push(new Map());
+          within({ stmt: s, kind: "switch" }, () => {
+            for (const c of s.cases) {
+              const test = c.test && value(c.test);
+              if (test && test !== type) {
+                throw new CompileError(`type '${test}' is not comparable to type '${type}'`, c.test!.start, c.test!.end);
+              }
+              c.body.forEach(statement);
+            }
+          });
+          scopes.pop();
+          return;
+        }
         case "labeled": {
           if (targets.some((t) => t.label === s.label)) {
             throw new CompileError(`duplicate label '${s.label}'`, s.start, s.start + s.label.length);
@@ -387,6 +403,9 @@ export function check(program: Stmt[]): Checked {
         case "doWhile":
           // A `continue` skips the rest of the body to test the condition.
           return !broken.has(s) && (isTrue(s.cond) || (alwaysReturns(s.body) && !continued.has(s)));
+        case "switch":
+          // Every case falls through to the last body, so it decides, provided some case runs.
+          return s.cases.some((c) => !c.test) && !broken.has(s) && alwaysReturns(s.cases.at(-1)!.body);
         default:
           return false;
       }

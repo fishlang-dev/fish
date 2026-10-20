@@ -132,7 +132,6 @@ const STATEMENTS: [string, string][] = [
   ["for (const k in o) {}", "'for...in' loops"],
   ["for (const x of xs) {}", "'for...of' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
-  ["switch (1) {}", "'switch' statements"],
   ["throw 1", "'throw' statements"],
   ["try {} finally {}", "'try' statements"],
   ["class A {}", "classes"],

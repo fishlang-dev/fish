@@ -200,6 +200,30 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         startBlock(end);
         return;
       }
+      case "switch": {
+        const subject = value(s.discriminant);
+        const type = LLVM[types.get(s.discriminant)!];
+        const bodies = s.cases.map(() => label());
+        const end = label();
+        exits.set(s, { exit: end });
+        // The tests run in order; when none matches, control goes to `default`, wherever it sits.
+        s.cases.forEach((c, i) => {
+          if (!c.test) return;
+          const [equal, next] = [temp(), label()];
+          emit(`${equal} = icmp eq ${type} ${subject}, ${value(c.test)}`);
+          emit(`br i1 ${equal}, label %${bodies[i]}, label %${next}`);
+          startBlock(next);
+        });
+        const fallback = s.cases.findIndex((c) => !c.test);
+        emit(`br label %${fallback < 0 ? end : bodies[fallback]}`);
+        s.cases.forEach((c, i) => {
+          startBlock(bodies[i]!);
+          c.body.forEach(statement);
+          emit(`br label %${bodies[i + 1] ?? end}`);
+        });
+        startBlock(end);
+        return;
+      }
       case "labeled": {
         const end = label();
         exits.set(s, { exit: end });
