@@ -30,6 +30,7 @@ export type Context = {
   setters: Map<Expr, Instance>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
+  construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
   classOf(t: ClassType): ClassInfo;
@@ -47,7 +48,7 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
@@ -230,11 +231,13 @@ export function expressions(ctx: Context) {
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);
         return self.type;
       case "new": {
-        const c = e.callee.kind === "ident" ? classes.get(e.callee.name) : undefined;
-        if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
-        if (e.typeArgs.length > 0) throw unsupported("type arguments on 'new'", e);
         const list = e.args ?? [];
-        args(list, list.map(value), instanceOf(c.constructor), e);
+        const argTypes = list.map(value);
+        const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
+        if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+        const constructor = instanceOf(c.constructor);
+        args(list, argTypes, constructor, e);
+        calls.set(e, constructor);
         return c.type;
       }
       case "call": {

@@ -1,6 +1,12 @@
-class Animal {}
+interface Measured {
+  size(): i64
+}
 
-function walk<A extends Animal>(a: A) {}
+class Sized<T extends Measured> {
+  constructor(public item: T) {}
+}
 
-function main() {}
-// error: a type parameter's bound must be an interface or an object type, not 'Animal'
+function main() {
+  new Sized(1)
+}
+// error: type 'i64' does not satisfy the constraint 'Measured': method 'size' is missing in type 'i64' but required in type 'Measured'

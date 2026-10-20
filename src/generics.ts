@@ -38,6 +38,11 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     bindings.set(node.name, arg);
     return;
   }
+  // `Box<T>` against `Box<i64>` matches the type arguments.
+  if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
+    node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
+    return;
+  }
   if (node.kind !== "object" || typeof arg === "string") return;
   for (const m of node.members) {
     if (m.kind !== "property" || typeof m.name !== "string" || !m.type) continue;
@@ -88,10 +93,11 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (!generic(f)) return instanceOf(f);
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), bound));
-    return instanceOf(f, scope);
+    return instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
   }
 
-  function instanceOf(f: Body, bindings = new Map<string, Type>()): Instance {
+  // A member of a generic class's instance runs with the class's type arguments in scope.
+  function instanceOf(f: Body, bindings = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
     let byKey = instances.get(f);
     if (!byKey) instances.set(f, byKey = new Map());
@@ -137,7 +143,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       }
     }
     withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
-    const ordered = new Map(params.map((p) => [p.name, bindings.get(p.name)!]));
+    const ordered = new Map([...(f.scope ?? []), ...params.map((p): [string, Type] => [p.name, bindings.get(p.name)!])]);
     for (const [i, bound] of implicitOf(f)) ordered.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound));
     const instance = instanceOf(f, ordered);
     if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
@@ -168,7 +174,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     found = new Map();
     implicits.set(f, found);
     if (f.self?.constructor || f.accessor) return found;
-    const scope = explicitPlaceholders(f);
+    const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f)]);
     withScope(scope, () => f.params.forEach((p, i) => {
       const type = p.type && resolveType(p.type);
       if (type && typeof type !== "string" && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) found!.set(i, type);

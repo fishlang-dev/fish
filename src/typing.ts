@@ -12,7 +12,8 @@ export type ObjectType = { kind: "object"; fields: Field[] };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
-export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType };
+// An instance of a generic class also records the class it came from and its type arguments.
+export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] } };
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
@@ -32,8 +33,8 @@ const keys = new Map<Exclude<Type, string>, string>();
 let declared = 0;
 
 // A class's key is unique to its declaration, since two programs may reuse a class name.
-export function classType(name: string): ClassType {
-  const t: ClassType = { kind: "class", name, fields: [] };
+export function classType(name: string, generic?: ClassType["generic"]): ClassType {
+  const t: ClassType = { kind: "class", name, fields: [], generic };
   keys.set(t, `class ${declared++}`);
   return t;
 }

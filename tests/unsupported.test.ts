@@ -4,7 +4,7 @@ import { parse } from "../src/parser.ts";
 
 // Each type form that parses but has no meaning yet, and the rejection it gets.
 const TYPES: [string, string][] = [
-  ["Array<i64>", "generic types"],
+  ["Array<i64>", "array types"],
   ["'a'", "literal types"],
   ["-1", "literal types"],
   ["i64[]", "array types"],
@@ -60,7 +60,6 @@ for (const [type, what, part] of MEMBERS) {
 // Class forms that parse but have no meaning yet: the rejected part is the third column.
 const CLASSES: [string, string, string][] = [
   ["abstract class A {}", "abstract classes", "abstract class A {}"],
-  ["class A<T> {}", "generic classes", "T"],
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A { static n = 1 }", "static fields", "static n = 1"],
   ["class A { readonly n = 1 }", "'readonly' modifiers", "readonly n = 1"],

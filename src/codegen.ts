@@ -21,6 +21,10 @@ const COMPARISON: Partial<Record<BinaryOp, string>> = {
 };
 
 
+// An instance's name in the IR. A generic class's instance is named by its type arguments,
+// which may hold quotes, so those are escaped as LLVM spells them.
+const symbol = (i: Instance) => `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`;
+
 export type Options = { src: string; file: string; release: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
@@ -69,7 +73,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
-    out.push(`define ${llvm(type)} @"fsh.${instance.symbol}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
+    out.push(`define ${llvm(type)} ${symbol(instance)}(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
   }
 
   return [
@@ -261,7 +265,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function invoke(target: Instance, pointer: string | undefined, args: string[]): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    const call = `call ${llvm(type)} @"fsh.${target.symbol}"(${values.join(", ")})`;
+    const call = `call ${llvm(type)} ${symbol(target)}(${values.join(", ")})`;
     if (type === "void") {
       emit(call);
       return undefined;
@@ -369,7 +373,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const instance = temp();
         allocas.push(`  ${instance} = alloca ${llvm(type)}`);
         const values = (e.args ?? []).map((a) => `, ${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-        emit(`call void @"fsh.${type.name}.constructor"(ptr ${instance}${values.join("")})`);
+        emit(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`);
         const result = temp();
         emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
         return result;

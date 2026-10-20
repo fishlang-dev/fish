@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
 import type { Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { interfaceType, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
+import { placeholders } from "./generics.ts";
+import { interfaceType, keyOf, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -8,12 +9,8 @@ import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 // Aliases, classes and interfaces share one namespace of type names.
 export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...others: Map<string, unknown>[]) {
   typeName(s.name, s, aliases, ...others);
-  if (s.typeParams.length > 0) {
-    throw unsupported("generic type aliases", { start: s.typeParams[0]!.start, end: s.typeParams.at(-1)!.end });
-  }
   aliases.set(s.name, s);
 }
-
 export function paramName(p: Param): string {
   if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
   return p.pattern.name;
@@ -32,14 +29,22 @@ export function storable(type: Type, at: Span): Type {
   return type;
 }
 
-// Resolves every alias and interface up front, so an unused one is still checked.
-export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, ClassType>, interfaces: Map<string, Interface>) {
-  const resolved = new Map<TypeAlias, Type>();
-  const resolving = new Set<TypeAlias>();
+// The class a name and type arguments refer to; a generic one is instantiated on first use.
+type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefined;
+
+// Resolves every alias and interface up front, so an unused one is still checked. A generic
+// alias is checked with placeholders for its type parameters, and resolved again per set of
+// type arguments.
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>) {
+  const resolved = new Map<string, Type>();
+  const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   let scope = new Map<string, Type>();
-  aliases.forEach(aliasType);
+  aliases.forEach((a) => {
+    const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
+    aliasType(a, [...scope.values()], a);
+  });
   interfaces.forEach(interfaceOf);
   return { resolveType, paramType, withScope };
 
@@ -75,14 +80,19 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (t.args.length > 0) throw unsupported("generic types", t);
-    if (t.name === "i64" || t.name === "boolean" || t.name === "void") return t.name;
-    if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
+    if (t.name === "i64" || t.name === "boolean" || t.name === "void" || t.name === "number") {
+      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
+      return t.name;
+    }
+    if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
+    const args = t.args.map(resolveType);
     const alias = aliases.get(t.name);
-    if (alias) return aliasType(alias);
-    const named = classes.get(t.name);
+    if (alias) return aliasType(alias, args, t);
+    const named = classNamed(t.name, args, t);
     if (named) return named;
     const trait = interfaces.get(t.name);
+    if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
@@ -124,14 +134,18 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
   }
 
   // An object type holds its fields inline, so one that contains itself has no finite size.
-  function aliasType(a: TypeAlias): Type {
-    const done = resolved.get(a);
+  function aliasType(a: TypeAlias, args: Type[], at: Span): Type {
+    if (args.length !== a.typeParams.length) {
+      throw new CompileError(`type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+    }
+    const key = `${a.name}<${args.map(keyOf).join(",")}>`;
+    const done = resolved.get(key);
     if (done) return done;
-    if (resolving.has(a)) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
-    resolving.add(a);
-    const type = resolveType(a.type);
-    resolving.delete(a);
-    resolved.set(a, type);
+    if (resolving.has(key) || resolving.size > 64) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
+    resolving.add(key);
+    const type = withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type));
+    resolving.delete(key);
+    resolved.set(key, type);
     return type;
   }
 

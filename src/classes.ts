@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { classType, type Access, type ClassType } from "./typing.ts";
+import { classType, type Access, type ClassType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
@@ -15,6 +15,8 @@ export type Body = Span & {
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.
   accessor?: boolean;
+  // For a member of a generic class's instance: what the class's type parameters stand for.
+  scope?: Map<string, Type>;
   self?: { type: ClassType; constructor: boolean; mutable: boolean };
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
@@ -45,13 +47,17 @@ export type ClassInfo = {
   // The initializers and parameter properties a derived constructor runs after `super(...)`.
   prelude: Stmt[];
   node: ClassNode;
+  // For an instance of a generic class: what its type parameters stand for.
+  scope: Map<string, Type>;
 };
 
-// Collects a class declaration's fields and builds the constructor it compiles to.
-export function declareClass(node: ClassNode & { name: string }): ClassInfo {
+// Collects a class declaration's fields and builds the constructor it compiles to. A generic
+// class is declared once per set of type arguments, under a name like `Box<i64>`, with
+// `scope` saying what its type parameters stand for.
+export function declareClass(node: ClassNode & { name: string }, name = node.name, scope = new Map<string, Type>()): ClassInfo {
   if (node.abstract) throw unsupported("abstract classes", node);
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
-  if (node.typeParams.length > 0) throw unsupported("generic classes", span(node.typeParams));
+  if (node.typeParams.length > 0 && node.extends) throw unsupported("generic classes that use 'extends'", node.extends);
   if (node.extends && node.extends.kind !== "ident") {
     throw unsupported(node.extends.kind === "instantiation" ? "generic base classes" : "base class expressions", node.extends);
   }
@@ -61,7 +67,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
   const ctor = constructors[0];
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
-  const type = classType(node.name);
+  const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
   const methods = new Map<string, Body>();
   const statics = new Map<string, Body>();
   const getters = new Map<string, Body>();
@@ -106,7 +112,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     ...initializers,
   ];
   const constructor: Body = {
-    name: `${node.name}.constructor`,
+    name: `${name}.constructor`,
+    scope,
     params: ctor?.params ?? [],
     body: [...prelude, ...(ctor?.body ?? [])],
     returnType: undefined,
@@ -117,7 +124,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
   };
   const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
-  return { type, fields, constructor, required, initializers: new Set(initializers), methods, statics, getters, setters, baseName, prelude, node };
+  return { type, fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node };
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
@@ -130,7 +137,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
     if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
     table.set(m.name, {
-      name: `${node.name}.${m.kind} ${m.name}`,
+      name: `${name}.${m.kind} ${m.name}`,
+      scope,
       params: m.params,
       body: m.body,
       returnType: m.returnType,
@@ -145,6 +153,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
+    if (isStatic && node.typeParams.length > 0) throw unsupported("static methods in generic classes", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
@@ -159,7 +168,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
     table.set(m.name, {
       // A static method has its own symbol, since an instance method may share its name.
-      name: `${node.name}.${isStatic ? "static " : ""}${m.name}`,
+      name: `${name}.${isStatic ? "static " : ""}${m.name}`,
+      scope,
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,
