@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
-import { atDeclarationKeyword, classNode, decoratorList } from "./declarations.ts";
+import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
@@ -119,6 +119,16 @@ export type Stmt = Span & (
       named: Specifier[] | undefined; module: string; attributes: Expr | undefined }
   // `import x = require("m")` sets `require`; `import x = A.B` sets `entity`.
   | { kind: "importEquals"; typeOnly: boolean; name: string; require: string | undefined; entity: string | undefined }
+  // `export` before a declaration.
+  | { kind: "export"; body: Stmt }
+  // Exactly one is set: a function, class or interface declaration, or an expression. They
+  // are kept apart because a function or class could otherwise be either.
+  | { kind: "exportDefault"; declaration: Stmt | undefined; value: Expr | undefined }
+  | { kind: "exportNamed"; typeOnly: boolean; specifiers: Specifier[]; module: string | undefined }
+  | { kind: "exportAll"; typeOnly: boolean; alias: string | undefined; module: string }
+  // `export = value`
+  | { kind: "exportAssign"; value: Expr }
+  | { kind: "exportAsNamespace"; name: string }
 ) | TypeAlias | Interface | Func | (ClassNode & { kind: "class" });
 
 export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
@@ -347,12 +357,13 @@ export function parse(src: string): Stmt[] {
   return program;
 }
 
-function func(c: Cursor): Func {
+// Only `export default function` may leave out the name, so `name` is "" there.
+export function func(c: Cursor, anonymous = false): Func {
   const start = c.peek().start;
   const async = c.eat("async");
   c.expect("function");
   const generator = c.eat("*");
-  const name = c.ident().text;
+  const name = anonymous && (c.at("(") || c.at("<")) ? "" : c.ident().text;
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);
@@ -386,10 +397,8 @@ export function statement(c: Cursor): Stmt {
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
   const decorators = decoratorList(c);
-  if (c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore)) {
-    const abstract = c.eat("abstract");
-    return { kind: "class", ...classNode(c, start, abstract, decorators) };
-  }
+  if (atClass(c)) return classDeclaration(c, start, decorators);
+  if (c.at("export")) return exportDeclaration(c, start, decorators);
   if (decorators.length > 0) throw c.error("expected a class after decorators");
   const declaration = atDeclarationKeyword(c);
   if (declaration) return declaration;

@@ -2,7 +2,7 @@
 enum Direction { Up, Down, Left, Right, }
 const enum Flags { None = 0, Read = 1 << 0, Write = 1 << 1, "Read Write" = Read | Write }
 namespace Geometry.Shapes {
-  const unit = 1
+  export const unit = 1
   namespace Inner {}
 }
 module Legacy { let x = 1 }

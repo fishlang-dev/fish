@@ -33,13 +33,8 @@ export function isPrint(callee: Expr): boolean {
 export function check(program: Stmt[]): Checked {
   const funcs: Func[] = [];
   for (const s of program) {
-    if (s.kind === "typeAlias") throw unsupported("type aliases", s);
-    if (s.kind === "interface") throw unsupported("interfaces", s);
-    if (s.kind === "class") throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
-    if (s.kind === "enum") throw unsupported("enums", s);
-    if (s.kind === "namespace") throw unsupported("namespaces", s);
-    if (s.kind === "declare") throw unsupported("ambient declarations", s);
-    if (s.kind === "import" || s.kind === "importEquals") throw unsupported("imports", s);
+    const declaration = unsupportedDeclaration(s);
+    if (declaration) throw declaration;
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -97,6 +92,8 @@ export function check(program: Stmt[]): Checked {
     inProgress.delete(f);
 
     function statement(s: Stmt) {
+      const declaration = unsupportedDeclaration(s);
+      if (declaration) throw declaration;
       switch (s.kind) {
         case "expr":
           if (s.expr.kind === "call") {
@@ -147,23 +144,8 @@ export function check(program: Stmt[]): Checked {
           condition(s.cond);
           scoped(s.body);
           return;
-        case "typeAlias":
-          throw unsupported("type aliases", s);
-        case "interface":
-          throw unsupported("interfaces", s);
         case "function":
           throw unsupported("nested functions", s);
-        case "class":
-          throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
-        case "enum":
-          throw unsupported("enums", s);
-        case "namespace":
-          throw unsupported("namespaces", s);
-        case "declare":
-          throw unsupported("ambient declarations", s);
-        case "import":
-        case "importEquals":
-          throw unsupported("imports", s);
         case "block":
           throw unsupported("block statements", s);
         case "debugger":
@@ -411,6 +393,35 @@ const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "functio
   mapped: "mapped types",
   template: "template literal types",
 };
+
+// Declarations that parse but have no meaning yet, wherever they appear.
+function unsupportedDeclaration(s: Stmt): CompileError | undefined {
+  switch (s.kind) {
+    case "typeAlias":
+      return unsupported("type aliases", s);
+    case "interface":
+      return unsupported("interfaces", s);
+    case "class":
+      return unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
+    case "enum":
+      return unsupported("enums", s);
+    case "namespace":
+      return unsupported("namespaces", s);
+    case "declare":
+      return unsupported("ambient declarations", s);
+    case "import":
+    case "importEquals":
+      return unsupported("imports", s);
+    case "export":
+    case "exportDefault":
+    case "exportNamed":
+    case "exportAll":
+    case "exportAssign":
+    case "exportAsNamespace":
+      return unsupported("exports", s);
+  }
+  return undefined;
+}
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 

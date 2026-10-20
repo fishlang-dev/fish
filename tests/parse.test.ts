@@ -454,6 +454,22 @@ function showStmt(s: Stmt): string {
       const from = clauses.length ? `${clauses.join(", ")} from ` : "";
       return `import ${s.typeOnly ? "type " : ""}${from}"${s.module}"${s.attributes ? ` with ${showExpr(s.attributes)}` : ""}`;
     }
+    case "export":
+      return `export ${showStmt(s.body)}`;
+    case "exportDefault":
+      return `export default ${s.declaration ? showStmt(s.declaration) : `(${showExpr(s.value!)})`}`;
+    case "exportNamed":
+      return `export ${s.typeOnly ? "type " : ""}{ ${s.specifiers.map(showSpecifier).join(", ")} }${s.module ? ` from "${s.module}"` : ""}`;
+    case "exportAll":
+      return `export ${s.typeOnly ? "type " : ""}*${s.alias ? ` as ${s.alias}` : ""} from "${s.module}"`;
+    case "exportAssign":
+      return `export = ${showExpr(s.value)}`;
+    case "exportAsNamespace":
+      return `export as namespace ${s.name}`;
+    case "class":
+      return showClass(s);
+    case "interface":
+      return `interface ${s.name}`;
     case "importEquals":
       return `import ${s.typeOnly ? "type " : ""}${s.name} = ${s.require ? `require("${s.require}")` : s.entity}`;
     case "switch": {
@@ -626,6 +642,34 @@ const MODULES: [string, string][] = [
   ["import('m')", "import('m')"],
   ["import.meta.url", "import.meta.url"],
   ["import {} from 'm'", 'import {  } from "m"'],
+  ["export const x = 1", "export const x = 1"],
+  ["export function f() {}", "export function f() { 0 }"],
+  ["export default function () {}", "export default function () { 0 }"],
+  ["export default function named() {}", "export default function named() { 0 }"],
+  ["export default (function () {})", "export default (function () {})"],
+  ["export default class {}", "export default class {  }"],
+  ["export default abstract class A {}", "export default abstract class A {  }"],
+  ["export default interface I {}", "export default interface I"],
+  ["export default x + 1", "export default ((x + 1))"],
+  ["export default async function () {}", "export default function () { 0 }"],
+  ["@dec export class A {}", "export @dec class A {  }"],
+  ["export @dec class A {}", "export @dec class A {  }"],
+  ["@dec export default class {}", "export default @dec class {  }"],
+  ["export { a, b as c, type T, x as default }", "export { a, b as c, type T, x as default }"],
+  ["export { a } from 'm'", 'export { a } from "m"'],
+  ["export type { T } from 'm'", 'export type { T } from "m"'],
+  ["export type T = i64", "export typeAlias"],
+  ["export * from 'm'", 'export * from "m"'],
+  ["export * as ns from 'm'", 'export * as ns from "m"'],
+  ["export type * from 'm'", 'export type * from "m"'],
+  ["export = Foo", "export = Foo"],
+  ["export as namespace MyLib", "export as namespace MyLib"],
+  ["export import A = B.C", "export import A = B.C"],
+  ["export declare const x: i64", "export declare"],
+  ["export enum E { A }", "export enum"],
+  ["export namespace N {}", "export namespace"],
+  ["export abstract class A {}", "export abstract class A {  }"],
+  ["export async function f() {}", "export function f() { 0 }"],
 ];
 
 for (const [stmt, shape] of MODULES) {

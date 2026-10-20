@@ -187,3 +187,12 @@ for (const decl of ["import x from 'm'", "import fs = require('fs')"]) {
     }));
   });
 }
+
+for (const decl of ["export const x = 1", "export default 1", "export * from 'm'", "export { a }"]) {
+  test(decl, () => {
+    const src = `${decl}\nfunction main() {}`;
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: "exports are not supported yet", start: 0, end: decl.length,
+    }));
+  });
+}

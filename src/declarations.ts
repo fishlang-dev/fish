@@ -1,7 +1,7 @@
 import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import {
-  block, endStatement, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
+  block, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, type, typeParameters, typeReference } from "./types.ts";
@@ -60,6 +60,13 @@ function namespaceDeclaration(c: Cursor): Stmt {
   if (c.at("{")) return { kind: "namespace", name, quoted, global, body: block(c), start, end: c.end() };
   endStatement(c);
   return { kind: "namespace", name, quoted, global, body: undefined, start, end: c.end() };
+}
+
+export const atClass = (c: Cursor) => c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore);
+
+export function classDeclaration(c: Cursor, start: number, decorators: Expr[]): Stmt {
+  const abstract = c.eat("abstract");
+  return { kind: "class", ...classNode(c, start, abstract, decorators) };
 }
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
@@ -258,7 +265,7 @@ export function specifiers(c: Cursor): Specifier[] {
 }
 
 // Specifier names may be reserved words, as in `default as d`, or strings.
-function specifierName(c: Cursor): string {
+export function specifierName(c: Cursor): string {
   const t = c.next();
   if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a name", t);
   return t.text;
@@ -267,4 +274,58 @@ function specifierName(c: Cursor): string {
 export function moduleName(c: Cursor): string {
   if (c.peek().kind !== "string") throw c.error("expected a module name");
   return c.next().text;
+}
+
+// Every form of `export`. Decorators written before `export` belong to the class after it.
+export function exportDeclaration(c: Cursor, start: number, decorators: Expr[]): Stmt {
+  c.expect("export");
+  const end = () => c.end();
+  if (c.eat("default")) {
+    const classStart = decorators.length > 0 ? start : c.peek().start;
+    const all = [...decorators, ...decoratorList(c)];
+    if (atClass(c)) return { kind: "exportDefault", declaration: classDeclaration(c, classStart, all), value: undefined, start, end: end() };
+    if (all.length > 0) throw c.error("expected a class after decorators");
+    if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) {
+      return { kind: "exportDefault", declaration: func(c, true), value: undefined, start, end: end() };
+    }
+    if (c.at("interface")) return { kind: "exportDefault", declaration: statement(c), value: undefined, start, end: end() };
+    const value = expression(c);
+    endStatement(c);
+    return { kind: "exportDefault", declaration: undefined, value, start, end: end() };
+  }
+  if (decorators.length > 0 || c.at("@")) {
+    const classStart = decorators.length > 0 ? start : c.peek().start;
+    const all = [...decorators, ...decoratorList(c)];
+    if (!atClass(c)) throw c.error("expected a class after decorators");
+    return { kind: "export", body: classDeclaration(c, classStart, all), start, end: end() };
+  }
+  if (c.eat("=")) {
+    const value = expression(c);
+    endStatement(c);
+    return { kind: "exportAssign", value, start, end: end() };
+  }
+  if (c.at("as") && isToken(c.peek(1), "namespace")) {
+    c.next();
+    c.next();
+    const name = c.ident().text;
+    endStatement(c);
+    return { kind: "exportAsNamespace", name, start, end: end() };
+  }
+  // `export type { A }` and `export type * from`, but `export type A = B` is an alias.
+  const typeOnly = c.at("type") && (isToken(c.peek(1), "{") || isToken(c.peek(1), "*")) && c.eat("type");
+  if (c.eat("*")) {
+    const alias = c.eat("as") ? specifierName(c) : undefined;
+    c.expect("from");
+    const module = moduleName(c);
+    endStatement(c);
+    return { kind: "exportAll", typeOnly, alias, module, start, end: end() };
+  }
+  if (c.at("{")) {
+    const list = specifiers(c);
+    const module = c.eat("from") ? moduleName(c) : undefined;
+    endStatement(c);
+    return { kind: "exportNamed", typeOnly, specifiers: list, module, start, end: end() };
+  }
+  const body = statement(c);
+  return { kind: "export", body, start, end: body.end };
 }
