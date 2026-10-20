@@ -9,7 +9,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { lower, lowersClasses, replaced, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -286,6 +286,7 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     const type = declared ?? inferred ?? "void";
+    if (holdsRef(type)) throw unsupported("returning references", f.returnType ?? f);
     if (type !== "void" && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { interfaceType, keyOf, literalType, objectType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { holdsRef, interfaceType, keyOf, literalType, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -27,6 +27,7 @@ export function storable(type: Type, at: Span): Type {
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
+  if (holdsRef(type)) throw unsupported("references in fields", at);
   return type;
 }
 
@@ -92,6 +93,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       return t.name;
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
+    if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "null" || t.name === "undefined") throw new CompileError(`'${t.name}' is Option in Fish, which is not supported yet`, t.start, t.end);
     const args = t.args.map(resolveType);
     const alias = aliases.get(t.name);
@@ -108,6 +110,15 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
 
+  // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
+  function reference(t: Extract<TypeNode, { kind: "ref" }>): Type {
+    if (t.args.length !== 1) throw new CompileError(`type '${t.name}' takes one type argument, the type it borrows`, t.start, t.end);
+    const to = resolveType(t.args[0]!);
+    if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
+    if (typeof to !== "string" && to.kind === "ref") throw unsupported("references to references", t);
+    return refType(to, t.name === "Mut");
+  }
+
   // A union holds values, so an interface, which describes values without being one, can't be
   // a member, and neither can `void`.
   function unionMember(node: TypeNode): Type {
@@ -115,6 +126,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
     if (typeof t !== "string" && t.kind === "param") throw unsupported("unions holding a type parameter", node);
+    if (holdsRef(t)) throw unsupported("unions holding references", node);
     return t;
   }
 
@@ -238,11 +250,11 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
-const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number"]);
+const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number", "Ref", "Mut"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

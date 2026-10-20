@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, holdsRef, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, ClassType, Field, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -306,8 +306,12 @@ export function expressions(ctx: Context) {
         }
         return found.type;
       }
-      case "object":
-        return objectType(fields(e.props.map(property), e.props));
+      case "object": {
+        const list = e.props.map(property);
+        const ref = list.findIndex((f) => holdsRef(f.type));
+        if (ref >= 0) throw unsupported("references in fields", e.props[ref]!);
+        return objectType(fields(list, e.props));
+      }
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);

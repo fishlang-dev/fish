@@ -13,6 +13,7 @@ const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
 // union is its member's index, then enough 64-bit words for its largest member.
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
+  if (t.kind === "ref") return "ptr";
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
   const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...t.fields.map((f) => llvm(f.type))];
   return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
@@ -28,6 +29,7 @@ function size(t: Type): [number, number] {
   if (t === "i64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (typeof t === "string") return [0, 1];
+  if (t.kind === "ref") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
   const parts = [...(t.kind === "class" && t.base ? [t.base] : []), ...t.fields.map((f) => f.type)].map(size);
@@ -145,6 +147,14 @@ export function conversions(b: Slots) {
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // A reference read where its value is wanted loads it; a mutable one lent as shared is the
+    // same pointer.
+    if (typeof from !== "string" && from.kind === "ref") {
+      if (typeof to !== "string" && to.kind === "ref") return v;
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(from.to)}, ptr ${v}`);
+      return convert(loaded, from.to, to);
+    }
     // A literal's value is known, so leaving one makes a constant, and entering one keeps nothing.
     if (typeof from !== "string" && from.kind === "literal" && (typeof to === "string" || to.kind !== "union")) return String(from.value);
     if (typeof to !== "string" && to.kind === "literal") return "zeroinitializer";

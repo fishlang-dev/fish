@@ -1,9 +1,10 @@
 import type { Instance } from "./check.ts";
 import { declareClass, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
+import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, keyOf, lower, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, holdsRef, keyOf, lower, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -82,6 +83,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "param" || t.kind === "interface") return false;
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
   if (t.kind === "union") return t.members.every(concrete);
+  if (t.kind === "ref") return concrete(t.to);
   let known = concreteObjects.get(t);
   if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
   return known;
@@ -180,6 +182,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     for (const p of params) {
       const type = bindings.get(p.name);
       if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      if (holdsRef(type)) throw unsupported("references as type arguments", at);
       if (typeof type !== "string" && type.kind === "interface") {
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
@@ -324,6 +327,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
     if (found) return found;
     if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    if (args.some(holdsRef)) throw unsupported("references as type arguments", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);

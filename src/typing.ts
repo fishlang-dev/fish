@@ -41,7 +41,11 @@ export type LiteralType = {
 // It has no fields; reaching into one takes narrowing to a member first.
 export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?: string };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType;
+// A borrow of a value that lives elsewhere: `Ref<T>` shared, `Mut<T>` mutable. It is a pointer
+// to the value, reads through to it, and copies like a pointer.
+export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -115,6 +119,27 @@ export function typeParameter(name: string, bound: ObjectType | InterfaceType | 
   return t;
 }
 
+export function refType(to: Type, mutable: boolean): RefType {
+  const key = `${mutable ? "mut" : "ref"} ${keyOf(to)}`;
+  let t = refs.get(key);
+  if (!t) {
+    t = { kind: "ref", to, mutable, fields: [] };
+    refs.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+const refs = new Map<string, RefType>();
+
+// Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
+export function holdsRef(t: Type): boolean {
+  if (typeof t === "string") return false;
+  if (t.kind === "ref") return true;
+  if (t.kind === "union") return t.members.some(holdsRef);
+  return t.kind === "object" && t.fields.some((f) => holdsRef(f.type));
+}
+
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
 // parameter in it.
 export function wrapped(name: string, bound: ObjectType | InterfaceType | undefined, concrete: Type): ParamType {
@@ -138,13 +163,14 @@ export function lower(t: Type): Type {
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
+    else if (t.kind === "ref") found = refType(lower(t.to), t.mutable);
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
   return found;
 }
 
-const lowered = new WeakMap<ObjectType | UnionType | ClassType, Type>();
+const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType, Type>();
 
 // A type with some of its parts swapped for others, looking inside objects and unions.
 export function replaced(t: Type, swap: Map<Type, Type>): Type {
@@ -154,6 +180,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     const args = t.generic?.args.map((a) => replaced(a, swap));
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
+  if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable);
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
@@ -211,6 +238,11 @@ export function derives(t: ClassType, base: ClassType): boolean {
 export function fits(from: Type, to: Type): boolean {
   // In an instance, a type parameter and the concrete type it stands for are one value.
   if (from === to || lower(from) === lower(to)) return true;
+  // A reference reads the value where it lives, so it fits only a reference to the same type;
+  // a mutable one also lends itself as shared.
+  if (typeof to !== "string" && to.kind === "ref") {
+    return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
+  }
   if (typeof to !== "string" && to.kind === "union") {
     if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
     return to.members.some((m) => fits(from, m));
@@ -218,6 +250,7 @@ export function fits(from: Type, to: Type): boolean {
   // A union fits where every member it may hold does, as an enum fits an i64.
   if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
+  if (typeof from !== "string" && from.kind === "ref") return false;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
   // A type parameter fits through its bound's fields, as any instance of it would.
@@ -233,6 +266,7 @@ export function show(t: Type): string {
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
+  if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
