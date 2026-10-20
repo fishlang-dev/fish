@@ -4,6 +4,7 @@ import {
   allowingIn, block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
   type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
+import { classNode } from "./declarations.ts";
 import { toPattern } from "./patterns.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
@@ -186,6 +187,11 @@ export function unary(c: Cursor): Expr {
 }
 
 // A newline before `++` or `--` ends the expression instead, as in JavaScript.
+// A member chain with calls, as in `extends mixin(Base)`.
+export function leftHandSide(c: Cursor): Expr {
+  return chain(c, c.at("new") ? newExpression(c) : primary(c), true);
+}
+
 function postfix(c: Cursor): Expr {
   const e = chain(c, c.at("new") ? newExpression(c) : primary(c), true);
   if ((!c.at("++") && !c.at("--")) || c.peek().newlineBefore) return e;
@@ -232,7 +238,7 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
 
 // Property names after `.` may be reserved words, as in `a.default`.
 function propertyKey(c: Cursor): string {
-  if (c.peek().kind !== "ident") throw c.error("expected a property name");
+  if (c.peek().kind !== "ident" && c.peek().kind !== "private") throw c.error("expected a property name");
   return c.next().text;
 }
 
@@ -293,6 +299,11 @@ export function primary(c: Cursor): Expr {
   if (c.at("{")) return object(c);
   if (c.at("function") || atAsync(c, "function")) return functionExpression(c);
   if (c.at("import")) return importExpression(c);
+  if (c.at("class")) return { kind: "class", ...classNode(c, false, []) };
+  if (c.peek().kind === "private") {
+    const t = c.next();
+    return { kind: "privateName", name: t.text, start: t.start, end: t.end };
+  }
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {

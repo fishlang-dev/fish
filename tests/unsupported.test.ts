@@ -68,6 +68,7 @@ const EXPRESSIONS: [string, string][] = [
   ["{ a: 1 }", "object literals"],
   ["function () {}", "function expressions"],
   ["(x: i64) => x", "arrow functions"],
+  ["class {}", "class expressions"],
   ["a[0]", "indexed access expressions"],
   ["new C()", "'new' expressions"],
   ["f<i64>", "instantiation expressions"],
@@ -134,6 +135,7 @@ const STATEMENTS: [string, string][] = [
   ["continue", "'continue' statements"],
   ["throw 1", "'throw' statements"],
   ["try {} finally {}", "'try' statements"],
+  ["class A {}", "classes"],
 ];
 
 test("let x: i64", () => {

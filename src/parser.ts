@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
+import { classNode } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
@@ -66,6 +67,9 @@ export type Expr = Span & (
   // `import(specifier, options?)`
   | { kind: "import"; args: Expr[] }
   | { kind: "nonNull"; expr: Expr }
+  | (ClassNode & { kind: "class" })
+  // `#x` on its own, which is only valid as the left side of `in`.
+  | { kind: "privateName"; name: string }
   | { kind: "unary"; op: UnaryOp; operand: Expr }
   | { kind: "update"; op: "++" | "--"; prefix: boolean; operand: Expr }
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
@@ -105,7 +109,7 @@ export type Stmt = Span & (
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
-) | TypeAlias | Interface | Func;
+) | TypeAlias | Interface | Func | (ClassNode & { kind: "class" });
 
 export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
 
@@ -128,6 +132,28 @@ export type ObjectProp = Span & (
   | { kind: "method"; key: PropertyName; async: boolean; generator: boolean; typeParams: TypeParam[];
       params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
   | { kind: "get" | "set"; key: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
+);
+
+export type Modifier =
+  | "public" | "private" | "protected" | "static" | "readonly" | "abstract"
+  | "override" | "declare" | "accessor" | "async";
+
+export type ClassNode = Span & {
+  // Undefined for an anonymous class expression or `export default class`.
+  name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
+  // An instantiation expression when written with type arguments, as in `extends Base<T>`.
+  extends: Expr | undefined; implements: TypeNode[]; members: ClassMember[];
+};
+
+// A private name is a string starting with "#". A missing body is an overload signature.
+export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } & (
+  | { kind: "field"; name: PropertyName; optional: boolean; definite: boolean; type: TypeNode | undefined; init: Expr | undefined }
+  | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
+      params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
+  | { kind: "constructor"; params: Param[]; body: Stmt[] | undefined }
+  | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
+  | { kind: "index"; params: Param[]; type: TypeNode }
+  | { kind: "staticBlock"; body: Stmt[] }
 );
 
 // `this` is an identifier pattern named "this".
@@ -336,6 +362,10 @@ function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
+  if (c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore)) {
+    const abstract = c.eat("abstract");
+    return { kind: "class", ...classNode(c, abstract, []), start };
+  }
   if (c.at(";")) return { kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);

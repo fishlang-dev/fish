@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parse, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
+import { parse, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
 function show(t: TypeNode): string {
@@ -191,6 +191,7 @@ function showExpr(e: Expr): string {
     case "meta":
     case "object":
     case "function":
+    case "privateName":
       return src.slice(e.start, e.end);
     case "spread":
       return `...${showExpr(e.value)}`;
@@ -235,6 +236,8 @@ function showExpr(e: Expr): string {
       return `(<${show(e.type)}>${showExpr(e.expr)})`;
     case "destructure":
       return `(${showPattern(e.pattern)} = ${showExpr(e.value)})`;
+    case "class":
+      return showClass(e);
     case "arrow": {
       const typeParams = e.typeParams.length ? `<${e.typeParams.map((p) => p.name).join(", ")}>` : "";
       const returns = e.returnType ? `: ${show(e.returnType)}` : "";
@@ -506,4 +509,56 @@ for (const [stmt, shape] of STATEMENTS) {
 
 test("do x(); while (y) z()", () => {
   expect(parseStatements("do x(); while (y) z()").map(showStmt).join("; ")).toBe("do { 1 statements } while (y); z()");
+});
+
+// A class's header, then each member as `kind name` with its modifiers and decorators.
+function showClass(k: ClassNode & { kind: "class" }): string {
+  const decorators = k.decorators.map((d) => `@${showExpr(d)} `).join("");
+  const heritage = `${k.extends ? ` extends ${showExpr(k.extends)}` : ""}${k.implements.length ? ` implements ${k.implements.map(show).join(", ")}` : ""}`;
+  return `${decorators}${k.abstract ? "abstract " : ""}class${k.name ? ` ${k.name}` : ""}${heritage} { ${k.members.map(showClassMember).join("; ")} }`;
+}
+
+function showClassMember(m: ClassMember): string {
+  const prefix = `${m.decorators.map((d) => `@${showExpr(d)} `).join("")}${m.modifiers.map((x) => `${x} `).join("")}`;
+  const body = (b: unknown[] | undefined) => (b ? ` { ${b.length} }` : ";");
+  switch (m.kind) {
+    case "field":
+      return `${prefix}field ${showName(m.name)}${m.optional ? "?" : ""}${m.definite ? "!" : ""}${m.type ? `: ${show(m.type)}` : ""}${m.init ? ` = ${showExpr(m.init)}` : ""}`;
+    case "method":
+      return `${prefix}method ${m.generator ? "*" : ""}${showName(m.name)}${m.optional ? "?" : ""}(${showParams(m.params)})${body(m.body)}`;
+    case "constructor":
+      return `${prefix}constructor(${showParams(m.params)})${body(m.body)}`;
+    case "get":
+    case "set":
+      return `${prefix}${m.kind} ${showName(m.name)}(${showParams(m.params)})${body(m.body)}`;
+    case "index":
+      return `${prefix}index [${showParams(m.params)}]: ${show(m.type)}`;
+    case "staticBlock":
+      return `static block { ${m.body.length} }`;
+  }
+}
+
+const CLASSES: [string, string][] = [
+  ["class A {}", "class A {  }"],
+  ["class A<T> extends B<T> implements C, D.E<T> { x = 1; y: i64; m() {} }", "class A extends B<T> implements C, D.E<T> { field x = 1; field y: i64; method m() { 0 } }"],
+  ["class A extends mixin(B, C) {}", "class A extends mixin(B, C) {  }"],
+  ["abstract class A {}", "abstract class A {  }"],
+  ["class A { constructor(x: i64) { this.x = x } get size() { return 1 } set size(v) {} }", "class A { constructor(x: i64) { 1 }; get size() { 1 }; set size(v) { 0 } }"],
+  ["class A { #count = 0; #inc() { this.#count++ } has(o) { return #count in o } }", "class A { field #count = 0; method #inc() { 1 }; method has(o) { 1 } }"],
+  ["class A { *gen() {} 'quoted'() {} [key]() {} 42 = 1 }", "class A { method *gen() { 0 }; method quoted() { 0 }; method [key]() { 0 }; field 42 = 1 }"],
+  ["class A { get = 1; set() {} constructor = 2 }", "class A { field get = 1; method set() { 0 }; field constructor = 2 }"],
+  ["class A { ;; }", "class A {  }"],
+];
+
+for (const [stmt, shape] of CLASSES) {
+  test(stmt, () => {
+    const [s] = parseStatements(stmt);
+    if (s?.kind !== "class") throw new Error("expected a class");
+    expect(showClass(s)).toBe(shape);
+  });
+}
+
+test("class expressions", () => {
+  expect(showExpr(parseExpr("class extends Base { x = 1 }"))).toBe("class extends Base { field x = 1 }");
+  expect(showExpr(parseExpr("#x in obj"))).toBe("(#x in obj)");
 });

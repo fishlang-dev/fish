@@ -4,7 +4,8 @@ export type Token = {
   // An `int` is an integer in any base; a `float` has a fraction or exponent; a `bigint` ends in `n`.
   // A template with substitutions arrives in pieces: a head ending in `${`, middles between
   // `}` and `${`, and a tail from `}` to the closing backtick.
-  kind: "ident" | "int" | "float" | "bigint" | "string" | "regex" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
+  // A `private` token is a class's private name, `#` included, as in `#count`.
+  kind: "ident" | "private" | "int" | "float" | "bigint" | "string" | "regex" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
   // Source text; for strings and templates, the decoded value. Keywords are idents, since most TS keywords are contextual.
   text: string;
   start: number;
@@ -163,6 +164,13 @@ export function lexer(src: string): Lexer {
       if (close < 0) throw new CompileError("unterminated comment", i, i + 2);
       if (src.slice(i, close).includes("\n")) newlineBefore = true;
       i = close + 2;
+    } else if (start === 0 && src.startsWith("#!")) {
+      // A shebang line, allowed only at the very start of a file.
+      while (i < src.length && src[i] !== "\n") i++;
+    } else if (c === "#" && /[\p{ID_Start}_$]/u.test(src[i + 1] ?? "")) {
+      i++;
+      while (i < src.length && /[\p{ID_Continue}$\u200c\u200d]/u.test(src[i]!)) i++;
+      return token("private", src.slice(start, i), start);
     } else if (/[\p{ID_Start}_$]/u.test(c)) {
       while (i < src.length && /[\p{ID_Continue}$\u200c\u200d]/u.test(src[i]!)) i++;
       return token("ident", src.slice(start, i), start);

@@ -32,6 +32,7 @@ export function check(program: Stmt[]): Checked {
   for (const s of program) {
     if (s.kind === "typeAlias") throw unsupported("type aliases", s);
     if (s.kind === "interface") throw unsupported("interfaces", s);
+    if (s.kind === "class") throw unsupported("classes", s);
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -144,6 +145,8 @@ export function check(program: Stmt[]): Checked {
           throw unsupported("interfaces", s);
         case "function":
           throw unsupported("nested functions", s);
+        case "class":
+          throw unsupported("classes", s);
         case "block":
           throw unsupported("block statements", s);
         case "debugger":
@@ -351,6 +354,8 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   object: "object literals",
   function: "function expressions",
   arrow: "arrow functions",
+  class: "class expressions",
+  privateName: "private names",
   index: "indexed access expressions",
   new: "'new' expressions",
   instantiation: "instantiation expressions",
