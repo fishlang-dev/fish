@@ -121,11 +121,11 @@ export function expressions(ctx: Context) {
     return { type: resultOf(instance, e), what: `'${target.name}'` };
   }
 
-  // Whether `x.clone()` is the compiler's copy: for any object, instance, union or type
-  // parameter value that doesn't declare a `clone` method of its own.
+  // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
+  // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
   function copies(t: Type): boolean {
-    if (typeof t === "string" || t.kind === "literal") return false;
-    if (t.kind === "class") return !inherited(classOf(t), "methods", "clone");
+    if (typeof t === "string" || t.kind === "literal") return true;
+    if (t.kind === "class") return !classOf(t).methods.has("clone");
     const bound = t.kind === "param" ? t.bound : t.kind === "interface" ? t : undefined;
     return !bound || bound.kind !== "interface" || !bound.methods.some((m) => m.name === "clone");
   }
@@ -134,7 +134,7 @@ export function expressions(ctx: Context) {
   function cloned(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError("'clone' takes no arguments", e.start, e.end);
     const stored = lower(receiver);
-    if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && inherited(classOf(stored), "methods", "clone")) {
+    if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
     return { type: receiver, what: "'clone'" };

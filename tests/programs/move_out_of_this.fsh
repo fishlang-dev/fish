@@ -10,4 +10,4 @@ class Holder {
 function main() {
   print(new Holder().get().v)
 }
-// error: 'this.inner' can't be moved out of 'this', since a method only borrows it; use 'this.inner.clone()'
+// error: 'this.inner' can't be moved out of 'this', since it is only borrowed here; use 'this.inner.clone()'

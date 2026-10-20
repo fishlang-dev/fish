@@ -2,7 +2,7 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
-import type { Type } from "./typing.ts";
+import { field, type Type } from "./typing.ts";
 
 // Moves: a value that isn't Copy has one owner, so passing, assigning, storing or returning
 // it hands it over, and the place it came from can't be used until it is assigned again.
@@ -15,9 +15,9 @@ export function isCopy(t: Type): boolean {
   return t.kind === "union" && t.members.every(isCopy);
 }
 
-// Where a place moved, and the note explaining it. A place is a local's id, or `this`,
-// followed by a field path, like `3.inner.x`.
-type Move = { start: number; end: number; note: string };
+// Where a place moved, the note explaining it, and the pass of each loop it moved on. A place
+// is a local's id, or `this`, followed by a field path, like `3.inner.x`.
+type Move = { start: number; end: number; note: string; passes: Map<Stmt, number> };
 
 // The places moved on the way here, or null where control can't reach.
 type State = Map<string, Move> | null;
@@ -33,6 +33,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
   const exits = new Map<Stmt, State>();
   const nexts = new Map<Stmt, State>();
+  // The pass each enclosing loop is on.
+  const passes = new Map<Stmt, number>();
   statements(body);
 
   function statements(list: Stmt[]) {
@@ -46,7 +48,10 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       case "let": {
         const d = s.declarations[0]!;
         const name = d.target.kind === "ident" ? d.target.name : "";
-        return expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
+        expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
+        // A declaration run again by a loop makes a fresh variable.
+        revive(String(locals.get(s)!.id));
+        return;
       }
       case "if": {
         expr(s.cond);
@@ -107,7 +112,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   function loop(s: Stmt, test: () => Expr | undefined, body: () => void, bodyFirst = false, update?: () => void) {
     const entry = state;
     let back: State = null;
-    for (;;) {
+    for (let pass = 0; ; pass++) {
+      passes.set(s, pass);
       state = join(entry, back);
       exits.set(s, null);
       nexts.set(s, null);
@@ -116,7 +122,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       const cond = () => {
         const t = test();
         if (t) expr(t);
-        leaving = t ? join(state, null) : null;
+        // A loop with no condition, or `true`, ends only by a `break`.
+        leaving = t && !(t.kind === "bool" && t.value) ? join(state, null) : null;
       };
       if (!bodyFirst) cond();
       body();
@@ -126,6 +133,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       leaving = join(leaving, exits.get(s)!);
       const next = join(back, state);
       if (same(next, back)) {
+        passes.delete(s);
         state = leaving;
         return;
       }
@@ -144,8 +152,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       case "ident":
         return locals.has(e) ? use(e, consume) : undefined;
       case "this":
-        if (consume && !isCopy(types.get(e)!)) {
-          throw new CompileError("'this' can't be moved, since a method only borrows it; use 'this.clone()' to hand over a copy", e.start, e.end);
+        if (consume && state && !isCopy(types.get(e)!)) {
+          throw new CompileError("'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy", e.start, e.end);
         }
         return;
       case "member":
@@ -156,7 +164,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         for (const p of e.props) {
           const into = (place: string) => `'${place}' moved here into the new object; use '${place}.clone()' to keep a copy`;
           if (p.kind === "property") expr(p.value, into);
-          else if (p.kind === "shorthand") use(p, into);
+          // A shorthand holds its variable as narrowed there.
+          else if (p.kind === "shorthand") use(p, into, field(types.get(e) as Exclude<Type, string>, p.name)!.type);
         }
         return;
       case "new":
@@ -178,7 +187,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         assign(e.target);
         // An assignment used as a value hands over what it just stored.
-        if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
+        if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined && !setters.has(e.target)) use(e.target, consume);
         return;
       }
       case "conditional": {
@@ -210,15 +219,14 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   }
 
   // Reads or hands over a place, which must still hold its value.
-  function use(e: Named, consume?: Consumer) {
+  function use(e: Named, consume?: Consumer, type = e.kind === "shorthand" ? locals.get(e)!.type : types.get(e)!) {
     const place = key(e)!;
     usable(e, place);
-    const type = e.kind === "shorthand" ? locals.get(e)!.type : types.get(e)!;
     if (!consume || isCopy(type) || !state) return;
     if (place.startsWith("this")) {
-      throw new CompileError(`'${text(e)}' can't be moved out of 'this', since a method only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
+      throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
     }
-    state.set(place, { start: e.start, end: e.end, note: consume(text(e)) });
+    state.set(place, { start: e.start, end: e.end, note: consume(text(e)), passes: new Map(passes) });
   }
 
   // A place can't be used once it, something it is inside, or something inside it moved.
@@ -232,7 +240,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       const what = moved === place ? `'${name}' was moved, so it can't be used here`
         : inside ? `'${name}' can't be used here because '${pathOf(moved)}' was moved`
         : `'${name}' can't be used as a whole here because '${pathOf(moved)}' was moved out of it`;
-      const earlier = move.start >= e.start ? " (in an earlier pass through this loop)" : "";
+      const earlier = [...passes].some(([loop, pass]) => (move.passes.get(loop) ?? pass) < pass) ? " (in an earlier pass through this loop)" : "";
       throw new CompileError(what + earlier, e.start, e.end, { message: move.note, start: move.start, end: move.end });
     }
   }
@@ -251,6 +259,11 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         throw new CompileError(`can't assign to '${text(target)}' because '${pathOf(moved)}' was moved`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
       }
     }
+    revive(place);
+  }
+
+  function revive(place: string) {
+    if (!state) return;
     for (const moved of [...state.keys()]) if (moved === place || moved.startsWith(`${place}.`)) state.delete(moved);
   }
 

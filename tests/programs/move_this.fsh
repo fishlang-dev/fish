@@ -8,4 +8,4 @@ class Node {
 function main() {
   print(new Node().me().n)
 }
-// error: 'this' can't be moved, since a method only borrows it; use 'this.clone()' to hand over a copy
+// error: 'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy
