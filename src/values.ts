@@ -224,9 +224,31 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
-    if (!fits(type, to)) throw new CompileError(message, e.start, e.end);
+    if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
     excess(e, to);
     coercions.set(e, to);
+  }
+
+  // An object literal builds a class it is declared as, without its constructor, when it
+  // gives every field and the class has no field hidden from it. Nested literals may build
+  // the classes of nested fields.
+  function builds(e: Expr, type: Type, to: Type): boolean {
+    if (e.kind !== "object" || typeof type === "string" || typeof to === "string" || to.kind !== "class") return false;
+    classOf(to);
+    for (const f of to.fields) {
+      if ((f.access ?? "public") !== "public") {
+        throw new CompileError(`an object literal can't build '${to.name}' because '${f.name}' is ${f.access}; use 'new'`, e.start, e.end);
+      }
+      const given = field(type, f.name);
+      if (!given) {
+        throw new CompileError(`property '${f.name}' is missing in type '${show(type)}' but required in type '${to.name}'`, e.start, e.end);
+      }
+      const prop = e.props.find((p) => p.kind === "property" && p.key === f.name);
+      if (!fits(given.type, f.type) && !(prop?.kind === "property" && builds(prop.value, given.type, f.type))) {
+        throw new CompileError(`type '${show(given.type)}' is not assignable to type '${show(f.type)}'`, (prop ?? e).start, (prop ?? e).end);
+      }
+    }
+    return true;
   }
 
   function excess(e: Expr, to: Type) {
