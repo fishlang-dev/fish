@@ -16,11 +16,16 @@ export function declareEnum(node: Span & { name: string; const: boolean; members
     if (members.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
     const value: bigint | string | undefined = m.init ? constant(m.init) : next;
     if (value === undefined) throw new CompileError(`enum member '${m.name}' must have an initializer`, m.start, m.end);
+    if (typeof value === "bigint" && (value > I64_MAX || value < -I64_MAX - 1n)) {
+      throw new CompileError(`enum member '${m.name}' is ${value}, which does not fit in i64`, m.start, m.end);
+    }
     members.set(m.name, literalType(value, { enum: node.name, member: m.name }));
     next = typeof value === "bigint" ? value + 1n : undefined;
   }
   return { type: unionType([...members.values()], node.name), members };
 }
+
+const I64_MAX = (1n << 63n) - 1n;
 
 function constant(e: Expr): bigint | string {
   if (e.kind === "int" || e.kind === "string") return e.value;
