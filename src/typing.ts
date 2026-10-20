@@ -149,6 +149,10 @@ const lowered = new WeakMap<ObjectType | UnionType | ClassType, Type>();
 export function replaced(t: Type, swap: Map<Type, Type>): Type {
   const found = swap.get(t);
   if (found) return found;
+  if (typeof t !== "string" && t.kind === "class") {
+    const args = t.generic?.args.map((a) => replaced(a, swap));
+    return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
+  }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }

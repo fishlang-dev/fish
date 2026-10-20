@@ -483,6 +483,9 @@ export function expressions(ctx: Context) {
   function stored(target: Expr): Type {
     if (target.kind !== "member") return types.get(target)!;
     const object = lower(stored(target.object));
+    if (typeof object !== "string" && object.kind === "union") {
+      throw new CompileError(`can't assign to '${target.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
+    }
     return (typeof object !== "string" && field(object, target.name)?.type) || types.get(target)!;
   }
 

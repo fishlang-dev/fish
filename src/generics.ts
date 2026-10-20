@@ -180,7 +180,9 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
     for (const [i, bound] of implicitOf(f)) own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound));
     const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
+    // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
+    else sites.delete(at);
     const instance = instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
     if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     return instance;

@@ -127,9 +127,8 @@ export function check(program: Stmt[]): Checked {
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums);
-  // A class first made while lowering an instance is reported at that function.
-  let lowering: Span = { start: 0, end: 0 };
-  lowersClasses((c, args) => classNamed(c.generic!.name, args, lowering)!);
+  // A class first made while lowering is reported at the function being checked.
+  lowersClasses((c, args) => classNamed(c.generic!.name, args, checking?.body ?? { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
@@ -165,7 +164,6 @@ export function check(program: Stmt[]): Checked {
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
-    lowering = instance.body;
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
