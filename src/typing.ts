@@ -14,16 +14,28 @@ export type ObjectType = { kind: "object"; fields: Field[] };
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType;
+// An interface is a trait: fields and method signatures that any value with those members
+// satisfies. It describes values but is never one, so it never reaches codegen. Its members
+// are filled in once resolved.
+export type Method = { name: string; params: Type[]; returns: Type };
+export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType;
 
 const interned = new Map<string, ObjectType>();
-const keys = new Map<ObjectType | ClassType, string>();
-let classes = 0;
+const keys = new Map<ObjectType | ClassType | InterfaceType, string>();
+let declared = 0;
 
 // A class's key is unique to its declaration, since two programs may reuse a class name.
 export function classType(name: string): ClassType {
   const t: ClassType = { kind: "class", name, fields: [] };
-  keys.set(t, `class ${classes++}`);
+  keys.set(t, `class ${declared++}`);
+  return t;
+}
+
+export function interfaceType(name: string): InterfaceType {
+  const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
+  keys.set(t, `interface ${declared++}`);
   return t;
 }
 
@@ -41,7 +53,7 @@ export function objectType(fields: Field[]): ObjectType {
 }
 
 // A field of an object, or of an instance or the bases it embeds.
-export function field(t: ObjectType | ClassType, name: string): Field | undefined {
+export function field(t: ObjectType | ClassType | InterfaceType, name: string): Field | undefined {
   const own = t.fields.find((f) => f.name === name);
   return own ?? (t.kind === "class" && t.base ? field(t.base, name) : undefined);
 }
@@ -68,7 +80,8 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
   if (from === to) return true;
-  if (typeof from === "string" || typeof to === "string" || to.kind === "class") return false;
+  // An interface is satisfied by members, which only the checker can look up.
+  if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
   return to.fields.every((f) => {
     const found = field(from, f.name);
     return found !== undefined && (found.access ?? "public") === "public" && fits(found.type, f.type);
@@ -78,7 +91,7 @@ export function fits(from: Type, to: Type): boolean {
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
   if (typeof t === "string") return t;
-  if (t.kind === "class") return t.name;
+  if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
   return `{ ${t.fields.map((f) => `${name(f.name)}: ${show(f.type)}`).join("; ")} }`;

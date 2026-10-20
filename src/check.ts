@@ -1,8 +1,9 @@
 import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, Func as Declared, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
-import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { show, type ClassType, type Type } from "./typing.ts";
+import type { Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
+import { unsatisfied } from "./interfaces.ts";
+import { addAlias, paramName, resolver, storable, typeName } from "./resolve.ts";
+import { fits, show, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -53,13 +54,19 @@ export function check(program: Stmt[]): Checked {
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();
   const classes = new Map<string, ClassInfo>();
+  const interfaces = new Map<string, Interface>();
   for (const s of program) {
     if (s.kind === "typeAlias") {
-      addAlias(aliases, s, classes);
+      addAlias(aliases, s, classes, interfaces);
+      continue;
+    }
+    if (s.kind === "interface") {
+      typeName(s.name, s, aliases, classes, interfaces);
+      interfaces.set(s.name, s);
       continue;
     }
     if (s.kind === "class" && s.name !== undefined) {
-      typeName(s.name, s, aliases, classes);
+      typeName(s.name, s, aliases, classes, interfaces);
       classes.set(s.name, declareClass({ ...s, name: s.name }));
       continue;
     }
@@ -86,7 +93,7 @@ export function check(program: Stmt[]): Checked {
   const main = byName.get("main");
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
-  const { resolveType, paramType } = resolver(aliases, new Map([...classes].map(([name, c]) => [name, c.type])));
+  const { resolveType, paramType } = resolver(aliases, new Map([...classes].map(([name, c]) => [name, c.type])), interfaces);
   const instances = new Map<Body, Instance>();
   const done = new Set<Body>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
@@ -100,6 +107,7 @@ export function check(program: Stmt[]): Checked {
   classes.forEach(checkOverrides);
   const laidOut = new Set<ClassInfo>();
   classes.forEach(layout);
+  classes.forEach(implemented);
   classes.forEach((c) => {
     if (contains(c.type, c.type, new Set())) {
       throw new CompileError(`class '${c.type.name}' contains itself, so it would have infinite size`, c.constructor.start, c.constructor.end);
@@ -143,12 +151,22 @@ export function check(program: Stmt[]): Checked {
     laidOut.add(c);
     if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
-      if (f.type) return { name: f.name, type: resolveType(f.type), access: f.access };
+      if (f.type) return { name: f.name, type: storable(resolveType(f.type), f), access: f.access };
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = { name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, owner: c.type, start: f.start, end: f.end };
       checkBody(initializer);
       return { name: f.name, type: instanceOf(initializer).returns, access: f.access };
     });
+  }
+
+  // `implements` is optional, since satisfying an interface is by shape, but checked when written.
+  function implemented(c: ClassInfo) {
+    for (const node of c.node.implements) {
+      const trait = resolveType(node);
+      const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, { classOf, returnOf, paramType }, node)
+        : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
+      if (reason) throw new CompileError(`class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
+    }
   }
 
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
@@ -179,6 +197,7 @@ export function check(program: Stmt[]): Checked {
     const instance = instanceOf(f);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     const declared = f.returnType && resolveType(f.returnType);
+    if (declared && isInterface(declared)) throw unsupported("functions returning an interface", f.returnType!);
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
@@ -199,7 +218,11 @@ export function check(program: Stmt[]): Checked {
       thisReady: (e) => unset.size === 0 || e === exempt,
     });
 
-    for (const p of f.params) declare(paramName(p), paramType(p, f.self?.constructor), false, true, p);
+    for (const p of f.params) {
+      const type = paramType(p, f.self?.constructor);
+      if (isInterface(type)) throw unsupported("parameters typed with an interface", p);
+      declare(paramName(p), type, false, true, p);
+    }
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
     for (const s of f.body) {
@@ -241,7 +264,8 @@ export function check(program: Stmt[]): Checked {
           const annotated = d.type && resolveType(d.type);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
-          declare(d.target.name, annotated ?? type, s.keyword === "let", false, s);
+          // An interface describes the value, which keeps its own concrete type.
+          declare(d.target.name, annotated && !isInterface(annotated) ? annotated : type, s.keyword === "let", false, s);
           return;
         }
         case "if":
@@ -419,6 +443,8 @@ export function check(program: Stmt[]): Checked {
 
 // Stands for the base in a derived constructor's unset fields until `super(...)` runs.
 const SUPER = "super()";
+
+const isInterface = (t: Type) => typeof t !== "string" && t.kind === "interface";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 

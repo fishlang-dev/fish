@@ -61,7 +61,6 @@ for (const [type, what, part] of MEMBERS) {
 const CLASSES: [string, string, string][] = [
   ["abstract class A {}", "abstract classes", "abstract class A {}"],
   ["class A<T> {}", "generic classes", "T"],
-  ["class A implements I {}", "'implements' clauses", "I"],
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A { static n = 1 }", "static fields", "static n = 1"],
   ["class A { readonly n = 1 }", "'readonly' modifiers", "readonly n = 1"],

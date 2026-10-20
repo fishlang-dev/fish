@@ -58,7 +58,7 @@ export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
     case "typeAlias":
       return unsupported("local type aliases", s);
     case "interface":
-      return unsupported("interfaces", s);
+      return unsupported("local interfaces", s);
     case "class":
       return unsupported(s.decorators.length > 0 ? "decorators" : "local classes", s);
     case "enum":

@@ -1,4 +1,5 @@
-import type { Body, ClassInfo } from "./classes.ts";
+import { inherited, type Body, type ClassInfo } from "./classes.ts";
+import { unsatisfied } from "./interfaces.ts";
 import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
@@ -117,15 +118,6 @@ export function expressions(ctx: Context) {
     }
     types.set(callee.object, base);
     return found;
-  }
-
-  // A member of a class or of the bases it embeds, nearest first.
-  function inherited(c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
-    for (let b: ClassInfo | undefined = c; b; b = b.base) {
-      const found = b[table].get(name);
-      if (found) return found;
-    }
-    return undefined;
   }
 
   // TypeScript's access rules: a private member is reachable only from inside its class, and
@@ -266,6 +258,12 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
+    if (typeof to !== "string" && to.kind === "interface") {
+      const reason = unsatisfied(type, to, { classOf, returnOf, paramType }, e);
+      if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
+      excess(e, to);
+      return;
+    }
     if (typeof type !== "string" && type.kind === "class" && typeof to !== "string" && to.kind === "class" && derives(type, to)) {
       throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
     }

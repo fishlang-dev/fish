@@ -306,6 +306,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // Builds a value of `to` from the matching fields of a wider value of `from`.
   function project(v: string, from: Type, to: Type): string {
     if (from === to || typeof from === "string" || typeof to === "string") return v;
+    if (from.kind === "interface" || to.kind === "interface") throw new Error("internal error: an interface reached codegen");
     // A class built from a literal starts with its embedded base, built the same way.
     const embeds = to.kind === "class" && to.base;
     let result = "undef";

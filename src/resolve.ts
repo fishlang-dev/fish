@@ -1,13 +1,13 @@
 import { CompileError } from "./diag.ts";
-import type { Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { objectType, type ClassType, type Field, type Type } from "./typing.ts";
+import type { Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import { interfaceType, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
 
-// Aliases and classes share one namespace of type names.
-export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, classes: Map<string, unknown>) {
-  typeName(s.name, s, aliases, classes);
+// Aliases, classes and interfaces share one namespace of type names.
+export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...others: Map<string, unknown>[]) {
+  typeName(s.name, s, aliases, ...others);
   if (s.typeParams.length > 0) {
     throw unsupported("generic type aliases", { start: s.typeParams[0]!.start, end: s.typeParams.at(-1)!.end });
   }
@@ -19,16 +19,26 @@ export function paramName(p: Param): string {
   return p.pattern.name;
 }
 
-export function typeName(name: string, at: Span, aliases: Map<string, unknown>, classes: Map<string, unknown>) {
+export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
   if (BUILT_IN_TYPES.has(name)) throw new CompileError(`'${name}' is a built-in type`, at.start, at.end);
-  if (aliases.has(name) || classes.has(name)) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
+  if (namespaces.some((n) => n.has(name))) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
 }
 
-// Resolves every alias up front, so an unused one is still checked.
-export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, ClassType>) {
+// A field holds a value, and an interface type describes values without being one.
+export function storable(type: Type, at: Span): Type {
+  if (typeof type !== "string" && type.kind === "interface") {
+    throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
+  }
+  return type;
+}
+
+// Resolves every alias and interface up front, so an unused one is still checked.
+export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, ClassType>, interfaces: Map<string, Interface>) {
   const resolved = new Map<TypeAlias, Type>();
   const resolving = new Set<TypeAlias>();
+  const traits = new Map<Interface, InterfaceType>();
   aliases.forEach(aliasType);
+  interfaces.forEach(interfaceOf);
   return { resolveType, paramType };
 
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
@@ -46,7 +56,6 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
     return resolveType(p.type);
   }
 
-
   function resolveType(t: TypeNode): Type {
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
@@ -59,7 +68,45 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
     if (alias) return aliasType(alias);
     const named = classes.get(t.name);
     if (named) return named;
+    const trait = interfaces.get(t.name);
+    if (trait) return interfaceOf(trait);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
+  }
+
+  // The interface is registered before its members resolve, so a member may name it.
+  function interfaceOf(i: Interface): InterfaceType {
+    const found = traits.get(i);
+    if (found) return found;
+    const t = interfaceType(i.name);
+    traits.set(i, t);
+    if (i.typeParams.length > 0) throw unsupported("generic interfaces", { start: i.typeParams[0]!.start, end: i.typeParams.at(-1)!.end });
+    const add = (name: string, at: Span) => {
+      if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
+        throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
+      }
+    };
+    for (const node of i.extends) {
+      const base = resolveType(node);
+      if (typeof base === "string" || base.kind !== "interface") throw new CompileError("an interface can only extend interfaces", node.start, node.end);
+      for (const f of base.fields) add(f.name, node), t.fields.push(f);
+      for (const m of base.methods) add(m.name, node), t.methods.push(m);
+    }
+    for (const m of i.members) {
+      if (m.kind === "method") {
+        if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+        if (m.optional) throw unsupported("optional methods", m);
+        if (m.typeParams.length > 0) throw unsupported("generic methods", m);
+        if (!m.returns) throw new CompileError(`method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
+        add(m.name, m);
+        const method: Method = { name: m.name, params: m.params.map((p) => paramType(p)), returns: resolveType(m.returns) };
+        t.methods.push(method);
+      } else {
+        const f = member(m);
+        add(f.name, m);
+        t.fields.push(f);
+      }
+    }
+    return t;
   }
 
   // An object type holds its fields inline, so one that contains itself has no finite size.
@@ -80,7 +127,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classes: Map<string, C
     if (m.optional) throw unsupported("optional properties", m);
     if (m.readonly) throw unsupported("'readonly' properties", m);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    return { name: m.name, type: resolveType(m.type) };
+    return { name: m.name, type: storable(resolveType(m.type), m) };
   }
 }
 

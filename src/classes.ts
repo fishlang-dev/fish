@@ -51,7 +51,6 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
   if (node.extends && node.extends.kind !== "ident") {
     throw unsupported(node.extends.kind === "instantiation" ? "generic base classes" : "base class expressions", node.extends);
   }
-  if (node.implements.length > 0) throw unsupported("'implements' clauses", span(node.implements));
   const fields: FieldDecl[] = [];
   const constructors = node.members.filter((m) => m.kind === "constructor");
   if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
@@ -202,6 +201,15 @@ export function extend(c: ClassInfo, base: ClassInfo) {
   const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;
   c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];
+}
+
+// A member of a class or of the bases it embeds, nearest first.
+export function inherited(c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
+  for (let b: ClassInfo | undefined = c; b; b = b.base) {
+    const found = b[table].get(name);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 // With embedding, a base's own use of `this.m` keeps reaching the base's `m`, where
