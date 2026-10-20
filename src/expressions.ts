@@ -101,9 +101,9 @@ function conditional(c: Cursor): Expr {
   return { kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
 }
 
-const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", "&=", "|=", "^=", "&&=", "||=", "??="]);
+const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "&&=", "||=", "??="]);
 
-// Like `>>`, `>>=` and `>>>=` arrive as separate adjacent tokens and are rejoined here.
+// Like `>>`, `>>=`, `>>>=` and `<<=` arrive as separate adjacent tokens and are rejoined here.
 function assignOperator(c: Cursor): [AssignOp, number] | undefined {
   const t = c.peek();
   if (t.kind !== "punct") return undefined;
@@ -113,7 +113,7 @@ function assignOperator(c: Cursor): [AssignOp, number] | undefined {
     const n = c.peek(i);
     if (n.kind !== "punct" || (i > 0 && n.start !== c.peek(i - 1).end)) break;
     text += n.text;
-    if (text === ">>=" || text === ">>>=") return [text, i + 1];
+    if (text === ">>=" || text === ">>>=" || text === "<<=") return [text, i + 1];
   }
   return undefined;
 }
@@ -158,8 +158,13 @@ function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
   const t = c.peek();
   if (t.kind === "ident") return t.text === "instanceof" || (t.text === "in" && c.inAllowed) ? [t.text, 1] : undefined;
   if (t.kind !== "punct") return undefined;
-  if (t.text !== ">") return isBinaryOp(t.text) ? [t.text, 1] : undefined;
   const adjacent = (i: number, text: string) => isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
+  if (t.text === "<") {
+    // `<<=` arrives as `<` then `<=`, and is an assignment.
+    if (adjacent(1, "<=")) return undefined;
+    return adjacent(1, "<") ? ["<<", 2] : ["<", 1];
+  }
+  if (t.text !== ">") return isBinaryOp(t.text) ? [t.text, 1] : undefined;
   let count = 1;
   while (count < 3 && adjacent(count, ">")) count++;
   // `>>=` and `>>>=` are assignments, not comparisons.

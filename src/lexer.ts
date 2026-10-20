@@ -19,11 +19,12 @@ export type Token = {
 // Matches punctuation and keywords, never a literal with the same text.
 export const isToken = (t: Token, text: string) => (t.kind === "punct" || t.kind === "ident") && t.text === text;
 
-// Longest first, so `===` wins over `==` over `=`. `>>` and `>=` are left to the
-// parser to compose from single `>` tokens once generics arrive, as TS does.
+// Longest first, so `===` wins over `==` over `=`. `>>`, `>=` and `<<` are left to the
+// parser to compose from single `<` and `>` tokens, since `A<B<C>>` closes two generics and
+// `F<<T>() => T>` opens two, as TS does.
 const PUNCT = [
-  "**=", "<<=", "&&=", "||=", "??=", "...", "===", "!==",
-  "**", "<<", "=>", "==", "!=", "<=", "&&", "||", "??", "?.", "++", "--",
+  "**=", "&&=", "||=", "??=", "...", "===", "!==",
+  "**", "=>", "==", "!=", "<=", "&&", "||", "??", "?.", "++", "--",
   "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
   "{", "}", "(", ")", "[", "]", ";", ",", ".", ":", "?", "=", "<", ">",
   "+", "-", "*", "/", "%", "!", "|", "&", "^", "~", "@",

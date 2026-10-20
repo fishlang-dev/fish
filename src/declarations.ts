@@ -21,6 +21,8 @@ export function atDeclarationKeyword(c: Cursor): Stmt | undefined {
   if ((c.at("namespace") || c.at("module")) && sameLine && (next.kind === "ident" || (c.at("module") && next.kind === "string"))) {
     return namespaceDeclaration(c);
   }
+  // Inside `declare module "m" { }`, `global { }` augments the global scope without `declare`.
+  if (c.at("global") && isToken(next, "{") && sameLine) return namespaceDeclaration(c);
   if (c.at("declare") && sameLine && (DECLARABLE.has(next.text) && next.kind === "ident")) {
     c.next();
     const body = c.at("global") ? namespaceDeclaration(c) : statement(c);

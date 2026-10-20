@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parse, type Specifier, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
@@ -164,6 +166,7 @@ const SHAPES: [string, string][] = [
   ["({ a }: A) => B", "(({ a: a }: A) => B)"],
   ["([a, b]: [A, B], c) => B", "(([a, b]: [A, B], c) => B)"],
   ["({ a } | B)", "({ property a } | B)"],
+  ["Extends<<T>() => T extends X ? 1 : 0, Y>", "Extends<(<T>() => (T extends X ? 1 : 0)), Y>"],
   ["1.5 | 0xff | 1n | -1.5", "(1.5 | 0xff | 1n | -1.5)"],
 ];
 
@@ -291,6 +294,8 @@ const EXPRESSIONS: [string, string][] = [
   ["a < b << c", "(a < (b << c))"],
   ["a in b instanceof c", "((a in b) instanceof c)"],
   ["a << b + c", "(a << (b + c))"],
+  ["a <<= b << c", "(a <<= (b << c))"],
+  ["a < < b", "error"],
   ["a + b * c", "(a + (b * c))"],
   ["a - b - c", "((a - b) - c)"],
   ["a * b ** c", "(a * (b ** c))"],
@@ -359,7 +364,8 @@ const EXPRESSIONS: [string, string][] = [
 ];
 
 for (const [src, shape] of EXPRESSIONS) {
-  test(src, () => expect(showExpr(parseExpr(src))).toBe(shape));
+  if (shape === "error") test(src, () => expect(() => parseExpr(src)).toThrow());
+  else test(src, () => expect(showExpr(parseExpr(src))).toBe(shape));
 }
 
 for (const src of ["-a ** b", "typeof a ** b", "a * -b ** c"]) {
@@ -674,4 +680,14 @@ const MODULES: [string, string][] = [
 
 for (const [stmt, shape] of MODULES) {
   test(stmt, () => expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape));
+}
+
+// The design doc's bootstrap path: the compiler's own TypeScript is already valid Fish.
+for (const dir of ["src", "tests"]) {
+  const path = join(import.meta.dir, "..", dir);
+  for (const file of readdirSync(path).filter((f) => f.endsWith(".ts"))) {
+    test(`${dir}/${file} parses`, () => {
+      parse(readFileSync(join(path, file), "utf8"));
+    });
+  }
 }
