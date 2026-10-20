@@ -1,0 +1,9 @@
+node_modules/
+*.ll
+
+# Religion workflow files, kept local
+religion/
+.claude/
+.agents/
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,16 @@
+{
+  "name": "fish",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fishc": "src/main.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2"
+  }
+}
