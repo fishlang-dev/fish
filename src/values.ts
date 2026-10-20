@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, holdsRef, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, ClassType, Field, Type } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, holdsRef, isCopy, literalType, lower, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import type { Access, ClassType, Field, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -69,7 +69,7 @@ export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
   const unions: Union = {
-    types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
+    types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
   return { value, condition, effect, coerce };
@@ -96,7 +96,7 @@ export function expressions(ctx: Context) {
     }
     if (isPrint(callee)) {
       for (const a of e.args) {
-        const type = a.kind === "string" ? "void" : value(a);
+        const type = a.kind === "string" ? "void" : read(a);
         if (printable(type)) continue;
         throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
           : "printing an object is not supported yet; print its fields", a.start, a.end);
@@ -144,7 +144,9 @@ export function expressions(ctx: Context) {
   function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
     if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return undefined;
-    return value(object);
+    const type = value(object);
+    // A method called through a reference gets the pointer itself.
+    return typeof type !== "string" && type.kind === "ref" ? type.to : type;
   }
 
   // A method of an interface, called while checking a generic body at its definition on a
@@ -280,9 +282,15 @@ export function expressions(ctx: Context) {
           if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
           return found;
         }
-        const object = value(e.object);
+        const through = value(e.object);
+        const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
+        // A field read through a reference loads what it points to; a getter gets the pointer.
+        const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
-        if (shared) return shared;
+        if (shared) {
+          load();
+          return shared;
+        }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" ? undefined : field(object, e.name);
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
@@ -304,6 +312,7 @@ export function expressions(ctx: Context) {
           returnOf(instance, e);
           calls.set(e, instance);
         }
+        if (!calls.has(e)) load();
         return found.type;
       }
       case "object": {
@@ -385,6 +394,20 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to || lower(type) === lower(to)) return;
+    if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
+      borrow(e, type, to, message);
+      return;
+    }
+    // A reference gives its value where one is wanted only by copying it: nothing moves out of
+    // a borrow.
+    if (typeof type !== "string" && type.kind === "ref" && (typeof to === "string" || to.kind !== "ref")) {
+      if (!isCopy(type.to) && fits(type.to, to)) {
+        throw new CompileError(`can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end);
+      }
+      coercions.set(e, type.to);
+      coerce(e, type.to, to, message);
+      return;
+    }
     if (typeof to !== "string" && to.kind === "union") {
       intoUnion(e, type, to, message, unions);
       return;
@@ -414,6 +437,16 @@ export function expressions(ctx: Context) {
     // copying field by field can't read, so that copy is rejected in the instance.
     if (lower(type) !== type && !fits(lower(type), lower(to))) throw new CompileError(message, e.start, e.end);
     excess(e, to);
+    coercions.set(e, to);
+  }
+
+  // A value meeting a reference is lent rather than handed over. A place is lent where it
+  // lives, so it must be exactly the type borrowed; a temporary is converted first. Lending
+  // mutably needs a place that could be assigned.
+  function borrow(e: Expr, type: Type, to: RefType, message: string) {
+    const exact = lower(type) === lower(to.to);
+    if (place(e) ? !exact : !exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
+    if (to.mutable && place(e)) changeable(e, "mutably borrow");
     coercions.set(e, to);
   }
 
@@ -549,8 +582,14 @@ export function expressions(ctx: Context) {
       throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
     }
     const local = locals.get(root)!;
+    // A shared reference never changes what it points to; changing through a mutable one
+    // comes later.
+    if (typeof local.type !== "string" && local.type.kind === "ref") {
+      if (local.type.mutable) throw unsupported("changes through 'Mut' references", target);
+      throw new CompileError(`cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+    }
     if (local.param) {
-      const what = action === "assign to" ? "assigning to" : "calling a mutating method on";
+      const what = action === "assign to" ? "assigning to" : action === "mutably borrow" ? "mutably borrowing" : "calling a mutating method on";
       throw new CompileError(`${what} a parameter is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
     if (!local.mutable) {
@@ -577,7 +616,15 @@ export function expressions(ctx: Context) {
 
   // An operator works on a literal's base type, so `1` adds like any i64.
   function operand(e: Expr): Type {
-    return widen(e, value(e));
+    return widen(e, read(e));
+  }
+
+  // A value that is only read, seen through a reference to it.
+  function read(e: Expr): Type {
+    const type = value(e);
+    if (typeof type === "string" || type.kind !== "ref") return type;
+    coercions.set(e, type.to);
+    return type.to;
   }
 
   // An operand of an enum, a union of integer literals, works as an i64 too.

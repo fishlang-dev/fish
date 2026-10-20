@@ -51,6 +51,11 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     bindings.set(node.name, arg);
     return;
   }
+  // `Ref<T>` against a value or a reference borrows a T.
+  if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length === 1 && !names.has(node.name)) {
+    infer(node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
+    return;
+  }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
@@ -261,6 +266,9 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
   // it gets TypeScript's excess property check.
   function implicitArgument(arg: Expr, type: Type, bound: ObjectType | InterfaceType): Type {
+    if (typeof type !== "string" && type.kind === "ref") {
+      throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
+    }
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
     if (bound.kind === "interface") {
       const reason = unsatisfied(type, bound, members, arg);

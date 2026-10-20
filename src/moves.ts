@@ -2,18 +2,11 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
-import { field, type Type } from "./typing.ts";
+import { field, isCopy, type Type } from "./typing.ts";
 
 // Moves: a value that isn't Copy has one owner, so passing, assigning, storing or returning
 // it hands it over, and the place it came from can't be used until it is assigned again.
 // This walks a checked body in evaluation order, tracking which places have moved.
-
-// Primitives, literals, and unions of nothing else are copied; objects, instances, interface
-// values and type parameters move.
-export function isCopy(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal") return true;
-  return t.kind === "union" && t.members.every(isCopy);
-}
 
 // Where a place moved, the note explaining it, and the pass of each loop it moved on. A place
 // is a local's id, or `this`, followed by a field path, like `3.inner.x`.
@@ -28,7 +21,9 @@ type Consumer = (place: string) => string;
 // What names a place: a variable, `this`, a field, or a shorthand property naming a variable.
 type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 
-export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps }: Instance) {
+const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
+
+export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps, coercions }: Instance) {
   let state: State = new Map();
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
   const exits = new Map<Stmt, State>();
@@ -145,6 +140,9 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   // value that is only read, like a receiver or an operand, is borrowed. A statement's value
   // is discarded.
   function expr(e: Expr, consume?: Consumer, discarded = false) {
+    // A value lent to a reference stays where it is.
+    const lent = coercions.get(e);
+    if (lent && typeof lent !== "string" && lent.kind === "ref" && !isRef(types.get(e)!)) consume = undefined;
     switch (e.kind) {
       case "int":
       case "bool":
@@ -228,6 +226,10 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
     const place = key(e)!;
     usable(e, place);
     if (!consume || isCopy(type) || !state) return;
+    const root = locals.get(rootOf(e) as never);
+    if (root && isRef(root.type)) {
+      throw new CompileError(`'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
+    }
     if (place.startsWith("this")) {
       throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
     }
@@ -282,6 +284,10 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
     if (e.kind !== "member" || calls.has(e) || !types.has(e.object)) return undefined;
     const object = key(e.object);
     return object === undefined ? undefined : `${object}.${e.name}`;
+  }
+
+  function rootOf(e: Named): Named {
+    return e.kind === "member" ? rootOf(e.object) : e;
   }
 
   // How a place reads in a message.

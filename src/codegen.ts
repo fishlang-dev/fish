@@ -7,6 +7,11 @@ import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
 import { field, fieldPath, type ClassType, type ObjectType } from "./typing.ts";
 
+const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
+
+// What a reference points to, or the type itself.
+const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
+
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
 };
@@ -260,7 +265,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return undefined;
       }
       // The compiler's `clone()`: no value owns heap memory yet, so a copy of its bits is deep.
-      return value((e.callee as Extract<Expr, { kind: "member" }>).object);
+      const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
+      return convert(value(object), types.get(object)!, types.get(e)!);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.self && object ? thisPointer(target, object) : undefined;
@@ -273,7 +279,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
   // that declares the method.
   function thisPointer(target: Instance, object: Expr): string {
-    return upcast(receiver(object), types.get(object) as ClassType, target.body.owner!);
+    return upcast(receiver(object), referent(types.get(object)!) as ClassType, target.body.owner!);
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
@@ -305,6 +311,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // gets a slot.
   function receiver(object: Expr): string {
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
+    // A reference already points where the receiver lives.
+    if (isRef(types.get(object)!)) return evaluate(object);
     let root: Expr = object;
     while (root.kind === "member" && !calls.has(root)) root = root.object;
     if (root.kind === "ident" || root.kind === "this") return address(object);
@@ -316,9 +324,22 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // An expression's value, copied down to the declared type it meets when that is narrower.
   function value(e: Expr): string {
-    const result = evaluate(e);
     const to = coercions.get(e);
-    return to ? convert(result, types.get(e)!, to) : result;
+    const type = types.get(e)!;
+    if (to && typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) return borrowed(e, to.to);
+    const result = evaluate(e);
+    return to ? convert(result, type, to) : result;
+  }
+
+  // A pointer to a value lent to a reference: where a place lives, or a slot holding a
+  // temporary converted to the type borrowed.
+  function borrowed(e: Expr, to: Type): string {
+    let root = e;
+    while (root.kind === "member" && !calls.has(root)) root = root.object;
+    if (root.kind === "ident" || root.kind === "this") return address(e);
+    const slot = alloca(llvm(to));
+    emit(`store ${llvm(to)} ${convert(evaluate(e), types.get(e)!, to)}, ptr ${slot}`);
+    return slot;
   }
 
   function evaluate(e: Expr): string {
@@ -342,7 +363,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
         // An enum member's value is known, and the enum's name is no value to evaluate.
         if (!types.has(e.object)) return "zeroinitializer";
-        const shared = types.get(e.object)!;
+        // Through a reference, the value it points to.
+        const shared = coercions.get(e.object) ?? types.get(e.object)!;
         if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
         const object = shared as ObjectType | ClassType;
         const result = temp();
@@ -479,10 +501,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       emit(`${payload} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
       return payload;
     }
-    const object = stored(target.object) as ObjectType | ClassType;
+    const holder = stored(target.object);
+    const object = referent(holder) as ObjectType | ClassType;
+    // Through a reference, the field is inside what it points to.
+    const base = isRef(holder) ? evaluate(target.object) : address(target.object);
     const result = temp();
     const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
-    emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, ${path}`);
+    emit(`${result} = getelementptr ${llvm(object)}, ptr ${base}, i32 0, ${path}`);
     return result;
   }
 
@@ -490,7 +515,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // wider type than the one it is stored with.
   function stored(e: Expr): Type {
     if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
-    return field(stored(e.object) as ObjectType | ClassType, e.name)!.type;
+    return field(referent(stored(e.object)) as ObjectType | ClassType, e.name)!.type;
   }
 
   // The right side runs only when the left side does not already decide the result.

@@ -132,6 +132,14 @@ export function refType(to: Type, mutable: boolean): RefType {
 
 const refs = new Map<string, RefType>();
 
+// Primitives, literals, references, and unions of nothing else are copied; objects,
+// instances, interface values and type parameters move. A mutable reference passed on is
+// lent again rather than moved, so it copies too.
+export function isCopy(t: Type): boolean {
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "ref") return true;
+  return t.kind === "union" && t.members.every(isCopy);
+}
+
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
 export function holdsRef(t: Type): boolean {
   if (typeof t === "string") return false;
