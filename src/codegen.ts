@@ -2,7 +2,7 @@ import { isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
 import type { BinaryOp, Expr, Span, Stmt } from "./parser.ts";
 
-const LLVM: Record<Type, string> = { i64: "i64" };
+const LLVM: Record<Type, string> = { i64: "i64", void: "void" };
 
 const I64_MIN = -(1n << 63n);
 
@@ -46,8 +46,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, locals }: Checked, { src, file, release }: Options): string {
-  const userFuncs = new Set(funcs.map((f) => f.name));
+export function codegen({ funcs, locals, returns }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -55,14 +54,19 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
   let body: string[] = [];
   let temps = 0;
   let labels = 0;
+  let currentFunction = "";
 
   for (const f of funcs) {
+    currentFunction = f.name;
     allocas = [];
     body = [];
     temps = 0;
     labels = 0;
+    const type = returnType(f.name);
     f.body.forEach(statement);
-    out.push(`define void @"fsh.${f.name}"() {`, "entry:", ...allocas, ...body, "  ret void", "}", "");
+    // The last block is unreachable when every path returned; the checker guarantees it for values.
+    const end = type === "void" ? "ret void" : "unreachable";
+    out.push(`define ${LLVM[type]} @"fsh.${f.name}"() {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
   }
 
   return [
@@ -94,6 +98,12 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
     return `%${local.name}.${local.id}`;
   }
 
+  function returnType(name: string): Type {
+    const type = returns.get(name);
+    if (!type) throw new Error(`internal error: no return type for ${name}`);
+    return type;
+  }
+
   function resolved(node: Expr | Stmt): Local {
     const local = locals.get(node);
     if (!local) throw new Error("internal error: unresolved name");
@@ -104,6 +114,11 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
     switch (s.kind) {
       case "expr":
         if (s.expr.kind === "call") call(s.expr.callee, s.expr.args);
+        return;
+      case "return":
+        emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
+        // Anything after a return goes in a fresh block that nothing branches to.
+        body.push(`${label()}:`);
         return;
       case "let": {
         const local = resolved(s);
@@ -121,9 +136,21 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
     }
   }
 
-  function call(callee: Expr, args: Expr[]) {
-    if (callee.kind === "ident" && userFuncs.has(callee.name)) emit(`call void @"fsh.${callee.name}"()`);
-    else if (isPrint(callee)) print(args);
+  // Returns the call's result, or undefined for a call that returns nothing.
+  function call(callee: Expr, args: Expr[]): string | undefined {
+    if (callee.kind === "ident" && returns.has(callee.name)) {
+      const type = returnType(callee.name);
+      const invoke = `call ${LLVM[type]} @"fsh.${callee.name}"()`;
+      if (type === "void") {
+        emit(invoke);
+        return undefined;
+      }
+      const result = temp();
+      emit(`${result} = ${invoke}`);
+      return result;
+    }
+    if (isPrint(callee)) print(args);
+    return undefined;
   }
 
   function value(e: Expr): string {
@@ -135,6 +162,11 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
         const t = temp();
         emit(`${t} = load ${LLVM[local.type]}, ptr ${slot(local)}`);
         return t;
+      }
+      case "call": {
+        const result = call(e.callee, e.args);
+        if (!result) throw new Error("internal error: void call used as a value");
+        return result;
       }
       case "unary":
         return arithmetic("-", "0", value(e.operand), e, "negate");

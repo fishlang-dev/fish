@@ -20,9 +20,10 @@ export type Stmt = Span & (
   | { kind: "let"; name: string; mutable: boolean; type: TypeRef | undefined; init: Expr }
   // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
   | { kind: "assign"; target: Expr; op: BinaryOp | "="; value: Expr }
+  | { kind: "return"; value: Expr | undefined }
 );
 
-export type Func = Span & { name: string; body: Stmt[] };
+export type Func = Span & { name: string; returnType: TypeRef | undefined; body: Stmt[] };
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative.
 const PRECEDENCE = { "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 } as const;
@@ -79,8 +80,9 @@ export function parse(src: string): Func[] {
     const name = ident().text;
     expect("(");
     expect(")");
+    const returnType = at(":") ? annotation() : undefined;
     const body = block();
-    return { name, body, start, end: tokens[pos - 1]!.end };
+    return { name, returnType, body, start, end: tokens[pos - 1]!.end };
   }
 
   function block(): Stmt[] {
@@ -101,17 +103,18 @@ export function parse(src: string): Func[] {
     if (at("let") || at("const")) {
       const mutable = next().text === "let";
       const name = ident().text;
-      let type: TypeRef | undefined;
-      if (at(":")) {
-        next();
-        if (peek().kind !== "ident") throw error("expected a type");
-        const t = next();
-        type = { name: t.text, start: t.start, end: t.end };
-      }
+      const type = at(":") ? annotation() : undefined;
       if (!at("=")) throw error("expected '=' (declarations need an initializer for now)");
       next();
       const init = expression();
       return { kind: "let", name, mutable, type, init, start, end: init.end };
+    }
+    if (at("return")) {
+      const end = next().end;
+      // A newline after `return` ends the statement, as in JavaScript.
+      if (at(";") || at("}") || peek().newlineBefore || peek().kind === "eof") return { kind: "return", value: undefined, start, end };
+      const value = expression();
+      return { kind: "return", value, start, end: value.end };
     }
     if (at("++") || at("--")) {
       const op = next();
@@ -128,6 +131,14 @@ export function parse(src: string): Func[] {
     // A newline before `++` ends the statement instead, as in JavaScript.
     if ((at("++") || at("--")) && !t.newlineBefore) return increment(expr, next(), start);
     return { kind: "expr", expr, start, end: expr.end };
+  }
+
+  // `: Type` after a declaration or parameter list.
+  function annotation(): TypeRef {
+    expect(":");
+    if (peek().kind !== "ident") throw error("expected a type");
+    const t = next();
+    return { name: t.text, start: t.start, end: t.end };
   }
 
   function increment(target: Expr, op: Token, start: number): Stmt {

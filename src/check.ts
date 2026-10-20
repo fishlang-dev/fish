@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
-import type { Expr, Func, Stmt, TypeRef } from "./parser.ts";
+import type { Expr, Func, Span, Stmt, TypeRef } from "./parser.ts";
 
-export type Type = "i64";
+export type Type = "i64" | "void";
 
 export type Local = { name: string; type: Type; mutable: boolean; id: number };
 
@@ -11,6 +11,8 @@ export type Checked = {
   types: Map<Expr, Type>;
   // The binding each name use and declaration refers to, after shadowing.
   locals: Map<Expr | Stmt, Local>;
+  // Each function's return type, written or inferred.
+  returns: Map<string, Type>;
 };
 
 type Call = Extract<Expr, { kind: "call" }>;
@@ -24,122 +26,170 @@ export function isPrint(callee: Expr): boolean {
 }
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
+// A function body is checked when first needed, so return types can be inferred in any order.
 export function check(funcs: Func[]): Checked {
-  const defined = new Set<string>();
+  const byName = new Map<string, Func>();
   for (const f of funcs) {
-    if (defined.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
-    defined.add(f.name);
+    if (byName.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
+    byName.set(f.name, f);
   }
-  if (!defined.has("main")) throw new CompileError("no main() function; execution starts there", 0, 0);
+  const main = byName.get("main");
+  if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   const types = new Map<Expr, Type>();
   const locals = new Map<Expr | Stmt, Local>();
-  let scopes: Map<string, Local>[] = [];
+  const returns = new Map<string, Type>();
+  const inProgress = new Set<Func>();
   let nextId = 0;
 
-  for (const f of funcs) {
-    scopes = [new Map()];
+  funcs.forEach(checkBody);
+  if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
+  return { funcs, types, locals, returns };
+
+  function returnOf(f: Func, at: Span): Type {
+    if (f.returnType) return resolveType(f.returnType);
+    if (inProgress.has(f)) {
+      throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
+    }
+    checkBody(f);
+    return returns.get(f.name)!;
+  }
+
+  function checkBody(f: Func) {
+    if (returns.has(f.name)) return;
+    inProgress.add(f);
+    const declared = f.returnType && resolveType(f.returnType);
+    let inferred: Type | undefined;
+    const scopes: Map<string, Local>[] = [new Map()];
+
     f.body.forEach(statement);
-  }
-  return { funcs, types, locals };
+    const type = declared ?? inferred ?? "void";
+    if (type !== "void" && !alwaysReturns(f.body)) {
+      const at = f.returnType ?? f;
+      throw new CompileError("not all code paths return a value", at.start, at.end);
+    }
+    returns.set(f.name, type);
+    inProgress.delete(f);
 
-  function statement(s: Stmt) {
-    switch (s.kind) {
-      case "expr":
-        if (s.expr.kind !== "call") throw new CompileError("only calls are supported as statements so far", s.start, s.end);
-        call(s.expr);
-        return;
-      case "let": {
-        const declared = s.type && resolveType(s.type);
-        const type = value(s.init);
-        if (declared && declared !== type) {
-          throw new CompileError(`type '${type}' is not assignable to type '${declared}'`, s.init.start, s.init.end);
+    function statement(s: Stmt) {
+      switch (s.kind) {
+        case "expr":
+          if (s.expr.kind !== "call") throw new CompileError("only calls are supported as statements so far", s.start, s.end);
+          call(s.expr);
+          return;
+        case "let": {
+          const annotated = s.type && resolveType(s.type);
+          const type = value(s.init);
+          if (annotated && annotated !== type) {
+            throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, s.init.start, s.init.end);
+          }
+          const scope = scopes[scopes.length - 1]!;
+          if (scope.has(s.name)) throw new CompileError(`cannot redeclare '${s.name}' in the same scope`, s.start, s.end);
+          const local = { name: s.name, type, mutable: s.mutable, id: nextId++ };
+          scope.set(s.name, local);
+          locals.set(s, local);
+          return;
         }
-        const scope = scopes[scopes.length - 1]!;
-        if (scope.has(s.name)) throw new CompileError(`cannot redeclare '${s.name}' in the same scope`, s.start, s.end);
-        const local = { name: s.name, type, mutable: s.mutable, id: nextId++ };
-        scope.set(s.name, local);
-        locals.set(s, local);
-        return;
+        case "assign": {
+          if (s.target.kind !== "ident") throw new CompileError("can only assign to a variable", s.target.start, s.target.end);
+          value(s.target);
+          const local = locals.get(s.target)!;
+          if (!local.mutable) {
+            throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
+          }
+          const type = value(s.value);
+          if (type !== local.type) {
+            throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, s.value.start, s.value.end);
+          }
+          locals.set(s, local);
+          return;
+        }
+        case "return": {
+          const type = s.value ? value(s.value) : "void";
+          const expected = declared ?? inferred;
+          if (expected && type !== expected) {
+            const at = s.value ?? s;
+            throw new CompileError(`type '${type}' is not assignable to return type '${expected}'`, at.start, at.end);
+          }
+          inferred = type;
+          return;
+        }
       }
-      case "assign": {
-        if (s.target.kind !== "ident") throw new CompileError("can only assign to a variable", s.target.start, s.target.end);
-        value(s.target);
-        const local = locals.get(s.target)!;
-        if (!local.mutable) {
-          throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
+    }
+
+    // Checks a call's arguments; returns the user function it calls, or undefined for print.
+    function call(e: Call): Func | undefined {
+      const { callee } = e;
+      const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
+      if (target) {
+        if (e.args.length > 0) throw new CompileError(`'${target.name}' takes no arguments`, e.start, e.end);
+        return target;
+      }
+      if (isPrint(callee)) {
+        for (const a of e.args) if (a.kind !== "string") value(a);
+        return undefined;
+      }
+      const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
+      throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+    }
+
+    function value(e: Expr): Type {
+      const type = typeOf(e);
+      types.set(e, type);
+      return type;
+    }
+
+    function typeOf(e: Expr): Type {
+      switch (e.kind) {
+        case "int":
+          if (e.value > I64_MAX) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
+          return "i64";
+        case "ident": {
+          const local = lookup(e.name);
+          if (!local) {
+            const message = byName.has(e.name) ? `functions can't be used as values yet` : `cannot find name '${e.name}'`;
+            throw new CompileError(message, e.start, e.end);
+          }
+          locals.set(e, local);
+          return local.type;
         }
-        const type = value(s.value);
-        if (type !== local.type) {
-          throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, s.value.start, s.value.end);
+        case "string":
+          throw new CompileError("strings can only be passed straight to print for now", e.start, e.end);
+        case "member":
+          throw new CompileError("member access is not supported yet", e.start, e.end);
+        case "call": {
+          const target = call(e);
+          const type = target ? returnOf(target, e) : "void";
+          if (type === "void") {
+            const what = target ? `'${target.name}'` : "printing";
+            throw new CompileError(`${what} does not return a value`, e.start, e.end);
+          }
+          return type;
         }
-        locals.set(s, local);
-        return;
+        case "unary":
+          return value(e.operand);
+        case "binary":
+          value(e.left);
+          return value(e.right);
       }
     }
-  }
 
-  // User functions take no arguments and return nothing yet.
-  function call(e: Call) {
-    const { callee } = e;
-    if (callee.kind === "ident" && defined.has(callee.name)) {
-      if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
-      return;
-    }
-    if (isPrint(callee)) {
-      for (const a of e.args) if (a.kind !== "string") value(a);
-      return;
-    }
-    const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
-    throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
-  }
-
-  function value(e: Expr): Type {
-    const type = typeOf(e);
-    types.set(e, type);
-    return type;
-  }
-
-  function typeOf(e: Expr): Type {
-    switch (e.kind) {
-      case "int":
-        if (e.value > I64_MAX) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
-        return "i64";
-      case "ident": {
-        const local = lookup(e.name);
-        if (!local) {
-          const message = defined.has(e.name) ? `functions can't be used as values yet` : `cannot find name '${e.name}'`;
-          throw new CompileError(message, e.start, e.end);
-        }
-        locals.set(e, local);
-        return local.type;
+    function lookup(name: string): Local | undefined {
+      for (let i = scopes.length - 1; i >= 0; i--) {
+        const local = scopes[i]!.get(name);
+        if (local) return local;
       }
-      case "string":
-        throw new CompileError("strings can only be passed straight to print for now", e.start, e.end);
-      case "member":
-        throw new CompileError("member access is not supported yet", e.start, e.end);
-      case "call":
-        call(e);
-        throw new CompileError("this call does not return a value", e.start, e.end);
-      case "unary":
-        return value(e.operand);
-      case "binary":
-        value(e.left);
-        return value(e.right);
+      return undefined;
     }
-  }
-
-  function lookup(name: string): Local | undefined {
-    for (let i = scopes.length - 1; i >= 0; i--) {
-      const local = scopes[i]!.get(name);
-      if (local) return local;
-    }
-    return undefined;
   }
 
   function resolveType(t: TypeRef): Type {
-    if (t.name === "i64") return "i64";
+    if (t.name === "i64" || t.name === "void") return t.name;
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
+}
+
+function alwaysReturns(stmts: Stmt[]): boolean {
+  return stmts.some((s) => s.kind === "return");
 }
