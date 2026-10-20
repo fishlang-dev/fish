@@ -24,7 +24,7 @@ export type Body = Span & {
 };
 
 // A field as declared: its annotation, its initializer, or both give its type.
-export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access };
+export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean };
 
 export type ClassInfo = {
   type: ClassType;
@@ -89,12 +89,12 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (m.optional) throw unsupported("optional fields", m);
     if (m.definite) throw unsupported("definite assignment assertions", m);
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    add({ name: m.name, type: m.type, init: m.init, access, start: m.start, end: m.end });
+    add({ name: m.name, type: m.type, init: m.init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
     const access = modifiers(p.modifiers, p, p.pattern.name);
-    return add({ name: p.pattern.name, type: p.type, init: undefined, access, start: p.start, end: p.end });
+    return add({ name: p.pattern.name, type: p.type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end });
   });
 
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
@@ -271,10 +271,11 @@ function assignField(name: string, value: Expr, at: Span): Stmt {
   return { kind: "expr", expr: { kind: "assign", op: "=", target, value, ...s }, ...s };
 }
 
-// A member's access, from its modifiers or a `#` name. `readonly` and the rest come later.
+// A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
 function modifiers(list: string[], at: Span, name: string): Access {
-  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected");
+  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly");
   if (other) throw unsupported(`'${other}' modifiers`, at);
+  list = list.filter((m) => m !== "readonly");
   if (list.length > 1) throw new CompileError("a member can have only one accessibility modifier", at.start, at.end);
   if (name.startsWith("#") && list.length > 0) {
     throw new CompileError("an accessibility modifier can't be used with a private identifier", at.start, at.end);

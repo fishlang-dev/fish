@@ -516,6 +516,7 @@ export function expressions(ctx: Context) {
     let root = target;
     let path = "";
     while (root.kind === "member") {
+      readonly(root, target, action);
       path = `.${root.name}${path}`;
       root = root.object;
     }
@@ -532,6 +533,22 @@ export function expressions(ctx: Context) {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError(`cannot ${action} ${what} is a constant`, target.start, target.end);
     }
+  }
+
+  // A readonly field can't change once constructed, nor can anything inside it. Only its own
+  // class's constructor may assign it, through `this`.
+  function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
+    const object = types.get(e.object);
+    if (typeof object === "string" || !object || !field(object, e.name)?.readonly) return;
+    if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
+    const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
+    throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);
+  }
+
+  // How a place reads in a message, like `p.inner.x`.
+  function placeText(e: Expr): string {
+    if (e.kind === "member") return `${placeText(e.object)}.${e.name}`;
+    return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
 
   // An operator works on a literal's base type, so `1` adds like any i64.

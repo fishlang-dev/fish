@@ -5,7 +5,8 @@
 // counts toward a structural fit, as in TypeScript.
 export type Access = "public" | "private" | "protected";
 
-export type Field = { name: string; type: Type; access?: Access };
+// A readonly field can't be written after construction, at any depth.
+export type Field = { name: string; type: Type; access?: Access; readonly?: boolean };
 
 // Fields are sorted by name, which is also their order in memory.
 export type ObjectType = { kind: "object"; fields: Field[] };
@@ -171,7 +172,7 @@ export function keyOf(t: Type): string {
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
-  const key = sorted.map((f) => `${JSON.stringify(f.name)}:${keyOf(f.type)}`).join(",");
+  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${keyOf(f.type)}`).join(",");
   let t = interned.get(key);
   if (!t) {
     t = { kind: "object", fields: sorted };
@@ -235,5 +236,5 @@ export function show(t: Type): string {
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
-  return `{ ${t.fields.map((f) => `${name(f.name)}: ${show(f.type)}`).join("; ")} }`;
+  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}: ${show(f.type)}`).join("; ")} }`;
 }

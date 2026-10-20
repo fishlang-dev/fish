@@ -66,7 +66,8 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     laidOut.add(c);
     if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
-      if (f.type) return { name: f.name, type: storable(withScope(c.scope, () => resolveType(f.type!)), f), access: f.access };
+      const readonly = f.readonly ? { readonly: true } : {};
+      if (f.type) return { name: f.name, type: storable(withScope(c.scope, () => resolveType(f.type!)), f), access: f.access, ...readonly };
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = {
         name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
@@ -74,7 +75,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       };
       const instance = instanceOf(initializer);
       checkBody(instance);
-      return { name: f.name, type: widenEnum(instance.returns), access: f.access };
+      return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
     });
   }
 

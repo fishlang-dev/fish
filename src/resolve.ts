@@ -181,9 +181,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     if (m.optional) throw unsupported("optional properties", m);
-    if (m.readonly) throw unsupported("'readonly' properties", m);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    return { name: m.name, type: storable(resolveType(m.type), m) };
+    return { name: m.name, type: storable(resolveType(m.type), m), ...(m.readonly && { readonly: true }) };
   }
 }
 
