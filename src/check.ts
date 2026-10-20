@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
-import type { AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { objectType, show, type Field, type Type } from "./typing.ts";
+import type { AssignOp, BinaryOp, Expr, Func as Declared, ObjectProp, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import { field, objectType, show, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, TYPE_FORMS, unsupported, unsupportedDeclaration } from "./unsupported.ts";
 
 export type { Type } from "./typing.ts";
@@ -14,8 +14,9 @@ export type Checked = {
   funcs: Func[];
   // Every value expression's type.
   types: Map<Expr, Type>;
-  // The binding each name use, declaration and parameter refers to, after shadowing.
-  locals: Map<Expr | Stmt | Param, Local>;
+  // The binding each name use, declaration, parameter and shorthand property refers to,
+  // after shadowing.
+  locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
   // Each function's return type, written or inferred.
   returns: Map<string, Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
@@ -77,7 +78,7 @@ export function check(program: Stmt[]): Checked {
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   const types = new Map<Expr, Type>();
-  const locals = new Map<Expr | Stmt | Param, Local>();
+  const locals = new Map<Expr | Stmt | Param | ObjectProp, Local>();
   const returns = new Map<string, Type>();
   const resolvedAliases = new Map<TypeAlias, Type>();
   const resolving = new Set<TypeAlias>();
@@ -182,6 +183,7 @@ export function check(program: Stmt[]): Checked {
           return;
         case "switch": {
           const type = value(s.discriminant);
+          if (typeof type !== "string") throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);
           if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
           // The case bodies share one scope, as in JavaScript.
@@ -279,7 +281,11 @@ export function check(program: Stmt[]): Checked {
         return target;
       }
       if (isPrint(callee)) {
-        for (const a of e.args) if (a.kind !== "string") value(a);
+        for (const a of e.args) {
+          if (a.kind !== "string" && typeof value(a) !== "string") {
+            throw new CompileError("printing an object is not supported yet; print its fields", a.start, a.end);
+          }
+        }
         return undefined;
       }
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -310,8 +316,15 @@ export function check(program: Stmt[]): Checked {
         }
         case "string":
           throw new CompileError("strings can only be passed straight to print for now", e.start, e.end);
-        case "member":
-          throw new CompileError("member access is not supported yet", e.start, e.end);
+        case "member": {
+          if (e.optional) throw unsupported("optional chains", e);
+          const object = value(e.object);
+          const found = typeof object === "string" ? undefined : field(object, e.name);
+          if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          return found.type;
+        }
+        case "object":
+          return objectType(fields(e.props.map(property), e.props));
         case "call": {
           const target = call(e);
           const type = target ? returnOf(target, e) : "void";
@@ -361,6 +374,22 @@ export function check(program: Stmt[]): Checked {
         default:
           throw unsupported(EXPRESSION_FORMS[e.kind], e);
       }
+    }
+
+    // Properties are checked in source order, which is the order they run in.
+    function property(p: ObjectProp): Field {
+      if (p.kind === "property") {
+        if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
+        return { name: p.key, type: value(p.value) };
+      }
+      if (p.kind !== "shorthand") {
+        throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);
+      }
+      if (p.default) throw new CompileError("'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
+      const local = lookup(p.name);
+      if (!local) throw new CompileError(`cannot find name '${p.name}'`, p.start, p.end);
+      locals.set(p, local);
+      return { name: p.name, type: local.type };
     }
 
     function assignable(target: Expr): Local {
@@ -437,6 +466,10 @@ export function check(program: Stmt[]): Checked {
   }
 
   function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Type {
+    // Value equality comes through Eq, which objects don't have yet.
+    if ((op === "===" || op === "!==") && (typeof left !== "string" || typeof right !== "string")) {
+      throw unsupported("comparisons of objects", at);
+    }
     if (op === "===" || op === "!==") {
       if (left === right) return "boolean";
       throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, at.start, at.end);

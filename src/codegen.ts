@@ -1,6 +1,7 @@
 import { ASSIGNMENTS, isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
-import type { ArithmeticOp, BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
+import type { ArithmeticOp, BinaryOp, Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
+import type { ObjectType } from "./typing.ts";
 
 const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
 
@@ -144,7 +145,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
     return type;
   }
 
-  function resolved(node: Expr | Stmt | Param): Local {
+  function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
     const local = locals.get(node);
     if (!local) throw new Error("internal error: unresolved name");
     return local;
@@ -305,6 +306,24 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
         return t;
       }
+      case "member": {
+        const object = types.get(e.object) as ObjectType;
+        const result = temp();
+        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${object.fields.findIndex((f) => f.name === e.name)}`);
+        return result;
+      }
+      case "object": {
+        const type = types.get(e) as ObjectType;
+        // Properties run in source order, then fill the fields in their sorted order.
+        const values = new Map(e.props.map(property));
+        let result = "undef";
+        type.fields.forEach((f, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${values.get(f.name)}, ${i}`);
+          result = next;
+        });
+        return result;
+      }
       case "call": {
         const result = call(e.callee, e.args);
         if (!result) throw new Error("internal error: void call used as a value");
@@ -362,6 +381,16 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
+  }
+
+  // A property's name and value.
+  function property(p: ObjectProp): [string, string] {
+    if (p.kind === "property") return [p.key as string, value(p.value)];
+    if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");
+    const local = resolved(p);
+    const result = temp();
+    emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
+    return [p.name, result];
   }
 
   function store(target: Expr, result: string) {

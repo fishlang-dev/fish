@@ -89,7 +89,6 @@ const EXPRESSIONS: [string, string][] = [
   ["/a+/g", "regular expressions"],
   ["`a${1}b`", "template literals"],
   ["[1, 2]", "array literals"],
-  ["{ a: 1 }", "object literals"],
   ["function () {}", "function expressions"],
   ["(x: i64) => x", "arrow functions"],
   ["1 |> % + 1", "'|>' expressions"],
@@ -103,6 +102,7 @@ const EXPRESSIONS: [string, string][] = [
   ["import('m')", "dynamic imports"],
   ["a!", "non-null assertions"],
   ["f?.()", "optional calls"],
+  ["a?.b", "optional chains"],
   ["console?.log(1)", "optional calls"],
   ["f<i64>()", "type arguments on calls"],
   ["1 as i64", "'as' expressions"],
@@ -117,6 +117,25 @@ for (const [expr, what] of EXPRESSIONS) {
     const start = src.indexOf(expr, src.indexOf("="));
     expect(() => check(parse(src))).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + expr.length,
+    }));
+  });
+}
+
+// Object literal properties besides `key: value` and shorthand: the rejected part is the
+// second column.
+const PROPERTIES: [string, string, string][] = [
+  ["{ ...a }", "spread elements", "...a"],
+  ["{ f() {} }", "methods in object literals", "f() {}"],
+  ["{ get x() { return 1 } }", "accessors in object literals", "get x() { return 1 }"],
+  ["{ [k]: 1 }", "computed property names", "k"],
+];
+
+for (const [expr, what, part] of PROPERTIES) {
+  test(expr, () => {
+    const src = `function main() {\n  let x = ${expr}\n}`;
+    const start = src.indexOf(part, src.indexOf("{", src.indexOf("=")));
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
 }
