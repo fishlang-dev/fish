@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import { EXPRESSION_FORMS, TYPE_FORMS, unsupported, unsupportedDeclaration } from "./unsupported.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
@@ -481,92 +482,6 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
   "<<=": "<<", ">>=": ">>", ">>>=": ">>>", "&&=": "&&", "||=": "||",
 };
 
-// What each expression form is called when the checker rejects it.
-const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional">, string> = {
-  float: "floating-point numbers",
-  bigint: "bigint literals",
-  null: "'null' values",
-  this: "'this' expressions",
-  super: "'super' expressions",
-  regex: "regular expressions",
-  spread: "spread elements",
-  array: "array literals",
-  object: "object literals",
-  function: "function expressions",
-  arrow: "arrow functions",
-  class: "class expressions",
-  privateName: "private names",
-  index: "indexed access expressions",
-  new: "'new' expressions",
-  instantiation: "instantiation expressions",
-  meta: "meta properties",
-  import: "dynamic imports",
-  nonNull: "non-null assertions",
-  destructure: "destructuring assignments",
-  pipe: "'|>' expressions",
-  topic: "topic references",
-  comptime: "comptime expressions",
-  match: "match expressions",
-  sequence: "comma expressions",
-  yield: "'yield' expressions",
-  as: "'as' expressions",
-  satisfies: "'satisfies' expressions",
-  assertion: "type assertions",
-  template: "template literals",
-  tagged: "tagged templates",
-};
-
-// What each type form is called when the checker rejects it.
-const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function">, string> = {
-  literal: "literal types",
-  array: "array types",
-  tuple: "tuple types",
-  object: "object types",
-  union: "union types",
-  intersection: "intersection types",
-  indexed: "indexed access types",
-  query: "'typeof' types",
-  predicate: "type predicates",
-  import: "import types",
-  conditional: "conditional types",
-  infer: "'infer' types",
-  mapped: "mapped types",
-  template: "template literal types",
-};
-
-// Declarations that parse but have no meaning yet, wherever they appear.
-function unsupportedDeclaration(s: Stmt): CompileError | undefined {
-  switch (s.kind) {
-    case "typeAlias":
-      return unsupported("type aliases", s);
-    case "interface":
-      return unsupported("interfaces", s);
-    case "class":
-      return unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
-    case "enum":
-      return unsupported("enums", s);
-    case "namespace":
-      return unsupported("namespaces", s);
-    case "declare":
-      return unsupported("ambient declarations", s);
-    case "import":
-    case "importEquals":
-      return unsupported("imports", s);
-    case "export":
-    case "exportDefault":
-    case "exportNamed":
-    case "exportAll":
-    case "exportAssign":
-    case "exportAsNamespace":
-      return unsupported("exports", s);
-  }
-  return undefined;
-}
-
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
-
-function unsupported(what: string, at: Span): CompileError {
-  return new CompileError(`${what} are not supported yet`, at.start, at.end);
-}
 
 const isTrue = (e: Expr) => e.kind === "bool" && e.value;
