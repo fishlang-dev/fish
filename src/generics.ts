@@ -1,9 +1,9 @@
 import type { Instance } from "./check.ts";
-import type { Body } from "./classes.ts";
+import { declareClass, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, keyOf, show, typeParameter, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
+import { field, fits, keyOf, show, typeParameter, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -194,5 +194,96 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     }
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
     return arg.kind === "object" ? bound : type;
+  }
+}
+
+// What generic classes need from the checker.
+type ClassChecker = {
+  classes: Map<string, ClassInfo>;
+  templates: Map<string, ClassNode & { name: string }>;
+  register(c: ClassInfo): void;
+  layout(c: ClassInfo): void;
+  members: Members;
+  resolveType(t: TypeNode): Type;
+  withScope<T>(bindings: Map<string, Type>, f: () => T): T;
+};
+
+// Generic classes: each set of type arguments declares the class again, on first use.
+export function genericClasses({ classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
+  // Where each instance was first used, and each template's instances by their arguments.
+  const uses = new Map<ClassInfo, Span>();
+  const instancesOf = new Map<ClassNode, Map<string, ClassInfo>>();
+  // An instance made while the resolver is still being built waits for `start` to check its
+  // bounds and lay it out, since both need the resolver.
+  let ready = false;
+  return { classNamed, construct, start, define };
+
+  function start() {
+    ready = true;
+    uses.forEach((_, c) => bounded(c));
+  }
+
+  // A generic class, like a generic body, is checked once at its definition with
+  // placeholders for its type parameters, whether or not anything instantiates it.
+  function define() {
+    templates.forEach((t) => classInstance(t, [...placeholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
+  }
+
+  function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {
+    const c = classes.get(name);
+    if (c && args.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
+    if (c) return c.type;
+    const template = templates.get(name);
+    return template && classInstance(template, args, at).type;
+  }
+
+  // The class a generic class's type arguments make, declared on first use, checked for its
+  // bounds, and named like `Box<i64>`.
+  function classInstance(template: ClassNode & { name: string }, args: Type[], at: Span): ClassInfo {
+    const params = template.typeParams;
+    if (args.length !== params.length) {
+      throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+    }
+    let byKey = instancesOf.get(template);
+    if (!byKey) instancesOf.set(template, byKey = new Map());
+    const key = args.map(keyOf).join(",");
+    const found = byKey.get(key);
+    if (found) return found;
+    if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
+    const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
+    byKey.set(key, c);
+    register(c);
+    uses.set(c, at);
+    if (ready) bounded(c);
+    return c;
+  }
+
+  // A generic class's type arguments must satisfy their bounds, checked where it is first used.
+  function bounded(c: ClassInfo) {
+    const at = uses.get(c)!;
+    withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, resolveType(p.constraint), members, at)));
+    layout(c);
+  }
+
+  // The class a `new` builds; a generic one's type arguments come from the expression or are
+  // inferred from the constructor's arguments.
+  function construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
+    const c = classes.get(name);
+    if (c && typeArgs.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
+    const template = templates.get(name);
+    if (!template) return c;
+    if (typeArgs.length > 0) return classInstance(template, typeArgs.map(resolveType), at);
+    const ctor = template.members.find((m) => m.kind === "constructor");
+    const names = new Set(template.typeParams.map((p) => p.name));
+    const bindings = new Map<string, Type>();
+    ctor?.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+    const args = template.typeParams.map((p) => {
+      const type = bindings.get(p.name);
+      if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      return type;
+    });
+    return classInstance(template, args, at);
   }
 }

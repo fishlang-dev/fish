@@ -1,11 +1,11 @@
 import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { alwaysReturns } from "./flow.ts";
-import { checkBound, infer, instancing, placeholders } from "./generics.ts";
+import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { addAlias, paramName, resolver, storable, typeName } from "./resolve.ts";
-import { fits, keyOf, show, type ClassType, type Type } from "./typing.ts";
+import { fits, show, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -104,11 +104,12 @@ export function check(program: Stmt[]): Checked {
   // Every class and generic class instance by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
-  let ready = false;
-  // Where each generic class instance was first used.
-  const uses = new Map<ClassInfo, Span>();
-  const instancesOf = new Map<ClassNode, Map<string, ClassInfo>>();
   classes.forEach(register);
+  // The resolver and generic classes need each other, so each reaches the other lazily.
+  const { classNamed, construct, start, define } = genericClasses({
+    classes, templates, register, layout: (c) => layout(c), members: { classOf: (t) => classOf(t), returnOf: (b, at) => members.returnOf(b, at), paramType: (p) => paramType(p) },
+    resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+  });
   const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
@@ -126,12 +127,10 @@ export function check(program: Stmt[]): Checked {
   classes.forEach(checkOverrides);
   const laidOut = new Set<ClassInfo>();
   // Classes are laid out before any body is checked, since checking one may need another's
-  // fields. Until the resolver exists, a generic class's instance waits for this.
-  ready = true;
-  infoOf.forEach((c) => (uses.has(c) ? bounded(c) : layout(c)));
-  // A generic class, like a generic body, is checked once at its definition with
-  // placeholders for its type parameters, whether or not anything instantiates it.
-  templates.forEach((t) => classInstance(t, [...placeholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
+  // fields. Until the resolver exists, a generic class's instance waits for `start`.
+  infoOf.forEach(layout);
+  start();
+  define();
   funcs.forEach((f) => checkBody(definition(f)));
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
@@ -159,64 +158,6 @@ export function check(program: Stmt[]): Checked {
 
   function bodiesOf(c: ClassInfo): Body[] {
     return [c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values()];
-  }
-
-  function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {
-    const c = classes.get(name);
-    if (c && args.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
-    if (c) return c.type;
-    const template = templates.get(name);
-    return template && classInstance(template, args, at).type;
-  }
-
-  // The class a generic class's type arguments make, declared on first use, checked for its
-  // bounds, and named like `Box<i64>`.
-  function classInstance(template: ClassNode & { name: string }, args: Type[], at: Span): ClassInfo {
-    const params = template.typeParams;
-    if (args.length !== params.length) {
-      throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
-    }
-    let byKey = instancesOf.get(template);
-    if (!byKey) instancesOf.set(template, byKey = new Map());
-    const key = args.map(keyOf).join(",");
-    const found = byKey.get(key);
-    if (found) return found;
-    if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    if (args.some(isInterface)) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
-    const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
-    const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
-    byKey.set(key, c);
-    register(c);
-    uses.set(c, at);
-    if (ready) bounded(c);
-    return c;
-  }
-
-  // A generic class's type arguments must satisfy their bounds, checked where it is first used.
-  function bounded(c: ClassInfo) {
-    const at = uses.get(c)!;
-    withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, resolveType(p.constraint), members, at)));
-    layout(c);
-  }
-
-  // The class a `new` builds; a generic one's type arguments come from the expression or are
-  // inferred from the constructor's arguments.
-  function construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
-    const c = classes.get(name);
-    if (c && typeArgs.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
-    const template = templates.get(name);
-    if (!template) return c;
-    if (typeArgs.length > 0) return classInstance(template, typeArgs.map(resolveType), at);
-    const ctor = template.members.find((m) => m.kind === "constructor");
-    const names = new Set(template.typeParams.map((p) => p.name));
-    const bindings = new Map<string, Type>();
-    ctor?.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
-    const args = template.typeParams.map((p) => {
-      const type = bindings.get(p.name);
-      if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
-      return type;
-    });
-    return classInstance(template, args, at);
   }
 
   // Bases are linked first, since a derived constructor may take its base's parameters.
