@@ -95,8 +95,6 @@ export type Expr = Span & (
 export type Stmt = Span & (
   | { kind: "expr"; expr: Expr }
   | { kind: "let"; keyword: "let" | "const" | "var"; declarations: Declarator[] }
-  // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
-  | { kind: "assign"; target: Expr; op: ArithmeticOp | "="; value: Expr }
   | { kind: "return"; value: Expr | undefined }
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
   | { kind: "while"; cond: Expr; body: Stmt[] }
@@ -253,8 +251,6 @@ export type AssignOp =
   | "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | ">>>="
   | "&=" | "|=" | "^=" | "&&=" | "||=" | "??=";
 
-// The assignments a statement can make so far, and the operator each applies.
-const ASSIGNMENT: Partial<Record<AssignOp, ArithmeticOp | "=">> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
 
 // Reserved in strict-mode JavaScript, so never usable as names.
 export const RESERVED = new Set([
@@ -590,9 +586,6 @@ function simpleStatement(c: Cursor): Stmt {
     return { kind: "return", value, start, end: value.end };
   }
   const expr = sequence(c);
-  if (expr.kind === "update") return increment(expr);
-  const op = expr.kind === "assign" ? ASSIGNMENT[expr.op] : undefined;
-  if (expr.kind === "assign" && op) return { kind: "assign", target: expr.target, op, value: expr.value, start, end: expr.end };
   return { kind: "expr", expr, start, end: expr.end };
 }
 
@@ -631,13 +624,6 @@ function interfaceDeclaration(c: Cursor): Interface {
   c.expect("{");
   const members = typeMembers(c);
   return { kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
-}
-
-// A statement `x++` or `++x` is `x += 1`; the 1 takes the operator's span.
-function increment(e: Extract<Expr, { kind: "update" }>): Stmt {
-  const at = e.prefix ? e.start : e.end - 2;
-  const one: Expr = { kind: "int", value: 1n, start: at, end: at + 2 };
-  return { kind: "assign", target: e.operand, op: e.op === "++" ? "+" : "-", value: one, start: e.start, end: e.end };
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.

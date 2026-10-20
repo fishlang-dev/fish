@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { ArithmeticOp, AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
@@ -98,13 +98,10 @@ export function check(program: Stmt[]): Checked {
       if (declaration) throw declaration;
       switch (s.kind) {
         case "expr":
-          if (s.expr.kind === "call") {
-            call(s.expr);
-            return;
-          }
-          if (s.expr.kind === "assign") throw new CompileError(`operator '${s.expr.op}' is not supported yet`, s.expr.start, s.expr.end);
-          value(s.expr);
-          throw new CompileError("only calls are supported as statements so far", s.start, s.end);
+          // Only a statement may call a function that returns nothing.
+          if (s.expr.kind === "call") call(s.expr);
+          else value(s.expr);
+          return;
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
@@ -117,24 +114,6 @@ export function check(program: Stmt[]): Checked {
             throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, d.init.start, d.init.end);
           }
           declare(d.target.name, type, s.keyword === "let", false, s);
-          return;
-        }
-        case "assign": {
-          if (s.target.kind !== "ident") throw new CompileError("can only assign to a variable", s.target.start, s.target.end);
-          value(s.target);
-          const local = locals.get(s.target)!;
-          if (local.param) {
-            throw new CompileError("assigning to a parameter is not supported yet; copy it into a 'let'", s.target.start, s.target.end);
-          }
-          if (!local.mutable) {
-            throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
-          }
-          const assigned = value(s.value);
-          const type = s.op === "=" ? assigned : binaryType(s.op, local.type, assigned, s);
-          if (type !== local.type) {
-            throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, s.value.start, s.value.end);
-          }
-          locals.set(s, local);
           return;
         }
         case "if":
@@ -260,6 +239,22 @@ export function check(program: Stmt[]): Checked {
           }
           return type;
         }
+        case "assign": {
+          const op = ASSIGNMENTS[e.op];
+          if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
+          const local = assignable(e.target);
+          const assigned = value(e.value);
+          const type = op === "=" ? assigned : binaryType(op, local.type, assigned, e);
+          if (type !== local.type) {
+            throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, e.value.start, e.value.end);
+          }
+          return type;
+        }
+        case "update": {
+          const local = assignable(e.operand);
+          if (local.type !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${local.type}'`, e.start, e.end);
+          return "i64";
+        }
         case "binary":
           // The migration lint rewrites loose equality to strict, so native code never uses it.
           if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
@@ -268,6 +263,19 @@ export function check(program: Stmt[]): Checked {
         default:
           throw unsupported(EXPRESSION_FORMS[e.kind], e);
       }
+    }
+
+    function assignable(target: Expr): Local {
+      if (target.kind !== "ident") throw new CompileError("can only assign to a variable", target.start, target.end);
+      value(target);
+      const local = locals.get(target)!;
+      if (local.param) {
+        throw new CompileError("assigning to a parameter is not supported yet; copy it into a 'let'", target.start, target.end);
+      }
+      if (!local.mutable) {
+        throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, target.start, target.end);
+      }
+      return local;
     }
 
     // Fish has no truthiness: a condition is a boolean, never a number tested against zero.
@@ -347,8 +355,11 @@ export function check(program: Stmt[]): Checked {
 // The binary operators that have a meaning so far.
 const SUPPORTED_OPERATORS = new Set<BinaryOp>(["||", "&&", "===", "!==", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]);
 
+// The assignment operators that have a meaning so far, and the operator each applies.
+export const ASSIGNMENTS: Partial<Record<AssignOp, ArithmeticOp | "=">> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
+
 // What each expression form is called when the checker rejects it.
-const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary">, string> = {
+const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update">, string> = {
   float: "floating-point numbers",
   bigint: "bigint literals",
   null: "'null' values",
@@ -368,9 +379,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   meta: "meta properties",
   import: "dynamic imports",
   nonNull: "non-null assertions",
-  update: "increment and decrement expressions",
   conditional: "conditional expressions",
-  assign: "assignment expressions",
   destructure: "destructuring assignments",
   pipe: "'|>' expressions",
   topic: "topic references",

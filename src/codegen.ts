@@ -1,4 +1,4 @@
-import { isPrint, type Checked, type Local, type Type } from "./check.ts";
+import { ASSIGNMENTS, isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
 import type { ArithmeticOp, BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
 
@@ -135,6 +135,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     switch (s.kind) {
       case "expr":
         if (s.expr.kind === "call") call(s.expr.callee, s.expr.args);
+        else value(s.expr);
         return;
       case "if": {
         const cond = value(s.cond);
@@ -175,13 +176,6 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         const local = resolved(s);
         allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
         emit(`store ${LLVM[local.type]} ${value(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
-        return;
-      }
-      case "assign": {
-        const local = resolved(s);
-        // The target is read before the right-hand side runs, as in JavaScript.
-        const result = s.op === "=" ? value(s.value) : arithmetic(s.op, value(s.target), value(s.value), s);
-        emit(`store ${LLVM[local.type]} ${result}, ptr ${slot(local)}`);
         return;
       }
     }
@@ -229,6 +223,19 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         emit(`${result} = xor i1 ${operand}, true`);
         return result;
       }
+      case "assign": {
+        const op = ASSIGNMENTS[e.op]!;
+        // The target is read before the right-hand side runs, as in JavaScript.
+        const result = op === "=" ? value(e.value) : arithmetic(op, value(e.target), value(e.value), e);
+        store(e.target, result);
+        return result;
+      }
+      case "update": {
+        const old = value(e.operand);
+        const result = arithmetic(e.op === "++" ? "+" : "-", old, "1", e);
+        store(e.operand, result);
+        return e.prefix ? result : old;
+      }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
         const condition = COMPARISON[e.op];
@@ -241,6 +248,11 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
+  }
+
+  function store(target: Expr, result: string) {
+    const local = resolved(target);
+    emit(`store ${LLVM[local.type]} ${result}, ptr ${slot(local)}`);
   }
 
   // The right side runs only when the left side does not already decide the result.
