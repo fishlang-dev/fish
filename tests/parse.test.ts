@@ -440,6 +440,22 @@ function showStmt(s: Stmt): string {
     }
     case "doWhile":
       return `do { ${s.body.length} statements } while (${showExpr(s.cond)})`;
+    case "switch": {
+      const cases = s.cases.map((k) => `${k.test ? `case ${showExpr(k.test)}` : "default"}: ${k.body.map(showStmt).join("; ")}`);
+      return `switch (${showExpr(s.discriminant)}) { ${cases.join(" | ")} }`;
+    }
+    case "labeled":
+      return `${s.label}: ${showStmt(s.body)}`;
+    case "break":
+    case "continue":
+      return s.label ? `${s.kind} ${s.label}` : s.kind;
+    case "throw":
+      return `throw ${showExpr(s.value)}`;
+    case "try": {
+      const binding = s.param ? ` (${showPattern(s.param)}${s.paramType ? `: ${show(s.paramType)}` : ""})` : "";
+      const handler = s.handler ? ` catch${binding} { ${s.handler.length} }` : "";
+      return `try { ${s.block.length} }${handler}${s.finalizer ? ` finally { ${s.finalizer.length} }` : ""}`;
+    }
     default:
       return s.kind;
   }
@@ -467,6 +483,18 @@ const STATEMENTS: [string, string][] = [
   ["for (;;) {}", "for (; ; )"],
   ["for (let of of ofs) {}", "for (let of of ofs)"],
   ["for (x of a, b) {}", "error"],
+  ["switch (x) { case 1: case 2: a(); break; default: b() }", "switch (x) { case 1:  | case 2: a(); break | default: b() }"],
+  ["switch (x) {}", "switch (x) {  }"],
+  ["outer: for (;;) { continue outer }", "outer: for (; ; )"],
+  ["a: b: c()", "a: b: c()"],
+  ["break\n  outer", "break; outer"],
+  ["throw new Error('x')", "throw (new Error('x'))"],
+  ["throw\n  x", "error"],
+  ["try {} catch {}", "try { 0 } catch { 0 }"],
+  ["try { a() } catch (e: unknown) { b() } finally { c() }", "try { 1 } catch (e: unknown) { 1 } finally { 1 }"],
+  ["try {} catch ({ message }) {}", "try { 0 } catch ({ message: message }) { 0 }"],
+  ["try {} finally {}", "try { 0 } finally { 0 }"],
+  ["try {}", "error"],
 ];
 
 for (const [stmt, shape] of STATEMENTS) {

@@ -91,6 +91,13 @@ export type Stmt = Span & (
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
   | { kind: "while"; cond: Expr; body: Stmt[] }
   | { kind: "doWhile"; body: Stmt[]; cond: Expr }
+  | { kind: "switch"; discriminant: Expr; cases: SwitchCase[] }
+  | { kind: "labeled"; label: string; body: Stmt }
+  | { kind: "break" | "continue"; label: string | undefined }
+  | { kind: "throw"; value: Expr }
+  // At least one of `handler` and `finalizer` is present; `catch {}` has no `param`.
+  | { kind: "try"; block: Stmt[]; param: Pattern | undefined; paramType: TypeNode | undefined;
+      handler: Stmt[] | undefined; finalizer: Stmt[] | undefined }
   // `init` is a declaration or an expression.
   | { kind: "for"; init: Stmt | Expr | undefined; test: Expr | undefined; update: Expr | undefined; body: Stmt[] }
   // `left` is a declaration without an initializer, or an assignment target.
@@ -139,6 +146,9 @@ export type Pattern = Span & (
 
 // In `{ a }` the value is the identifier pattern `a`.
 export type PatternProp = Span & { key: PropertyName; value: Pattern };
+
+// `default:` has no test.
+export type SwitchCase = Span & { test: Expr | undefined; body: Stmt[] };
 
 export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; init: Expr | undefined };
 
@@ -330,6 +340,14 @@ function statement(c: Cursor): Stmt {
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
   if (c.at("for")) return forStatement(c);
+  if (c.at("switch")) return switchStatement(c);
+  if (c.at("try")) return tryStatement(c);
+  if (c.peek().kind === "ident" && !RESERVED.has(c.peek().text) && isToken(c.peek(1), ":")) {
+    const label = c.next().text;
+    c.next();
+    const labeled = statement(c);
+    return { kind: "labeled", label, body: labeled, start, end: labeled.end };
+  }
   if (c.at("do")) return doWhileStatement(c);
   if (c.at("interface")) return interfaceDeclaration(c);
   const s: Stmt = c.at("debugger") ? { kind: "debugger", start, end: c.next().end }
@@ -382,6 +400,49 @@ function forStatement(c: Cursor): Stmt {
   return { kind: "for", init, test, update, body: body(c), start, end: c.end() };
 }
 
+function switchStatement(c: Cursor): Stmt {
+  const start = c.expect("switch").start;
+  c.expect("(");
+  const discriminant = sequence(c);
+  c.expect(")");
+  c.expect("{");
+  const cases: SwitchCase[] = [];
+  while (!c.eat("}")) {
+    const caseStart = c.peek().start;
+    let test: Expr | undefined;
+    if (c.eat("case")) test = sequence(c);
+    else if (!c.eat("default")) throw c.error("expected 'case' or 'default'");
+    c.expect(":");
+    const body: Stmt[] = [];
+    while (!c.at("case") && !c.at("default") && !c.at("}")) {
+      if (c.peek().kind === "eof") throw c.error("expected '}'");
+      body.push(statement(c));
+    }
+    cases.push({ test, body, start: caseStart, end: c.end() });
+  }
+  return { kind: "switch", discriminant, cases, start, end: c.end() };
+}
+
+function tryStatement(c: Cursor): Stmt {
+  const start = c.expect("try").start;
+  const tried = block(c);
+  let param: Pattern | undefined;
+  let paramType: TypeNode | undefined;
+  let handler: Stmt[] | undefined;
+  if (c.eat("catch")) {
+    // The binding is optional: `catch {}` ignores the error.
+    if (c.eat("(")) {
+      param = bindingPattern(c);
+      paramType = c.at(":") ? annotation(c) : undefined;
+      c.expect(")");
+    }
+    handler = block(c);
+  }
+  const finalizer = c.eat("finally") ? block(c) : undefined;
+  if (!handler && !finalizer) throw c.error("expected 'catch' or 'finally'");
+  return { kind: "try", block: tried, param, paramType, handler, finalizer, start, end: c.end() };
+}
+
 // The `;` after `do...while (x)` is optional even on the same line, unlike other statements.
 function doWhileStatement(c: Cursor): Stmt {
   const start = c.expect("do").start;
@@ -408,6 +469,18 @@ function declaration(c: Cursor): Stmt {
 function simpleStatement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (atDeclaration(c)) return declaration(c);
+  if (c.at("break") || c.at("continue")) {
+    const kind = c.next().text as "break" | "continue";
+    // A label must be on the same line, as with `return`'s value.
+    const label = c.peek().kind === "ident" && !c.peek().newlineBefore && !RESERVED.has(c.peek().text) ? c.next().text : undefined;
+    return { kind, label, start, end: c.end() };
+  }
+  if (c.at("throw")) {
+    c.next();
+    if (c.peek().newlineBefore) throw new CompileError("a line break is not allowed after 'throw'", start, c.peek().start);
+    const value = sequence(c);
+    return { kind: "throw", value, start, end: value.end };
+  }
   if (c.at("return")) {
     const end = c.next().end;
     // A newline after `return` ends the statement, as in JavaScript.

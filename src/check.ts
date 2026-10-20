@@ -158,6 +158,18 @@ export function check(program: Stmt[]): Checked {
           throw unsupported(s.await ? "'for await...of' loops" : "'for...of' loops", s);
         case "doWhile":
           throw unsupported("'do...while' loops", s);
+        case "switch":
+          throw unsupported("'switch' statements", s);
+        case "labeled":
+          throw unsupported("labeled statements", s);
+        case "break":
+          throw unsupported("'break' statements", s);
+        case "continue":
+          throw unsupported("'continue' statements", s);
+        case "throw":
+          throw unsupported("'throw' statements", s);
+        case "try":
+          throw unsupported("'try' statements", s);
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
