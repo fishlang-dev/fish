@@ -50,7 +50,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       }
       case "if": {
         expr(s.cond);
-        const before = state;
+        const before = join(state, null);
         statements(s.then);
         const then = state;
         state = before;
@@ -116,7 +116,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       const cond = () => {
         const t = test();
         if (t) expr(t);
-        leaving = t ? state : null;
+        leaving = t ? join(state, null) : null;
       };
       if (!bodyFirst) cond();
       body();
@@ -183,7 +183,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       }
       case "conditional": {
         expr(e.cond);
-        const before = state;
+        const before = join(state, null);
         expr(e.then, consume);
         const then = state;
         state = before;
@@ -194,7 +194,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       case "binary": {
         expr(e.left);
         // The right side of `&&` and `||` may not run.
-        const before = state;
+        const before = join(state, null);
         expr(e.right);
         if (e.op === "&&" || e.op === "||") state = join(before, state);
         return;
@@ -232,7 +232,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       const what = moved === place ? `'${name}' was moved, so it can't be used here`
         : inside ? `'${name}' can't be used here because '${pathOf(moved)}' was moved`
         : `'${name}' can't be used as a whole here because '${pathOf(moved)}' was moved out of it`;
-      const earlier = move.start > e.start ? " (in an earlier pass through this loop)" : "";
+      const earlier = move.start >= e.start ? " (in an earlier pass through this loop)" : "";
       throw new CompileError(what + earlier, e.start, e.end, { message: move.note, start: move.start, end: move.end });
     }
   }
