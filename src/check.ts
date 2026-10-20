@@ -9,7 +9,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { lower, lowersClasses, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { lower, lowersClasses, replaced, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -127,11 +127,18 @@ export function check(program: Stmt[]): Checked {
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums);
-  lowersClasses((c, args) => classNamed(c.generic!.name, args, { start: 0, end: 0 })!);
+  // A class first made while lowering an instance is reported at that function.
+  let lowering: Span = { start: 0, end: 0 };
+  lowersClasses((c, args) => classNamed(c.generic!.name, args, lowering)!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
-  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
+  // Each concrete instance's return type as its own body saw it, before lowering.
+  const views = new Map<Instance, Type>();
+  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf } = instancing({
+    resolveType, paramType, withScope, members, checking: () => checking,
+    classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
+  });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -157,6 +164,8 @@ export function check(program: Stmt[]): Checked {
 
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
+    views.set(instance, instance.returns);
+    lowering = instance.body;
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
@@ -175,6 +184,19 @@ export function check(program: Stmt[]): Checked {
     const params = paramTypes(target);
     const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`) ?? lower(params[i]!)]);
     return instanceOf(body, new Map([...body.scope!, ...implicit]));
+  }
+
+  // A call made inside an instance with one of its type parameters gets the type the definition
+  // gave it: the callee's return with the callee's parameters as the ones the call passed.
+  function resultOf(instance: Instance, at: Span): Type {
+    const returns = returnOf(instance, at);
+    const site = siteOf(at);
+    if (!site) return returns;
+    const f = instance.body;
+    const declared = f.returnType && withScope(new Map([...instance.bindings, ...site]), () => resolveType(f.returnType!));
+    if (declared && !isInterface(declared)) return declared;
+    const own = scopeOf(instance);
+    return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
   function returnOf(instance: Instance, at: Span): Type {
@@ -229,8 +251,14 @@ export function check(program: Stmt[]): Checked {
     if (superCall) unset.add(SUPER);
 
     const { value, condition, effect, coerce } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup,
+      types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup,
       self: f.self,
+      // In a generic class's member, its own fields read as their annotations do here, through
+      // the class's type parameters.
+      fieldView: (name) => {
+        const decl = f.scope?.size ? classOf(f.self!.type).fields.find((d) => d.name === name) : undefined;
+        return decl?.type && resolveType(decl.type);
+      },
       owner: f.owner,
       superCall,
       thisReady: (e) => unset.size === 0 || e === exempt,

@@ -145,6 +145,14 @@ export function lower(t: Type): Type {
 
 const lowered = new WeakMap<ObjectType | UnionType | ClassType, Type>();
 
+// A type with some of its parts swapped for others, looking inside objects and unions.
+export function replaced(t: Type, swap: Map<Type, Type>): Type {
+  const found = swap.get(t);
+  if (found) return found;
+  if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
+  return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
+}
+
 // The class a generic class's type arguments make, which only the checker can declare.
 let instanceClass = (c: ClassType, _args: Type[]): ClassType => c;
 export function lowersClasses(f: typeof instanceClass) {

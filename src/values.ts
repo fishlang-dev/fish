@@ -41,12 +41,17 @@ export type Context = {
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
+  // What a call returns as the calling body sees it: in terms of the calling instance's own
+  // type parameters, where it passed them.
+  resultOf(instance: Instance, at: Span): Type;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body): Instance;
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
   paramTypes(instance: Instance): Type[];
   lookup(name: string): Local | undefined;
   self: Body["self"];
+  // The type a field of `this`'s class reads as in this body, when that differs from its own.
+  fieldView(name: string): Type | undefined;
   // The class whose constructor or method this is, which may reach its non-public members.
   owner: ClassType | undefined;
   // A derived constructor's `super(...)`, the one place a base constructor may be called.
@@ -63,8 +68,8 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, fieldView } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -114,7 +119,7 @@ export function expressions(ctx: Context) {
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
-    return { type: returnOf(instance, e), what: `'${target.name}'` };
+    return { type: resultOf(instance, e), what: `'${target.name}'` };
   }
 
   // The type of a member call's receiver, unless it is `super` or a class's name.
@@ -281,7 +286,7 @@ export function expressions(ctx: Context) {
           returnOf(instance, e);
           calls.set(e, instance);
         }
-        return found.type;
+        return (object === self?.type && fieldView(e.name)) || found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));
@@ -357,7 +362,7 @@ export function expressions(ctx: Context) {
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
-    if (type === to) return;
+    if (type === to || lower(type) === lower(to)) return;
     if (typeof to !== "string" && to.kind === "union") {
       intoUnion(e, type, to, message, unions);
       return;

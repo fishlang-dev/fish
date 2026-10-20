@@ -87,18 +87,23 @@ type Checker = {
   members: Members;
   // The instance being checked, which new instantiations count their depth from.
   checking(): Instance | undefined;
+  // The type parameters of the generic class a body belongs to, if any.
+  classParams(f: Body): TypeParam[];
 };
 
 // The instances of every body: one for a plain function, and for a generic one, its
 // definition check plus one per set of type arguments its calls need.
-export function instancing({ resolveType, paramType, withScope, members, checking }: Checker) {
+export function instancing({ resolveType, paramType, withScope, members, checking, classParams }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, ObjectType | InterfaceType>>();
   const definitions = new Map<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
-  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all };
+  // What a call made inside an instance passed for each type parameter, where that was one of
+  // the instance's own.
+  const sites = new WeakMap<Span, Map<string, Type>>();
+  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at) };
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
   // type, which is what an interface's method signature is compared with.
@@ -171,10 +176,12 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     }
     withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
     // An argument from inside another instance may be one of its type parameters; the instance
-    // is keyed by what that stands for.
-    const ordered = new Map([...(f.scope ?? []), ...params.map((p): [string, Type] => [p.name, lower(bindings.get(p.name)!)])]);
-    for (const [i, bound] of implicitOf(f)) ordered.set(`#${i}`, lower(implicitArgument(args[i]!, argTypes[i]!, bound)));
-    const instance = instanceOf(f, ordered);
+    // is keyed by what that stands for, and the call site remembers the parameter itself.
+    const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
+    for (const [i, bound] of implicitOf(f)) own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound));
+    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
+    if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
+    const instance = instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
     if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     return instance;
   }
@@ -188,14 +195,19 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       scope.get(`#${i}`) ?? implicit.get(i) ?? paramType(p, f.self?.constructor)));
   }
 
-  // What a concrete instance's body sees: each of its type parameters offering only its bound,
-  // as at the definition, while holding the concrete type for codegen.
+  // What a concrete instance's body sees: each of its type parameters, and those of a generic
+  // class it belongs to, offering only its bound, as at the definition, while holding the
+  // concrete type for codegen.
   function scopeOf(instance: Instance): Map<string, Type> {
     const f = instance.body;
-    if (!instance.concrete || !generic(f)) return instance.bindings;
-    const own = placeholders(f.typeParams ?? [], (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)), (name) => instance.bindings.get(name)!);
-    const scope = new Map([...(f.scope ?? []), ...own]);
-    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), bound, instance.bindings.get(`#${i}`)!));
+    const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && concrete(instance.bindings.get(n)!));
+    const stands = (name: string) => instance.bindings.get(name)!;
+    const outer = classParams(f);
+    const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
+    const names = [...(f.typeParams ?? []).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
+    if (!known(names)) return outer.length > 0 ? scope : instance.bindings;
+    for (const [name, t] of placeholders(f.typeParams ?? [], (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
+    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), bound, stands(`#${i}`)));
     return scope;
   }
 
