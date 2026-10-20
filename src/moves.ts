@@ -198,10 +198,10 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
       case "conditional": {
         expr(e.cond);
         const before = join(state, null);
-        expr(e.then, consume);
+        expr(e.then, consume, discarded);
         const then = state;
         state = before;
-        expr(e.else, consume);
+        expr(e.else, consume, discarded);
         state = join(then, state);
         return;
       }
