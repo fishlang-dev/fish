@@ -144,11 +144,12 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }:
 }
 
 // Objects and instances have no equality until `Eq`, so a comparison where both sides might
-// hold one is rejected, whether or not they are unions.
+// hold one is rejected, whether or not they are unions. Any two object members may meet,
+// since a wider object fits an unrelated narrower type.
 export function objectsMeet(a: Type, b: Type): boolean {
   const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
   const object = (t: Type) => typeof t !== "string" && t.kind !== "literal";
-  return members(a).some((x) => object(x) && members(b).some((y) => object(y) && (x === y || fits(x, y) || fits(y, x))));
+  return members(a).some(object) && members(b).some(object);
 }
 
 // Whether a value of `a` might equal one of `b`: the same primitive, a literal and its base,
