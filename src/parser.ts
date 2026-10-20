@@ -7,6 +7,7 @@ export type TypeRef = Span & { name: string };
 
 export type Expr = Span & (
   | { kind: "int"; value: bigint }
+  | { kind: "bool"; value: boolean }
   | { kind: "string"; value: string }
   | { kind: "ident"; name: string }
   | { kind: "member"; object: Expr; name: string }
@@ -19,7 +20,7 @@ export type Stmt = Span & (
   | { kind: "expr"; expr: Expr }
   | { kind: "let"; name: string; mutable: boolean; type: TypeRef | undefined; init: Expr }
   // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
-  | { kind: "assign"; target: Expr; op: BinaryOp | "="; value: Expr }
+  | { kind: "assign"; target: Expr; op: ArithmeticOp | "="; value: Expr }
   | { kind: "return"; value: Expr | undefined }
 );
 
@@ -28,14 +29,21 @@ export type Param = Span & { name: string; type: TypeRef | undefined };
 export type Func = Span & { name: string; params: Param[]; returnType: TypeRef | undefined; body: Stmt[] };
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative.
-const PRECEDENCE = { "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 } as const;
+const PRECEDENCE = {
+  "===": 3, "!==": 3,
+  "<": 4, "<=": 4, ">": 4, ">=": 4,
+  "+": 5, "-": 5,
+  "*": 6, "/": 6, "%": 6,
+} as const;
 
 export type BinaryOp = keyof typeof PRECEDENCE;
+
+export type ArithmeticOp = "+" | "-" | "*" | "/" | "%";
 
 const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE, text);
 
 // Each assignment operator and the binary operator it applies, if any.
-const ASSIGNMENT: Record<string, BinaryOp | "="> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
+const ASSIGNMENT: Record<string, ArithmeticOp | "="> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
 
 // Reserved in strict-mode JavaScript, so never usable as names.
 const RESERVED = new Set([
@@ -165,12 +173,23 @@ export function parse(src: string): Func[] {
   function expression(minPrecedence = 0): Expr {
     let left = unary();
     for (;;) {
-      const t = peek();
-      if (t.kind !== "punct" || !isBinaryOp(t.text) || PRECEDENCE[t.text] <= minPrecedence) return left;
-      next();
-      const right = expression(PRECEDENCE[t.text]);
-      left = { kind: "binary", op: t.text, left, right, start: left.start, end: right.end };
+      const op = binaryOperator();
+      if (!op || PRECEDENCE[op] <= minPrecedence) return left;
+      if (next().text !== op) next();
+      const right = expression(PRECEDENCE[op]);
+      left = { kind: "binary", op, left, right, start: left.start, end: right.end };
     }
+  }
+
+  // `>=` arrives as `>` then `=`, so that generics can later close on `>`; rejoin it here.
+  // Migration rule A3 rewrites loose equality to strict, so native code never uses it.
+  function binaryOperator(): BinaryOp | undefined {
+    const t = peek();
+    if (t.kind !== "punct") return undefined;
+    if (t.text === "==" || t.text === "!=") throw new CompileError(`'${t.text}' is not supported; use '${t.text}='`, t.start, t.end);
+    const after = tokens[pos + 1]!;
+    const text = t.text === ">" && after.text === "=" && after.start === t.end ? ">=" : t.text;
+    return isBinaryOp(text) ? text : undefined;
   }
 
   function unary(): Expr {
@@ -210,6 +229,7 @@ export function parse(src: string): Func[] {
       case "string":
         return { kind: "string", value: t.text, ...span };
       case "ident":
+        if (t.text === "true" || t.text === "false") return { kind: "bool", value: t.text === "true", ...span };
         if (RESERVED.has(t.text)) break;
         return { kind: "ident", name: t.text, ...span };
     }

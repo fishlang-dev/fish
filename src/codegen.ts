@@ -1,8 +1,12 @@
 import { isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
-import type { BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
+import type { ArithmeticOp, BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
 
-const LLVM: Record<Type, string> = { i64: "i64", void: "void" };
+const LLVM: Record<Type, string> = { i64: "i64", boolean: "i1", void: "void" };
+
+const COMPARISON: Partial<Record<BinaryOp, string>> = {
+  "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
+};
 
 const I64_MIN = -(1n << 63n);
 
@@ -32,6 +36,8 @@ const RUNTIME = [
   "declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)",
   "",
   '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
+  '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
+  '@.false = private unnamed_addr constant [6 x i8] c"false\\00"',
   "",
   'define internal void @"fsh.panic"(ptr %message) noreturn cold {',
   "  call i32 @fflush(ptr null)",
@@ -165,6 +171,8 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     switch (e.kind) {
       case "int":
         return String(e.value);
+      case "bool":
+        return String(e.value);
       case "ident": {
         const local = resolved(e);
         const t = temp();
@@ -178,14 +186,20 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       }
       case "unary":
         return arithmetic("-", "0", value(e.operand), e, "negate");
-      case "binary":
-        return arithmetic(e.op, value(e.left), value(e.right), e);
+      case "binary": {
+        const condition = COMPARISON[e.op];
+        const [a, b] = [value(e.left), value(e.right)];
+        if (!condition) return arithmetic(e.op as ArithmeticOp, a, b, e);
+        const result = temp();
+        emit(`${result} = icmp ${condition} ${LLVM[types.get(e.left)!]} ${a}, ${b}`);
+        return result;
+      }
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
   }
 
-  function arithmetic(op: BinaryOp, a: string, b: string, at: Span, verb?: string): string {
+  function arithmetic(op: ArithmeticOp, a: string, b: string, at: Span, verb?: string): string {
     if (op === "/" || op === "%") return division(op, a, b, at);
     const [wrapping, checked, opVerb] = ARITHMETIC[op];
     const result = temp();
@@ -237,6 +251,11 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       if (i > 0) format += " ";
       if (a.kind === "string") {
         format += a.value.replaceAll("%", "%%");
+      } else if (types.get(a) === "boolean") {
+        const text = temp();
+        emit(`${text} = select i1 ${value(a)}, ptr @.true, ptr @.false`);
+        format += "%s";
+        values.push(`, ptr ${text}`);
       } else {
         format += "%lld";
         values.push(`, i64 ${value(a)}`);

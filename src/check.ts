@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
-import type { Expr, Func, Param, Span, Stmt, TypeRef } from "./parser.ts";
+import type { BinaryOp, Expr, Func, Param, Span, Stmt, TypeRef } from "./parser.ts";
 
-export type Type = "i64" | "void";
+export type Type = "i64" | "boolean" | "void";
 
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
 
@@ -98,7 +98,8 @@ export function check(funcs: Func[]): Checked {
           if (!local.mutable) {
             throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
           }
-          const type = value(s.value);
+          const assigned = value(s.value);
+          const type = s.op === "=" ? assigned : binaryType(s.op, local.type, assigned, s);
           if (type !== local.type) {
             throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, s.value.start, s.value.end);
           }
@@ -127,7 +128,13 @@ export function check(funcs: Func[]): Checked {
         if (e.args.length !== expected) {
           throw new CompileError(`expected ${expected} argument${expected === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
         }
-        e.args.forEach((a) => value(a));
+        e.args.forEach((a, i) => {
+          const type = value(a);
+          const expected = paramType(target.params[i]!);
+          if (type !== expected) {
+            throw new CompileError(`argument of type '${type}' is not assignable to parameter of type '${expected}'`, a.start, a.end);
+          }
+        });
         return target;
       }
       if (isPrint(callee)) {
@@ -149,6 +156,8 @@ export function check(funcs: Func[]): Checked {
         case "int":
           if (e.value > I64_MAX) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
           return "i64";
+        case "bool":
+          return "boolean";
         case "ident": {
           const local = lookup(e.name);
           if (!local) {
@@ -171,11 +180,13 @@ export function check(funcs: Func[]): Checked {
           }
           return type;
         }
-        case "unary":
-          return value(e.operand);
+        case "unary": {
+          const type = value(e.operand);
+          if (type !== "i64") throw new CompileError(`operator '-' cannot be applied to type '${type}'`, e.start, e.end);
+          return type;
+        }
         case "binary":
-          value(e.left);
-          return value(e.right);
+          return binaryType(e.op, value(e.left), value(e.right), e);
       }
     }
 
@@ -196,6 +207,17 @@ export function check(funcs: Func[]): Checked {
     }
   }
 
+  function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Type {
+    if (op === "===" || op === "!==") {
+      if (left === right) return "boolean";
+      throw new CompileError(`this comparison appears to be unintentional because the types '${left}' and '${right}' have no overlap`, at.start, at.end);
+    }
+    if (left !== "i64" || right !== "i64") {
+      throw new CompileError(`operator '${op}' cannot be applied to types '${left}' and '${right}'`, at.start, at.end);
+    }
+    return op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : "i64";
+  }
+
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all.
   function paramType(p: Param): Type {
     if (!p.type) throw new CompileError(`parameter '${p.name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
@@ -203,7 +225,7 @@ export function check(funcs: Func[]): Checked {
   }
 
   function resolveType(t: TypeRef): Type {
-    if (t.name === "i64" || t.name === "void") return t.name;
+    if (t.name === "i64" || t.name === "boolean" || t.name === "void") return t.name;
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
