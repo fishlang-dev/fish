@@ -11,7 +11,7 @@ class Leaf {
   constructor(public n: i64) {}
 
   accept(v: Visitor): i64 {
-    return v.visitLeaf(this)
+    return v.visitLeaf(this.clone())
   }
 }
 
@@ -19,7 +19,7 @@ class Pair {
   constructor(public left: Leaf, public right: Leaf) {}
 
   accept(v: Visitor): i64 {
-    return v.visitPair(this)
+    return v.visitPair(this.clone())
   }
 }
 
@@ -29,7 +29,7 @@ class Sum {
   }
 
   visitPair(p: Pair): i64 {
-    return p.left.accept(this) + p.right.accept(this)
+    return p.left.accept(this.clone()) + p.right.accept(this.clone())
   }
 }
 

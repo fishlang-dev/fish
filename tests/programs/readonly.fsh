@@ -28,7 +28,7 @@ function idOf(n: Named): i64 {
 function main() {
   let p: Point = { x: 1, y: 2 }
   p.y = 5
-  let q: { x: i64; y: i64 } = p
+  let q: { x: i64; y: i64 } = p.clone()
   q.x = 9
   const c = new Counter(100, 2)
   print(p.x, p.y, q.x, c.next(3), c.label, idOf(new Tag()), idOf({ id: 4 }))

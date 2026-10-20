@@ -11,6 +11,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
 import { lower, lowersClasses, replaced, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
+import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
 
 export type { Type } from "./typing.ts";
@@ -289,6 +290,7 @@ export function check(program: Stmt[]): Checked {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
+    checkMoves(f.body, instance);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
       throw new CompileError(`a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);

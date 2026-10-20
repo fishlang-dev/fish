@@ -31,7 +31,7 @@ function bounded<T extends { a: i64 | boolean }>(t: T): i64 {
 }
 
 function passed(h: H): i64 {
-  return copied(h) + bounded2(h)
+  return copied(h.clone()) + bounded2(h)
 }
 
 function bounded2<T extends H>(t: T): i64 {
@@ -50,7 +50,7 @@ class Box<T> {
     this.v = v
   }
   get(): T {
-    return this.v
+    return this.v.clone()
   }
 }
 

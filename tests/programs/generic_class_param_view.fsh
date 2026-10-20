@@ -23,7 +23,7 @@ class Holder<T extends H> {
 }
 
 function g<U extends H>(u: U): i64 {
-  return new Holder(u).mk(u)
+  return new Holder(u.clone()).mk(u)
 }
 
 function main() {

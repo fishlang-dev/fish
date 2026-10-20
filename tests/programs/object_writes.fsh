@@ -6,7 +6,7 @@ function main() {
   p.y += 5
   p.x++
   print(p.x, p.y)
-  let line = { from: p, to: { x: 0, y: 0 }, label: { visible: false } }
+  let line = { from: p.clone(), to: { x: 0, y: 0 }, label: { visible: false } }
   line.to.x = 3
   line.from.y *= 2
   line.label.visible = true

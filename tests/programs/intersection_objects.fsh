@@ -15,7 +15,7 @@ function main() {
   let p: Person = { name: 1, age: 2, meta: { created: 3, updated: 4 } }
   p.age = 5
   p.meta.updated = 6
-  const same: { age: i64; meta: { created: i64; updated: i64 }; name: i64 } = p
+  const same: { age: i64; meta: { created: i64; updated: i64 }; name: i64 } = p.clone()
   let o: Open = { id: 1 }
   o.id = 7
   const l: Locked = { id: 8, note: 9 }

@@ -18,7 +18,7 @@ function inferred<T>(t: T) {
   return t
 }
 function k<T extends H>(t: T): i64 {
-  const r = same(t).a
+  const r = same(t.clone()).a
   const s = inferred(t).a
   if (typeof r === "boolean") return r ? 1 : 0
   return typeof s === "number" ? r + s : r
@@ -39,7 +39,7 @@ class Box<T> {
     this.v = v
   }
   get(): T {
-    return this.v
+    return this.v.clone()
   }
   with(h: H): i64 {
     const r = h.a

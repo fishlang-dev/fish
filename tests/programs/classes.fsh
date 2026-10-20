@@ -46,7 +46,7 @@ function main() {
   print(c.count, c.step, c.limit, c.origin.y)
   const pair = new Pair(3, true)
   print(pair.left, pair.right)
-  const q = shift(p, 5)
+  const q = shift(p.clone(), 5)
   print(q.x, p.x)
   // An instance fits a structural type through its fields.
   print(readX(q))

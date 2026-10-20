@@ -51,7 +51,7 @@ function classify(d: "a" | "b" | "c" | i64): i64 {
 function main() {
   const c: Shape = { kind: "circle", r: 2 }
   const q: Shape = { kind: "square", side: 3 }
-  print(area(c), area(q), c.kind, q.kind)
+  print(area(c.clone()), area(q.clone()), c.kind, q.kind)
   print(describe(c), describe(q))
   print(sound(new Dog(4)), sound(new Cat()))
   const pet: Dog | Cat = new Cat()

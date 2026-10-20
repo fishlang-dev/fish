@@ -2,7 +2,7 @@ class Grow<T> {
   constructor(public value: T) {}
 
   next(): Grow<{ inner: T }> {
-    return new Grow({ inner: this.value })
+    return new Grow({ inner: this.value.clone() })
   }
 }
 

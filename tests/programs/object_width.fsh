@@ -15,13 +15,13 @@ function id(n: Named): i64 {
 
 function main() {
   const wide = { x: 1, y: 2, z: 3 }
-  print(sum(wide))
-  const narrow: Point = wide
+  print(sum(wide.clone()))
+  const narrow: Point = wide.clone()
   print(narrow.x, narrow.y)
   let stored: Point = { x: 0, y: 0 }
-  stored = wide
+  stored = wide.clone()
   print(stored.y)
-  print(flatten(wide).y)
+  print(flatten(wide.clone()).y)
   // Nested fields are copied down too.
   const deep = { name: { id: 7, extra: true }, more: 1 }
   print(id(deep))

@@ -17,13 +17,13 @@ class Holder<T extends H> {
     return r ? 1 : 0
   }
   again(): Holder<T> {
-    return new Holder(this.v)
+    return new Holder(this.v.clone())
   }
   view(): T {
-    return this.v
+    return this.v.clone()
   }
   get val(): T {
-    return this.v
+    return this.v.clone()
   }
   called(): i64 {
     const r = this.view().a

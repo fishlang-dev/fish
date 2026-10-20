@@ -2,7 +2,7 @@ class C {
   n = 1
 
   me(): C {
-    return this
+    return this.clone()
   }
 }
 

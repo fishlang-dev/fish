@@ -16,7 +16,7 @@ class Box<T> {
   constructor(public value: T) {}
 
   get(): T {
-    return this.value
+    return this.value.clone()
   }
 
   set(this: Mut<this>, value: T) {

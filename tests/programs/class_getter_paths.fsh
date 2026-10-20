@@ -15,7 +15,7 @@ class Holder {
   constructor(public inner: Counter) {}
 
   get copy(): Counter {
-    return this.inner
+    return this.inner.clone()
   }
 }
 
