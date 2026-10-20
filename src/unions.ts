@@ -1,4 +1,5 @@
 import { CompileError } from "./diag.ts";
+import { unsupported } from "./unsupported.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
 import { baseOf, field, fits, membersFor, objectType, show, unionType } from "./typing.ts";
@@ -37,6 +38,7 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
     if (literal) steps.push((coercions) => coercions.set(value!, want));
     if (nested) steps.push(nested.apply);
   }
+  if (to.fields.some((f) => !fields.some((g) => g.name === f.name))) return undefined;
   const type = objectType(fields);
   return { type, apply: (coercions) => {
     steps.forEach((step) => step(coercions));
@@ -134,10 +136,19 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }:
   const [left, right] = [value(e.left), value(e.right)];
   const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union";
   if (!isUnion(left) && !isUnion(right)) return undefined;
+  if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);
   if (!comparable(left, right)) {
     throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
+}
+
+// Objects and instances have no equality until `Eq`, so a comparison where both sides might
+// hold one is rejected, whether or not they are unions.
+export function objectsMeet(a: Type, b: Type): boolean {
+  const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+  const object = (t: Type) => typeof t !== "string" && t.kind !== "literal";
+  return members(a).some((x) => object(x) && members(b).some((y) => object(y) && (x === y || fits(x, y) || fits(y, x))));
 }
 
 // Whether a value of `a` might equal one of `b`: the same primitive, a literal and its base,

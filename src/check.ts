@@ -4,7 +4,7 @@ import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, S
 import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
-import { comparable } from "./unions.ts";
+import { comparable, objectsMeet } from "./unions.ts";
 import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
@@ -339,6 +339,7 @@ export function check(program: Stmt[]): Checked {
             let falling: Facts | null = null;
             for (const c of s.cases) {
               const test = c.test && value(c.test);
+              if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }

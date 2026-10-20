@@ -3,4 +3,4 @@ function main() {
   const x: { a: i64 } | i64 = 1
   print(x === p)
 }
-// error: no overlap
+// error: comparisons of objects are not supported yet
