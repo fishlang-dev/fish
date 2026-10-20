@@ -277,11 +277,12 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
     return ptr;
   }
 
-  // Where a method's receiver lives. A temporary, such as a call's result, gets a slot.
+  // Where a method's receiver lives. A temporary, such as a call's or a getter's result,
+  // gets a slot.
   function receiver(object: Expr): string {
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
     let root: Expr = object;
-    while (root.kind === "member") root = root.object;
+    while (root.kind === "member" && !calls.has(root)) root = root.object;
     if (root.kind === "ident" || root.kind === "this") return address(object);
     const type = llvm(types.get(object)!);
     const slot = temp();

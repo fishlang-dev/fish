@@ -328,8 +328,8 @@ export function expressions(ctx: Context) {
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
   function assignable(target: Expr, reads: boolean): Type {
-    if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     const setter = target.kind === "member" ? accessor(target) : undefined;
+    if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const type = value(target);
       changeable(target, "assign to");
@@ -361,8 +361,9 @@ export function expressions(ctx: Context) {
 
   // A variable, `this`, or a field inside one: somewhere a value lives, rather than a
   // temporary.
+  // A getter's result is a temporary, so a path through one isn't a place.
   function place(e: Expr): boolean {
-    while (e.kind === "member" && !e.optional) e = e.object;
+    while (e.kind === "member" && !e.optional && !calls.has(e)) e = e.object;
     return e.kind === "ident" || e.kind === "this";
   }
 
