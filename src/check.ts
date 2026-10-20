@@ -106,6 +106,11 @@ export function check(funcs: Func[]): Checked {
           locals.set(s, local);
           return;
         }
+        case "if":
+          condition(s.cond);
+          scoped(s.then);
+          if (s.else) scoped(s.else);
+          return;
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
@@ -192,6 +197,20 @@ export function check(funcs: Func[]): Checked {
       }
     }
 
+    // Fish has no truthiness: a condition is a boolean, never a number tested against zero.
+    function condition(e: Expr) {
+      const type = value(e);
+      if (type !== "boolean") {
+        throw new CompileError(`condition must be a boolean, not '${type}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
+      }
+    }
+
+    function scoped(stmts: Stmt[]) {
+      scopes.push(new Map());
+      stmts.forEach(statement);
+      scopes.pop();
+    }
+
     function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param) {
       const scope = scopes[scopes.length - 1]!;
       if (scope.has(name)) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
@@ -236,5 +255,7 @@ export function check(funcs: Func[]): Checked {
 }
 
 function alwaysReturns(stmts: Stmt[]): boolean {
-  return stmts.some((s) => s.kind === "return");
+  return stmts.some((s) =>
+    s.kind === "return" ||
+    (s.kind === "if" && s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else)));
 }

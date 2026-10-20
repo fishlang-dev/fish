@@ -22,6 +22,7 @@ export type Stmt = Span & (
   // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
   | { kind: "assign"; target: Expr; op: ArithmeticOp | "="; value: Expr }
   | { kind: "return"; value: Expr | undefined }
+  | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
 );
 
 export type Param = Span & { name: string; type: TypeRef | undefined };
@@ -110,13 +111,39 @@ export function parse(src: string): Func[] {
     while (!at("}")) {
       if (peek().kind === "eof") throw error("expected '}'");
       stmts.push(statement());
-      endStatement();
     }
     next();
     return stmts;
   }
 
+  // A braced block, or a single statement as in `if (x) return 1`.
+  function body(): Stmt[] {
+    return at("{") ? block() : [statement()];
+  }
+
+  // Statements that end in a block need nothing after them; the rest end as in JavaScript.
   function statement(): Stmt {
+    if (at("if")) return ifStatement();
+    const s = simpleStatement();
+    endStatement();
+    return s;
+  }
+
+  function ifStatement(): Stmt {
+    const start = next().start;
+    expect("(");
+    const cond = expression();
+    expect(")");
+    const then = body();
+    let otherwise: Stmt[] | undefined;
+    if (at("else")) {
+      next();
+      otherwise = body();
+    }
+    return { kind: "if", cond, then, else: otherwise, start, end: tokens[pos - 1]!.end };
+  }
+
+  function simpleStatement(): Stmt {
     const start = peek().start;
     if (at("var")) throw new CompileError("'var' is not supported; use 'let' or 'const'", start, peek().end);
     if (at("let") || at("const")) {

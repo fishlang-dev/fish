@@ -136,6 +136,23 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       case "expr":
         if (s.expr.kind === "call") call(s.expr.callee, s.expr.args);
         return;
+      case "if": {
+        const cond = value(s.cond);
+        const then = label();
+        const otherwise = s.else ? label() : undefined;
+        const end = label();
+        emit(`br i1 ${cond}, label %${then}, label %${otherwise ?? end}`);
+        startBlock(then);
+        s.then.forEach(statement);
+        emit(`br label %${end}`);
+        if (s.else && otherwise) {
+          startBlock(otherwise);
+          s.else.forEach(statement);
+          emit(`br label %${end}`);
+        }
+        startBlock(end);
+        return;
+      }
       case "return":
         emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
