@@ -1,6 +1,9 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
-import { block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode, type UnaryOp } from "./parser.ts";
+import {
+  block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
+  type TypeParam, type UnaryOp,
+} from "./parser.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
@@ -37,6 +40,8 @@ export function sequence(c: Cursor): Expr {
 // One expression without a top-level comma: an argument, an element, an initializer.
 export function expression(c: Cursor): Expr {
   if (c.at("yield")) return yieldExpression(c);
+  const arrow = atArrow(c) ? arrowFunction(c) : undefined;
+  if (arrow) return arrow;
   const target = conditional(c);
   const [op, width] = assignOperator(c) ?? [];
   if (!op || !width) return target;
@@ -44,6 +49,41 @@ export function expression(c: Cursor): Expr {
   // Right-associative: `a = b = c` is `a = (b = c)`.
   const value = expression(c);
   return { kind: "assign", op, target, value, start: target.start, end: value.end };
+}
+
+// What can start an arrow function; the head is then tried in full before committing.
+function atArrow(c: Cursor): boolean {
+  return c.at("(") || c.at("<") || c.at("async") || (c.peek().kind === "ident" && isToken(c.peek(1), "=>"));
+}
+
+// The head decides: `(a)` and `(a) => a` differ only at the `=>`, so the head is parsed on a
+// trial basis and the body only once it is certain this is an arrow.
+function arrowFunction(c: Cursor): Expr | undefined {
+  const start = c.peek().start;
+  const head = c.attempt(() => arrowHead(c));
+  if (!head) return undefined;
+  const body = c.at("{") ? block(c) : expression(c);
+  return { kind: "arrow", ...head, body, start, end: c.end() };
+}
+
+function arrowHead(c: Cursor) {
+  // `async => 1` takes a parameter named `async`; `async(x)` without `=>` is a call.
+  const async = c.at("async") && !isToken(c.peek(1), "=>") && !c.peek(1).newlineBefore && c.eat("async");
+  let typeParams: TypeParam[] = [];
+  let params: Param[];
+  let returnType: TypeNode | undefined;
+  if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
+    const name = c.ident();
+    params = [{ name: name.text, type: undefined, optional: false, rest: false, default: undefined, start: name.start, end: name.end }];
+  } else {
+    typeParams = typeParameters(c);
+    params = parameters(c);
+    returnType = returnAnnotation(c);
+  }
+  // No line break may come before `=>`, as in JavaScript.
+  if (c.peek().newlineBefore) throw c.error("expected '=>'");
+  c.expect("=>");
+  return { async, typeParams, params, returnType };
 }
 
 function conditional(c: Cursor): Expr {

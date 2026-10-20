@@ -66,6 +66,7 @@ const EXPRESSIONS: [string, string][] = [
   ["[1, 2]", "array literals"],
   ["{ a: 1 }", "object literals"],
   ["function () {}", "function expressions"],
+  ["(x: i64) => x", "arrow functions"],
   ["a[0]", "indexed access expressions"],
   ["new C()", "'new' expressions"],
   ["f<i64>", "instantiation expressions"],

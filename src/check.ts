@@ -306,6 +306,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   array: "array literals",
   object: "object literals",
   function: "function expressions",
+  arrow: "arrow functions",
   index: "indexed access expressions",
   new: "'new' expressions",
   instantiation: "instantiation expressions",

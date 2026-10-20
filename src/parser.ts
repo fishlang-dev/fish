@@ -50,6 +50,9 @@ export type Expr = Span & (
   | { kind: "object"; props: ObjectProp[] }
   | { kind: "function"; name: string | undefined; async: boolean; generator: boolean;
       typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
+  // `body` is an expression, or the statements of a braced block.
+  | { kind: "arrow"; async: boolean; typeParams: TypeParam[]; params: Param[];
+      returnType: TypeNode | undefined; body: Expr | Stmt[] }
   // `optional` marks the link written `?.`; later links in the same chain short-circuit with it.
   | { kind: "member"; object: Expr; name: string; optional: boolean }
   | { kind: "index"; object: Expr; index: Expr; optional: boolean }

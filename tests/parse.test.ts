@@ -76,7 +76,8 @@ function showName(name: PropertyName): string {
 function showParams(params: Param[]): string {
   return params.map((p) => {
     const name = `${p.rest ? "..." : ""}${p.name}${p.optional ? "?" : ""}`;
-    return p.type ? `${name}: ${show(p.type)}` : name;
+    const fallback = p.default ? ` = ${showExpr(p.default)}` : "";
+    return `${p.type ? `${name}: ${show(p.type)}` : name}${fallback}`;
   }).join(", ");
 }
 
@@ -229,6 +230,12 @@ function showExpr(e: Expr): string {
       return `(${showExpr(e.expr)} ${e.kind} ${show(e.type)})`;
     case "assertion":
       return `(<${show(e.type)}>${showExpr(e.expr)})`;
+    case "arrow": {
+      const typeParams = e.typeParams.length ? `<${e.typeParams.map((p) => p.name).join(", ")}>` : "";
+      const returns = e.returnType ? `: ${show(e.returnType)}` : "";
+      const body = Array.isArray(e.body) ? `{ ${e.body.length} statements }` : showExpr(e.body);
+      return `(${e.async ? "async " : ""}${typeParams}(${showParams(e.params)})${returns} => ${body})`;
+    }
   }
 }
 
@@ -319,6 +326,26 @@ const EXPRESSIONS: [string, string][] = [
   ["yield* g()", "(yield* g())"],
   ["yield a ? b : c", "(yield (a ? b : c))"],
   ["a[b, c]", "a[(b, c)]"],
+  ["(a)", "a"],
+  ["(a) => a", "((a) => a)"],
+  ["(a, b) => a", "((a, b) => a)"],
+  ["(a, b)", "(a, b)"],
+  ["x => y => x", "((x) => ((y) => x))"],
+  ["async (x) => x", "(async (x) => x)"],
+  ["async(x)", "async(x)"],
+  ["async x => x", "(async (x) => x)"],
+  ["async => async", "((async) => async)"],
+  ["<T>(x: T) => x", "(<T>(x: T) => x)"],
+  ["<T>x", "(<T>x)"],
+  ["async <T>(x: T): Promise<T> => x", "(async <T>(x: T): Promise<T> => x)"],
+  ["() => {}", "(() => { 0 statements })"],
+  ["() => ({})", "(() => {})"],
+  ["(x = 1, ...rest: A[]) => { f(); g() }", "((x = 1, ...rest: (A[])) => { 2 statements })"],
+  ["(x): x is T => true", "((x): x is T => true)"],
+  ["a ? (b) : c", "(a ? b : c)"],
+  ["f(x => x + 1, (a, b) => a)", "f(((x) => (x + 1)), ((a, b) => a))"],
+  ["a = () => b", "(a = (() => b))"],
+  ["(a) + 1", "(a + 1)"],
 ];
 
 for (const [src, shape] of EXPRESSIONS) {
@@ -328,3 +355,8 @@ for (const [src, shape] of EXPRESSIONS) {
 for (const src of ["-a ** b", "typeof a ** b", "a * -b ** c"]) {
   test(`${src} is rejected`, () => expect(() => parseExpr(src)).toThrow("parenthesise the left side of '**'"));
 }
+
+// No line break may come before `=>`, so this is `(a)` followed by a stray `=>`.
+test("a newline before => ends the expression", () => {
+  expect(() => parseExpr("(a)\n  => a")).toThrow("expected an expression, found '=>'");
+});
