@@ -25,8 +25,11 @@ export type ClassInfo = {
   fields: FieldDecl[];
   // Its body starts by assigning the field initializers, then the parameter properties.
   constructor: Body;
-  // The fields the constructor's own statements must assign before `this` can be used.
+  // Every field, each unset until a constructor statement assigns it; until then `this` may
+  // only appear as the target of such an assignment.
   required: Set<string>;
+  // The prelude's field initializers, which can't see the constructor's parameters.
+  initializers: Set<Stmt>;
   methods: Map<string, Body>;
   statics: Map<string, Body>;
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
@@ -93,9 +96,11 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
       throw new CompileError(`duplicate property '${name}'`, m.start, m.end);
     }
   }
+  // As in TypeScript, parameter properties are assigned before field initializers run.
+  const initializers = fields.filter((f) => f.init).map((f) => assignField(f.name, f.init!, f));
   const prelude = [
-    ...fields.filter((f) => f.init).map((f) => assignField(f.name, f.init!, f)),
     ...properties.map((f) => assignField(f.name, { kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
+    ...initializers,
   ];
   const constructor: Body = {
     name: `${node.name}.constructor`,
@@ -107,9 +112,9 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     start: (ctor ?? node).start,
     end: (ctor ?? node).end,
   };
-  const required = new Set(fields.filter((f) => !f.init && !properties.includes(f)).map((f) => f.name));
+  const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
-  return { type, fields, constructor, required, methods, statics, getters, setters, baseName, prelude, node };
+  return { type, fields, constructor, required, initializers: new Set(initializers), methods, statics, getters, setters, baseName, prelude, node };
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);

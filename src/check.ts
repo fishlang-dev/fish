@@ -186,11 +186,15 @@ export function check(program: Stmt[]): Checked {
     });
 
     for (const p of f.params) declare(paramName(p), paramType(p, f.self?.constructor), false, true, p);
+    // A field initializer runs before the constructor's body, out of reach of its parameters.
+    let hidden = false;
     for (const s of f.body) {
       const assigned = unset.size > 0 ? fieldAssignment(s) : undefined;
       exempt = assigned?.object;
+      hidden = f.self?.constructor === true && classOf(f.self.type).initializers.has(s);
       statement(s);
       exempt = undefined;
+      hidden = false;
       if (assigned) unset.delete(assigned.name);
       if (s.kind === "expr" && s.expr === superCall) unset.delete(SUPER);
     }
@@ -303,6 +307,7 @@ export function check(program: Stmt[]): Checked {
         case "try":
           throw unsupported("'try' statements", s);
         case "return": {
+          if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
@@ -315,11 +320,13 @@ export function check(program: Stmt[]): Checked {
       }
     }
 
-    // The `this.x` a statement assigns, when it is a plain assignment to a field.
+    // The `this.x` a statement assigns, when it is a plain assignment to one of the class's
+    // own fields. A setter is a method, which can't run until every field is set.
     function fieldAssignment(s: Stmt): Extract<Expr, { kind: "member" }> | undefined {
       if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
       const target = s.expr.target;
-      return target.kind === "member" && target.object.kind === "this" ? target : undefined;
+      if (target.kind !== "member" || target.object.kind !== "this") return undefined;
+      return classOf(f.self!.type).fields.some((d) => d.name === target.name) ? target : undefined;
     }
 
     function within(target: Target, check: () => void) {
@@ -357,7 +364,7 @@ export function check(program: Stmt[]): Checked {
     }
 
     function lookup(name: string): Local | undefined {
-      for (let i = scopes.length - 1; i >= 0; i--) {
+      for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
         if (local) return local;
       }
