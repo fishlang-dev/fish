@@ -329,6 +329,14 @@ export function check(program: Stmt[]): Checked {
           if (local.type !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${local.type}'`, e.start, e.end);
           return "i64";
         }
+        case "conditional": {
+          condition(e.cond);
+          const [then, otherwise] = [value(e.then), value(e.else)];
+          if (then !== otherwise) {
+            throw new CompileError(`both sides of '?:' must have the same type, not '${then}' and '${otherwise}'`, e.start, e.end);
+          }
+          return then;
+        }
         case "binary":
           // The migration lint rewrites loose equality to strict, so native code never uses it.
           if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
@@ -462,7 +470,7 @@ const SUPPORTED_OPERATORS = new Set<BinaryOp>(["||", "&&", "===", "!==", "<", "<
 export const ASSIGNMENTS: Partial<Record<AssignOp, ArithmeticOp | "=">> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
 
 // What each expression form is called when the checker rejects it.
-const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update">, string> = {
+const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional">, string> = {
   float: "floating-point numbers",
   bigint: "bigint literals",
   null: "'null' values",
@@ -482,7 +490,6 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   meta: "meta properties",
   import: "dynamic imports",
   nonNull: "non-null assertions",
-  conditional: "conditional expressions",
   destructure: "destructuring assignments",
   pipe: "'|>' expressions",
   topic: "topic references",

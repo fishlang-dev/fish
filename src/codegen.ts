@@ -313,6 +313,23 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         store(e.operand, result);
         return e.prefix ? result : old;
       }
+      case "conditional": {
+        const cond = value(e.cond);
+        const [then, otherwise, end] = [label(), label(), label()];
+        emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
+        startBlock(then);
+        const a = value(e.then);
+        const thenEnd = block;
+        emit(`br label %${end}`);
+        startBlock(otherwise);
+        const b = value(e.else);
+        const otherwiseEnd = block;
+        emit(`br label %${end}`);
+        startBlock(end);
+        const result = temp();
+        emit(`${result} = phi ${LLVM[types.get(e)!]} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
+        return result;
+      }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
         const condition = COMPARISON[e.op];
