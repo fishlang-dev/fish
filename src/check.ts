@@ -105,16 +105,20 @@ export function check(program: Stmt[]): Checked {
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
   classes.forEach(register);
-  // The resolver and generic classes need each other, so each reaches the other lazily.
+  // A class's members, for interface satisfaction. Like the resolver and generic classes,
+  // which need each other, it reaches what is set up below lazily.
+  const members: Members = {
+    classOf,
+    returnOf: (b, at) => returnOf(instanceOf(b), at),
+    paramTypesOf: (b) => paramTypes(instanceOf(b)),
+  };
   const { classNamed, construct, start, define } = genericClasses({
-    classes, templates, register, layout: (c) => layout(c), members: { classOf: (t) => classOf(t), returnOf: (b, at) => members.returnOf(b, at), paramType: (p) => paramType(p) },
-    resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
-  const members: Members = { classOf, returnOf: (b, at) => returnOf(instanceOf(b), at), paramType };
   const { instanceOf, instantiate, paramTypes, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();

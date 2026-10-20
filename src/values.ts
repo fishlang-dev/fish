@@ -83,7 +83,9 @@ export function expressions(ctx: Context) {
     }
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param") return traitCall(e, callee);
+    if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
+      return traitCall(e, callee, receiver);
+    }
     const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined;
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -103,12 +105,13 @@ export function expressions(ctx: Context) {
     return value(object);
   }
 
-  // A method of a type parameter's bound, called while checking a generic body at its
-  // definition. Each instance resolves the call to its concrete type's method.
-  function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
-    const param = types.get(callee.object) as Extract<Type, { kind: "param" }>;
-    const found = param.bound?.kind === "interface" ? param.bound.methods.find((m) => m.name === callee.name) : undefined;
-    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${param.name}'`, callee.start, callee.end);
+  // A method of an interface, called while checking a generic body at its definition on a
+  // value of a type parameter bounded by it, or of an interface a call returned. Each
+  // instance resolves the call to its concrete type's method.
+  function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Extract<Type, { kind: "param" | "interface" }>): { type: Type; what: string } {
+    const trait = receiver.kind === "param" ? receiver.bound : receiver;
+    const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
+    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("expected 0 type arguments", e.start, e.end);
     if (e.args.length !== found.params.length) {
       throw new CompileError(`expected ${found.params.length} argument${found.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
