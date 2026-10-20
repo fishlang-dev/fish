@@ -1,7 +1,11 @@
 // The checker's types. Object types are interned, so two types are structurally identical,
 // the same fields with the same types in any order, exactly when they are the same object.
 
-export type Field = { name: string; type: Type };
+// A class member that isn't public is reachable only from inside its class, and never
+// counts toward a structural fit, as in TypeScript.
+export type Access = "public" | "private" | "protected";
+
+export type Field = { name: string; type: Type; access?: Access };
 
 // Fields are sorted by name, which is also their order in memory.
 export type ObjectType = { kind: "object"; fields: Field[] };
@@ -47,7 +51,7 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof from === "string" || typeof to === "string" || to.kind === "class") return false;
   return to.fields.every((f) => {
     const found = field(from, f.name);
-    return found !== undefined && fits(found.type, f.type);
+    return found !== undefined && (found.access ?? "public") === "public" && fits(found.type, f.type);
   });
 }
 

@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode } from "./parser.ts";
-import { classType, type ClassType } from "./typing.ts";
+import { classType, type Access, type ClassType } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
@@ -12,10 +12,13 @@ export type Body = Span & {
   body: Stmt[];
   returnType: TypeNode | undefined;
   self?: { type: ClassType; constructor: boolean; mutable: boolean };
+  // For a class's constructor and methods: the class, and who may call the method.
+  owner?: ClassType;
+  access?: Access;
 };
 
 // A field as declared: its annotation, its initializer, or both give its type.
-export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined };
+export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access };
 
 export type ClassInfo = {
   type: ClassType;
@@ -52,18 +55,17 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     }
     if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (m.modifiers.includes("static")) throw unsupported("static fields", m);
-    modifiers(m.modifiers, m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (m.name.startsWith("#")) throw unsupported("private names", m);
+    const access = modifiers(m.modifiers, m, m.name);
     if (m.optional) throw unsupported("optional fields", m);
     if (m.definite) throw unsupported("definite assignment assertions", m);
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    add({ name: m.name, type: m.type, init: m.init, start: m.start, end: m.end });
+    add({ name: m.name, type: m.type, init: m.init, access, start: m.start, end: m.end });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
-    modifiers(p.modifiers, p);
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
-    return add({ name: p.pattern.name, type: p.type, init: undefined, start: p.start, end: p.end });
+    const access = modifiers(p.modifiers, p, p.pattern.name);
+    return add({ name: p.pattern.name, type: p.type, init: undefined, access, start: p.start, end: p.end });
   });
 
   for (const name of methods.keys()) {
@@ -80,6 +82,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     body: [...prelude, ...(ctor?.body ?? [])],
     returnType: undefined,
     self: { type, constructor: true, mutable: true },
+    owner: type,
     start: (ctor ?? node).start,
     end: (ctor ?? node).end,
   };
@@ -88,9 +91,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
-    modifiers(m.modifiers.filter((x) => x !== "static"), m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (m.name.startsWith("#")) throw unsupported("private names", m);
+    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator) throw unsupported("generator methods", m);
     if (m.typeParams.length > 0) throw unsupported("generic methods", span(m.typeParams));
@@ -106,6 +108,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
       body: m.body,
       returnType: m.returnType,
       self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false },
+      owner: type,
+      access,
       start: m.start,
       end: m.end,
     });
@@ -135,10 +139,15 @@ function assignField(name: string, value: Expr, at: Span): Stmt {
   return { kind: "expr", expr: { kind: "assign", op: "=", target, value, ...s }, ...s };
 }
 
-// Only `public` means nothing yet; access checks and `readonly` come later.
-function modifiers(list: string[], at: Span) {
-  const other = list.find((m) => m !== "public");
+// A member's access, from its modifiers or a `#` name. `readonly` and the rest come later.
+function modifiers(list: string[], at: Span, name: string): Access {
+  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected");
   if (other) throw unsupported(`'${other}' modifiers`, at);
+  if (list.length > 1) throw new CompileError("a member can have only one accessibility modifier", at.start, at.end);
+  if (name.startsWith("#") && list.length > 0) {
+    throw new CompileError("an accessibility modifier can't be used with a private identifier", at.start, at.end);
+  }
+  return name.startsWith("#") ? "private" : (list[0] as Access | undefined) ?? "public";
 }
 
 function span(nodes: Span[]): Span {

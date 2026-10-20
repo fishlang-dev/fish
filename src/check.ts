@@ -111,10 +111,10 @@ export function check(program: Stmt[]): Checked {
     if (laidOut.has(c)) return;
     laidOut.add(c);
     c.type.fields = c.fields.map((f) => {
-      if (f.type) return { name: f.name, type: resolveType(f.type) };
+      if (f.type) return { name: f.name, type: resolveType(f.type), access: f.access };
       const name = `${c.type.name}.${f.name} initializer`;
-      checkBody({ name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, start: f.start, end: f.end });
-      return { name: f.name, type: returns.get(name)! };
+      checkBody({ name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, owner: c.type, start: f.start, end: f.end });
+      return { name: f.name, type: returns.get(name)!, access: f.access };
     });
   }
 
@@ -155,6 +155,7 @@ export function check(program: Stmt[]): Checked {
     const { value, condition, effect, coerce } = expressions({
       types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup,
       self: f.self,
+      owner: f.owner,
       thisReady: (e) => unset.size === 0 || e === exempt,
     });
 

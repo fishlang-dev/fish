@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { field, fits, objectType, show, type ClassType, type Field, type Type } from "./typing.ts";
+import { field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Local } from "./check.ts";
 
@@ -33,12 +33,14 @@ export type Context = {
   paramType(p: Param, property?: boolean): Type;
   lookup(name: string): Local | undefined;
   self: Body["self"];
+  // The class whose constructor or method this is, which may reach its non-public members.
+  owner: ClassType | undefined;
   // Whether this `this` may be used: a constructor's can't until every field is assigned.
   thisReady(e: Expr): boolean;
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup, self, thisReady } = ctx;
+  const { types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup, self, owner, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -78,13 +80,25 @@ export function expressions(ctx: Context) {
     if (named) {
       const found = named.statics.get(name);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
+      visible(found.access, named.type, name, callee);
       return found;
     }
     const type = value(object);
     const found = typeof type !== "string" && type.kind === "class" ? classOf(type).methods.get(name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
+    visible(found.access, found.owner!, name, callee);
     if (found.self!.mutable && place(object)) changeable(object, `call '${name}' on`);
     return found;
+  }
+
+  // TypeScript's access rules: a private or protected member is reachable only from inside
+  // its own class.
+  function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
+    if (!access || access === "public" || owner === declaring) return;
+    const message = name.startsWith("#")
+      ? `property '${name}' is not accessible outside class '${declaring.name}' because it has a private identifier`
+      : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
+    throw new CompileError(message, at.start, at.end);
   }
 
   function args(list: Expr[], target: Body, at: Span) {
@@ -134,6 +148,7 @@ export function expressions(ctx: Context) {
           throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         }
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+        if (typeof object !== "string" && object.kind === "class") visible(found.access, object, e.name, e);
         return found.type;
       }
       case "object":
