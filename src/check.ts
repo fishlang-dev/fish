@@ -37,7 +37,9 @@ export function check(program: Stmt[]): Checked {
     if (declaration) throw declaration;
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
+    if (s.kind === "comptime") throw unsupported("comptime blocks", s);
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    if (s.macro) throw unsupported("macros", s);
     if (!hasBody(s)) throw unsupported("functions without a body", s);
     funcs.push(s);
   }
@@ -146,6 +148,8 @@ export function check(program: Stmt[]): Checked {
           return;
         case "function":
           throw unsupported("nested functions", s);
+        case "comptime":
+          throw unsupported("comptime blocks", s);
         case "block":
           throw unsupported("block statements", s);
         case "debugger":
@@ -316,6 +320,7 @@ export function check(program: Stmt[]): Checked {
     if (p.optional) throw unsupported("optional parameters", p);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
+    if (p.comptime) throw unsupported("comptime parameters", p);
     if (p.modifiers.length > 0) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
@@ -369,6 +374,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   destructure: "destructuring assignments",
   pipe: "'|>' expressions",
   topic: "topic references",
+  comptime: "comptime expressions",
   sequence: "comma expressions",
   yield: "'yield' expressions",
   as: "'as' expressions",

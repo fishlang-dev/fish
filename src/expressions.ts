@@ -80,7 +80,7 @@ function arrowHead(c: Cursor) {
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
     const name = c.ident();
     const pattern: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
-    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], start: name.start, end: name.end }];
+    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: name.start, end: name.end }];
   } else {
     typeParams = typeParameters(c);
     params = parameters(c);
@@ -165,6 +165,17 @@ function binary(c: Cursor, minPrecedence = 0): Expr {
   }
 }
 
+// `comptime` is a modifier only before a name, a literal or `new` on the same line. Anything
+// else keeps its TypeScript meaning: `comptime(x)` calls, `comptime[0]` indexes, and
+// `comptime - 1` subtracts.
+function atComptime(c: Cursor): boolean {
+  if (!c.at("comptime")) return false;
+  const next = c.peek(1);
+  if (next.newlineBefore) return false;
+  if (["string", "int", "float", "bigint"].includes(next.kind)) return true;
+  return next.kind === "ident" && !["in", "instanceof", "as", "satisfies"].includes(next.text);
+}
+
 // `as` and `satisfies` bind like relational operators, and only on the same line.
 const atTypeOperator = (c: Cursor) => (c.at("as") || c.at("satisfies")) && !c.peek().newlineBefore;
 
@@ -190,6 +201,11 @@ function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
 
 export function unary(c: Cursor): Expr {
   const t = c.peek();
+  if (atComptime(c)) {
+    c.next();
+    const expr = unary(c);
+    return { kind: "comptime", expr, start: t.start, end: expr.end };
+  }
   if (c.eat("<")) {
     const asserted = type(c);
     c.expect(">");

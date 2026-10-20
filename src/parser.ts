@@ -78,6 +78,8 @@ export type Expr = Span & (
   // `value |> body`, where `body` refers to `value` as `%`.
   | { kind: "pipe"; value: Expr; body: Expr }
   | { kind: "topic" }
+  // `comptime expr`: evaluated while compiling.
+  | { kind: "comptime"; expr: Expr }
   // `[a, b] = [b, a]`: an assignment whose left side is a pattern.
   | { kind: "destructure"; pattern: Pattern; value: Expr }
   // `a, b`; only where a full expression is allowed, never as an argument or element.
@@ -117,6 +119,7 @@ export type Stmt = Span & (
   // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
   | { kind: "declare"; body: Stmt }
+  | { kind: "comptime"; body: Stmt[] }
   // `named` is undefined without braces; `attributes` is the object after `with`.
   | { kind: "import"; typeOnly: boolean; default: string | undefined; namespace: string | undefined;
       named: Specifier[] | undefined; module: string; attributes: Expr | undefined }
@@ -183,7 +186,7 @@ export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } &
 // `modifiers` make a constructor parameter a parameter property, as in `private readonly x`.
 export type Param = Span & {
   pattern: Pattern; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined;
-  modifiers: Modifier[]; decorators: Expr[];
+  modifiers: Modifier[]; decorators: Expr[]; comptime: boolean;
 };
 
 export type Pattern = Span & (
@@ -217,7 +220,8 @@ export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: Ty
 export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[] };
 
 export type Func = Span & {
-  kind: "function"; name: string; async: boolean; generator: boolean;
+  // `macro` marks `macro function`, a comptime function over syntax trees.
+  kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean;
   // Undefined for an overload signature or a `declare function`.
   typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined;
 };
@@ -256,7 +260,8 @@ export type Cursor = {
   inAllowed: boolean;
   // Set while parsing the right side of `|>`, recording whether it used the topic `%`.
   topic: { used: boolean } | undefined;
-  // The token `offset` places ahead of the current one.
+  // The token `offset` places ahead of the current one. Never look past a `/` where an
+  // expression starts: it may begin a regex, and lexing its body as tokens can fail.
   peek(offset?: number): Token;
   next(): Token;
   at(text: string): boolean;
@@ -378,7 +383,7 @@ export function func(c: Cursor, anonymous = false): Func {
   let body: Stmt[] | undefined;
   if (c.at("{")) body = block(c);
   else endStatement(c);
-  return { kind: "function", name, async, generator, typeParams, params, returnType, body, start, end: c.end() };
+  return { kind: "function", name, async, generator, macro: false, typeParams, params, returnType, body, start, end: c.end() };
 }
 
 export function block(c: Cursor): Stmt[] {
@@ -403,6 +408,15 @@ export function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
+  // Both are contextual: in TypeScript `comptime {` and `macro function` are syntax errors.
+  if (c.at("comptime") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
+    c.next();
+    return { kind: "comptime", body: block(c), start, end: c.end() };
+  }
+  if (c.at("macro") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore) {
+    c.next();
+    return { ...func(c), macro: true, start };
+  }
   const decorators = decoratorList(c);
   if (atClass(c)) return classDeclaration(c, start, decorators);
   if (c.at("export")) return exportDeclaration(c, start, decorators);

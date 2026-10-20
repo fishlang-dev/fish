@@ -45,6 +45,7 @@ const SIGNATURES: [string, string, string][] = [
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
   ["(@inject x: i64)", "decorators", "@inject x: i64"],
+  ["(comptime n: i64)", "comptime parameters", "comptime n: i64"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {
@@ -71,6 +72,7 @@ const EXPRESSIONS: [string, string][] = [
   ["function () {}", "function expressions"],
   ["(x: i64) => x", "arrow functions"],
   ["1 |> % + 1", "'|>' expressions"],
+  ["comptime 1", "comptime expressions"],
   ["class {}", "class expressions"],
   ["a[0]", "indexed access expressions"],
   ["new C()", "'new' expressions"],
@@ -125,6 +127,7 @@ const STATEMENTS: [string, string][] = [
   ["function inner() {}", "nested functions"],
   ["{ print(1) }", "block statements"],
   ["debugger", "'debugger' statements"],
+  ["comptime { print(1) }", "comptime blocks"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
   ["for (;;) {}", "'for' loops"],
@@ -197,3 +200,10 @@ for (const decl of ["export const x = 1", "export default 1", "export * from 'm'
     }));
   });
 }
+
+test("macro function", () => {
+  const decl = "macro function m(input: Ast): Ast { return input }";
+  expect(() => check(parse(`${decl}\nfunction main() {}`))).toThrow(expect.objectContaining({
+    message: "macros are not supported yet", start: 0, end: decl.length,
+  }));
+});

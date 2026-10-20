@@ -77,7 +77,7 @@ function showName(name: PropertyName): string {
 
 function showParams(params: Param[]): string {
   return params.map((p) => {
-    const name = `${p.decorators.map((d) => `@${showExpr(d)} `).join("")}${p.modifiers.map((m) => `${m} `).join("")}${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
+    const name = `${p.comptime ? "comptime " : ""}${p.decorators.map((d) => `@${showExpr(d)} `).join("")}${p.modifiers.map((m) => `${m} `).join("")}${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
     const fallback = p.default ? ` = ${showExpr(p.default)}` : "";
     return `${p.type ? `${name}: ${show(p.type)}` : name}${fallback}`;
   }).join(", ");
@@ -243,6 +243,8 @@ function showExpr(e: Expr): string {
       return `(${showExpr(e.value)} |> ${showExpr(e.body)})`;
     case "topic":
       return "%";
+    case "comptime":
+      return `(comptime ${showExpr(e.expr)})`;
     case "class":
       return showClass(e);
     case "arrow": {
@@ -309,6 +311,16 @@ const EXPRESSIONS: [string, string][] = [
   ["x |> [%, %]", "(x |> [%, %])"],
   ["x |> % + 1 |> % * 2", "((x |> (% + 1)) |> (% * 2))"],
   ["a || b |> f(%)", "((a || b) |> f(%))"],
+  ["comptime fib(10)", "(comptime fib(10))"],
+  ["comptime fib(10) + 1", "((comptime fib(10)) + 1)"],
+  ["comptime 'text'", "(comptime 'text')"],
+  ["comptime new Table()", "(comptime (new Table()))"],
+  ["comptime(x)", "comptime(x)"],
+  ["comptime[0]", "comptime[0]"],
+  ["comptime - 1", "(comptime - 1)"],
+  ["comptime`x`", "comptime`x`"],
+  ["comptime in x", "(comptime in x)"],
+  ["comptime as T", "(comptime as T)"],
   ["a < < b", "error"],
   ["a + b * c", "(a + (b * c))"],
   ["a - b - c", "((a - b) - c)"],
@@ -467,7 +479,9 @@ function showStmt(s: Stmt): string {
     case "doWhile":
       return `do { ${s.body.length} statements } while (${showExpr(s.cond)})`;
     case "function":
-      return `function ${s.name}(${showParams(s.params)})${s.body ? ` { ${s.body.length} }` : ";"}`;
+      return `${s.macro ? "macro " : ""}function ${s.name}(${showParams(s.params)})${s.body ? ` { ${s.body.length} }` : ";"}`;
+    case "comptime":
+      return `comptime { ${s.body.length} }`;
     case "import": {
       const clauses = [
         s.default,
@@ -550,6 +564,13 @@ const STATEMENTS: [string, string][] = [
   ["try {} catch ({ message }) {}", "try { 0 } catch ({ message: message }) { 0 }"],
   ["try {} finally {}", "try { 0 } finally { 0 }"],
   ["try {}", "error"],
+  ["comptime { setup(); check() }", "comptime { 2 }"],
+  ["comptime\n  { setup() }", "comptime; block"],
+  ["function f(comptime n: i64, m) {}", "function f(comptime n: i64, m) { 0 }"],
+  ["function f(comptime) {}", "function f(comptime) { 0 }"],
+  ["macro function m(input: Ast): Ast { return input }", "macro function m(input: Ast) { 1 }"],
+  ["macro(x)", "macro(x)"],
+  ["macro\n  function f() {}", "macro; function f() { 0 }"],
 ];
 
 for (const [stmt, shape] of STATEMENTS) {

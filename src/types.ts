@@ -39,13 +39,15 @@ function parameter(c: Cursor): Param {
   while (PARAMETER_MODIFIERS.some((m) => c.at(m)) && !c.peek(1).newlineBefore && startsBinding(c.peek(1))) {
     modifiers.push(c.next().text as Modifier);
   }
+  // `comptime n: i64` takes its argument at compile time.
+  const comptime = c.at("comptime") && !c.peek(1).newlineBefore && startsBinding(c.peek(1)) && c.eat("comptime");
   const rest = c.eat("...");
   const t = c.peek();
   const pattern: Pattern = c.eat("this") ? { kind: "ident", name: "this", start: t.start, end: t.end } : bindingPattern(c);
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { pattern, type, optional, rest, default: fallback, modifiers, decorators, start, end: c.end() };
+  return { pattern, type, optional, rest, default: fallback, modifiers, decorators, comptime, start, end: c.end() };
 }
 
 const startsBinding = (t: Token) => t.kind === "ident" || isToken(t, "{") || isToken(t, "[");
