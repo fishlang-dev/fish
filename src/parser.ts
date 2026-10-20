@@ -12,7 +12,7 @@ export type Expr = Span & (
   | { kind: "ident"; name: string }
   | { kind: "member"; object: Expr; name: string }
   | { kind: "call"; callee: Expr; args: Expr[] }
-  | { kind: "unary"; op: "-"; operand: Expr }
+  | { kind: "unary"; op: "-" | "!"; operand: Expr }
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
 );
 
@@ -30,6 +30,8 @@ export type Func = Span & { name: string; params: Param[]; returnType: TypeRef |
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative.
 const PRECEDENCE = {
+  "||": 1,
+  "&&": 2,
   "===": 3, "!==": 3,
   "<": 4, "<=": 4, ">": 4, ">=": 4,
   "+": 5, "-": 5,
@@ -193,10 +195,10 @@ export function parse(src: string): Func[] {
   }
 
   function unary(): Expr {
-    if (!at("-")) return postfix();
+    if (!at("-") && !at("!")) return postfix();
     const op = next();
     const operand = unary();
-    return { kind: "unary", op: "-", operand, start: op.start, end: operand.end };
+    return { kind: "unary", op: op.text === "-" ? "-" : "!", operand, start: op.start, end: operand.end };
   }
 
   function postfix(): Expr {

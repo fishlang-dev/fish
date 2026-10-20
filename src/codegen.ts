@@ -60,6 +60,8 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
   let body: string[] = [];
   let temps = 0;
   let labels = 0;
+  // The label of the block being emitted into, which a phi names as its predecessor.
+  let block = "entry";
   let currentFunction = "";
 
   for (const f of funcs) {
@@ -68,6 +70,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     body = [];
     temps = 0;
     labels = 0;
+    block = "entry";
     const type = returnType(f.name);
     // Parameters are copied into slots like any other binding.
     const params = f.params.map((p) => {
@@ -107,6 +110,11 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     return `L${labels++}`;
   }
 
+  function startBlock(name: string) {
+    body.push(`${name}:`);
+    block = name;
+  }
+
   function slot(local: Local): string {
     return `%${local.name}.${local.id}`;
   }
@@ -131,7 +139,7 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       case "return":
         emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
-        body.push(`${label()}:`);
+        startBlock(label());
         return;
       case "let": {
         const local = resolved(s);
@@ -184,9 +192,15 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         if (!result) throw new Error("internal error: void call used as a value");
         return result;
       }
-      case "unary":
-        return arithmetic("-", "0", value(e.operand), e, "negate");
+      case "unary": {
+        const operand = value(e.operand);
+        if (e.op === "-") return arithmetic("-", "0", operand, e, "negate");
+        const result = temp();
+        emit(`${result} = xor i1 ${operand}, true`);
+        return result;
+      }
       case "binary": {
+        if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
         if (!condition) return arithmetic(e.op as ArithmeticOp, a, b, e);
@@ -197,6 +211,23 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
+  }
+
+  // The right side runs only when the left side does not already decide the result.
+  function logical(op: "&&" | "||", left: Expr, right: Expr): string {
+    const a = value(left);
+    const from = block;
+    const rhs = label();
+    const end = label();
+    emit(op === "&&" ? `br i1 ${a}, label %${rhs}, label %${end}` : `br i1 ${a}, label %${end}, label %${rhs}`);
+    startBlock(rhs);
+    const b = value(right);
+    const rhsEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    const result = temp();
+    emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
+    return result;
   }
 
   function arithmetic(op: ArithmeticOp, a: string, b: string, at: Span, verb?: string): string {
@@ -236,10 +267,10 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
     const ok = label();
     const { line, col } = locate(src, at.start);
     emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
-    body.push(`${fail}:`);
+    startBlock(fail);
     emit(`call void @"fsh.panic"(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
     emit("unreachable");
-    body.push(`${ok}:`);
+    startBlock(ok);
   }
 
   // `console.log` and `print` are the same: arguments joined by spaces, then a newline.

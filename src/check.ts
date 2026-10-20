@@ -182,7 +182,9 @@ export function check(funcs: Func[]): Checked {
         }
         case "unary": {
           const type = value(e.operand);
-          if (type !== "i64") throw new CompileError(`operator '-' cannot be applied to type '${type}'`, e.start, e.end);
+          if (type !== (e.op === "-" ? "i64" : "boolean")) {
+            throw new CompileError(`operator '${e.op}' cannot be applied to type '${type}'`, e.start, e.end);
+          }
           return type;
         }
         case "binary":
@@ -212,10 +214,12 @@ export function check(funcs: Func[]): Checked {
       if (left === right) return "boolean";
       throw new CompileError(`this comparison appears to be unintentional because the types '${left}' and '${right}' have no overlap`, at.start, at.end);
     }
-    if (left !== "i64" || right !== "i64") {
+    // Only booleans, so `&&` and `||` always produce a boolean rather than one of their operands.
+    const operand = op === "&&" || op === "||" ? "boolean" : "i64";
+    if (left !== operand || right !== operand) {
       throw new CompileError(`operator '${op}' cannot be applied to types '${left}' and '${right}'`, at.start, at.end);
     }
-    return op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : "i64";
+    return operand === "boolean" || op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : "i64";
   }
 
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all.
