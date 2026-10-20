@@ -66,6 +66,14 @@ const EXPRESSIONS: [string, string][] = [
   ["[1, 2]", "array literals"],
   ["{ a: 1 }", "object literals"],
   ["function () {}", "function expressions"],
+  ["a[0]", "indexed access expressions"],
+  ["new C()", "'new' expressions"],
+  ["f<i64>", "instantiation expressions"],
+  ["import.meta", "meta properties"],
+  ["import('m')", "dynamic imports"],
+  ["a!", "non-null assertions"],
+  ["f?.()", "optional calls"],
+  ["f<i64>()", "type arguments on calls"],
   ["tag`a`", "tagged templates"],
 ];
 

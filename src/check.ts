@@ -144,6 +144,8 @@ export function check(items: Item[]): Checked {
     // Checks a call's arguments; returns the user function it calls, or undefined for print.
     function call(e: Call): Func | undefined {
       const { callee } = e;
+      if (e.optional) throw unsupported("optional calls", e);
+      if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
       const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
       if (target) {
         const expected = target.params.length;
@@ -293,6 +295,12 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   array: "array literals",
   object: "object literals",
   function: "function expressions",
+  index: "indexed access expressions",
+  new: "'new' expressions",
+  instantiation: "instantiation expressions",
+  meta: "meta properties",
+  import: "dynamic imports",
+  nonNull: "non-null assertions",
   template: "template literals",
   tagged: "tagged templates",
 };

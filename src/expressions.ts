@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
-import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp } from "./parser.ts";
-import { isPropertyName, parameters, propertyName, returnAnnotation, typeParameters } from "./types.ts";
+import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode } from "./parser.ts";
+import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -47,21 +47,76 @@ export function unary(c: Cursor): Expr {
 }
 
 function postfix(c: Cursor): Expr {
-  let e = primary(c);
+  return chain(c, c.at("new") ? newExpression(c) : primary(c), true);
+}
+
+// Member accesses, calls, tagged templates and `!` after `e`. Without `calls`, it stops
+// before a call, as the callee of `new` does: `new a.b()` constructs `a.b`.
+function chain(c: Cursor, e: Expr, calls: boolean): Expr {
+  const start = e.start;
   for (;;) {
-    if (c.eat(".")) {
-      const name = c.ident();
-      e = { kind: "member", object: e, name: name.text, start: e.start, end: name.end };
-    } else if (c.eat("(")) {
-      const args = c.list(() => element(c), ")");
-      e = { kind: "call", callee: e, args, start: e.start, end: c.end() };
-    } else if (c.peek().kind === "template" || c.peek().kind === "templateHead") {
+    const t = c.peek();
+    const optional = calls && c.eat("?.");
+    if (c.eat("[")) {
+      const index = expression(c);
+      e = { kind: "index", object: e, index, optional, start, end: c.expect("]").end };
+    } else if (c.eat(".") || (optional && !c.at("(") && !c.at("<"))) {
+      e = { kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
+    } else if (calls && (c.at("(") || c.at("<"))) {
+      // After `?.` a `<` can only start type arguments, so a failure there is a real error.
+      const typeArgs = !c.at("<") ? [] : optional ? typeArguments(c, true) : c.attempt(() => typeArguments(c, false));
+      if (!typeArgs) return e;
+      if (c.at("(")) {
+        c.next();
+        const args = c.list(() => element(c), ")");
+        e = { kind: "call", callee: e, typeArgs, args, optional, start, end: c.end() };
+      } else if (atTemplate(c)) {
+        const quoted = template(c);
+        e = { kind: "tagged", tag: e, typeArgs, template: quoted, start, end: quoted.end };
+      } else {
+        e = { kind: "instantiation", expr: e, typeArgs, start, end: c.end() };
+      }
+    } else if (atTemplate(c)) {
       const quoted = template(c);
-      e = { kind: "tagged", tag: e, typeArgs: [], template: quoted, start: e.start, end: quoted.end };
+      e = { kind: "tagged", tag: e, typeArgs: [], template: quoted, start, end: quoted.end };
+    } else if (c.at("!") && !t.newlineBefore) {
+      e = { kind: "nonNull", expr: e, start, end: c.next().end };
     } else {
       return e;
     }
   }
+}
+
+// Property names after `.` may be reserved words, as in `a.default`.
+function propertyKey(c: Cursor): string {
+  if (c.peek().kind !== "ident") throw c.error("expected a property name");
+  return c.next().text;
+}
+
+const atTemplate = (c: Cursor) => c.peek().kind === "template" || c.peek().kind === "templateHead";
+
+// `<T>` before a call is only type arguments when what follows confirms it, as in
+// TypeScript; otherwise `a < b > c` would be read as a generic. After `?.` it always is.
+function typeArguments(c: Cursor, certain: boolean): TypeNode[] {
+  c.expect("<");
+  const args = c.list(() => type(c), ">");
+  const t = c.peek();
+  const follows = c.at("(") || atTemplate(c) || certain || t.newlineBefore || t.kind === "eof" ||
+    [")", "]", "}", ";", ",", ".", "?."].some((text) => c.at(text));
+  if (!follows) throw c.error("expected '('");
+  return args;
+}
+
+function newExpression(c: Cursor): Expr {
+  const start = c.expect("new").start;
+  if (c.eat(".")) {
+    if (!c.at("target")) throw c.error("expected 'target'");
+    return { kind: "meta", name: "new.target", start, end: c.next().end };
+  }
+  const callee = chain(c, c.at("new") ? newExpression(c) : primary(c), false);
+  const typeArgs = c.at("<") ? c.attempt(() => typeArguments(c, false)) ?? [] : [];
+  const args = c.eat("(") ? c.list(() => element(c), ")") : undefined;
+  return { kind: "new", callee, typeArgs, args, start, end: c.end() };
 }
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
@@ -94,6 +149,7 @@ export function primary(c: Cursor): Expr {
   if (c.at("[")) return array(c);
   if (c.at("{")) return object(c);
   if (c.at("function") || atAsync(c, "function")) return functionExpression(c);
+  if (c.at("import")) return importExpression(c);
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {
@@ -117,6 +173,18 @@ export function primary(c: Cursor): Expr {
     return e;
   }
   throw c.error("expected an expression", t);
+}
+
+// `import.meta`, or `import(specifier)` loading a module at run time.
+function importExpression(c: Cursor): Expr {
+  const start = c.expect("import").start;
+  if (c.eat(".")) {
+    if (!c.at("meta")) throw c.error("expected 'meta'");
+    return { kind: "meta", name: "import.meta", start, end: c.next().end };
+  }
+  c.expect("(");
+  const args = c.list(() => expression(c), ")");
+  return { kind: "import", args, start, end: c.end() };
 }
 
 // An array element or a call argument: an expression, or `...` and one.

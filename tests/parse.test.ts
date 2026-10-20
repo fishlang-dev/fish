@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parse, type Param, type PropertyName, type TypeMember, type TypeNode } from "../src/parser.ts";
+import { parse, type Expr, type Param, type PropertyName, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
 function show(t: TypeNode): string {
@@ -165,4 +165,94 @@ const SHAPES: [string, string][] = [
 
 for (const [src, shape] of SHAPES) {
   test(src, () => expect(show(parseType(src))).toBe(shape));
+}
+
+// Prints an expression with every operator application parenthesised. Member chains print
+// as written, and a `new` is wrapped whole, so `(new C()).x` and `new (a.b)()` read clearly.
+function showExpr(e: Expr): string {
+  const args = (list: Expr[]) => `(${list.map(showExpr).join(", ")})`;
+  const typeArgs = (list: TypeNode[]) => (list.length ? `<${list.map(show).join(", ")}>` : "");
+  switch (e.kind) {
+    case "int":
+    case "float":
+    case "bigint":
+    case "bool":
+    case "string":
+    case "null":
+    case "this":
+    case "super":
+    case "regex":
+    case "template":
+    case "ident":
+    case "meta":
+    case "object":
+    case "function":
+      return src.slice(e.start, e.end);
+    case "spread":
+      return `...${showExpr(e.value)}`;
+    case "array":
+      return `[${e.elements.map((x) => (x ? showExpr(x) : "")).join(", ")}]`;
+    case "member":
+      return `${showExpr(e.object)}${e.optional ? "?." : "."}${e.name}`;
+    case "index":
+      return `${showExpr(e.object)}${e.optional ? "?." : ""}[${showExpr(e.index)}]`;
+    case "call":
+      return `${showExpr(e.callee)}${e.optional ? "?." : ""}${typeArgs(e.typeArgs)}${args(e.args)}`;
+    case "new": {
+      const callee = e.callee.kind === "ident" || e.callee.kind === "new" ? showExpr(e.callee) : `(${showExpr(e.callee)})`;
+      return `(new ${callee}${typeArgs(e.typeArgs)}${e.args ? args(e.args) : ""})`;
+    }
+    case "instantiation":
+      return `${showExpr(e.expr)}${typeArgs(e.typeArgs)}`;
+    case "tagged":
+      return `${showExpr(e.tag)}${typeArgs(e.typeArgs)}${showExpr(e.template)}`;
+    case "import":
+      return `import${args(e.args)}`;
+    case "nonNull":
+      return `${showExpr(e.expr)}!`;
+    case "unary":
+      return `(${e.op}${showExpr(e.operand)})`;
+    case "binary":
+      return `(${showExpr(e.left)} ${e.op} ${showExpr(e.right)})`;
+  }
+}
+
+function parseExpr(expr: string): Expr {
+  src = `function f() {\n  let x = ${expr}\n}`;
+  const [f] = parse(src);
+  const [s] = f?.kind === "function" ? f.body : [];
+  if (s?.kind !== "let") throw new Error("expected a let statement");
+  return s.init;
+}
+
+const EXPRESSIONS: [string, string][] = [
+  ["a.b.c", "a.b.c"],
+  ["a.default.new", "a.default.new"],
+  ["a[b][c]", "a[b][c]"],
+  ["f(a)(b)", "f(a)(b)"],
+  ["a?.b.c()", "a?.b.c()"],
+  ["a?.[k]", "a?.[k]"],
+  ["f?.(x)", "f?.(x)"],
+  ["a?.b!.c", "a?.b!.c"],
+  ["new a.b.C()", "(new (a.b.C)())"],
+  ["new C().x", "(new C()).x"],
+  ["new C", "(new C)"],
+  ["new C.x", "(new (C.x))"],
+  ["new new C()()", "(new (new C())())"],
+  ["new C<T>(x)", "(new C<T>(x))"],
+  ["f<T>(x)", "f<T>(x)"],
+  ["f<A, B<C>>(x)", "f<A, B<C>>(x)"],
+  ["a?.<T>(x)", "a?.<T>(x)"],
+  ["a < b > c", "((a < b) > c)"],
+  ["a < b > (c)", "a<b>(c)"],
+  ["f<T>", "f<T>"],
+  ["tag<T>`x`", "tag<T>`x`"],
+  ["import.meta.url", "import.meta.url"],
+  ["import('./m', opts)", "import('./m', opts)"],
+  ["x!", "x!"],
+  ["super.x()", "super.x()"],
+];
+
+for (const [src, shape] of EXPRESSIONS) {
+  test(src, () => expect(showExpr(parseExpr(src))).toBe(shape));
 }

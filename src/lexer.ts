@@ -193,7 +193,8 @@ export function lexer(src: string): Lexer {
       i++;
       return token("string", value, start);
     } else {
-      const p = PUNCT.find((p) => src.startsWith(p, i));
+      // `a?.5:1` is a conditional, so `?.` before a digit is `?` then a number.
+      const p = PUNCT.find((p) => src.startsWith(p, i) && !(p === "?." && /[0-9]/.test(src[i + 2] ?? "")));
       if (!p) throw new CompileError(`unexpected character '${c}'`, i);
       i += p.length;
       if (substitutions.length > 0 && (p === "{" || p === "}")) substitutions[substitutions.length - 1]! += p === "{" ? 1 : -1;

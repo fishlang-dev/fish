@@ -50,8 +50,18 @@ export type Expr = Span & (
   | { kind: "object"; props: ObjectProp[] }
   | { kind: "function"; name: string | undefined; async: boolean; generator: boolean;
       typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
-  | { kind: "member"; object: Expr; name: string }
-  | { kind: "call"; callee: Expr; args: Expr[] }
+  // `optional` marks the link written `?.`; later links in the same chain short-circuit with it.
+  | { kind: "member"; object: Expr; name: string; optional: boolean }
+  | { kind: "index"; object: Expr; index: Expr; optional: boolean }
+  | { kind: "call"; callee: Expr; typeArgs: TypeNode[]; args: Expr[]; optional: boolean }
+  // `args` is undefined for `new C` without parentheses.
+  | { kind: "new"; callee: Expr; typeArgs: TypeNode[]; args: Expr[] | undefined }
+  // `f<T>` without a call.
+  | { kind: "instantiation"; expr: Expr; typeArgs: TypeNode[] }
+  | { kind: "meta"; name: "import.meta" | "new.target" }
+  // `import(specifier, options?)`
+  | { kind: "import"; args: Expr[] }
+  | { kind: "nonNull"; expr: Expr }
   | { kind: "unary"; op: "-" | "!"; operand: Expr }
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
 );
@@ -136,6 +146,8 @@ export type Cursor = {
   end(): number;
   // Takes the `/` or `/=` at the cursor as the start of a regular expression instead.
   regex(): Token;
+  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
+  attempt<T>(parse: () => T): T | undefined;
 };
 
 function cursor(src: string): Cursor {
@@ -185,6 +197,16 @@ function cursor(src: string): Cursor {
       return items;
     },
     end: () => tokens[c.pos - 1]!.end,
+    attempt: (parse) => {
+      const [pos, conditionalAllowed] = [c.pos, c.conditionalAllowed];
+      try {
+        return parse();
+      } catch (e) {
+        if (!(e instanceof CompileError)) throw e;
+        [c.pos, c.conditionalAllowed] = [pos, conditionalAllowed];
+        return undefined;
+      }
+    },
     regex: () => {
       const slash = c.peek();
       tokens.length = c.pos;
