@@ -193,6 +193,8 @@ export function check(program: Stmt[]): Checked {
     const facts: Facts[] = [];
     const assigned = assignedNames(f.body);
     const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name);
+    // Bindings declared directly in a switch case body whose checking has finished.
+    const caseOnly = new Set<Local>();
     const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
@@ -212,6 +214,7 @@ export function check(program: Stmt[]): Checked {
       proves,
       assume,
       narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
+      reachable: (l) => !caseOnly.has(l),
     });
 
     const params = paramTypes(instance);
@@ -331,13 +334,17 @@ export function check(program: Stmt[]): Checked {
           if (typeof type !== "string" && !union && type.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);
           if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
-          // The case bodies share one scope, as in JavaScript.
-          scopes.push(new Map());
+          // The case bodies share one scope, as in JavaScript, but any case may be entered
+          // directly, skipping the bodies before it, so a binding one case declares is usable
+          // only in that case.
+          const shared = new Map<string, Local>();
+          scopes.push(shared);
           within({ stmt: s, kind: "switch" }, () => {
             // A case narrows a union for its body, and so do the cases that fall through into it.
             // `falling` is what holds for a body the previous one falls into, or null when it leaves.
             let falling: Facts | null = null;
             for (const c of s.cases) {
+              const before = new Set(shared.values());
               const test = c.test && value(c.test);
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
@@ -346,6 +353,7 @@ export function check(program: Stmt[]): Checked {
               const tested: Facts = c.test ? proves({ kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
               const reaching: Facts = falling ? either(falling, tested) : tested;
               assume(reaching, () => statements(c.body));
+              for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
               falling = leaves(c.body) ? null : reaching;
             }
           });

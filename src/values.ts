@@ -58,11 +58,13 @@ export type Context = {
   proves(e: Expr): Guard;
   assume<T>(proven: Facts, check: () => T): T;
   narrowed(l: Local): Type | undefined;
+  // False for a binding declared in another case of a switch, which entering this case skips.
+  reachable(l: Local): boolean;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -223,6 +225,9 @@ export function expressions(ctx: Context) {
             : enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
             : `cannot find name '${e.name}'`;
           throw new CompileError(message, e.start, e.end);
+        }
+        if (!reachable(local)) {
+          throw new CompileError(`'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
         }
         locals.set(e, local);
         return narrowed(local) ?? local.type;
