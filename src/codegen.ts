@@ -153,6 +153,19 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         startBlock(end);
         return;
       }
+      case "while": {
+        const test = label();
+        const loop = label();
+        const end = label();
+        emit(`br label %${test}`);
+        startBlock(test);
+        emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
+        startBlock(loop);
+        s.body.forEach(statement);
+        emit(`br label %${test}`);
+        startBlock(end);
+        return;
+      }
       case "return":
         emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.

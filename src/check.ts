@@ -111,6 +111,10 @@ export function check(funcs: Func[]): Checked {
           scoped(s.then);
           if (s.else) scoped(s.else);
           return;
+        case "while":
+          condition(s.cond);
+          scoped(s.body);
+          return;
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
@@ -254,8 +258,10 @@ export function check(funcs: Func[]): Checked {
   }
 }
 
+// `while (true)` never finishes, since there is no `break` yet, so nothing after it runs.
 function alwaysReturns(stmts: Stmt[]): boolean {
   return stmts.some((s) =>
     s.kind === "return" ||
-    (s.kind === "if" && s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else)));
+    (s.kind === "if" && s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else)) ||
+    (s.kind === "while" && s.cond.kind === "bool" && s.cond.value));
 }

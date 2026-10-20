@@ -23,6 +23,7 @@ export type Stmt = Span & (
   | { kind: "assign"; target: Expr; op: ArithmeticOp | "="; value: Expr }
   | { kind: "return"; value: Expr | undefined }
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
+  | { kind: "while"; cond: Expr; body: Stmt[] }
 );
 
 export type Param = Span & { name: string; type: TypeRef | undefined };
@@ -124,6 +125,7 @@ export function parse(src: string): Func[] {
   // Statements that end in a block need nothing after them; the rest end as in JavaScript.
   function statement(): Stmt {
     if (at("if")) return ifStatement();
+    if (at("while")) return whileStatement();
     const s = simpleStatement();
     endStatement();
     return s;
@@ -141,6 +143,15 @@ export function parse(src: string): Func[] {
       otherwise = body();
     }
     return { kind: "if", cond, then, else: otherwise, start, end: tokens[pos - 1]!.end };
+  }
+
+  function whileStatement(): Stmt {
+    const start = next().start;
+    expect("(");
+    const cond = expression();
+    expect(")");
+    const loop = body();
+    return { kind: "while", cond, body: loop, start, end: tokens[pos - 1]!.end };
   }
 
   function simpleStatement(): Stmt {
