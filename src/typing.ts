@@ -30,10 +30,15 @@ export type ParamType = { kind: "param"; name: string; bound: ObjectType | Inter
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
 export type LiteralType = { kind: "literal"; value: string | bigint | boolean; fields: Field[] };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType;
+// A union holds a value of one of its members: a tag naming which, then that member's value.
+// It has no fields; reaching into one takes narrowing to a member first.
+export type UnionType = { kind: "union"; members: Type[]; fields: Field[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
+const unions = new Map<string, UnionType>();
 const keys = new Map<Exclude<Type, string>, string>();
 let declared = 0;
 
@@ -59,6 +64,30 @@ export function literalType(value: string | bigint | boolean): LiteralType {
     keys.set(t, key);
   }
   return t;
+}
+
+// Members are flattened, deduplicated and kept in one order, so equal unions are one type,
+// and a literal whose base type is also a member adds nothing. A single member is itself.
+export function unionType(parts: Type[]): Type {
+  const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p]));
+  const members = [...new Set(flat)]
+    .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
+    .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
+  if (members.length === 1) return members[0]!;
+  const key = `union ${members.map(keyOf).join("|")}`;
+  let t = unions.get(key);
+  if (!t) {
+    t = { kind: "union", members, fields: [] };
+    unions.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// The members of `union` a value of `type` can go into: the one it is, or else every one it
+// fits. The checker allows exactly one.
+export function membersFor(type: Type, union: UnionType): Type[] {
+  return union.members.includes(type) ? [type] : union.members.filter((m) => fits(type, m));
 }
 
 // The type a literal's value belongs to, if Fish has it yet.
@@ -118,6 +147,11 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
   if (from === to) return true;
+  if (typeof to !== "string" && to.kind === "union") {
+    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
+    return to.members.some((m) => fits(from, m));
+  }
+  if (typeof from !== "string" && from.kind === "union") return false;
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
@@ -132,6 +166,7 @@ export function fits(from: Type, to: Type): boolean {
 export function show(t: Type): string {
   if (typeof t === "string") return t;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
+  if (t.kind === "union") return t.members.map(show).join(" | ");
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

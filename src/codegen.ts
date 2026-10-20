@@ -4,22 +4,12 @@ import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
-import { field, fieldPath, type ClassType, type ObjectType } from "./typing.ts";
-
-const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
-
-// An object is a literal struct of its fields, in their sorted order. An instance is a
-// literal struct of the base it embeds, if any, then its own fields in declaration order.
-function llvm(t: Type): string {
-  if (typeof t === "string") return PRIMITIVES[t];
-  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...t.fields.map((f) => llvm(f.type))];
-  return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
-}
+import { conversions, llvm } from "./layout.ts";
+import { fieldPath, type ClassType, type ObjectType } from "./typing.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
 };
-
 
 // An instance's name in the IR. A generic class's instance is named by its type arguments,
 // which may hold quotes, so those are escaped as LLVM spells them.
@@ -47,8 +37,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let self: ClassType | undefined;
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
-  const builder = { emit, temp, label, startBlock, cString };
+  const builder = { emit, temp, label, startBlock, cString, alloca };
   const { operate, arithmetic } = lowering(builder, src, file, release);
+  const { convert } = conversions(builder);
 
   for (const instance of instances) {
     current = instance;
@@ -91,6 +82,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   function emit(line: string) {
     body.push(`  ${line}`);
+  }
+
+  function alloca(type: string): string {
+    const slot = temp();
+    allocas.push(`  ${slot} = alloca ${type}`);
+    return slot;
   }
 
   function temp(): string {
@@ -246,7 +243,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
-      if (isPrint(e.callee)) print(e.args, builder, value, (a) => types.get(a)!);
+      if (isPrint(e.callee)) print(e.args, builder, value, (a) => types.get(a)!, convert);
       return undefined;
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
@@ -294,8 +291,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     while (root.kind === "member" && !calls.has(root)) root = root.object;
     if (root.kind === "ident" || root.kind === "this") return address(object);
     const type = llvm(types.get(object)!);
-    const slot = temp();
-    allocas.push(`  ${slot} = alloca ${type}`);
+    const slot = alloca(type);
     emit(`store ${type} ${value(object)}, ptr ${slot}`);
     return slot;
   }
@@ -304,34 +300,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function value(e: Expr): string {
     const result = evaluate(e);
     const to = coercions.get(e);
-    return to ? project(result, types.get(e)!, to) : result;
-  }
-
-  // Builds a value of `to` from the matching fields of a wider value of `from`.
-  function project(v: string, from: Type, to: Type): string {
-    if (from === to) return v;
-    // A literal's value is known, so leaving one makes a constant, and entering one keeps nothing.
-    if (typeof from !== "string" && from.kind === "literal") return String(from.value);
-    if (typeof to !== "string" && to.kind === "literal") return "zeroinitializer";
-    if (typeof from === "string" || typeof to === "string") return v;
-    if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param") {
-      throw new Error("internal error: an interface or a type parameter reached codegen");
-    }
-    // A class built from a literal starts with its embedded base, built the same way.
-    const embeds = to.kind === "class" && to.base;
-    let result = "undef";
-    const insert = (part: string, type: Type, i: number) => {
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(to)} ${result}, ${llvm(type)} ${part}, ${i}`);
-      result = next;
-    };
-    if (embeds) insert(project(v, from, embeds), embeds, 0);
-    to.fields.forEach((f, i) => {
-      const part = temp();
-      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from, f.name).join(", ")}`);
-      insert(project(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
-    });
-    return result;
+    return to ? convert(result, types.get(e)!, to) : result;
   }
 
   function evaluate(e: Expr): string {
@@ -377,8 +346,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "new": {
         // The constructor fills in a slot, which then holds the new instance.
         const type = types.get(e) as ClassType;
-        const instance = temp();
-        allocas.push(`  ${instance} = alloca ${llvm(type)}`);
+        const instance = alloca(llvm(type));
         const values = (e.args ?? []).map((a) => `, ${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
         emit(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`);
         const result = temp();

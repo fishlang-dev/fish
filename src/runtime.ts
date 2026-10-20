@@ -1,4 +1,4 @@
-import type { Builder } from "./arithmetic.ts";
+import { llvm, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
 import type { Type } from "./typing.ts";
 
@@ -28,29 +28,58 @@ export const RUNTIME = [
   "}",
 ];
 
-// `console.log` and `print` are the same: arguments joined by spaces, then a newline.
-// String literals are folded into the printf format at compile time.
-export function print(args: Expr[], { emit, temp, cString }: Builder, value: (e: Expr) => string, typeOf: (e: Expr) => Type) {
+// `console.log` and `print` are the same: arguments joined by spaces, then a newline. String
+// literals and literal values are folded into the printf format at compile time. A union is
+// printed by branching on its tag, so the format is flushed before it and each branch prints
+// its member.
+export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf: (e: Expr) => Type, convert: Convert) {
+  const { emit, temp, label, startBlock, cString } = b;
   let format = "";
-  const values: string[] = [];
+  let values: string[] = [];
   args.forEach((a, i) => {
     if (i > 0) format += " ";
-    const type = typeOf(a);
-    if (a.kind === "string") {
-      format += a.value.replaceAll("%", "%%");
-    } else if (typeof type !== "string" && type.kind === "literal") {
-      // A literal's value is known, though what produces it still runs.
-      value(a);
-      format += String(type.value).replaceAll("%", "%%");
+    if (a.kind === "string") format += escape(a.value);
+    else piece(value(a), typeOf(a));
+  });
+  format += "\n";
+  flush();
+
+  function piece(v: string, type: Type) {
+    if (typeof type !== "string" && type.kind === "literal") {
+      format += escape(String(type.value));
     } else if (type === "boolean") {
       const text = temp();
-      emit(`${text} = select i1 ${value(a)}, ptr @.true, ptr @.false`);
+      emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
       format += "%s";
       values.push(`, ptr ${text}`);
+    } else if (typeof type !== "string" && type.kind === "union") {
+      flush();
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
+      const cases = type.members.map(() => label());
+      const end = label();
+      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      type.members.forEach((member, i) => {
+        startBlock(cases[i]!);
+        piece(convert(v, type, member), member);
+        flush();
+        emit(`br label %${end}`);
+      });
+      startBlock(end);
     } else {
       format += "%lld";
-      values.push(`, i64 ${value(a)}`);
+      values.push(`, i64 ${v}`);
     }
-  });
-  emit(`call i32 (ptr, ...) @printf(ptr ${cString(format + "\n")}${values.join("")})`);
+  }
+
+  function flush() {
+    if (format === "") return;
+    emit(`call i32 (ptr, ...) @printf(ptr ${cString(format)}${values.join("")})`);
+    format = "";
+    values = [];
+  }
 }
+
+const escape = (text: string) => text.replaceAll("%", "%%");
+
+type Convert = (v: string, from: Type, to: Type) => string;

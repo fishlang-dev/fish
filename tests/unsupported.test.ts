@@ -6,7 +6,6 @@ import { parse } from "../src/parser.ts";
 const TYPES: [string, string][] = [
   ["Array<i64>", "array types"],
   ["i64[]", "array types"],
-  ["i64 | boolean", "union types"],
   ["A & B", "intersection types"],
   ["keyof A", "'keyof' types"],
   ["readonly i64[]", "'readonly' types"],

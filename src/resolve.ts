@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import { placeholders } from "./generics.ts";
-import { interfaceType, keyOf, literalType, objectType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
+import { interfaceType, keyOf, literalType, objectType, unionType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -78,6 +78,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind === "literal") return literal(t.value);
+    if (t.kind === "union") return unionType(t.types.map(unionMember));
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
@@ -87,6 +88,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       return t.name;
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
+    if (t.name === "null" || t.name === "undefined") throw new CompileError(`'${t.name}' is Option in Fish, which is not supported yet`, t.start, t.end);
     const args = t.args.map(resolveType);
     const alias = aliases.get(t.name);
     if (alias) return aliasType(alias, args, t);
@@ -96,6 +98,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
+  }
+
+  // A union holds values, so an interface, which describes values without being one, can't be
+  // a member, and neither can `void`.
+  function unionMember(node: TypeNode): Type {
+    const t = resolveType(node);
+    if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
+    if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
+    if (typeof t !== "string" && t.kind === "param") throw unsupported("unions holding a type parameter", node);
+    return t;
   }
 
   function literal(e: Expr): Type {

@@ -69,6 +69,7 @@ export function concrete(t: Type): boolean {
   // An interface describes values without being one, so only a definition check holds one.
   if (t.kind === "param" || t.kind === "interface") return false;
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+  if (t.kind === "union") return t.members.every(concrete);
   let known = concreteObjects.get(t);
   if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
   return known;

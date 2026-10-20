@@ -4,7 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, membersFor, objectType, show } from "./typing.ts";
+import type { Access, ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 
@@ -20,6 +21,9 @@ export function isPrint(callee: Expr): boolean {
   return callee.kind === "member" && callee.name === "log" &&
     callee.object.kind === "ident" && callee.object.name === "console";
 }
+
+const printable = (t: Type): boolean =>
+  typeof t === "string" || t.kind === "literal" || (t.kind === "union" && t.members.every(printable));
 
 // The value a literal expression writes, if it is one.
 function literalValue(e: Expr): string | bigint | boolean | undefined {
@@ -82,8 +86,8 @@ export function expressions(ctx: Context) {
     if (isPrint(callee)) {
       for (const a of e.args) {
         const type = a.kind === "string" ? "void" : value(a);
-        if (typeof type === "string" || type.kind === "literal") continue;
-        throw new CompileError(type.kind === "param" ? `a value of type '${type.name}' can't be printed`
+        if (printable(type)) continue;
+        throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
           : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
       return { type: "void", what: "printing" };
@@ -302,6 +306,10 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
+    if (typeof to !== "string" && to.kind === "union") {
+      intoUnion(e, type, to, message);
+      return;
+    }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
     if (typeof to !== "string" && to.kind === "literal") {
       if (literalValue(e) !== to.value) throw new CompileError(message, e.start, e.end);
@@ -342,6 +350,27 @@ export function expressions(ctx: Context) {
       }
     }
     return true;
+  }
+
+  // A value goes into the one union member it is or fits; a literal expression may also be a
+  // literal member with its value. A union goes into a wider one member by member.
+  function intoUnion(e: Expr, type: Type, to: UnionType, message: string) {
+    const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    for (const source of sources) {
+      const value = literalValue(e);
+      const literal = to.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === value);
+      if (literal && sources.length === 1 && baseOf(literal as LiteralType) === type) {
+        types.set(e, literal);
+        break;
+      }
+      const into = membersFor(source, to);
+      if (into.length === 0) throw new CompileError(message, e.start, e.end);
+      if (into.length > 1) {
+        throw new CompileError(`type '${show(source)}' fits more than one member of '${show(to)}': ${into.map((m) => `'${show(m)}'`).join(" and ")}`, e.start, e.end);
+      }
+      if (sources.length === 1) excess(e, into[0]!);
+    }
+    coercions.set(e, to);
   }
 
   function excess(e: Expr, to: Type) {
