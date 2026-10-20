@@ -13,7 +13,8 @@ const keys = new Map<ObjectType, string>();
 
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const key = sorted.map((f) => `${JSON.stringify(f.name)}:${typeof f.type === "string" ? f.type : keys.get(f.type)}`).join(",");
+  // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
+  const key = sorted.map((f) => `${JSON.stringify(f.name)}:${typeof f.type === "string" ? f.type : `{${keys.get(f.type)}}`}`).join(",");
   let t = interned.get(key);
   if (!t) {
     t = { kind: "object", fields: sorted };
