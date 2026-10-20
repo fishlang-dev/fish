@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
 import {
-  block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
+  allowingIn, block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
   type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
 import { toPattern } from "./patterns.ts";
@@ -94,7 +94,7 @@ function arrowHead(c: Cursor) {
 function conditional(c: Cursor): Expr {
   const cond = binary(c);
   if (!c.eat("?")) return cond;
-  const then = expression(c);
+  const then = allowingIn(c, true, () => expression(c));
   c.expect(":");
   const otherwise = expression(c);
   return { kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
@@ -155,7 +155,7 @@ const atTypeOperator = (c: Cursor) => (c.at("as") || c.at("satisfies")) && !c.pe
 // `A<B<C>>` closes two generics; `>>`, `>>>` and `>=` are rejoined here from adjacent tokens.
 function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
   const t = c.peek();
-  if (t.kind === "ident") return t.text === "in" || t.text === "instanceof" ? [t.text, 1] : undefined;
+  if (t.kind === "ident") return t.text === "instanceof" || (t.text === "in" && c.inAllowed) ? [t.text, 1] : undefined;
   if (t.kind !== "punct") return undefined;
   if (t.text !== ">") return isBinaryOp(t.text) ? [t.text, 1] : undefined;
   const adjacent = (i: number, text: string) => isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
@@ -201,7 +201,7 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
     const t = c.peek();
     const optional = calls && c.eat("?.");
     if (c.eat("[")) {
-      const index = sequence(c);
+      const index = allowingIn(c, true, () => sequence(c));
       e = { kind: "index", object: e, index, optional, start, end: c.expect("]").end };
     } else if (c.eat(".") || (optional && !c.at("(") && !c.at("<"))) {
       e = { kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
@@ -278,7 +278,7 @@ export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: s
 }
 
 function template(c: Cursor): Expr {
-  const { quasis, parts, start, end } = templateParts(c, (c) => sequence(c));
+  const { quasis, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, () => sequence(c)));
   return { kind: "template", quasis, exprs: parts, start, end };
 }
 
@@ -311,7 +311,7 @@ export function primary(c: Cursor): Expr {
       return { kind: "ident", name: t.text, ...span };
   }
   if (t.text === "(") {
-    const e = sequence(c);
+    const e = allowingIn(c, true, () => sequence(c));
     c.expect(")");
     return e;
   }
@@ -341,14 +341,16 @@ function element(c: Cursor): Expr {
 function array(c: Cursor): Expr {
   const start = c.expect("[").start;
   const elements: (Expr | undefined)[] = [];
-  while (!c.eat("]")) {
-    if (c.eat(",")) {
-      elements.push(undefined);
-      continue;
+  allowingIn(c, true, () => {
+    while (!c.eat("]")) {
+      if (c.eat(",")) {
+        elements.push(undefined);
+        continue;
+      }
+      elements.push(element(c));
+      if (!c.at("]")) c.expect(",");
     }
-    elements.push(element(c));
-    if (!c.at("]")) c.expect(",");
-  }
+  });
   return { kind: "array", elements, start, end: c.end() };
 }
 

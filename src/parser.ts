@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
-import { bindingPattern } from "./patterns.ts";
+import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
 export type Span = { start: number; end: number };
@@ -90,6 +90,11 @@ export type Stmt = Span & (
   | { kind: "return"; value: Expr | undefined }
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
   | { kind: "while"; cond: Expr; body: Stmt[] }
+  | { kind: "doWhile"; body: Stmt[]; cond: Expr }
+  // `init` is a declaration or an expression.
+  | { kind: "for"; init: Stmt | Expr | undefined; test: Expr | undefined; update: Expr | undefined; body: Stmt[] }
+  // `left` is a declaration without an initializer, or an assignment target.
+  | { kind: "forIn" | "forOf"; await: boolean; left: Stmt | Pattern; right: Expr; body: Stmt[] }
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
@@ -177,6 +182,9 @@ export type Cursor = {
   pos: number;
   // False only directly inside a conditional type's `extends` clause, as in TypeScript.
   conditionalAllowed: boolean;
+  // False only directly inside a `for` initializer, so `for (x in y)` isn't read as an
+  // expression; any bracket, list or block allows `in` again, as in TypeScript.
+  inAllowed: boolean;
   // The token `offset` places ahead of the current one.
   peek(offset?: number): Token;
   next(): Token;
@@ -209,6 +217,7 @@ function cursor(src: string): Cursor {
   const c: Cursor = {
     pos: 0,
     conditionalAllowed: true,
+    inAllowed: true,
     peek: (offset = 0) => {
       while (tokens.length <= c.pos + offset && tokens.at(-1)?.kind !== "eof") tokens.push(lex.next());
       return tokens[Math.min(c.pos + offset, tokens.length - 1)]!;
@@ -234,7 +243,7 @@ function cursor(src: string): Cursor {
       return c.next();
     },
     error: (message, t = c.peek()) => new CompileError(`${message}, found ${describe(t)}`, t.start, t.end),
-    list: (item, close) => {
+    list: (item, close) => allowingIn(c, true, () => {
       const items = [];
       while (!c.at(close)) {
         items.push(item());
@@ -242,15 +251,15 @@ function cursor(src: string): Cursor {
       }
       c.next();
       return items;
-    },
+    }),
     end: () => tokens[c.pos - 1]!.end,
     attempt: (parse) => {
-      const [pos, conditionalAllowed] = [c.pos, c.conditionalAllowed];
+      const [pos, conditionalAllowed, inAllowed] = [c.pos, c.conditionalAllowed, c.inAllowed];
       try {
         return parse();
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
-        [c.pos, c.conditionalAllowed] = [pos, conditionalAllowed];
+        [c.pos, c.conditionalAllowed, c.inAllowed] = [pos, conditionalAllowed, inAllowed];
         return undefined;
       }
     },
@@ -262,6 +271,15 @@ function cursor(src: string): Cursor {
     },
   };
   return c;
+}
+
+// Parses with the `in` operator allowed or not, restoring the outer setting after.
+export function allowingIn<T>(c: Cursor, allowed: boolean, parse: () => T): T {
+  const outer = c.inAllowed;
+  c.inAllowed = allowed;
+  const result = parse();
+  c.inAllowed = outer;
+  return result;
 }
 
 // A program is a list of statements; which of them may appear at the top level is the
@@ -289,10 +307,12 @@ function func(c: Cursor): Func {
 export function block(c: Cursor): Stmt[] {
   c.expect("{");
   const stmts: Stmt[] = [];
-  while (!c.eat("}")) {
-    if (c.peek().kind === "eof") throw c.error("expected '}'");
-    stmts.push(statement(c));
-  }
+  allowingIn(c, true, () => {
+    while (!c.eat("}")) {
+      if (c.peek().kind === "eof") throw c.error("expected '}'");
+      stmts.push(statement(c));
+    }
+  });
   return stmts;
 }
 
@@ -309,6 +329,8 @@ function statement(c: Cursor): Stmt {
   if (c.at(";")) return { kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
+  if (c.at("for")) return forStatement(c);
+  if (c.at("do")) return doWhileStatement(c);
   if (c.at("interface")) return interfaceDeclaration(c);
   const s: Stmt = c.at("debugger") ? { kind: "debugger", start, end: c.next().end }
     : atTypeAlias(c) ? typeAlias(c)
@@ -336,15 +358,56 @@ function whileStatement(c: Cursor): Stmt {
   return { kind: "while", cond, body: loop, start, end: c.end() };
 }
 
+// `for (init; test; update)`, `for (left in right)`, `for (left of right)` and `for await`.
+function forStatement(c: Cursor): Stmt {
+  const start = c.expect("for").start;
+  const isAwait = c.eat("await");
+  c.expect("(");
+  const declared = atDeclaration(c) ? allowingIn(c, false, () => declaration(c)) : undefined;
+  const expr = declared || c.at(";") ? undefined : allowingIn(c, false, () => sequence(c));
+  const init = declared ?? expr;
+  if (init && (c.at("in") || c.at("of"))) {
+    const kind = c.next().text === "in" ? "forIn" : "forOf";
+    const left = declared ?? toPattern(expr!);
+    // `for...in` takes any expression; `for...of` one without a top-level comma.
+    const right = kind === "forIn" ? sequence(c) : expression(c);
+    c.expect(")");
+    return { kind, await: isAwait, left, right, body: body(c), start, end: c.end() };
+  }
+  c.expect(";");
+  const test = c.at(";") ? undefined : sequence(c);
+  c.expect(";");
+  const update = c.at(")") ? undefined : sequence(c);
+  c.expect(")");
+  return { kind: "for", init, test, update, body: body(c), start, end: c.end() };
+}
+
+// The `;` after `do...while (x)` is optional even on the same line, unlike other statements.
+function doWhileStatement(c: Cursor): Stmt {
+  const start = c.expect("do").start;
+  const loop = body(c);
+  c.expect("while");
+  c.expect("(");
+  const cond = sequence(c);
+  c.expect(")");
+  c.eat(";");
+  return { kind: "doWhile", body: loop, cond, start, end: c.end() };
+}
+
+const atDeclaration = (c: Cursor) => c.at("let") || c.at("const") || c.at("var");
+
+function declaration(c: Cursor): Stmt {
+  const start = c.peek().start;
+  const keyword = c.next().text as "let" | "const" | "var";
+  const declarations: Declarator[] = [];
+  do declarations.push(declarator(c));
+  while (c.eat(","));
+  return { kind: "let", keyword, declarations, start, end: c.end() };
+}
+
 function simpleStatement(c: Cursor): Stmt {
   const start = c.peek().start;
-  if (c.at("let") || c.at("const") || c.at("var")) {
-    const keyword = c.next().text as "let" | "const" | "var";
-    const declarations: Declarator[] = [];
-    do declarations.push(declarator(c));
-    while (c.eat(","));
-    return { kind: "let", keyword, declarations, start, end: c.end() };
-  }
+  if (atDeclaration(c)) return declaration(c);
   if (c.at("return")) {
     const end = c.next().end;
     // A newline after `return` ends the statement, as in JavaScript.

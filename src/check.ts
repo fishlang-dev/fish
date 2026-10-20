@@ -150,6 +150,14 @@ export function check(program: Stmt[]): Checked {
           throw unsupported("'debugger' statements", s);
         case "empty":
           return;
+        case "for":
+          throw unsupported("'for' loops", s);
+        case "forIn":
+          throw unsupported("'for...in' loops", s);
+        case "forOf":
+          throw unsupported(s.await ? "'for await...of' loops" : "'for...of' loops", s);
+        case "doWhile":
+          throw unsupported("'do...while' loops", s);
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;

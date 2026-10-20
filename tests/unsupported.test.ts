@@ -123,6 +123,11 @@ const STATEMENTS: [string, string][] = [
   ["debugger", "'debugger' statements"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
+  ["for (;;) {}", "'for' loops"],
+  ["for (const k in o) {}", "'for...in' loops"],
+  ["for (const x of xs) {}", "'for...of' loops"],
+  ["for await (const x of xs) {}", "'for await...of' loops"],
+  ["do {} while (true)", "'do...while' loops"],
 ];
 
 test("let x: i64", () => {

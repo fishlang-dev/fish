@@ -419,3 +419,63 @@ const DESTRUCTURING: [string, string][] = [
 for (const [expr, shape] of DESTRUCTURING) {
   test(expr, () => expect(showExpr(parseExpr(expr))).toBe(shape));
 }
+
+// Prints a statement's head: declarations and loop headers, which is where grouping matters.
+function showStmt(s: Stmt): string {
+  switch (s.kind) {
+    case "let": {
+      const declarators = s.declarations.map((d) => `${showPattern(d.target)}${d.init ? ` = ${showExpr(d.init)}` : ""}`);
+      return `${s.keyword} ${declarators.join(", ")}`;
+    }
+    case "expr":
+      return showExpr(s.expr);
+    case "for": {
+      const init = s.init === undefined ? "" : "keyword" in s.init ? showStmt(s.init) : showExpr(s.init as Expr);
+      return `for (${init}; ${s.test ? showExpr(s.test) : ""}; ${s.update ? showExpr(s.update) : ""})`;
+    }
+    case "forIn":
+    case "forOf": {
+      const left = "keyword" in s.left ? showStmt(s.left) : showPattern(s.left as Pattern);
+      return `for${s.await ? " await" : ""} (${left} ${s.kind === "forIn" ? "in" : "of"} ${showExpr(s.right)})`;
+    }
+    case "doWhile":
+      return `do { ${s.body.length} statements } while (${showExpr(s.cond)})`;
+    default:
+      return s.kind;
+  }
+}
+
+function parseStatements(stmts: string): Stmt[] {
+  src = `function f() {\n  ${stmts}\n}`;
+  const [f] = parse(src);
+  return f?.kind === "function" ? f.body : [];
+}
+
+const STATEMENTS: [string, string][] = [
+  ["for (x in y) {}", "for (x in y)"],
+  ["for (x = (a in b); ;) {}", "for ((x = (a in b)); ; )"],
+  ["for (let x = [a in b], y = f(c in d); ;) {}", "for (let x = [(a in b)], y = f((c in d)); ; )"],
+  ["for (let f = () => { a in b }; ;) {}", "for (let f = (() => { 1 statements }); ; )"],
+  ["for (let x = a ? b in c : d; ;) {}", "for (let x = (a ? (b in c) : d); ; )"],
+  ["for (let [k, v] of map) {}", "for (let [k, v] of map)"],
+  ["for (const { a, b } of list) {}", "for (const { a: a, b: b } of list)"],
+  ["for ([a, b] of pairs) {}", "for ([a, b] of pairs)"],
+  ["for (obj.prop in source) {}", "for (obj.prop in source)"],
+  ["for (let i = 0, n = a.length; i < n; i++) {}", "for (let i = 0, n = a.length; (i < n); (i++))"],
+  ["for (const key in obj) {}", "for (const key in obj)"],
+  ["for await (const chunk of stream) {}", "for await (const chunk of stream)"],
+  ["for (;;) {}", "for (; ; )"],
+  ["for (let of of ofs) {}", "for (let of of ofs)"],
+  ["for (x of a, b) {}", "error"],
+];
+
+for (const [stmt, shape] of STATEMENTS) {
+  test(stmt, () => {
+    if (shape === "error") return void expect(() => parseStatements(stmt)).toThrow();
+    expect(parseStatements(stmt).map(showStmt).join("; ")).toBe(shape);
+  });
+}
+
+test("do x(); while (y) z()", () => {
+  expect(parseStatements("do x(); while (y) z()").map(showStmt).join("; ")).toBe("do { 1 statements } while (y); z()");
+});
