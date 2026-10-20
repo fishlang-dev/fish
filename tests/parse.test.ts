@@ -43,6 +43,8 @@ function show(t: TypeNode): string {
       const optional = t.optional ? `${t.optional}?` : "";
       return `{ ${readonly}[${t.name} in ${show(t.constraint)}${as}]${optional}${t.type ? `: ${show(t.type)}` : ""} }`;
     }
+    case "template":
+      return `\`${t.quasis.map((q, i) => (i === 0 ? q : `\${${show(t.types[i - 1]!)}}${q}`)).join("")}\``;
     case "predicate":
       return `${t.asserts ? "asserts " : ""}${t.name}${t.type ? ` is ${show(t.type)}` : ""}`;
   }
@@ -155,6 +157,10 @@ const SHAPES: [string, string][] = [
   ["import('m')", "import(\"m\")"],
   ["import(\"./m\").A.B<T>", "import(\"./m\").A.B<T>"],
   ["typeof import('m')", "typeof import(\"m\")"],
+  ["`a${B}c`", "`a${B}c`"],
+  ["`${A | B}-${`x${C}`}`", "`${(A | B)}-${`x${C}`}`"],
+  ["`plain`", "`plain`"],
+  ["1.5 | 0xff | 1n | -1.5", "(1.5 | 0xff | 1n | -1.5)"],
 ];
 
 for (const [src, shape] of SHAPES) {

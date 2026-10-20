@@ -287,6 +287,8 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   null: "'null' values",
   this: "'this' expressions",
   super: "'super' expressions",
+  template: "template literals",
+  tagged: "tagged templates",
 };
 
 // What each type form is called when the checker rejects it.
@@ -304,6 +306,7 @@ const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "functio
   conditional: "conditional types",
   infer: "'infer' types",
   mapped: "mapped types",
+  template: "template literal types",
 };
 
 function unsupported(what: string, at: Span): CompileError {

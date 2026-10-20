@@ -53,13 +53,37 @@ function postfix(c: Cursor): Expr {
     } else if (c.eat("(")) {
       const args = c.list(() => expression(c), ")");
       e = { kind: "call", callee: e, args, start: e.start, end: c.end() };
+    } else if (c.peek().kind === "template" || c.peek().kind === "templateHead") {
+      const quoted = template(c);
+      e = { kind: "tagged", tag: e, typeArgs: [], template: quoted, start: e.start, end: quoted.end };
     } else {
       return e;
     }
   }
 }
 
+// A template's pieces, with each substitution parsed by `part`; shared with template literal types.
+export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; parts: T[]; start: number; end: number } {
+  const first = c.next();
+  const quasis = [first.text];
+  const parts: T[] = [];
+  let piece = first;
+  while (piece.kind !== "template" && piece.kind !== "templateTail") {
+    parts.push(part(c));
+    piece = c.peek();
+    if (piece.kind !== "templateMiddle" && piece.kind !== "templateTail") throw c.error("expected '}'");
+    quasis.push(c.next().text);
+  }
+  return { quasis, parts, start: first.start, end: piece.end };
+}
+
+function template(c: Cursor): Expr {
+  const { quasis, parts, start, end } = templateParts(c, (c) => expression(c));
+  return { kind: "template", quasis, exprs: parts, start, end };
+}
+
 export function primary(c: Cursor): Expr {
+  if (c.peek().kind === "template" || c.peek().kind === "templateHead") return template(c);
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {

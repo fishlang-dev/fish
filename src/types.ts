@@ -1,4 +1,4 @@
-import { primary, unary, expression } from "./expressions.ts";
+import { expression, primary, templateParts, unary } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import type { Cursor, Param, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 
@@ -170,6 +170,10 @@ function primaryType(c: Cursor): TypeNode {
   if (c.at("-") && isNumber(c.peek(1))) {
     const value = unary(c);
     return { kind: "literal", value, start: value.start, end: value.end };
+  }
+  if (t.kind === "template" || t.kind === "templateHead") {
+    const { quasis, parts, start, end } = templateParts(c, (c) => type(c));
+    return { kind: "template", quasis, types: parts, start, end };
   }
   if (c.at("[")) return tuple(c);
   if (c.at("{")) return atMappedType(c) ? mappedType(c) : objectType(c);

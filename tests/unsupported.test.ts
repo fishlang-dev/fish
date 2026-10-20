@@ -23,6 +23,7 @@ const TYPES: [string, string][] = [
   ["A extends B ? i64 : boolean", "conditional types"],
   ["{ [K in A]: i64 }", "mapped types"],
   ["infer U", "'infer' types"],
+  ["`a${B}`", "template literal types"],
 ];
 
 for (const [type, what] of TYPES) {
@@ -59,6 +60,8 @@ const EXPRESSIONS: [string, string][] = [
   ["null", "'null' values"],
   ["this", "'this' expressions"],
   ["super", "'super' expressions"],
+  ["`a${1}b`", "template literals"],
+  ["tag`a`", "tagged templates"],
 ];
 
 for (const [expr, what] of EXPRESSIONS) {

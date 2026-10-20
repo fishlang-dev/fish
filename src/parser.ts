@@ -22,6 +22,7 @@ export type TypeNode = Span & (
   | { kind: "import"; module: string; name: string | undefined; args: TypeNode[] }
   | { kind: "conditional"; check: TypeNode; extends: TypeNode; then: TypeNode; else: TypeNode }
   | { kind: "infer"; name: string; constraint: TypeNode | undefined }
+  | { kind: "template"; quasis: string[]; types: TypeNode[] }
   | { kind: "mapped"; name: string; constraint: TypeNode; as: TypeNode | undefined;
       type: TypeNode | undefined; readonly: "+" | "-" | undefined; optional: "+" | "-" | undefined }
   // Only in return positions; name may be "this".
@@ -35,6 +36,9 @@ export type Expr = Span & (
   | { kind: "float"; value: number }
   | { kind: "bigint"; value: bigint }
   | { kind: "null" } | { kind: "this" } | { kind: "super" }
+  // Decoded text; `quasis` has one more entry than `exprs`.
+  | { kind: "template"; quasis: string[]; exprs: Expr[] }
+  | { kind: "tagged"; tag: Expr; typeArgs: TypeNode[]; template: Expr }
   | { kind: "bool"; value: boolean }
   | { kind: "string"; value: string }
   | { kind: "ident"; name: string }
@@ -118,7 +122,8 @@ export type Cursor = {
 function cursor(tokens: Token[]): Cursor {
   const describe = (t: Token) => {
     if (t.kind === "eof") return "end of file";
-    return t.kind === "string" ? "a string literal" : `'${t.text}'`;
+    if (t.kind === "string") return "a string literal";
+    return t.kind.startsWith("template") ? "a template literal" : `'${t.text}'`;
   };
   const c: Cursor = {
     pos: 0,

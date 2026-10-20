@@ -2,8 +2,10 @@ import { CompileError } from "./diag.ts";
 
 export type Token = {
   // An `int` is an integer in any base; a `float` has a fraction or exponent; a `bigint` ends in `n`.
-  kind: "ident" | "int" | "float" | "bigint" | "string" | "punct" | "eof";
-  // Source text; for strings, the decoded value. Keywords are idents, since most TS keywords are contextual.
+  // A template with substitutions arrives in pieces: a head ending in `${`, middles between
+  // `}` and `${`, and a tail from `}` to the closing backtick.
+  kind: "ident" | "int" | "float" | "bigint" | "string" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
+  // Source text; for strings and templates, the decoded value. Keywords are idents, since most TS keywords are contextual.
   text: string;
   start: number;
   end: number;
@@ -47,6 +49,27 @@ function escape(src: string, i: number): [string, number] {
   return [c, i + 2];
 }
 
+// The decoded text of a template piece starting at `i`, where it ends, and whether a
+// substitution follows.
+function template(src: string, i: number): [string, number, boolean] {
+  let value = "";
+  for (;;) {
+    if (i >= src.length) throw new CompileError("unterminated template literal", i);
+    if (src[i] === "`") return [value, i + 1, false];
+    if (src.startsWith("${", i)) return [value, i + 2, true];
+    if (src[i] === "\\") {
+      const [escaped, end] = escape(src, i);
+      value += escaped;
+      i = end;
+    } else if (src.startsWith("\r\n", i)) {
+      value += "\n";
+      i += 2;
+    } else {
+      value += src[i++];
+    }
+  }
+}
+
 // The end of the number starting at `i`, and which kind of number it is.
 function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
   const radix = { x: /[0-9a-fA-F_]/, o: /[0-7_]/, b: /[01_]/ }[src[i] === "0" ? (src[i + 1] ?? "").toLowerCase() : ""];
@@ -78,6 +101,9 @@ export function lex(src: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   let newlineBefore = false;
+  // For each template substitution we are inside, how many `{` it has open, so the `}` that
+  // closes the substitution can be told from one that closes a block or an object.
+  const substitutions: number[] = [];
   const push = (kind: Token["kind"], text: string, start: number) => {
     tokens.push({ kind, text, start, end: i, newlineBefore });
     newlineBefore = false;
@@ -105,6 +131,16 @@ export function lex(src: string): Token[] {
       const [end, kind] = number(src, i);
       i = end;
       push(kind, src.slice(start, i), start);
+    } else if (c === "`" || (c === "}" && substitutions.at(-1) === 0)) {
+      const [value, end, more] = template(src, i + 1);
+      i = end;
+      if (c === "`") {
+        if (more) substitutions.push(0);
+        push(more ? "templateHead" : "template", value, start);
+      } else {
+        if (!more) substitutions.pop();
+        push(more ? "templateMiddle" : "templateTail", value, start);
+      }
     } else if (c === '"' || c === "'") {
       let value = "";
       i++;
@@ -124,6 +160,7 @@ export function lex(src: string): Token[] {
       const p = PUNCT.find((p) => src.startsWith(p, i));
       if (!p) throw new CompileError(`unexpected character '${c}'`, i);
       i += p.length;
+      if (substitutions.length > 0 && (p === "{" || p === "}")) substitutions[substitutions.length - 1]! += p === "{" ? 1 : -1;
       push("punct", p, start);
     }
   }
