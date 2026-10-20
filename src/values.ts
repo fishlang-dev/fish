@@ -9,7 +9,7 @@ import type { Access, ClassType, Field, Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { intoUnion, typeofComparison, unionComparison, type Union } from "./unions.ts";
+import { instanceofCheck, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -61,7 +61,10 @@ export type Context = {
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed } = ctx;
-  const unions: Union = { types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to) };
+  const unions: Union = {
+    types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
+    classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
+  };
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -227,6 +230,8 @@ export function expressions(ctx: Context) {
       case "member": {
         if (e.optional) throw unsupported("optional chains", e);
         const object = value(e.object);
+        const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
+        if (shared) return shared;
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" ? undefined : field(object, e.name);
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
@@ -307,6 +312,7 @@ export function expressions(ctx: Context) {
           const special = typeofComparison(e, unions) ?? unionComparison(e, unions);
           if (special) return special;
         }
+        if (e.op === "instanceof") return instanceofCheck(e, unions);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         return binaryType(e.op, operand(e.left), operand(e.right), e);
       default:

@@ -2,7 +2,8 @@ import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from 
 import { CompileError } from "./diag.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { alwaysReturns, assignedNames } from "./flow.ts";
-import { guard, type Facts } from "./narrow.ts";
+import { either, guard, type Facts } from "./narrow.ts";
+import { caseFits } from "./unions.ts";
 import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
@@ -319,18 +320,25 @@ export function check(program: Stmt[]): Checked {
           return;
         case "switch": {
           const type = value(s.discriminant);
-          if (typeof type !== "string") throw unsupported("comparisons of objects", s.discriminant);
+          const union = typeof type !== "string" && type.kind === "union" ? type : undefined;
+          if (typeof type !== "string" && !union) throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);
           if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
           // The case bodies share one scope, as in JavaScript.
           scopes.push(new Map());
           within({ stmt: s, kind: "switch" }, () => {
+            // A case narrows a union for its body, and so do the cases that fall through into it.
+            // `falling` is what holds for a body the previous one falls into, or null when it leaves.
+            let falling: Facts | null = null;
             for (const c of s.cases) {
               const test = c.test && value(c.test);
-              if (test && test !== type) {
+              if (test && (union ? !caseFits(union, c.test!, test) : test !== type)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              statements(c.body);
+              const tested: Facts = c.test ? proves({ kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
+              const reaching: Facts = falling ? either(falling, tested) : tested;
+              assume(reaching, () => statements(c.body));
+              falling = leaves(c.body) ? null : reaching;
             }
           });
           scopes.pop();

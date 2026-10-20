@@ -1,7 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, literalValue, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { field, fieldPath, membersFor, type Type, type UnionType } from "./typing.ts";
+import { field, fieldPath, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -44,12 +44,18 @@ export type Slots = Builder & { alloca(type: string): string };
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca } = b;
-  return { convert, test };
+  return { convert, test, matches, unionField };
 
   // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
   // its payload when v isn't a literal. Undefined for any other comparison.
   function test(e: Expr, value: (e: Expr) => string, typeOf: (e: Expr) => Type): string | undefined {
-    if (e.kind !== "binary" || (e.op !== "===" && e.op !== "!==")) return undefined;
+    if (e.kind !== "binary") return undefined;
+    if (e.op === "instanceof") {
+      const [type, c] = [typeOf(e.left), typeOf(e.right)];
+      const v = value(e.left);
+      return typeof type !== "string" && type.kind === "union" ? holds(v, type, [c]) : String(type === c);
+    }
+    if (e.op !== "===" && e.op !== "!==") return undefined;
     const kind = typeofTest(e);
     let result: string;
     if (kind) {
@@ -64,14 +70,43 @@ export function conversions(b: Slots) {
       if (!unionLeft && (typeof right === "string" || right.kind !== "union")) return undefined;
       const [u, o] = [value(e.left), value(e.right)];
       const [union, v, other, otherType] = (unionLeft ? [left, u, e.right, right] : [right, o, e.left, left]) as [UnionType, string, Expr, Type];
-      const literal = literalValue(other);
-      const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal);
-      result = member ? holds(v, union, [member]) : holdsValue(v, union, membersFor(otherType, union).find((m) => typeof m === "string")!, unionLeft ? o : u);
+      result = matches(v, union, other, unionLeft ? o : u, otherType);
     }
     if (e.op === "===") return result;
     const negated = temp();
     emit(`${negated} = xor i1 ${result}, true`);
     return negated;
+  }
+
+  // Whether union `v` holds the value of `other`: its literal member, or the primitive member
+  // the other value's type goes into, holding the same value.
+  function matches(v: string, union: UnionType, other: Expr, o: string, otherType: Type): string {
+    const literal = literalValue(other);
+    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal);
+    return member ? holds(v, union, [member]) : holdsValue(v, union, membersFor(otherType, union).find((m) => typeof m === "string")!, o);
+  }
+
+  // A field every member of the union has, read from whichever member it holds.
+  function unionField(v: string, union: UnionType, name: string, to: Type): string {
+    const result = alloca(llvm(to));
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
+    const cases = union.members.map(() => label());
+    const end = label();
+    emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+    union.members.forEach((member, i) => {
+      startBlock(cases[i]!);
+      // The checker found the field on every member, so each is an object or an instance.
+      const holder = member as ObjectType | ClassType;
+      const part = temp();
+      emit(`${part} = extractvalue ${llvm(member)} ${payload(v, union, member)}, ${fieldPath(holder, name).join(", ")}`);
+      emit(`store ${llvm(to)} ${convert(part, field(holder, name)!.type, to)}, ptr ${result}`);
+      emit(`br label %${end}`);
+    });
+    startBlock(end);
+    const out = temp();
+    emit(`${out} = load ${llvm(to)}, ptr ${result}`);
+    return out;
   }
 
   // Whether a union holds one of these members.

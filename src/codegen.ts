@@ -39,7 +39,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
   const { operate, arithmetic } = lowering(builder, src, file, release);
-  const { convert, test } = conversions(builder);
+  const { convert, test, matches, unionField } = conversions(builder);
 
   for (const instance of instances) {
     current = instance;
@@ -182,15 +182,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "switch": {
         const subject = value(s.discriminant);
-        const type = llvm(types.get(s.discriminant)!);
+        const subjectType = types.get(s.discriminant)!;
+        const type = llvm(subjectType);
         const bodies = s.cases.map(() => label());
         const end = label();
         exits.set(s, { exit: end });
         // The tests run in order; when none matches, control goes to `default`, wherever it sits.
         s.cases.forEach((c, i) => {
           if (!c.test) return;
-          const [equal, next] = [temp(), label()];
-          emit(`${equal} = icmp eq ${type} ${subject}, ${value(c.test)}`);
+          const test = value(c.test);
+          const equal = typeof subjectType !== "string" && subjectType.kind === "union"
+            ? matches(subject, subjectType, c.test, test, types.get(c.test)!)
+            : compare(type, subject, test);
+          const next = label();
           emit(`br i1 ${equal}, label %${bodies[i]}, label %${next}`);
           startBlock(next);
         });
@@ -239,6 +243,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // Returns the call's result, or undefined for a call that returns nothing.
+  function compare(type: string, a: string, b: string): string {
+    const result = temp();
+    emit(`${result} = icmp eq ${type} ${a}, ${b}`);
+    return result;
+  }
+
   // A method's receiver runs before its arguments, as in JavaScript.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
@@ -322,7 +332,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "member": {
         const getter = calls.get(e);
         if (getter) return invoke(getter, thisPointer(getter, e.object), [])!;
-        const object = types.get(e.object) as ObjectType | ClassType;
+        const shared = types.get(e.object)!;
+        if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
+        const object = shared as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
         return result;
@@ -440,7 +452,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
     if (target.kind === "this") return "%this";
-    if (target.kind !== "member") return slot(resolved(target));
+    if (target.kind !== "member") {
+      // A union narrowed to one member keeps it in place as its payload.
+      const local = resolved(target);
+      if (types.get(target) === local.type) return slot(local);
+      const payload = temp();
+      emit(`${payload} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
+      return payload;
+    }
     const object = types.get(target.object) as ObjectType | ClassType;
     const result = temp();
     const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");

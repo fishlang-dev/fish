@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
-import type { Expr } from "./parser.ts";
-import { baseOf, membersFor, show, type LiteralType, type Type, type UnionType } from "./typing.ts";
+import type { Expr, Span } from "./parser.ts";
+import { baseOf, field, membersFor, show, unionType, type ClassType, type LiteralType, type Type, type UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
 
@@ -11,7 +11,34 @@ export type Union = {
   coercions: Map<Expr, Type>;
   value(e: Expr): Type;
   excess(e: Expr, to: Type): void;
+  // The class a name declares, unless a variable shadows it.
+  classNamed(name: string): ClassType | undefined;
 };
+
+// A field every member of a union has, read without narrowing first: its type is the union
+// of the members' field types. This is how a discriminant like `x.kind` is read.
+export function unionField(union: UnionType, name: string, at: Span): Type | undefined {
+  const found = union.members.map((m) => (typeof m === "string" ? undefined : field(m, name)));
+  if (found.some((f) => !f || (f.access ?? "public") !== "public")) return undefined;
+  return unionType(found.map((f) => f!.type));
+}
+
+// `x instanceof C` checks whether x holds an instance of exactly C: with embedding, an
+// instance of a class that extends C is not a C.
+export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, value, classNamed }: Union): Type {
+  value(e.left);
+  const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
+  if (!c) throw new CompileError("the right side of 'instanceof' must be a class", e.right.start, e.right.end);
+  types.set(e.right, c);
+  return "boolean";
+}
+
+// Whether a `switch` over a union may compare it with a case of this type.
+export function caseFits(union: UnionType, test: Expr, type: Type): boolean {
+  const literal = literalValue(test);
+  return union.members.some((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
+    || membersFor(type, union).some((m) => typeof m === "string");
+}
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.

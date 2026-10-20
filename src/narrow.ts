@@ -52,36 +52,51 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const both = (x: Facts, y: Facts) => new Map([...x, ...y]);
     return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(a.no, b.no) } : { yes: either(a.yes, b.yes), no: both(a.no, b.no) };
   }
+  if (e.op === "instanceof") {
+    const c = types.get(e.right);
+    return split(e.left, (m) => (m === c ? "yes" : "no"), true);
+  }
   if (e.op !== "===" && e.op !== "!==") return nothing;
   const test = typeofTest(e);
-  const [subject, check]: [Expr, (m: Type) => boolean] | [] = test
-    ? test.name.kind === "string" ? [test.operand, (m) => category(m) === (test.name as { value: string }).value] : []
-    : literalSide(e);
-  if (!subject || subject.kind !== "ident") return nothing;
-  const local = locals.get(subject);
-  const type = types.get(subject);
-  if (!local || !type || !narrowable(local)) return nothing;
-  const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
-  const yes = members.filter(check!);
-  const no = members.filter((m) => !check!(m));
-  const facts = (list: Type[]): Facts => new Map(list.length > 0 ? [[local, unionType(list)]] : []);
-  const result = { yes: facts(yes), no: facts(no) };
-  return e.op === "===" ? result : { yes: result.no, no: result.yes };
-
-  // `x === "up"` narrows x to its member for that literal; anything else proves nothing.
-  function literalSide(b: Extract<Expr, { kind: "binary" }>): [Expr, (m: Type) => boolean] | [] {
-    for (const [subject, other] of [[b.left, b.right], [b.right, b.left]] as const) {
-      const value = literalValue(other);
-      if (value !== undefined && subject.kind === "ident") {
-        return [subject, (m) => typeof m !== "string" && m.kind === "literal" && m.value === value];
-      }
+  if (test) {
+    const name = test.name.kind === "string" ? test.name.value : undefined;
+    return name ? split(test.operand, (m) => (category(m) === name ? "yes" : "no"), e.op === "===") : nothing;
+  }
+  for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
+    const value = literalValue(other);
+    if (value === undefined) continue;
+    // `x === "up"` leaves x's member for that literal. `x.kind === "up"` leaves the members
+    // whose `kind` is that literal, and any whose `kind` might be.
+    if (subject.kind === "ident") return split(subject, (m) => (is(m, value) ? "yes" : "no"), e.op === "===");
+    if (subject.kind === "member") {
+      return split(subject.object, (m) => {
+        const kind = typeof m === "string" ? undefined : m.fields.find((f) => f.name === subject.name)?.type;
+        if (kind && is(kind, value)) return "yes";
+        return kind && typeof kind !== "string" && kind.kind === "literal" ? "no" : "both";
+      }, e.op === "===");
     }
-    return [];
+  }
+  return nothing;
+
+  // Splits a narrowable variable's members by whether a check holds for them.
+  function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean): Guard {
+    const local = subject.kind === "ident" ? locals.get(subject) : undefined;
+    const type = types.get(subject);
+    if (!local || !type || !narrowable(local)) return nothing;
+    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    const facts = (keep: string): Facts => {
+      const left = members.filter((m) => check(m) !== keep);
+      return new Map(left.length > 0 ? [[local, unionType(left)]] : []);
+    };
+    const [yes, no] = [facts("no"), facts("yes")];
+    return positive ? { yes, no } : { yes: no, no: yes };
   }
 }
 
+const is = (t: Type, value: unknown) => typeof t !== "string" && t.kind === "literal" && t.value === value;
+
 // A variable either of two branches narrowed has, after them, whichever type it had.
-function either(x: Facts, y: Facts): Facts {
+export function either(x: Facts, y: Facts): Facts {
   const out: Facts = new Map();
   for (const [local, t] of x) {
     const other = y.get(local);
