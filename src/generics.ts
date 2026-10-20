@@ -29,6 +29,16 @@ export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: 
   return scope;
 }
 
+// A generic class's placeholders, one set shared by its definition check and its members,
+// since each new set would name another instance of the class.
+function classPlaceholders(params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
+  let found = classScopes.get(params);
+  if (!found) classScopes.set(params, found = placeholders(params, resolve));
+  return found;
+}
+
+const classScopes = new WeakMap<TypeParam[], Map<string, Type>>();
+
 // Binds the type parameters `node` names by matching it against an argument's type.
 export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
@@ -103,9 +113,6 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new WeakMap<Span, Map<string, Type>>();
-  // One set of placeholders per generic class, shared by its members, since each new set
-  // would name another class.
-  const classPlaceholders = new WeakMap<TypeParam[], Map<string, Type>>();
   return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at) };
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
@@ -234,9 +241,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     implicits.set(f, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
-    const params = classParams(f);
-    let outer = classPlaceholders.get(params);
-    if (!outer) classPlaceholders.set(params, outer = placeholders(params, (t, s) => withScope(s, () => resolveType(t))));
+    const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
     withScope(scope, () => f.params.forEach((p, i) => {
       const type = p.type && resolveType(p.type);
@@ -294,7 +299,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
   function define() {
-    templates.forEach((t) => classInstance(t, [...placeholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
+    templates.forEach((t) => classInstance(t, [...classPlaceholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
   }
 
   function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {

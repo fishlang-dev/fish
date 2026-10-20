@@ -178,9 +178,7 @@ export function check(program: Stmt[]): Checked {
     const to = owner && (lower(owner) as ClassType);
     if (!owner || to === owner) return target;
     const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(target.body)]!;
-    // A parameter of type `T` there may be an object type here, which is an implicit one.
-    const params = paramTypes(target);
-    const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`) ?? lower(params[i]!)]);
+    const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
     return instanceOf(body, new Map([...body.scope!, ...implicit]));
   }
 
