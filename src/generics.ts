@@ -60,14 +60,21 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
   throw new CompileError(`type '${show(type)}' does not satisfy the constraint '${show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
-// Whether a type has no type parameter in it, so its instance can be compiled.
+// Whether a type has no type parameter in it, so its instance can be compiled. A class's
+// fields come from its type arguments and base, so those decide it, and an object type's
+// answer is kept, since its fields never change: walking nested types afresh at every level
+// would take time exponential in their depth.
 export function concrete(t: Type): boolean {
   if (typeof t === "string") return true;
   // An interface describes values without being one, so only a definition check holds one.
   if (t.kind === "param" || t.kind === "interface") return false;
-  if (t.kind === "class" && (!(t.generic?.args.every(concrete) ?? true) || (t.base && !concrete(t.base)))) return false;
-  return t.fields.every((f) => concrete(f.type));
+  if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+  let known = concreteObjects.get(t);
+  if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
+  return known;
 }
+
+const concreteObjects = new WeakMap<ObjectType, boolean>();
 
 // What instantiating needs from the checker.
 type Checker = {
