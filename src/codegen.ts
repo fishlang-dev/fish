@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { fieldPath, type ClassType, type ObjectType } from "./typing.ts";
+import { field, fieldPath, type ClassType, type ObjectType } from "./typing.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
@@ -346,7 +346,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "object": {
         const type = types.get(e) as ObjectType;
         // Properties run in source order, then fill the fields in their sorted order.
-        const values = new Map(e.props.map(property));
+        const values = new Map(e.props.map((p) => property(p, type)));
         let result = "undef";
         type.fields.forEach((f, i) => {
           const next = temp();
@@ -441,13 +441,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // A property's name and value.
-  function property(p: ObjectProp): [string, string] {
+  // A shorthand's variable may be narrowed, or an enum member the field widens, so its value
+  // is converted to the field's type.
+  function property(p: ObjectProp, object: ObjectType): [string, string] {
     if (p.kind === "property") return [p.key as string, value(p.value)];
     if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");
     const local = resolved(p);
     const result = temp();
     emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    return [p.name, result];
+    return [p.name, convert(result, local.type, field(object, p.name)!.type)];
   }
 
   function store(target: Expr, result: string) {

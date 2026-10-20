@@ -413,10 +413,15 @@ export function expressions(ctx: Context) {
       throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);
     }
     if (p.default) throw new CompileError("'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
+    // A shorthand reads its variable like a name does: within its switch case, narrowed, and
+    // widened from an enum member to the enum like any property.
     const local = lookup(p.name);
     if (!local) throw new CompileError(`cannot find name '${p.name}'`, p.start, p.end);
+    if (!reachable(local)) {
+      throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
+    }
     locals.set(p, local);
-    return { name: p.name, type: local.type };
+    return { name: p.name, type: widenEnum(narrowed(local) ?? local.type) };
   }
 
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
