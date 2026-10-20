@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { BinaryOp, Expr, Func, Item, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { BinaryOp, Expr, Func, Param, Span, Stmt, TypeNode } from "./parser.ts";
 
 export type Type = "i64" | "boolean" | "void";
 
@@ -27,15 +27,20 @@ export function isPrint(callee: Expr): boolean {
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
-export function check(items: Item[]): Checked {
+export function check(program: Stmt[]): Checked {
   const funcs: Func[] = [];
-  for (const item of items) {
-    if (item.kind === "typeAlias") throw unsupported("type aliases", item);
-    if (item.kind === "interface") throw unsupported("interfaces", item);
-    funcs.push(item);
+  for (const s of program) {
+    if (s.kind === "typeAlias") throw unsupported("type aliases", s);
+    if (s.kind === "interface") throw unsupported("interfaces", s);
+    if (s.kind === "empty") continue;
+    // Top-level code with side effects belongs in main(), as migration rule G7 says.
+    if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    funcs.push(s);
   }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
+    if (f.async) throw unsupported("async functions", f);
+    if (f.generator) throw unsupported("generator functions", f);
     if (f.typeParams.length > 0) {
       throw unsupported("generic functions", { start: f.typeParams[0]!.start, end: f.typeParams.at(-1)!.end });
     }
@@ -132,6 +137,14 @@ export function check(items: Item[]): Checked {
           throw unsupported("type aliases", s);
         case "interface":
           throw unsupported("interfaces", s);
+        case "function":
+          throw unsupported("nested functions", s);
+        case "block":
+          throw unsupported("block statements", s);
+        case "debugger":
+          throw unsupported("'debugger' statements", s);
+        case "empty":
+          return;
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;

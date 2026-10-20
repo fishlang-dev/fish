@@ -87,7 +87,10 @@ export type Stmt = Span & (
   | { kind: "return"; value: Expr | undefined }
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
   | { kind: "while"; cond: Expr; body: Stmt[] }
-) | TypeAlias | Interface;
+  | { kind: "block"; body: Stmt[] }
+  | { kind: "empty" }
+  | { kind: "debugger" }
+) | TypeAlias | Interface | Func;
 
 export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
 
@@ -119,9 +122,10 @@ export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: Ty
 
 export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[] };
 
-export type Func = Span & { kind: "function"; name: string; typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] };
-
-export type Item = Func | TypeAlias | Interface;
+export type Func = Span & {
+  kind: "function"; name: string; async: boolean; generator: boolean;
+  typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[];
+};
 
 export type BinaryOp =
   | "??" | "||" | "&&" | "|" | "^" | "&" | "===" | "!==" | "==" | "!="
@@ -239,33 +243,26 @@ function cursor(src: string): Cursor {
   return c;
 }
 
-export function parse(src: string): Item[] {
+// A program is a list of statements; which of them may appear at the top level is the
+// checker's call.
+export function parse(src: string): Stmt[] {
   const c = cursor(src);
-  const items: Item[] = [];
-  while (c.peek().kind !== "eof") {
-    if (c.at("function")) {
-      items.push(func(c));
-    } else if (c.at("interface")) {
-      items.push(interfaceDeclaration(c));
-    } else if (atTypeAlias(c)) {
-      items.push(typeAlias(c));
-      endStatement(c);
-    } else {
-      const t = c.peek();
-      throw new CompileError("only declarations are allowed at the top level; move this into main()", t.start, t.end);
-    }
-  }
-  return items;
+  const program: Stmt[] = [];
+  while (c.peek().kind !== "eof") program.push(statement(c));
+  return program;
 }
 
 function func(c: Cursor): Func {
-  const start = c.expect("function").start;
+  const start = c.peek().start;
+  const async = c.eat("async");
+  c.expect("function");
+  const generator = c.eat("*");
   const name = c.ident().text;
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);
   const body = block(c);
-  return { kind: "function", name, typeParams, params, returnType, body, start, end: c.end() };
+  return { kind: "function", name, async, generator, typeParams, params, returnType, body, start, end: c.end() };
 }
 
 export function block(c: Cursor): Stmt[] {
@@ -285,10 +282,16 @@ function body(c: Cursor): Stmt[] {
 
 // Statements that end in a block need nothing after them; the rest end as in JavaScript.
 function statement(c: Cursor): Stmt {
+  const start = c.peek().start;
+  if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
+  if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
+  if (c.at(";")) return { kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
   if (c.at("interface")) return interfaceDeclaration(c);
-  const s = atTypeAlias(c) ? typeAlias(c) : simpleStatement(c);
+  const s: Stmt = c.at("debugger") ? { kind: "debugger", start, end: c.next().end }
+    : atTypeAlias(c) ? typeAlias(c)
+    : simpleStatement(c);
   endStatement(c);
   return s;
 }

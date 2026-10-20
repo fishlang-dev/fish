@@ -114,3 +114,30 @@ test("(1, 2)", () => {
     message: "comma expressions are not supported yet", start, end: start + 4,
   }));
 });
+
+// Statements that parse but have no meaning yet, inside main().
+const STATEMENTS: [string, string][] = [
+  ["function inner() {}", "nested functions"],
+  ["{ print(1) }", "block statements"],
+  ["debugger", "'debugger' statements"],
+];
+
+for (const [stmt, what] of STATEMENTS) {
+  test(stmt, () => {
+    const src = `function main() {\n  ${stmt}\n}`;
+    const start = src.indexOf(stmt);
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + stmt.length,
+    }));
+  });
+}
+
+// Declarations that parse but have no meaning yet, at the top level.
+for (const [decl, what] of [["async function f() {}", "async functions"], ["function* f() {}", "generator functions"]]) {
+  test(decl!, () => {
+    const src = `${decl}\nfunction main() {}`;
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start: 0, end: decl!.length,
+    }));
+  });
+}
