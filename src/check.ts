@@ -289,6 +289,10 @@ export function check(program: Stmt[]): Checked {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
+    // A class's own `clone()` replaces the compiler's copy, so it has to make one.
+    if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
+      throw new CompileError(`a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
+    }
     instance.returns = type;
     if (instance.concrete) lowerTables(instance);
     done.add(instance);

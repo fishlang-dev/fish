@@ -255,8 +255,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
-      if (isPrint(e.callee)) print(e.args, builder, value, (a) => types.get(a)!, convert);
-      return undefined;
+      if (isPrint(e.callee)) {
+        print(e.args, builder, value, (a) => types.get(a)!, convert);
+        return undefined;
+      }
+      // The compiler's `clone()`: no value owns heap memory yet, so a copy of its bits is deep.
+      return value((e.callee as Extract<Expr, { kind: "member" }>).object);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.self && object ? thisPointer(target, object) : undefined;
