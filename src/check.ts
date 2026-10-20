@@ -2,6 +2,7 @@ import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from 
 import { CompileError } from "./diag.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { alwaysReturns, assignedNames } from "./flow.ts";
+import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { caseFits } from "./unions.ts";
 import { genericClasses, instancing } from "./generics.ts";
@@ -68,18 +69,24 @@ export function check(program: Stmt[]): Checked {
   // Generic classes, declared again for each set of type arguments they are used with.
   const templates = new Map<string, ClassNode & { name: string }>();
   const interfaces = new Map<string, Interface>();
+  const enums = new Map<string, EnumInfo>();
   for (const s of program) {
+    if (s.kind === "enum") {
+      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
+      enums.set(s.name, declareEnum(s));
+      continue;
+    }
     if (s.kind === "typeAlias") {
-      addAlias(aliases, s, classes, templates, interfaces);
+      addAlias(aliases, s, classes, templates, interfaces, enums);
       continue;
     }
     if (s.kind === "interface") {
-      typeName(s.name, s, aliases, classes, templates, interfaces);
+      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
       interfaces.set(s.name, s);
       continue;
     }
     if (s.kind === "class" && s.name !== undefined) {
-      typeName(s.name, s, aliases, classes, templates, interfaces);
+      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
       if (s.typeParams.length > 0) templates.set(s.name, { ...s, name: s.name });
       else classes.set(s.name, declareClass({ ...s, name: s.name }));
       continue;
@@ -98,7 +105,7 @@ export function check(program: Stmt[]): Checked {
   for (const f of funcs) {
     if (f.async) throw unsupported("async functions", f);
     if (f.generator) throw unsupported("generator functions", f);
-    if (byName.has(f.name) || classes.has(f.name) || templates.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
+    if (byName.has(f.name) || classes.has(f.name) || templates.has(f.name) || enums.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
   const main = byName.get("main");
@@ -119,7 +126,7 @@ export function check(program: Stmt[]): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces);
+  const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
@@ -197,7 +204,7 @@ export function check(program: Stmt[]): Checked {
     if (superCall) unset.add(SUPER);
 
     const { value, condition, effect, coerce } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup,
+      types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup,
       self: f.self,
       owner: f.owner,
       superCall,

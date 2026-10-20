@@ -82,12 +82,25 @@ export function conversions(b: Slots) {
   // the other value's type goes into, holding the same value.
   function matches(v: string, union: UnionType, other: Expr, o: string, otherType: Type): string {
     const literal = literalValue(other);
-    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal);
+    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
+      ?? (typeof otherType !== "string" && otherType.kind === "literal" && union.members.includes(otherType) ? otherType : undefined);
     return member ? holds(v, union, [member]) : holdsValue(v, union, membersFor(otherType, union).find((m) => typeof m === "string")!, o);
   }
 
   // A field every member of the union has, read from whichever member it holds.
   function unionField(v: string, union: UnionType, name: string, to: Type): string {
+    return eachMember(v, union, to, (part, member) => {
+      // The checker found the field on every member, so each is an object or an instance.
+      const holder = member as ObjectType | ClassType;
+      const value = temp();
+      emit(`${value} = extractvalue ${llvm(member)} ${part}, ${fieldPath(holder, name).join(", ")}`);
+      return convert(value, field(holder, name)!.type, to);
+    });
+  }
+
+  // A value of `to` made from whichever member the union holds, branching on its tag. This
+  // also reads an enum, a union of integer literals, as an i64.
+  function eachMember(v: string, union: UnionType, to: Type, make: (part: string, member: Type) => string): string {
     const result = alloca(llvm(to));
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
@@ -96,11 +109,7 @@ export function conversions(b: Slots) {
     emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
     union.members.forEach((member, i) => {
       startBlock(cases[i]!);
-      // The checker found the field on every member, so each is an object or an instance.
-      const holder = member as ObjectType | ClassType;
-      const part = temp();
-      emit(`${part} = extractvalue ${llvm(member)} ${payload(v, union, member)}, ${fieldPath(holder, name).join(", ")}`);
-      emit(`store ${llvm(to)} ${convert(part, field(holder, name)!.type, to)}, ptr ${result}`);
+      emit(`store ${llvm(to)} ${make(payload(v, union, member), member)}, ptr ${result}`);
       emit(`br label %${end}`);
     });
     startBlock(end);
@@ -144,7 +153,9 @@ export function conversions(b: Slots) {
     if (typeof to !== "string" && to.kind === "union") {
       return typeof from !== "string" && from.kind === "union" ? retag(v, from, to) : inject(v, from, to);
     }
-    if (typeof from !== "string" && from.kind === "union") return payload(v, from, to);
+    if (typeof from !== "string" && from.kind === "union") {
+      return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => convert(part, member, to));
+    }
     if (typeof from === "string" || typeof to === "string") return v;
     if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param") {
       throw new Error("internal error: an interface or a type parameter reached codegen");

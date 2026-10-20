@@ -194,7 +194,7 @@ const STATEMENTS: [string, string][] = [
   ["try {} finally {}", "'try' statements"],
   ["class A {}", "local classes"],
   ["@sealed class A {}", "decorators"],
-  ["enum E { A }", "enums"],
+  ["enum E { A }", "local enums"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];

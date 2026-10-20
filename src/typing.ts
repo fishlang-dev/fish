@@ -28,11 +28,12 @@ export type ParamType = { kind: "param"; name: string; bound: ObjectType | Inter
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
-export type LiteralType = { kind: "literal"; value: string | bigint | boolean; fields: Field[] };
+// An enum's member is a literal that knows its enum, so a plain literal is never one.
+export type LiteralType = { kind: "literal"; value: string | bigint | boolean; fields: Field[]; owner?: { enum: string; member: string } };
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
 // It has no fields; reaching into one takes narrowing to a member first.
-export type UnionType = { kind: "union"; members: Type[]; fields: Field[] };
+export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?: string };
 
 export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType;
 
@@ -55,11 +56,11 @@ export function interfaceType(name: string): InterfaceType {
   return t;
 }
 
-export function literalType(value: string | bigint | boolean): LiteralType {
-  const key = `literal ${typeof value} ${value}`;
+export function literalType(value: string | bigint | boolean, owner?: LiteralType["owner"]): LiteralType {
+  const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member}` : ""}`;
   let t = literals.get(key);
   if (!t) {
-    t = { kind: "literal", value, fields: [] };
+    t = { kind: "literal", value, fields: [], owner };
     literals.set(key, t);
     keys.set(t, key);
   }
@@ -68,7 +69,8 @@ export function literalType(value: string | bigint | boolean): LiteralType {
 
 // Members are flattened, deduplicated and kept in one order, so equal unions are one type,
 // and a literal whose base type is also a member adds nothing. A single member is itself.
-export function unionType(parts: Type[]): Type {
+// An enum's union carries the enum's name, for messages.
+export function unionType(parts: Type[], name?: string): Type {
   const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p]));
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
@@ -77,7 +79,7 @@ export function unionType(parts: Type[]): Type {
   const key = `union ${members.map(keyOf).join("|")}`;
   let t = unions.get(key);
   if (!t) {
-    t = { kind: "union", members, fields: [] };
+    t = { kind: "union", members, fields: [], name };
     unions.set(key, t);
     keys.set(t, key);
   }
@@ -151,7 +153,8 @@ export function fits(from: Type, to: Type): boolean {
     if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
     return to.members.some((m) => fits(from, m));
   }
-  if (typeof from !== "string" && from.kind === "union") return false;
+  // A union fits where every member it may hold does, as an enum fits an i64.
+  if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
@@ -165,8 +168,9 @@ export function fits(from: Type, to: Type): boolean {
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
   if (typeof t === "string") return t;
+  if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
-  if (t.kind === "union") return t.members.map(show).join(" | ");
+  if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

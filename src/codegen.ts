@@ -332,6 +332,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "member": {
         const getter = calls.get(e);
         if (getter) return invoke(getter, thisPointer(getter, e.object), [])!;
+        // An enum member's value is known, and the enum's name is no value to evaluate.
+        if (!types.has(e.object)) return "zeroinitializer";
         const shared = types.get(e.object)!;
         if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
         const object = shared as ObjectType | ClassType;

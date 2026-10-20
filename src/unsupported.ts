@@ -60,7 +60,7 @@ export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
     case "class":
       return unsupported(s.decorators.length > 0 ? "decorators" : "local classes", s);
     case "enum":
-      return unsupported("enums", s);
+      return unsupported("local enums", s);
     case "namespace":
       return unsupported("namespaces", s);
     case "declare":

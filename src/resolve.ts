@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { interfaceType, keyOf, literalType, objectType, unionType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
@@ -35,7 +36,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves every alias and interface up front, so an unused one is still checked. A generic
 // alias is checked with placeholders for its type parameters, and resolved again per set of
 // type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>) {
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>) {
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -94,6 +95,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);
     if (named) return named;
+    const [owner, name] = t.name.split(".");
+    const e = enums.get(owner!);
+    if (e && name === undefined) return e.type;
+    if (e && e.members.has(name!)) return e.members.get(name!)!;
     const trait = interfaces.get(t.name);
     if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);

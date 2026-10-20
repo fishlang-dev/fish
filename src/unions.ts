@@ -37,7 +37,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
 export function caseFits(union: UnionType, test: Expr, type: Type): boolean {
   const literal = literalValue(test);
   return union.members.some((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-    || membersFor(type, union).some((m) => typeof m === "string");
+    || membersFor(type, union).some((m) => typeof m === "string" || m.kind === "literal");
 }
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
@@ -46,7 +46,8 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
   const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
   for (const source of sources) {
     const value = literalValue(e);
-    const literal = to.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === value);
+    // A plain literal expression never becomes an enum's member.
+    const literal = to.members.find((m) => typeof m !== "string" && m.kind === "literal" && !m.owner && m.value === value);
     if (literal && sources.length === 1 && baseOf(literal as LiteralType) === type) {
       types.set(e, literal);
       break;
@@ -81,7 +82,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }:
   if (!union) return undefined;
   const literal = literalValue(other!);
   const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
-    ?? membersFor(otherType!, union).find((m) => typeof m === "string");
+    ?? membersFor(otherType!, union).find((m) => typeof m === "string" || m.kind === "literal");
   if (!member) {
     throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
   }

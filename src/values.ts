@@ -4,8 +4,9 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, objectType, show } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, objectType, show, unionType } from "./typing.ts";
 import type { Access, ClassType, Field, Type } from "./typing.ts";
+import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
@@ -36,6 +37,7 @@ export type Context = {
   setters: Map<Expr, Instance>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
+  enums: Map<string, EnumInfo>;
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
@@ -59,7 +61,7 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => value(e), excess: (e, to) => excess(e, to),
@@ -218,6 +220,7 @@ export function expressions(ctx: Context) {
         if (!local) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
+            : enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
             : `cannot find name '${e.name}'`;
           throw new CompileError(message, e.start, e.end);
         }
@@ -229,6 +232,13 @@ export function expressions(ctx: Context) {
         return literalType(e.value);
       case "member": {
         if (e.optional) throw unsupported("optional chains", e);
+        // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
+        const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
+        if (named) {
+          const found = named.members.get(e.name);
+          if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
+          return found;
+        }
         const object = value(e.object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) return shared;
@@ -294,10 +304,16 @@ export function expressions(ctx: Context) {
         condition(e.cond);
         const proven = proves(e.cond);
         const [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
-        if (then !== otherwise) {
+        if (then === otherwise) return then;
+        // Different sides make a union of both, as in TypeScript.
+        const both = [then, otherwise];
+        if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
           throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
         }
-        return then;
+        const union = unionType(both);
+        coerce(e.then, then, union, `type '${show(then)}' is not assignable to type '${show(union)}'`);
+        coerce(e.else, otherwise, union, `type '${show(otherwise)}' is not assignable to type '${show(union)}'`);
+        return union;
       }
       case "binary":
         // The migration lint rewrites loose equality to strict, so native code never uses it.
@@ -472,8 +488,11 @@ export function expressions(ctx: Context) {
     return widen(e, value(e));
   }
 
+  // An operand of an enum, a union of integer literals, works as an i64 too.
   function widen(e: Expr, type: Type): Type {
-    const base = typeof type !== "string" && type.kind === "literal" ? baseOf(type) : undefined;
+    const literals = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    const bases = new Set(literals.map((t) => (typeof t !== "string" && t.kind === "literal" ? baseOf(t) : undefined)));
+    const base = bases.size === 1 ? [...bases][0] : undefined;
     if (!base) return type;
     coercions.set(e, base);
     return base;
