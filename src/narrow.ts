@@ -90,8 +90,10 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
     const facts = (keep: string): Facts => {
       const left = members.filter((m) => check(m) !== keep);
-      if (left.length === 0 || (ref?.mutable && left.length > 1)) return new Map();
-      return new Map([[local, ref ? refType(unionType(left), ref.mutable) : unionType(left)]]);
+      if (left.length === 0) return new Map();
+      // A mutable reference can point at one member inside the union, but to several only
+      // through a shared copy.
+      return new Map([[local, ref ? refType(unionType(left), ref.mutable && left.length === 1) : unionType(left)]]);
     };
     const [yes, no] = [facts("no"), facts("yes")];
     return positive ? { yes, no } : { yes: no, no: yes };

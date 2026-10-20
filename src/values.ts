@@ -63,11 +63,13 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
+  // How deeply nested the scope declaring a binding is.
+  depthOf(l: Local): number;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, depthOf } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -173,11 +175,17 @@ export function expressions(ctx: Context) {
   // interface it returns is, as for any call, the one concrete type the method returns.
   function concreteMethod(e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type): Type {
     const target = inherited(classOf(c), "methods", callee.name)!;
-    if (target.self!.mutable && place(callee.object)) changeable(callee.object, `call '${callee.name}' on`);
+    if (target.self!.mutable) mutates(callee.object, callee.name);
     const instance = instantiate(target, [], e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
     calls.set(e, instance);
     if (typeof returns === "string" || returns.kind !== "interface") return returns;
     return wrapped(returns.name, returns, lower(returnOf(instance, e)));
+  }
+
+  // A mutating method's receiver must be a place that could change, or a temporary.
+  function mutates(object: Expr, name: string) {
+    intoMember(object, types, `call '${name}' on`);
+    if (place(object)) changeable(object, `call '${name}' on`);
   }
 
   // The method a member call names: a static one on a class name, or an instance one, whose
@@ -196,7 +204,7 @@ export function expressions(ctx: Context) {
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
     visible(found.access, found.owner!, name, callee);
-    if (found.self!.mutable && place(object)) changeable(object, `call '${name}' on`);
+    if (found.self!.mutable) mutates(object, name);
     return found;
   }
 
@@ -355,6 +363,8 @@ export function expressions(ctx: Context) {
         const assigned = op === "=" ? value(e.value) : read(e.value);
         const type = op === "=" ? assigned : binaryType(op, target, widen(e.value, assigned), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
+        const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
+        if (local && typeof local.type !== "string" && local.type.kind === "ref") rebind(local, e.value);
         return target;
       }
       case "update": {
@@ -372,6 +382,7 @@ export function expressions(ctx: Context) {
         const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
         if (isRef(then) && isRef(otherwise)) {
           const [a, b] = [(then as RefType).to, (otherwise as RefType).to];
+          if ((then as RefType).mutable && (otherwise as RefType).mutable && lower(a) === lower(b)) return then;
           const bound = (t: Type) => (typeof t !== "string" && t.kind === "param" ? t.bound : undefined);
           const common = [a, b, bound(a), bound(b)].find((t) => t && fits(a, t) && fits(b, t));
           if (common) {
@@ -454,7 +465,8 @@ export function expressions(ctx: Context) {
         coercions.set(e, to);
         return;
       }
-      const reason = !type.mutable && to.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${show(to.to)}' can be lent mutably`;
+      if (!to.mutable) throw new CompileError(message, e.start, e.end);
+      const reason = !type.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${show(to.to)}' can be lent mutably`;
       throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
@@ -471,15 +483,45 @@ export function expressions(ctx: Context) {
   function borrow(e: Expr, type: Type, to: RefType, message: string) {
     const exact = lower(type) === lower(to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
-    if (to.mutable && place(e)) {
-      // A shared borrow of anything else lends a copy, but a mutable one must reach the place.
-      const local = e.kind === "ident" ? locals.get(e) : undefined;
-      if (!exact || (local && local.type !== type && typeof type !== "string" && type.kind === "union")) {
+    // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
+    // that isn't a temporary must reach the place.
+    if (to.mutable && rooted(e)) {
+      if (!place(e) || !inPlace(e, to)) {
         throw new CompileError(`${message}: only a place holding exactly '${show(to.to)}' can be lent mutably`, e.start, e.end);
       }
       changeable(e, "mutably borrow");
     }
     coercions.set(e, to);
+  }
+
+  // Whether an expression reaches into a variable or `this`, rather than being a temporary.
+  function rooted(e: Expr): boolean {
+    while (e.kind === "member" && !calls.has(e)) e = e.object;
+    return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
+  }
+
+  // Whether lending a place to `to` points to where it lives, rather than to a copy: it holds
+  // exactly that type, and isn't a variable narrowed to part of a union.
+  function inPlace(e: Expr, to: RefType): boolean {
+    const type = types.get(e)!;
+    const local = e.kind === "ident" ? locals.get(e) : undefined;
+    const held = typeof type !== "string" && type.kind === "ref" ? type.to : type;
+    if (local && local.type !== type && typeof held !== "string" && held.kind === "union") return false;
+    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : lower(type) === lower(to.to);
+  }
+
+  // Without lifetimes, a reference variable can only be pointed at something that lives as long
+  // as it: a place lent where it lives, or another reference variable, declared in its own
+  // scope or an enclosing one.
+  function rebind(target: Local, e: Expr) {
+    const to = target.type as RefType;
+    let root = e;
+    while (root.kind === "member" && !calls.has(root)) root = root.object;
+    const local = root.kind === "ident" ? locals.get(root) : undefined;
+    const lives = root.kind === "this" || (local !== undefined && depthOf(local) <= depthOf(target));
+    if (!lives || !place(e) || !inPlace(e, to)) {
+      throw new CompileError(`'${target.name}' can only be pointed at a variable, or a field of one, declared in its own scope or an enclosing one, so that it lives as long as '${target.name}'`, e.start, e.end);
+    }
   }
 
   // An object literal builds a class it is declared as, without its constructor, when it

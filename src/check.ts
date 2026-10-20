@@ -236,6 +236,8 @@ export function check(program: Stmt[]): Checked {
     const facts: Facts[] = [];
     const assigned = assignedNames(f.body);
     const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name);
+    // How many scopes enclose each binding's declaration.
+    const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
     const caseOnly = new Set<Local>();
     const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable);
@@ -264,6 +266,7 @@ export function check(program: Stmt[]): Checked {
       assume,
       narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
       reachable: (l) => !caseOnly.has(l),
+      depthOf: (l) => depths.get(l)!,
     });
 
     const params = paramTypes(instance, scopeOf(instance));
@@ -502,6 +505,7 @@ export function check(program: Stmt[]): Checked {
       const scope = scopes[scopes.length - 1]!;
       if (scope.has(name)) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = { name, type, mutable, param, id: nextId++ };
+      depths.set(local, scopes.length);
       scope.set(name, local);
       locals.set(node, local);
     }

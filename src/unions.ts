@@ -48,11 +48,14 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
 
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
-export function intoMember(target: Expr, types: Map<Expr, Type>) {
+// A mutating method call likewise needs its receiver in one member.
+export function intoMember(target: Expr, types: Map<Expr, Type>, action = "assign to") {
   for (let e = target; e.kind === "member"; e = e.object) {
-    const object = types.get(e.object);
+    const found = types.get(e.object);
+    const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
     if (typeof object !== "string" && object?.kind === "union") {
-      throw new CompileError(`can't assign to '${e.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
+      const what = action === "assign to" ? `assign to '${e.name}'` : `${action} '${e.name}'`;
+      throw new CompileError(`can't ${what} through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
   }
 }

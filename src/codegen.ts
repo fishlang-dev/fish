@@ -313,9 +313,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
     // A reference already points where the receiver lives.
     if (isRef(types.get(object)!)) return evaluate(object);
-    let root: Expr = object;
-    while (root.kind === "member" && !calls.has(root)) root = root.object;
-    if (root.kind === "ident" || root.kind === "this") return address(object);
+    if (lendable(object)) return address(object);
     const type = llvm(types.get(object)!);
     const slot = alloca(type);
     emit(`store ${type} ${value(object)}, ptr ${slot}`);
