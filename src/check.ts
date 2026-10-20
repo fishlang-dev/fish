@@ -1,11 +1,11 @@
 import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import type { Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { alwaysReturns } from "./flow.ts";
-import { checkBound, concrete, infer, placeholders } from "./generics.ts";
+import { instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { addAlias, paramName, resolver, storable, typeName } from "./resolve.ts";
-import { fits, keyOf, show, type ClassType, type Type } from "./typing.ts";
+import { fits, show, type ClassType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -99,12 +99,11 @@ export function check(program: Stmt[]): Checked {
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   const { resolveType, paramType, withScope } = resolver(aliases, new Map([...classes].map(([name, c]) => [name, c.type])), interfaces);
-  const instances = new Map<Body, Map<string, Instance>>();
-  // Instances still to check, and the one being checked, which new instantiations count from.
-  const pending: Instance[] = [];
+  // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
   const members: Members = { classOf, returnOf: (b, at) => returnOf(instanceOf(b), at), paramType };
+  const { instanceOf, instantiate, paramTypes, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -127,71 +126,13 @@ export function check(program: Stmt[]): Checked {
   ])];
   // A generic body is checked once at its definition, with placeholders for its type
   // parameters, whether or not anything instantiates it.
-  for (const f of bodies) {
-    const generic = f.typeParams && f.typeParams.length > 0;
-    checkBody(generic ? instanceOf(f, placeholders(f.typeParams!, (t, scope) => withScope(scope, () => resolveType(t)))) : instanceOf(f));
-  }
+  bodies.forEach((f) => checkBody(definition(f)));
   while (pending.length > 0) checkBody(pending.shift()!);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   const compiled = new Set(bodies);
-  return { instances: [...instances.values()].flatMap((m) => [...m.values()]).filter((i) => i.concrete && compiled.has(i.body)) };
+  return { instances: all().filter((i) => i.concrete && compiled.has(i.body)) };
 
-  function instanceOf(f: Body, bindings = new Map<string, Type>()): Instance {
-    const key = [...bindings.values()].map(keyOf).join(",");
-    let byKey = instances.get(f);
-    if (!byKey) instances.set(f, byKey = new Map());
-    let found = byKey.get(key);
-    if (!found) {
-      const isConcrete = [...bindings.values()].every(concrete);
-      const generic = bindings.size > 0;
-      const count = [...byKey.values()].filter((i) => i.concrete).length;
-      found = {
-        body: f, symbol: generic && isConcrete ? `${f.name}#${count}` : f.name, bindings, concrete: isConcrete,
-        depth: generic && checking ? checking.depth + 1 : 0, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(),
-      };
-      byKey.set(key, found);
-      pending.push(found);
-    }
-    return found;
-  }
-
-  // The instance a call runs: a generic function's type arguments come from the call, or are
-  // inferred from its arguments, and must satisfy their bounds.
-  function instantiate(f: Body, typeArgs: TypeNode[], argTypes: Type[], at: Span): Instance {
-    const params = f.typeParams ?? [];
-    if (typeArgs.length > 0 && typeArgs.length !== params.length) {
-      throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
-    }
-    if (params.length === 0) return instanceOf(f);
-    const bindings = new Map<string, Type>();
-    if (typeArgs.length > 0) {
-      params.forEach((p, i) => bindings.set(p.name, resolveType(typeArgs[i]!)));
-    } else {
-      const names = new Set(params.map((p) => p.name));
-      f.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
-    }
-    for (const p of params) {
-      const type = bindings.get(p.name);
-      if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
-      if (typeof type !== "string" && type.kind === "interface") {
-        throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
-      }
-    }
-    withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
-    const instance = instanceOf(f, new Map(params.map((p) => [p.name, bindings.get(p.name)!])));
-    if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    return instance;
-  }
-
-  function paramTypes(instance: Instance): Type[] {
-    const f = instance.body;
-    return withScope(instance.bindings, () => f.params.map((p) => paramType(p, f.self?.constructor)));
-  }
-
-  // Resolves a class's field types. An unannotated field takes its initializer's type, which
-  // is checked as the body of a function that returns it, so it may use other classes.
   // Bases are linked first, since a derived constructor may take its base's parameters.
   function link(c: ClassInfo, path: Set<ClassInfo>) {
     if (linked.has(c) || c.baseName === undefined) return;
@@ -203,6 +144,8 @@ export function check(program: Stmt[]): Checked {
     linked.add(c);
   }
 
+  // Resolves a class's field types. An unannotated field takes its initializer's type, which
+  // is checked as the body of a function that returns it, so it may use other classes.
   function layout(c: ClassInfo) {
     if (laidOut.has(c)) return;
     laidOut.add(c);
@@ -242,7 +185,8 @@ export function check(program: Stmt[]): Checked {
 
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
-    if (f.returnType) return withScope(instance.bindings, () => resolveType(f.returnType!));
+    const declared = f.returnType && withScope(instance.bindings, () => resolveType(f.returnType!));
+    if (declared && !isInterface(declared)) return declared;
     if (inProgress.has(instance)) {
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
@@ -266,8 +210,10 @@ export function check(program: Stmt[]): Checked {
     const f = instance.body;
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
-    const declared = f.returnType && resolveType(f.returnType);
-    if (declared && isInterface(declared)) throw unsupported("functions returning an interface", f.returnType!);
+    let declared = f.returnType && resolveType(f.returnType);
+    // A function returning an interface returns its one concrete type, which must satisfy it.
+    const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
+    if (trait) declared = undefined;
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
@@ -288,11 +234,8 @@ export function check(program: Stmt[]): Checked {
       thisReady: (e) => unset.size === 0 || e === exempt,
     });
 
-    for (const p of f.params) {
-      const type = paramType(p, f.self?.constructor);
-      if (isInterface(type)) throw unsupported("parameters typed with an interface", p);
-      declare(paramName(p), type, false, true, p);
-    }
+    const params = paramTypes(instance);
+    f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
     for (const s of f.body) {
@@ -423,6 +366,8 @@ export function check(program: Stmt[]): Checked {
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
+          const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
+          if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;
           return;
         }

@@ -34,7 +34,7 @@ export type Context = {
   returnOf(instance: Instance, at: Span): Type;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body): Instance;
-  instantiate(f: Body, typeArgs: TypeNode[], argTypes: Type[], at: Span): Instance;
+  instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
   paramTypes(instance: Instance): Type[];
   lookup(name: string): Local | undefined;
   self: Body["self"];
@@ -86,7 +86,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
     const argTypes = e.args.map(value);
-    const instance = instantiate(target, e.typeArgs, argTypes, e);
+    const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
     return { type: returnOf(instance, e), what: `'${target.name}'` };

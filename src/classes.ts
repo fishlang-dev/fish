@@ -13,6 +13,8 @@ export type Body = Span & {
   returnType: TypeNode | undefined;
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
+  // An accessor's parameter is the property's type, so it is never generic.
+  accessor?: boolean;
   self?: { type: ClassType; constructor: boolean; mutable: boolean };
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
@@ -133,6 +135,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
       body: m.body,
       returnType: m.returnType,
       self: { type, constructor: false, mutable: m.kind === "set" },
+      accessor: true,
       owner: type,
       access,
       start: m.start,

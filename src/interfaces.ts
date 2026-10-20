@@ -16,6 +16,10 @@ export type Members = {
 export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const missing = (what: string, name: string) => `${what} '${name}' is missing in type '${show(type)}' but required in type '${trait.name}'`;
   if (type === trait) return undefined;
+  // A type parameter has what its bound has.
+  if (typeof type !== "string" && type.kind === "param") {
+    return type.bound ? unsatisfied(type.bound, trait, members, at) : `type '${type.name}' has no members`;
+  }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;
   for (const f of trait.fields) {
     const own = typeof type === "string" ? undefined : field(type, f.name);
