@@ -3,7 +3,7 @@ import { declareClass, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, keyOf, show, typeParameter, widenEnum, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, keyOf, objectType, show, typeParameter, widenEnum, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -219,10 +219,22 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (bound.kind === "interface") {
       const reason = unsatisfied(type, bound, members, arg);
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
-      return type;
+      return unionFields(type, bound);
     }
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
-    return arg.kind === "object" ? bound : type;
+    return arg.kind === "object" ? bound : unionFields(type, bound);
+  }
+
+  // An object argument with a field narrower than the union its bound declares takes the
+  // union there, so the body's narrowing of that field holds in every instance. A class's
+  // fields are fixed by its declaration, so an instance keeps its own.
+  function unionFields(type: Type, bound: ObjectType | InterfaceType): Type {
+    if (typeof type === "string" || type.kind !== "object") return type;
+    return objectType(type.fields.map((f) => {
+      const declared = field(bound, f.name)?.type;
+      const union = declared && typeof declared !== "string" && declared.kind === "union" ? declared : undefined;
+      return union && f.type !== union ? { name: f.name, type: union } : f;
+    }));
   }
 }
 
