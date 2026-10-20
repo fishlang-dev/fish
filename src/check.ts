@@ -345,17 +345,17 @@ export function check(program: Stmt[]): Checked {
         case "assign": {
           const op = ASSIGNMENTS[e.op];
           if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-          const local = assignable(e.target);
+          const target = assignable(e.target);
           const assigned = value(e.value);
-          const type = op === "=" ? assigned : binaryType(op, local.type, assigned, e);
-          if (type !== local.type) {
-            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(local.type)}'`, e.value.start, e.value.end);
+          const type = op === "=" ? assigned : binaryType(op, target, assigned, e);
+          if (type !== target) {
+            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(target)}'`, e.value.start, e.value.end);
           }
           return type;
         }
         case "update": {
-          const local = assignable(e.operand);
-          if (local.type !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(local.type)}'`, e.start, e.end);
+          const target = assignable(e.operand);
+          if (target !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
           return "i64";
         }
         case "conditional": {
@@ -392,17 +392,26 @@ export function check(program: Stmt[]): Checked {
       return { name: p.name, type: local.type };
     }
 
-    function assignable(target: Expr): Local {
-      if (target.kind !== "ident") throw new CompileError("can only assign to a variable", target.start, target.end);
-      value(target);
-      const local = locals.get(target)!;
+    // The type of what an assignment replaces: a `let` variable, or a field inside one.
+    // `const` is deeply immutable, so no field of a constant can change.
+    function assignable(target: Expr): Type {
+      let root = target;
+      let path = "";
+      while (root.kind === "member" && !root.optional) {
+        path = `.${root.name}${path}`;
+        root = root.object;
+      }
+      if (root.kind !== "ident") throw new CompileError("can only assign to a variable or a field", target.start, target.end);
+      const type = value(target);
+      const local = locals.get(root)!;
       if (local.param) {
         throw new CompileError("assigning to a parameter is not supported yet; copy it into a 'let'", target.start, target.end);
       }
       if (!local.mutable) {
-        throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, target.start, target.end);
+        const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
+        throw new CompileError(`cannot assign to ${what} is a constant`, target.start, target.end);
       }
-      return local;
+      return type;
     }
 
     // Fish has no truthiness: a condition is a boolean, never a number tested against zero.

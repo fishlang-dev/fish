@@ -65,6 +65,8 @@ const RUNTIME = [
   "}",
 ];
 
+const fieldIndex = (t: ObjectType, name: string) => t.fields.findIndex((f) => f.name === name);
+
 export type Options = { src: string; file: string; release: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
@@ -309,7 +311,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
       case "member": {
         const object = types.get(e.object) as ObjectType;
         const result = temp();
-        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${object.fields.findIndex((f) => f.name === e.name)}`);
+        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldIndex(object, e.name)}`);
         return result;
       }
       case "object": {
@@ -394,8 +396,16 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
   }
 
   function store(target: Expr, result: string) {
-    const local = resolved(target);
-    emit(`store ${llvm(local.type)} ${result}, ptr ${slot(local)}`);
+    emit(`store ${llvm(types.get(target)!)} ${result}, ptr ${address(target)}`);
+  }
+
+  // Where an assignment target lives: a variable's slot, or a field inside one.
+  function address(target: Expr): string {
+    if (target.kind !== "member") return slot(resolved(target));
+    const object = types.get(target.object) as ObjectType;
+    const result = temp();
+    emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, i32 ${fieldIndex(object, target.name)}`);
+    return result;
   }
 
   // The right side runs only when the left side does not already decide the result.
