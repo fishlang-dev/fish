@@ -384,11 +384,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "assign": {
         const op = ASSIGNMENTS[e.op]!;
-        // The target is read before the right-hand side runs, as in JavaScript. `&&=` and `||=`
-        // skip the right side as `&&` and `||` do, and storing the unchanged value is harmless.
-        const result = op === "=" ? value(e.value)
-          : op === "&&" || op === "||" ? logical(op, e.target, e.value)
-          : operate(op, value(e.target), value(e.value), e);
+        // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
+        // run it, which matters when the target is a setter.
+        if (op === "&&" || op === "||") {
+          return logical(op, value(e.target), () => {
+            const assigned = value(e.value);
+            store(e.target, assigned);
+            return assigned;
+          });
+        }
+        // The target is read before the right-hand side runs, as in JavaScript.
+        const result = op === "=" ? value(e.value) : operate(op, value(e.target), value(e.value), e);
         store(e.target, result);
         return result;
       }
@@ -416,7 +422,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return result;
       }
       case "binary": {
-        if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
+        if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
         const tested = test(e, value, (x) => types.get(x)!);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
@@ -472,14 +478,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // The right side runs only when the left side does not already decide the result.
-  function logical(op: "&&" | "||", left: Expr, right: Expr): string {
-    const a = value(left);
+  function logical(op: "&&" | "||", a: string, right: () => string): string {
     const from = block;
     const rhs = label();
     const end = label();
     emit(op === "&&" ? `br i1 ${a}, label %${rhs}, label %${end}` : `br i1 ${a}, label %${end}, label %${rhs}`);
     startBlock(rhs);
-    const b = value(right);
+    const b = right();
     const rhsEnd = block;
     emit(`br label %${end}`);
     startBlock(end);
