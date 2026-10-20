@@ -74,6 +74,7 @@ const EXPRESSIONS: [string, string][] = [
   ["a!", "non-null assertions"],
   ["f?.()", "optional calls"],
   ["f<i64>()", "type arguments on calls"],
+  ["i++", "increment and decrement expressions"],
   ["tag`a`", "tagged templates"],
 ];
 
@@ -83,6 +84,18 @@ for (const [expr, what] of EXPRESSIONS) {
     const start = src.indexOf(expr, src.indexOf("="));
     expect(() => check(parse(src))).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + expr.length,
+    }));
+  });
+}
+
+// Operators that parse but have no meaning yet.
+for (const expr of ["2 ** 3", "1 | 2", "1 << 2", "a ?? b", "a in b", "typeof 1", "~1", "await 1"]) {
+  test(expr, () => {
+    const src = `function main() {\n  let x = ${expr}\n}`;
+    const op = expr.match(/\*\*|\||<<|\?\?|\bin\b|typeof|~|await/)![0];
+    const start = src.indexOf(expr);
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `operator '${op}' is not supported yet`, start, end: start + expr.length,
     }));
   });
 }

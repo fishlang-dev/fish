@@ -1,53 +1,79 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
-import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode } from "./parser.ts";
+import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp, type TypeNode, type UnaryOp } from "./parser.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
-// Binding power of each binary operator, as in TypeScript. All are left-associative.
+// Binding power of each binary operator, as in TypeScript. All are left-associative but `**`.
 const PRECEDENCE: Record<BinaryOp, number> = {
-  "||": 1,
-  "&&": 2,
-  "===": 3, "!==": 3,
-  "<": 4, "<=": 4, ">": 4, ">=": 4,
-  "+": 5, "-": 5,
-  "*": 6, "/": 6, "%": 6,
+  "??": 1,
+  "||": 2,
+  "&&": 3,
+  "|": 4,
+  "^": 5,
+  "&": 6,
+  "===": 7, "!==": 7, "==": 7, "!=": 7,
+  "<": 8, "<=": 8, ">": 8, ">=": 8, "instanceof": 8, "in": 8,
+  "<<": 9, ">>": 9, ">>>": 9,
+  "+": 10, "-": 10,
+  "*": 11, "/": 11, "%": 11,
+  "**": 12,
 };
 
 const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE, text);
 
+const UNARY = new Set(["-", "+", "!", "~", "typeof", "void", "delete", "await"]);
+
 export function expression(c: Cursor, minPrecedence = 0): Expr {
+  const startsUnary = UNARY.has(c.peek().text) && (c.peek().kind === "punct" || c.peek().kind === "ident");
   let left = unary(c);
   for (;;) {
-    const op = binaryOperator(c);
-    if (!op || PRECEDENCE[op] <= minPrecedence) return left;
-    if (c.next().text !== op) c.next();
-    const right = expression(c, PRECEDENCE[op]);
+    const [op, width] = binaryOperator(c) ?? [];
+    if (!op || !width || PRECEDENCE[op] <= minPrecedence) return left;
+    // TypeScript rejects `-a ** b` rather than pick a meaning for it.
+    if (op === "**" && startsUnary && left.kind === "unary") throw c.error("parenthesise the left side of '**'");
+    c.pos += width;
+    // Right-associative: `a ** b ** c` is `a ** (b ** c)`.
+    const right = expression(c, op === "**" ? PRECEDENCE[op] - 1 : PRECEDENCE[op]);
     left = { kind: "binary", op, left, right, start: left.start, end: right.end };
   }
 }
 
-// `>=` arrives as `>` then `=`, so that generics can later close on `>`; rejoin it here.
-// Migration rule A3 rewrites loose equality to strict, so native code never uses it.
-function binaryOperator(c: Cursor): BinaryOp | undefined {
+// The operator at the cursor and how many tokens it spans. The lexer emits `>` alone so that
+// `A<B<C>>` closes two generics; `>>`, `>>>` and `>=` are rejoined here from adjacent tokens.
+function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
   const t = c.peek();
+  if (t.kind === "ident") return t.text === "in" || t.text === "instanceof" ? [t.text, 1] : undefined;
   if (t.kind !== "punct") return undefined;
-  if (t.text === "==" || t.text === "!=") throw new CompileError(`'${t.text}' is not supported; use '${t.text}='`, t.start, t.end);
-  const after = c.peek(1);
-  const text = t.text === ">" && after.text === "=" && after.start === t.end ? ">=" : t.text;
-  return isBinaryOp(text) ? text : undefined;
+  if (t.text !== ">") return isBinaryOp(t.text) ? [t.text, 1] : undefined;
+  const adjacent = (i: number, text: string) => isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
+  let count = 1;
+  while (count < 3 && adjacent(count, ">")) count++;
+  // `>>=` and `>>>=` are assignments, not comparisons.
+  if (adjacent(count, "=")) return count === 1 ? [">=", 2] : undefined;
+  return [count === 1 ? ">" : count === 2 ? ">>" : ">>>", count];
 }
 
 export function unary(c: Cursor): Expr {
-  if (!c.at("-") && !c.at("!")) return postfix(c);
-  const op = c.next();
+  const t = c.peek();
+  if (c.at("++") || c.at("--")) {
+    c.next();
+    const operand = unary(c);
+    return { kind: "update", op: t.text as "++" | "--", prefix: true, operand, start: t.start, end: operand.end };
+  }
+  if (!UNARY.has(t.text) || (t.kind !== "punct" && t.kind !== "ident")) return postfix(c);
+  c.next();
   const operand = unary(c);
-  return { kind: "unary", op: op.text === "-" ? "-" : "!", operand, start: op.start, end: operand.end };
+  return { kind: "unary", op: t.text as UnaryOp, operand, start: t.start, end: operand.end };
 }
 
+// A newline before `++` or `--` ends the expression instead, as in JavaScript.
 function postfix(c: Cursor): Expr {
-  return chain(c, c.at("new") ? newExpression(c) : primary(c), true);
+  const e = chain(c, c.at("new") ? newExpression(c) : primary(c), true);
+  if ((!c.at("++") && !c.at("--")) || c.peek().newlineBefore) return e;
+  const op = c.next();
+  return { kind: "update", op: op.text as "++" | "--", prefix: false, operand: e, start: e.start, end: op.end };
 }
 
 // Member accesses, calls, tagged templates and `!` after `e`. Without `calls`, it stops

@@ -211,7 +211,9 @@ function showExpr(e: Expr): string {
     case "nonNull":
       return `${showExpr(e.expr)}!`;
     case "unary":
-      return `(${e.op}${showExpr(e.operand)})`;
+      return `(${e.op}${/\w/.test(e.op) ? " " : ""}${showExpr(e.operand)})`;
+    case "update":
+      return e.prefix ? `(${e.op}${showExpr(e.operand)})` : `(${showExpr(e.operand)}${e.op})`;
     case "binary":
       return `(${showExpr(e.left)} ${e.op} ${showExpr(e.right)})`;
   }
@@ -251,8 +253,39 @@ const EXPRESSIONS: [string, string][] = [
   ["import('./m', opts)", "import('./m', opts)"],
   ["x!", "x!"],
   ["super.x()", "super.x()"],
+  ["a ?? b || c", "(a ?? (b || c))"],
+  ["a || b && c", "(a || (b && c))"],
+  ["a && b | c", "(a && (b | c))"],
+  ["a | b ^ c", "(a | (b ^ c))"],
+  ["a ^ b & c", "(a ^ (b & c))"],
+  ["a & b == c", "(a & (b == c))"],
+  ["a != b < c", "(a != (b < c))"],
+  ["a < b << c", "(a < (b << c))"],
+  ["a in b instanceof c", "((a in b) instanceof c)"],
+  ["a << b + c", "(a << (b + c))"],
+  ["a + b * c", "(a + (b * c))"],
+  ["a - b - c", "((a - b) - c)"],
+  ["a * b ** c", "(a * (b ** c))"],
+  ["a ** b ** c", "(a ** (b ** c))"],
+  ["a >> b >>> c >= d", "(((a >> b) >>> c) >= d)"],
+  ["a > b >= c", "((a > b) >= c)"],
+  ["(-a) ** b", "((-a) ** b)"],
+  ["++a ** b", "((++a) ** b)"],
+  ["typeof a === 'x'", "((typeof a) === 'x')"],
+  ["!a && -b", "((!a) && (-b))"],
+  ["void 0", "(void 0)"],
+  ["delete a.b", "(delete a.b)"],
+  ["await p.then()", "(await p.then())"],
+  ["~+a", "(~(+a))"],
+  ["-a++", "(-(a++))"],
+  ["a+++b", "((a++) + b)"],
+  ["- -a", "(-(-a))"],
 ];
 
 for (const [src, shape] of EXPRESSIONS) {
   test(src, () => expect(showExpr(parseExpr(src))).toBe(shape));
+}
+
+for (const src of ["-a ** b", "typeof a ** b", "a * -b ** c"]) {
+  test(`${src} is rejected`, () => expect(() => parseExpr(src)).toThrow("parenthesise the left side of '**'"));
 }

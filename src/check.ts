@@ -85,9 +85,12 @@ export function check(items: Item[]): Checked {
     function statement(s: Stmt) {
       switch (s.kind) {
         case "expr":
-          if (s.expr.kind !== "call") throw new CompileError("only calls are supported as statements so far", s.start, s.end);
-          call(s.expr);
-          return;
+          if (s.expr.kind === "call") {
+            call(s.expr);
+            return;
+          }
+          value(s.expr);
+          throw new CompileError("only calls are supported as statements so far", s.start, s.end);
         case "let": {
           const annotated = s.type && resolveType(s.type);
           const type = value(s.init);
@@ -205,6 +208,7 @@ export function check(items: Item[]): Checked {
           return type;
         }
         case "unary": {
+          if (e.op !== "-" && e.op !== "!") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
           const type = value(e.operand);
           if (type !== (e.op === "-" ? "i64" : "boolean")) {
             throw new CompileError(`operator '${e.op}' cannot be applied to type '${type}'`, e.start, e.end);
@@ -212,6 +216,9 @@ export function check(items: Item[]): Checked {
           return type;
         }
         case "binary":
+          // Migration rule A3 rewrites loose equality to strict, so native code never uses it.
+          if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
+          if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
           return binaryType(e.op, value(e.left), value(e.right), e);
         default:
           throw unsupported(EXPRESSION_FORMS[e.kind], e);
@@ -283,6 +290,9 @@ export function check(items: Item[]): Checked {
   }
 }
 
+// The binary operators that have a meaning so far.
+const SUPPORTED_OPERATORS = new Set<BinaryOp>(["||", "&&", "===", "!==", "<", "<=", ">", ">=", "+", "-", "*", "/", "%"]);
+
 // What each expression form is called when the checker rejects it.
 const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary">, string> = {
   float: "floating-point numbers",
@@ -301,6 +311,7 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   meta: "meta properties",
   import: "dynamic imports",
   nonNull: "non-null assertions",
+  update: "increment and decrement expressions",
   template: "template literals",
   tagged: "tagged templates",
 };

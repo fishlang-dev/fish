@@ -62,7 +62,8 @@ export type Expr = Span & (
   // `import(specifier, options?)`
   | { kind: "import"; args: Expr[] }
   | { kind: "nonNull"; expr: Expr }
-  | { kind: "unary"; op: "-" | "!"; operand: Expr }
+  | { kind: "unary"; op: UnaryOp; operand: Expr }
+  | { kind: "update"; op: "++" | "--"; prefix: boolean; operand: Expr }
   | { kind: "binary"; op: BinaryOp; left: Expr; right: Expr }
 );
 
@@ -110,7 +111,12 @@ export type Func = Span & { kind: "function"; name: string; typeParams: TypePara
 
 export type Item = Func | TypeAlias | Interface;
 
-export type BinaryOp = "||" | "&&" | "===" | "!==" | "<" | "<=" | ">" | ">=" | "+" | "-" | "*" | "/" | "%";
+export type BinaryOp =
+  | "??" | "||" | "&&" | "|" | "^" | "&" | "===" | "!==" | "==" | "!="
+  | "<" | "<=" | ">" | ">=" | "instanceof" | "in" | "<<" | ">>" | ">>>"
+  | "+" | "-" | "*" | "/" | "%" | "**";
+
+export type UnaryOp = "-" | "+" | "!" | "~" | "typeof" | "void" | "delete" | "await";
 
 export type ArithmeticOp = "+" | "-" | "*" | "/" | "%";
 
@@ -308,11 +314,8 @@ function simpleStatement(c: Cursor): Stmt {
     const value = expression(c);
     return { kind: "return", value, start, end: value.end };
   }
-  if (c.at("++") || c.at("--")) {
-    const op = c.next();
-    return increment(expression(c), op, start);
-  }
   const expr = expression(c);
+  if (expr.kind === "update") return increment(expr);
   const t = c.peek();
   const op = t.kind === "punct" ? ASSIGNMENT[t.text] : undefined;
   if (op) {
@@ -320,8 +323,6 @@ function simpleStatement(c: Cursor): Stmt {
     const value = expression(c);
     return { kind: "assign", target: expr, op, value, start, end: value.end };
   }
-  // A newline before `++` ends the statement instead, as in JavaScript.
-  if ((c.at("++") || c.at("--")) && !t.newlineBefore) return increment(expr, c.next(), start);
   return { kind: "expr", expr, start, end: expr.end };
 }
 
@@ -354,10 +355,11 @@ function interfaceDeclaration(c: Cursor): Interface {
   return { kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
 }
 
-function increment(target: Expr, op: Token, start: number): Stmt {
-  const one: Expr = { kind: "int", value: 1n, start: op.start, end: op.end };
-  const end = Math.max(target.end, op.end);
-  return { kind: "assign", target, op: op.text === "++" ? "+" : "-", value: one, start, end };
+// A statement `x++` or `++x` is `x += 1`; the 1 takes the operator's span.
+function increment(e: Extract<Expr, { kind: "update" }>): Stmt {
+  const at = e.prefix ? e.start : e.end - 2;
+  const one: Expr = { kind: "int", value: 1n, start: at, end: at + 2 };
+  return { kind: "assign", target: e.operand, op: e.op === "++" ? "+" : "-", value: one, start: e.start, end: e.end };
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.
