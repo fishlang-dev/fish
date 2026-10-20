@@ -28,10 +28,8 @@ function size(t: Type): [number, number] {
   if (t === "i64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (typeof t === "string") return [0, 1];
-  if (t.kind === "union") {
-    const n = words(t);
-    return n === 0 ? [4, 4] : [8 + 8 * n, 8];
-  }
+  // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
+  if (t.kind === "union") return [8 + 8 * words(t), 8];
   const parts = [...(t.kind === "class" && t.base ? [t.base] : []), ...t.fields.map((f) => f.type)].map(size);
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
