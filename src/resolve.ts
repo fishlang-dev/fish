@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { interfaceType, keyOf, literalType, objectType, unionType, type ClassType, type Field, type InterfaceType, type Method, type Type } from "./typing.ts";
+import { interfaceType, keyOf, literalType, objectType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -80,6 +80,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind === "literal") return literal(t.value);
     if (t.kind === "union") return unionType(t.types.map(unionMember));
+    if (t.kind === "intersection") return intersection(t.types);
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
@@ -123,6 +124,17 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const value = negative ? -digits.value : digits.value;
     if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
     return literalType(value);
+  }
+
+  // `A & B` of object types is one object type with the fields of both.
+  function intersection(nodes: TypeNode[]): Type {
+    const sides = nodes.map((node) => {
+      const t = resolveType(node);
+      if (typeof t !== "string" && t.kind === "object") return t;
+      if (typeof t !== "string" && t.kind === "interface") throw unsupported("intersections with interfaces", node);
+      throw unsupported(`intersections with ${typeof t === "string" || t.kind === "literal" ? "primitive types" : SIDE_FORMS[t.kind]}`, node);
+    });
+    return sides.reduce((a, b) => merged(a, b, nodes[0]!, nodes.at(-1)!));
   }
 
   // The interface is registered before its members resolve, so a member may name it.
@@ -185,6 +197,31 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return { name: m.name, type: storable(resolveType(m.type), m), ...(m.readonly && { readonly: true }) };
   }
 }
+
+// A field both sides of `&` declare keeps its type, merging nested object types; other types
+// conflict, since no value could have both. It is readonly only when both sides say so, as in
+// TypeScript.
+function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType {
+  const fields = [...a.fields];
+  for (const f of b.fields) {
+    const i = fields.findIndex((g) => g.name === f.name);
+    const g = fields[i];
+    if (!g) {
+      fields.push(f);
+      continue;
+    }
+    const both = typeof g.type !== "string" && g.type.kind === "object" && typeof f.type !== "string" && f.type.kind === "object";
+    if (g.type !== f.type && !both) {
+      throw new CompileError(`property '${f.name}' has type '${show(g.type)}' on one side of '&' and '${show(f.type)}' on the other`, from.start, to.end);
+    }
+    const type = both ? merged(g.type as ObjectType, f.type as ObjectType, from, to) : f.type;
+    fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }) };
+  }
+  return objectType(fields);
+}
+
+// What each other kind of type is called when it can't be a side of `&`.
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", interface: "interfaces", object: "object types" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

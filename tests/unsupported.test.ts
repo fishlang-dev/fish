@@ -6,7 +6,6 @@ import { parse } from "../src/parser.ts";
 const TYPES: [string, string][] = [
   ["Array<i64>", "array types"],
   ["i64[]", "array types"],
-  ["A & B", "intersection types"],
   ["keyof A", "'keyof' types"],
   ["readonly i64[]", "'readonly' types"],
   ["unique symbol", "'unique' types"],
@@ -42,6 +41,23 @@ const MEMBERS: [string, string, string][] = [
   ["{ x?: i64 }", "optional properties", "x?: i64"],
   ["{ [k]: i64 }", "computed property names", "k"],
 ];
+
+// Each kind of type `&` can't combine yet, rejected at that side.
+const INTERSECTIONS: [string, string, string][] = [
+  ["i64 & { a: i64 }", "intersections with primitive types", "i64"],
+  ["{ a: i64 } & A", "intersections with classes", "A"],
+  ["{ a: i64 } & (1 | 2)", "intersections with unions", "1 | 2"],
+];
+
+for (const [type, what, part] of INTERSECTIONS) {
+  test(type, () => {
+    const src = `class A {}\nfunction f(p: ${type}) {}\nfunction main() {}`;
+    const start = src.indexOf(part, src.indexOf("p:"));
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + part.length,
+    }));
+  });
+}
 
 for (const [type, what, part] of MEMBERS) {
   test(type, () => {
