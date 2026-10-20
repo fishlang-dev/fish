@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, derives, field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
-import type { Local } from "./check.ts";
+import type { Instance, Local } from "./check.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -25,12 +25,13 @@ export type Context = {
   types: Map<Expr, Type>;
   locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
   coercions: Map<Expr, Type>;
-  calls: Map<Expr, Body>;
-  setters: Map<Expr, Body>;
+  calls: Map<Expr, Instance>;
+  setters: Map<Expr, Instance>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   returnOf(f: Body, at: Span): Type;
   classOf(t: ClassType): ClassInfo;
+  instanceOf(f: Body): Instance;
   paramType(p: Param, property?: boolean): Type;
   lookup(name: string): Local | undefined;
   self: Body["self"];
@@ -43,7 +44,7 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup, self, owner, superCall, thisReady } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, instanceOf, paramType, lookup, self, owner, superCall, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -62,7 +63,7 @@ export function expressions(ctx: Context) {
       const base = classOf(self!.type.base!);
       types.set(callee, base.type);
       args(e.args, base.constructor, e);
-      calls.set(e, base.constructor);
+      calls.set(e, instanceOf(base.constructor));
       return base.constructor;
     }
     if (isPrint(callee)) {
@@ -76,7 +77,7 @@ export function expressions(ctx: Context) {
     const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee) : undefined;
     if (target) {
       args(e.args, target, e);
-      calls.set(e, target);
+      calls.set(e, instanceOf(target));
       return target;
     }
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -190,7 +191,7 @@ export function expressions(ctx: Context) {
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
           visible(getter.access, getter.owner!, e.name, e);
-          calls.set(e, getter);
+          calls.set(e, instanceOf(getter));
           return returnOf(getter, e);
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
@@ -340,7 +341,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
     }
     changeable(target, "assign to");
-    setters.set(target, setter);
+    setters.set(target, instanceOf(setter));
     types.set(target, type);
     return type;
   }

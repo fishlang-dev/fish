@@ -14,21 +14,26 @@ type Func = Declared & { body: Stmt[] };
 
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
 
-export type Checked = {
-  // Every function to compile: the top-level ones, then each class's constructor and methods.
-  funcs: Body[];
-  // The function each call of a user function or method runs, and the getter each read of
-  // an accessor runs.
-  calls: Map<Expr, Body>;
-  // The setter each assignment to an accessor runs.
-  setters: Map<Expr, Body>;
+// Every function to compile: the top-level ones, then each class's constructor and methods.
+export type Checked = { instances: Instance[] };
+
+// One compiled function: a body checked with concrete types, and the tables codegen reads
+// to lower it. `symbol` names it in the IR.
+export type Instance = {
+  body: Body;
+  symbol: string;
+  // Its return type, written or inferred.
+  returns: Type;
   // Every value expression's type.
   types: Map<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
   // after shadowing.
   locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
-  // Each function's return type, written or inferred.
-  returns: Map<string, Type>;
+  // The function each call of a user function or method runs, and the getter each read of
+  // an accessor runs.
+  calls: Map<Expr, Instance>;
+  // The setter each assignment to an accessor runs.
+  setters: Map<Expr, Instance>;
   // Each expression whose value meets a narrower declared type, and the type it is copied
   // down to.
   coercions: Map<Expr, Type>;
@@ -82,14 +87,8 @@ export function check(program: Stmt[]): Checked {
   if (!main) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   const { resolveType, paramType } = resolver(aliases, new Map([...classes].map(([name, c]) => [name, c.type])));
-  const types = new Map<Expr, Type>();
-  const locals = new Map<Expr | Stmt | Param | ObjectProp, Local>();
-  const returns = new Map<string, Type>();
-
-  const jumps = new Map<Stmt, Stmt>();
-  const coercions = new Map<Expr, Type>();
-  const calls = new Map<Expr, Body>();
-  const setters = new Map<Expr, Body>();
+  const instances = new Map<Body, Instance>();
+  const done = new Set<Body>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -111,8 +110,20 @@ export function check(program: Stmt[]): Checked {
   ])];
   bodies.forEach(checkBody);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
-  if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  return { funcs: bodies, calls, setters, types, locals, returns, coercions, jumps };
+  if (instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
+  return { instances: bodies.map(instanceOf) };
+
+  function instanceOf(f: Body): Instance {
+    let found = instances.get(f);
+    if (!found) {
+      found = {
+        body: f, symbol: f.name, returns: "void",
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(),
+      };
+      instances.set(f, found);
+    }
+    return found;
+  }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
@@ -134,8 +145,9 @@ export function check(program: Stmt[]): Checked {
     c.type.fields = c.fields.map((f) => {
       if (f.type) return { name: f.name, type: resolveType(f.type), access: f.access };
       const name = `${c.type.name}.${f.name} initializer`;
-      checkBody({ name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, owner: c.type, start: f.start, end: f.end });
-      return { name: f.name, type: returns.get(name)!, access: f.access };
+      const initializer: Body = { name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined, owner: c.type, start: f.start, end: f.end };
+      checkBody(initializer);
+      return { name: f.name, type: instanceOf(initializer).returns, access: f.access };
     });
   }
 
@@ -158,12 +170,14 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     checkBody(f);
-    return returns.get(f.name)!;
+    return instanceOf(f).returns;
   }
 
   function checkBody(f: Body) {
-    if (returns.has(f.name)) return;
+    if (done.has(f)) return;
     inProgress.add(f);
+    const instance = instanceOf(f);
+    const { types, locals, coercions, calls, setters, jumps } = instance;
     const declared = f.returnType && resolveType(f.returnType);
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
@@ -178,7 +192,7 @@ export function check(program: Stmt[]): Checked {
     if (superCall) unset.add(SUPER);
 
     const { value, condition, effect, coerce } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup,
+      types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, instanceOf, paramType, lookup,
       self: f.self,
       owner: f.owner,
       superCall,
@@ -207,7 +221,8 @@ export function check(program: Stmt[]): Checked {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
-    returns.set(f.name, type);
+    instance.returns = type;
+    done.add(f);
     inProgress.delete(f);
 
     function statement(s: Stmt) {

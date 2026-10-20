@@ -1,4 +1,4 @@
-import type { Body, Checked, Local, Type } from "./check.ts";
+import type { Checked, Instance, Local, Type } from "./check.ts";
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -26,7 +26,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, calls, setters, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -36,7 +36,9 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   let labels = 0;
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
-  let currentFunction = "";
+  // The instance being emitted, and the tables its checking produced.
+  let current = instances[0]!;
+  let { types, locals, calls, setters, coercions, jumps } = current;
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
   // Where a `break` and a `continue` go for each statement they can name.
@@ -44,15 +46,17 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   const builder = { emit, temp, label, startBlock, cString };
   const { operate, arithmetic } = lowering(builder, src, file, release);
 
-  for (const f of funcs) {
-    currentFunction = f.name;
+  for (const instance of instances) {
+    current = instance;
+    ({ types, locals, calls, setters, coercions, jumps } = instance);
+    const f = instance.body;
     self = f.self?.type;
     allocas = [];
     body = [];
     temps = 0;
     labels = 0;
     block = "entry";
-    const type = returnType(f.name);
+    const type = instance.returns;
     // Parameters are copied into slots like any other binding.
     const params = f.params.map((p) => {
       const local = resolved(p);
@@ -65,7 +69,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
-    out.push(`define ${llvm(type)} @"fsh.${f.name}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
+    out.push(`define ${llvm(type)} @"fsh.${instance.symbol}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
   }
 
   return [
@@ -100,12 +104,6 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
 
   function slot(local: Local): string {
     return `%${local.name}.${local.id}`;
-  }
-
-  function returnType(name: string): Type {
-    const type = returns.get(name);
-    if (!type) throw new Error(`internal error: no return type for ${name}`);
-    return type;
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
@@ -221,7 +219,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
         return;
       }
       case "return":
-        emit(s.value ? `ret ${llvm(returnType(currentFunction))} ${value(s.value)}` : "ret void");
+        emit(s.value ? `ret ${llvm(current.returns)} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
         startBlock(label());
         return;
@@ -248,22 +246,22 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
       return undefined;
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
-    const pointer = target.self && object ? instance(target, object) : undefined;
+    const pointer = target.body.self && object ? thisPointer(target, object) : undefined;
     const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
     return invoke(target, pointer, values);
   }
 
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
   // that declares the method.
-  function instance(target: Body, object: Expr): string {
-    return upcast(receiver(object), types.get(object) as ClassType, target.owner!);
+  function thisPointer(target: Instance, object: Expr): string {
+    return upcast(receiver(object), types.get(object) as ClassType, target.body.owner!);
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
-  function invoke(target: Body, pointer: string | undefined, args: string[]): string | undefined {
-    const type = returnType(target.name);
+  function invoke(target: Instance, pointer: string | undefined, args: string[]): string | undefined {
+    const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    const call = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
+    const call = `call ${llvm(type)} @"fsh.${target.symbol}"(${values.join(", ")})`;
     if (type === "void") {
       emit(call);
       return undefined;
@@ -339,7 +337,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
       }
       case "member": {
         const getter = calls.get(e);
-        if (getter) return invoke(getter, instance(getter, e.object), [])!;
+        if (getter) return invoke(getter, thisPointer(getter, e.object), [])!;
         const object = types.get(e.object) as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
@@ -445,7 +443,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   function store(target: Expr, result: string) {
     const setter = setters.get(target);
     if (setter && target.kind === "member") {
-      invoke(setter, instance(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
+      invoke(setter, thisPointer(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
       return;
     }
     emit(`store ${llvm(types.get(target)!)} ${result}, ptr ${address(target)}`);
