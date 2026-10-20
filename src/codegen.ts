@@ -1,7 +1,7 @@
 import { ASSIGNMENTS, isPrint, type Checked, type Local, type Type } from "./check.ts";
 import { locate } from "./diag.ts";
 import type { ArithmeticOp, BinaryOp, Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
-import type { ObjectType } from "./typing.ts";
+import { field, type ObjectType } from "./typing.ts";
 
 const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
 
@@ -72,7 +72,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src, file, release }: Options): string {
+export function codegen({ funcs, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -282,7 +282,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
   function call(callee: Expr, args: Expr[]): string | undefined {
     if (callee.kind === "ident" && returns.has(callee.name)) {
       const type = returnType(callee.name);
-      const values = args.map((a) => `${llvm(types.get(a)!)} ${value(a)}`);
+      const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
       const invoke = `call ${llvm(type)} @"fsh.${callee.name}"(${values.join(", ")})`;
       if (type === "void") {
         emit(invoke);
@@ -296,7 +296,28 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
     return undefined;
   }
 
+  // An expression's value, copied down to the declared type it meets when that is narrower.
   function value(e: Expr): string {
+    const result = evaluate(e);
+    const to = coercions.get(e);
+    return to ? project(result, types.get(e)!, to) : result;
+  }
+
+  // Builds a value of `to` from the matching fields of a wider value of `from`.
+  function project(v: string, from: Type, to: Type): string {
+    if (from === to || typeof from === "string" || typeof to === "string") return v;
+    let result = "undef";
+    to.fields.forEach((f, i) => {
+      const part = temp();
+      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldIndex(from, f.name)}`);
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(to)} ${result}, ${llvm(f.type)} ${project(part, field(from, f.name)!.type, f.type)}, ${i}`);
+      result = next;
+    });
+    return result;
+  }
+
+  function evaluate(e: Expr): string {
     switch (e.kind) {
       case "int":
         return String(e.value);

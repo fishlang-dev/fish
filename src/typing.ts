@@ -27,6 +27,17 @@ export function field(t: ObjectType, name: string): Field | undefined {
   return t.fields.find((f) => f.name === name);
 }
 
+// Whether a value of `from` fits where `to` is declared: the same type, or an object with at
+// least `to`'s fields, each fitting in turn.
+export function fits(from: Type, to: Type): boolean {
+  if (from === to) return true;
+  if (typeof from === "string" || typeof to === "string") return false;
+  return to.fields.every((f) => {
+    const found = field(from, f.name);
+    return found !== undefined && fits(found.type, f.type);
+  });
+}
+
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
   if (typeof t === "string") return t;

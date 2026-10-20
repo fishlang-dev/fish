@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { AssignOp, BinaryOp, Expr, Func as Declared, ObjectProp, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { field, objectType, show, type Field, type Type } from "./typing.ts";
+import { field, fits, objectType, show, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, TYPE_FORMS, unsupported, unsupportedDeclaration } from "./unsupported.ts";
 
 export type { Type } from "./typing.ts";
@@ -19,6 +19,9 @@ export type Checked = {
   locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
   // Each function's return type, written or inferred.
   returns: Map<string, Type>;
+  // Each expression whose value meets a narrower declared type, and the type it is copied
+  // down to.
+  coercions: Map<Expr, Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
   jumps: Map<Stmt, Stmt>;
 };
@@ -85,6 +88,7 @@ export function check(program: Stmt[]): Checked {
   aliases.forEach(aliasType);
 
   const jumps = new Map<Stmt, Stmt>();
+  const coercions = new Map<Expr, Type>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -94,7 +98,7 @@ export function check(program: Stmt[]): Checked {
   funcs.forEach(checkBody);
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (returns.get("main") !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  return { funcs, types, locals, returns, jumps };
+  return { funcs, types, locals, returns, coercions, jumps };
 
   function returnOf(f: Func, at: Span): Type {
     if (f.returnType) return resolveType(f.returnType);
@@ -138,10 +142,8 @@ export function check(program: Stmt[]): Checked {
           if (!d.init) throw unsupported("declarations without an initializer", d);
           const annotated = d.type && resolveType(d.type);
           const type = value(d.init);
-          if (annotated && annotated !== type) {
-            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(annotated)}'`, d.init.start, d.init.end);
-          }
-          declare(d.target.name, type, s.keyword === "let", false, s);
+          if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
+          declare(d.target.name, annotated ?? type, s.keyword === "let", false, s);
           return;
         }
         case "if":
@@ -224,11 +226,10 @@ export function check(program: Stmt[]): Checked {
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
-          if (expected && type !== expected) {
-            const at = s.value ?? s;
-            throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(expected)}'`, at.start, at.end);
-          }
-          inferred = type;
+          const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
+          if (expected && s.value) coerce(s.value, type, expected, message);
+          else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
+          inferred = expected ?? type;
           return;
         }
       }
@@ -274,9 +275,7 @@ export function check(program: Stmt[]): Checked {
         e.args.forEach((a, i) => {
           const type = value(a);
           const expected = paramType(target.params[i]!);
-          if (type !== expected) {
-            throw new CompileError(`argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`, a.start, a.end);
-          }
+          coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);
         });
         return target;
       }
@@ -348,10 +347,8 @@ export function check(program: Stmt[]): Checked {
           const target = assignable(e.target);
           const assigned = value(e.value);
           const type = op === "=" ? assigned : binaryType(op, target, assigned, e);
-          if (type !== target) {
-            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(target)}'`, e.value.start, e.value.end);
-          }
-          return type;
+          coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
+          return target;
         }
         case "update": {
           const target = assignable(e.operand);
@@ -373,6 +370,27 @@ export function check(program: Stmt[]): Checked {
           return binaryType(e.op, value(e.left), value(e.right), e);
         default:
           throw unsupported(EXPRESSION_FORMS[e.kind], e);
+      }
+    }
+
+    // A value meeting a declared type must fit it. A wider one is copied down to it, except
+    // that a fresh object literal may not name extra properties, as in TypeScript.
+    function coerce(e: Expr, type: Type, to: Type, message: string) {
+      if (type === to) return;
+      if (!fits(type, to)) throw new CompileError(message, e.start, e.end);
+      excess(e, to);
+      coercions.set(e, to);
+    }
+
+    function excess(e: Expr, to: Type) {
+      if (e.kind !== "object" || typeof to === "string") return;
+      for (const p of e.props) {
+        const name = p.kind === "shorthand" ? p.name : (p as { key: string }).key;
+        const found = field(to, name);
+        if (!found) {
+          throw new CompileError(`object literal may only specify known properties, and '${name}' does not exist in type '${show(to)}'`, p.start, p.end);
+        }
+        if (p.kind === "property") excess(p.value, found.type);
       }
     }
 
