@@ -2,7 +2,13 @@ import { ASSIGNMENTS, isPrint, type Checked, type Local, type Type } from "./che
 import { locate } from "./diag.ts";
 import type { ArithmeticOp, BinaryOp, Expr, Param, Span, Stmt } from "./parser.ts";
 
-const LLVM: Record<Type, string> = { i64: "i64", boolean: "i1", void: "void" };
+const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
+
+// An object is a literal struct of its fields, in their sorted order.
+function llvm(t: Type): string {
+  if (typeof t === "string") return PRIMITIVES[t];
+  return t.fields.length === 0 ? "{}" : `{ ${t.fields.map((f) => llvm(f.type)).join(", ")} }`;
+}
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
@@ -88,14 +94,14 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
     // Parameters are copied into slots like any other binding.
     const params = f.params.map((p) => {
       const local = resolved(p);
-      allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
-      emit(`store ${LLVM[local.type]} %${local.name}.arg, ptr ${slot(local)}`);
-      return `${LLVM[local.type]} %${local.name}.arg`;
+      allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+      emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
+      return `${llvm(local.type)} %${local.name}.arg`;
     });
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
-    out.push(`define ${LLVM[type]} @"fsh.${f.name}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
+    out.push(`define ${llvm(type)} @"fsh.${f.name}"(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
   }
 
   return [
@@ -213,7 +219,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
       }
       case "switch": {
         const subject = value(s.discriminant);
-        const type = LLVM[types.get(s.discriminant)!];
+        const type = llvm(types.get(s.discriminant)!);
         const bodies = s.cases.map(() => label());
         const end = label();
         exits.set(s, { exit: end });
@@ -251,14 +257,14 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         return;
       }
       case "return":
-        emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
+        emit(s.value ? `ret ${llvm(returnType(currentFunction))} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
         startBlock(label());
         return;
       case "let": {
         const local = resolved(s);
-        allocas.push(`  ${slot(local)} = alloca ${LLVM[local.type]}`);
-        emit(`store ${LLVM[local.type]} ${value(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
+        allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+        emit(`store ${llvm(local.type)} ${value(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
         return;
       }
     }
@@ -273,8 +279,8 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
   function call(callee: Expr, args: Expr[]): string | undefined {
     if (callee.kind === "ident" && returns.has(callee.name)) {
       const type = returnType(callee.name);
-      const values = args.map((a) => `${LLVM[types.get(a)!]} ${value(a)}`);
-      const invoke = `call ${LLVM[type]} @"fsh.${callee.name}"(${values.join(", ")})`;
+      const values = args.map((a) => `${llvm(types.get(a)!)} ${value(a)}`);
+      const invoke = `call ${llvm(type)} @"fsh.${callee.name}"(${values.join(", ")})`;
       if (type === "void") {
         emit(invoke);
         return undefined;
@@ -296,7 +302,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
       case "ident": {
         const local = resolved(e);
         const t = temp();
-        emit(`${t} = load ${LLVM[local.type]}, ptr ${slot(local)}`);
+        emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
         return t;
       }
       case "call": {
@@ -341,7 +347,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         emit(`br label %${end}`);
         startBlock(end);
         const result = temp();
-        emit(`${result} = phi ${LLVM[types.get(e)!]} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
+        emit(`${result} = phi ${llvm(types.get(e)!)} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
         return result;
       }
       case "binary": {
@@ -350,7 +356,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
         const [a, b] = [value(e.left), value(e.right)];
         if (!condition) return operate(e.op, a, b, e);
         const result = temp();
-        emit(`${result} = icmp ${condition} ${LLVM[types.get(e.left)!]} ${a}, ${b}`);
+        emit(`${result} = icmp ${condition} ${llvm(types.get(e.left)!)} ${a}, ${b}`);
         return result;
       }
       default:
@@ -360,7 +366,7 @@ export function codegen({ funcs, types, locals, returns, jumps }: Checked, { src
 
   function store(target: Expr, result: string) {
     const local = resolved(target);
-    emit(`store ${LLVM[local.type]} ${result}, ptr ${slot(local)}`);
+    emit(`store ${llvm(local.type)} ${result}, ptr ${slot(local)}`);
   }
 
   // The right side runs only when the left side does not already decide the result.

@@ -39,11 +39,10 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
 };
 
 // What each type form is called when the checker rejects it.
-export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function">, string> = {
+export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object">, string> = {
   literal: "literal types",
   array: "array types",
   tuple: "tuple types",
-  object: "object types",
   union: "union types",
   intersection: "intersection types",
   indexed: "indexed access types",
@@ -60,7 +59,7 @@ export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "
 export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
   switch (s.kind) {
     case "typeAlias":
-      return unsupported("type aliases", s);
+      return unsupported("local type aliases", s);
     case "interface":
       return unsupported("interfaces", s);
     case "class":

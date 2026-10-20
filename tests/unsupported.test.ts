@@ -16,7 +16,6 @@ const TYPES: [string, string][] = [
   ["A[K]", "indexed access types"],
   ["typeof x", "'typeof' types"],
   ["[i64, i64]", "tuple types"],
-  ["{ x: i64 }", "object types"],
   ["(x: i64) => i64", "function types"],
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],
@@ -32,6 +31,28 @@ for (const [type, what] of TYPES) {
     const start = src.indexOf(type);
     expect(() => check(parse(src))).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + type.length,
+    }));
+  });
+}
+
+// Object type members besides plain properties: the rejected part is the third column.
+const MEMBERS: [string, string, string][] = [
+  ["{ f(): i64 }", "methods in object types", "f(): i64"],
+  ["{ (): i64 }", "call signatures", "(): i64"],
+  ["{ new (): i64 }", "construct signatures", "new (): i64"],
+  ["{ [k: string]: i64 }", "index signatures", "[k: string]: i64"],
+  ["{ get x(): i64 }", "accessors in object types", "get x(): i64"],
+  ["{ x?: i64 }", "optional properties", "x?: i64"],
+  ["{ readonly x: i64 }", "'readonly' properties", "readonly x: i64"],
+  ["{ [k]: i64 }", "computed property names", "k"],
+];
+
+for (const [type, what, part] of MEMBERS) {
+  test(type, () => {
+    const src = `function f(p: ${type}) {}\nfunction main() {}`;
+    const start = src.indexOf(part, src.indexOf("{"));
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
 }

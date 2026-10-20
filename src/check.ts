@@ -1,11 +1,12 @@
 import { CompileError } from "./diag.ts";
-import type { AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { AssignOp, BinaryOp, Expr, Func as Declared, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import { objectType, show, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, TYPE_FORMS, unsupported, unsupportedDeclaration } from "./unsupported.ts";
+
+export type { Type } from "./typing.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
-
-export type Type = "i64" | "boolean" | "void";
 
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
 
@@ -41,7 +42,17 @@ export function isPrint(callee: Expr): boolean {
 // A function body is checked when first needed, so return types can be inferred in any order.
 export function check(program: Stmt[]): Checked {
   const funcs: Func[] = [];
+  const aliases = new Map<string, TypeAlias>();
   for (const s of program) {
+    if (s.kind === "typeAlias") {
+      if (BUILT_IN_TYPES.has(s.name)) throw new CompileError(`'${s.name}' is a built-in type`, s.start, s.end);
+      if (aliases.has(s.name)) throw new CompileError(`duplicate type name '${s.name}'`, s.start, s.end);
+      if (s.typeParams.length > 0) {
+        throw unsupported("generic type aliases", { start: s.typeParams[0]!.start, end: s.typeParams.at(-1)!.end });
+      }
+      aliases.set(s.name, s);
+      continue;
+    }
     const declaration = unsupportedDeclaration(s);
     if (declaration) throw declaration;
     if (s.kind === "empty") continue;
@@ -68,6 +79,10 @@ export function check(program: Stmt[]): Checked {
   const types = new Map<Expr, Type>();
   const locals = new Map<Expr | Stmt | Param, Local>();
   const returns = new Map<string, Type>();
+  const resolvedAliases = new Map<TypeAlias, Type>();
+  const resolving = new Set<TypeAlias>();
+  aliases.forEach(aliasType);
+
   const jumps = new Map<Stmt, Stmt>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
@@ -123,7 +138,7 @@ export function check(program: Stmt[]): Checked {
           const annotated = d.type && resolveType(d.type);
           const type = value(d.init);
           if (annotated && annotated !== type) {
-            throw new CompileError(`type '${type}' is not assignable to type '${annotated}'`, d.init.start, d.init.end);
+            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(annotated)}'`, d.init.start, d.init.end);
           }
           declare(d.target.name, type, s.keyword === "let", false, s);
           return;
@@ -175,7 +190,7 @@ export function check(program: Stmt[]): Checked {
             for (const c of s.cases) {
               const test = c.test && value(c.test);
               if (test && test !== type) {
-                throw new CompileError(`type '${test}' is not comparable to type '${type}'`, c.test!.start, c.test!.end);
+                throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               c.body.forEach(statement);
             }
@@ -209,7 +224,7 @@ export function check(program: Stmt[]): Checked {
           const expected = declared ?? inferred;
           if (expected && type !== expected) {
             const at = s.value ?? s;
-            throw new CompileError(`type '${type}' is not assignable to return type '${expected}'`, at.start, at.end);
+            throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(expected)}'`, at.start, at.end);
           }
           inferred = type;
           return;
@@ -258,7 +273,7 @@ export function check(program: Stmt[]): Checked {
           const type = value(a);
           const expected = paramType(target.params[i]!);
           if (type !== expected) {
-            throw new CompileError(`argument of type '${type}' is not assignable to parameter of type '${expected}'`, a.start, a.end);
+            throw new CompileError(`argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`, a.start, a.end);
           }
         });
         return target;
@@ -310,7 +325,7 @@ export function check(program: Stmt[]): Checked {
           if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
           const type = value(e.operand);
           if (type !== (e.op === "!" ? "boolean" : "i64")) {
-            throw new CompileError(`operator '${e.op}' cannot be applied to type '${type}'`, e.start, e.end);
+            throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
           }
           return type;
         }
@@ -321,20 +336,20 @@ export function check(program: Stmt[]): Checked {
           const assigned = value(e.value);
           const type = op === "=" ? assigned : binaryType(op, local.type, assigned, e);
           if (type !== local.type) {
-            throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, e.value.start, e.value.end);
+            throw new CompileError(`type '${show(type)}' is not assignable to type '${show(local.type)}'`, e.value.start, e.value.end);
           }
           return type;
         }
         case "update": {
           const local = assignable(e.operand);
-          if (local.type !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${local.type}'`, e.start, e.end);
+          if (local.type !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(local.type)}'`, e.start, e.end);
           return "i64";
         }
         case "conditional": {
           condition(e.cond);
           const [then, otherwise] = [value(e.then), value(e.else)];
           if (then !== otherwise) {
-            throw new CompileError(`both sides of '?:' must have the same type, not '${then}' and '${otherwise}'`, e.start, e.end);
+            throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
           }
           return then;
         }
@@ -365,7 +380,7 @@ export function check(program: Stmt[]): Checked {
     function condition(e: Expr) {
       const type = value(e);
       if (type !== "boolean") {
-        throw new CompileError(`condition must be a boolean, not '${type}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
+        throw new CompileError(`condition must be a boolean, not '${show(type)}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
       }
     }
 
@@ -424,7 +439,7 @@ export function check(program: Stmt[]): Checked {
   function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Type {
     if (op === "===" || op === "!==") {
       if (left === right) return "boolean";
-      throw new CompileError(`this comparison appears to be unintentional because the types '${left}' and '${right}' have no overlap`, at.start, at.end);
+      throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, at.start, at.end);
     }
     const logical = BITWISE_ON_BOOLEANS[op];
     if (logical && left === "boolean" && right === "boolean") {
@@ -433,7 +448,7 @@ export function check(program: Stmt[]): Checked {
     // Only booleans, so `&&` and `||` always produce a boolean rather than one of their operands.
     const operand = op === "&&" || op === "||" ? "boolean" : "i64";
     if (left !== operand || right !== operand) {
-      throw new CompileError(`operator '${op}' cannot be applied to types '${left}' and '${right}'`, at.start, at.end);
+      throw new CompileError(`operator '${op}' cannot be applied to types '${show(left)}' and '${show(right)}'`, at.start, at.end);
     }
     return operand === "boolean" || op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : "i64";
   }
@@ -460,12 +475,56 @@ export function check(program: Stmt[]): Checked {
   function resolveType(t: TypeNode): Type {
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
+    if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     if (t.args.length > 0) throw unsupported("generic types", t);
     if (t.name === "i64" || t.name === "boolean" || t.name === "void") return t.name;
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
+    const alias = aliases.get(t.name);
+    if (alias) return aliasType(alias);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
+
+  // An object type holds its fields inline, so one that contains itself has no finite size.
+  function aliasType(a: TypeAlias): Type {
+    const done = resolvedAliases.get(a);
+    if (done) return done;
+    if (resolving.has(a)) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
+    resolving.add(a);
+    const type = resolveType(a.type);
+    resolving.delete(a);
+    resolvedAliases.set(a, type);
+    return type;
+  }
+
+  function member(m: TypeMember): Field {
+    if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
+    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (m.optional) throw unsupported("optional properties", m);
+    if (m.readonly) throw unsupported("'readonly' properties", m);
+    if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
+    return { name: m.name, type: resolveType(m.type) };
+  }
+}
+
+const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number"]);
+
+// What each kind of object type member besides a property is called when rejected.
+const MEMBER_FORMS = {
+  method: "methods in object types",
+  call: "call signatures",
+  construct: "construct signatures",
+  index: "index signatures",
+  get: "accessors in object types",
+  set: "accessors in object types",
+};
+
+// Fields with their source spans, checked for a name given twice.
+function fields(list: Field[], at: Span[]): Field[] {
+  list.forEach((f, i) => {
+    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError(`duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
+  });
+  return list;
 }
 
 // The binary operators that have a meaning so far.
