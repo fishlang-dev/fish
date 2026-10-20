@@ -1,4 +1,5 @@
-import { isPrint, type Checked, type Local, type Type } from "./check.ts";
+import type { Checked, Local, Type } from "./check.ts";
+import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
