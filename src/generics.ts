@@ -87,7 +87,14 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // Instances still to check.
   const pending: Instance[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
-  return { instanceOf, instantiate, paramTypes, definition, pending, all };
+  return { instanceOf, instantiate, paramTypes, declaredParams, definition, pending, all };
+
+  // A body's parameter types as written: an implicit parameter's is its interface or object
+  // type, which is what an interface's method signature is compared with.
+  function declaredParams(f: Body): Type[] {
+    const implicit = implicitOf(f);
+    return withScope(f.scope ?? new Map(), () => f.params.map((p, i) => implicit.get(i) ?? paramType(p, f.self?.constructor)));
+  }
 
   // A generic body is checked once at its definition, with placeholders for its type
   // parameters, whether or not anything instantiates it.
@@ -105,7 +112,9 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (!byKey) instances.set(f, byKey = new Map());
     let found = byKey.get(key);
     if (!found) {
-      const isConcrete = [...bindings.values()].every(concrete);
+      // Every type parameter, implicit ones included, needs a concrete binding to compile.
+      const complete = (f.typeParams ?? []).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`));
+      const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       const count = [...byKey.values()].filter((i) => i.concrete).length;
       found = {

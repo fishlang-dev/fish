@@ -109,8 +109,8 @@ export function check(program: Stmt[]): Checked {
   // which need each other, it reaches what is set up below lazily.
   const members: Members = {
     classOf,
-    returnOf: (b, at) => returnOf(instanceOf(b), at),
-    paramTypesOf: (b) => paramTypes(instanceOf(b)),
+    returnOf: (b, at) => returnOf(definition(b), at),
+    paramTypesOf: (b) => declaredParams(b),
   };
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
@@ -119,7 +119,7 @@ export function check(program: Stmt[]): Checked {
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
-  const { instanceOf, instantiate, paramTypes, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
+  const { instanceOf, instantiate, paramTypes, declaredParams, definition, pending, all } = instancing({ resolveType, paramType, withScope, members, checking: () => checking });
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();

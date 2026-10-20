@@ -1,6 +1,6 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, fits, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
+import { field, fits, keyOf, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -15,6 +15,21 @@ export type Members = {
 // and a public method taking exactly its parameter types and returning a fitting type for
 // each of its methods. `implements` is never needed.
 export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
+  // An interface can name itself, as a builder's methods return the builder, so a pair already
+  // being checked is taken as satisfied rather than checked again forever.
+  const key = `${keyOf(type)} ${keyOf(trait)}`;
+  if (assuming.has(key)) return undefined;
+  assuming.add(key);
+  try {
+    return check(type, trait, members, at);
+  } finally {
+    assuming.delete(key);
+  }
+}
+
+const assuming = new Set<string>();
+
+function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
     typeof expected !== "string" && expected.kind === "interface" ? unsatisfied(actual, expected, members, at) === undefined : fits(actual, expected);
