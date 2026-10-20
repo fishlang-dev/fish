@@ -18,6 +18,8 @@ export type Expr = Span & (
 export type Stmt = Span & (
   | { kind: "expr"; expr: Expr }
   | { kind: "let"; name: string; mutable: boolean; type: TypeRef | undefined; init: Expr }
+  // `x += v` is stored as op "+"; `x++` as op "+" with value 1.
+  | { kind: "assign"; target: Expr; op: BinaryOp | "="; value: Expr }
 );
 
 export type Func = Span & { name: string; body: Stmt[] };
@@ -28,6 +30,9 @@ const PRECEDENCE = { "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 } as const;
 export type BinaryOp = keyof typeof PRECEDENCE;
 
 const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE, text);
+
+// Each assignment operator and the binary operator it applies, if any.
+const ASSIGNMENT: Record<string, BinaryOp | "="> = { "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%" };
 
 // Reserved in strict-mode JavaScript, so never usable as names.
 const RESERVED = new Set([
@@ -108,8 +113,27 @@ export function parse(src: string): Func[] {
       const init = expression();
       return { kind: "let", name, mutable, type, init, start, end: init.end };
     }
+    if (at("++") || at("--")) {
+      const op = next();
+      return increment(expression(), op, start);
+    }
     const expr = expression();
+    const t = peek();
+    const op = t.kind === "punct" ? ASSIGNMENT[t.text] : undefined;
+    if (op) {
+      next();
+      const value = expression();
+      return { kind: "assign", target: expr, op, value, start, end: value.end };
+    }
+    // A newline before `++` ends the statement instead, as in JavaScript.
+    if ((at("++") || at("--")) && !t.newlineBefore) return increment(expr, next(), start);
     return { kind: "expr", expr, start, end: expr.end };
+  }
+
+  function increment(target: Expr, op: Token, start: number): Stmt {
+    const one: Expr = { kind: "int", value: 1n, start: op.start, end: op.end };
+    const end = Math.max(target.end, op.end);
+    return { kind: "assign", target, op: op.text === "++" ? "+" : "-", value: one, start, end };
   }
 
   // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.

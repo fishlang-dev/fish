@@ -62,6 +62,20 @@ export function check(funcs: Func[]): Checked {
         locals.set(s, local);
         return;
       }
+      case "assign": {
+        if (s.target.kind !== "ident") throw new CompileError("can only assign to a variable", s.target.start, s.target.end);
+        value(s.target);
+        const local = locals.get(s.target)!;
+        if (!local.mutable) {
+          throw new CompileError(`cannot assign to '${local.name}' because it is a constant`, s.target.start, s.target.end);
+        }
+        const type = value(s.value);
+        if (type !== local.type) {
+          throw new CompileError(`type '${type}' is not assignable to type '${local.type}'`, s.value.start, s.value.end);
+        }
+        locals.set(s, local);
+        return;
+      }
     }
   }
 

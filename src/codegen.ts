@@ -111,6 +111,13 @@ export function codegen({ funcs, locals }: Checked, { src, file, release }: Opti
         emit(`store ${LLVM[local.type]} ${value(s.init)}, ptr ${slot(local)}`);
         return;
       }
+      case "assign": {
+        const local = resolved(s);
+        // The target is read before the right-hand side runs, as in JavaScript.
+        const result = s.op === "=" ? value(s.value) : arithmetic(s.op, value(s.target), value(s.value), s);
+        emit(`store ${LLVM[local.type]} ${result}, ptr ${slot(local)}`);
+        return;
+      }
     }
   }
 
