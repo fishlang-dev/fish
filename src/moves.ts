@@ -44,7 +44,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   function statement(s: Stmt) {
     switch (s.kind) {
       case "expr":
-        return expr(s.expr);
+        return expr(s.expr, undefined, true);
       case "let": {
         const d = s.declarations[0]!;
         const name = d.target.kind === "ident" ? d.target.name : "";
@@ -71,7 +71,7 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         return loop(s, () => s.cond, () => statements(s.body), true);
       case "for":
         if (s.init) statement(s.init);
-        return loop(s, () => s.test, () => statements(s.body), false, () => s.update && expr(s.update));
+        return loop(s, () => s.test, () => statements(s.body), false, () => s.update && expr(s.update, undefined, true));
       case "labeled": {
         exits.set(s, null);
         statement(s.body);
@@ -142,8 +142,9 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
   }
 
   // Evaluates an expression. `consume` says how its value is handed over, when it is; a
-  // value that is only read, like a receiver or an operand, is borrowed.
-  function expr(e: Expr, consume?: Consumer) {
+  // value that is only read, like a receiver or an operand, is borrowed. A statement's value
+  // is discarded.
+  function expr(e: Expr, consume?: Consumer, discarded = false) {
     switch (e.kind) {
       case "int":
       case "bool":
@@ -187,8 +188,8 @@ export function checkMoves(body: Stmt[], { types, locals, calls, setters, jumps 
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         assign(e.target);
         // An assignment used as a value hands over what it just stored. A setter keeps what it
-        // was given, with no place to hand it back from.
-        if (consume && !isCopy(types.get(e)!) && setters.has(e.target)) {
+        // was given, with nothing left to read or hand on.
+        if (!discarded && state && !isCopy(types.get(e)!) && setters.has(e.target)) {
           throw new CompileError(`'${text(e.target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
         }
         if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
