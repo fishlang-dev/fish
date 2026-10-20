@@ -1,5 +1,7 @@
 import { CompileError } from "./diag.ts";
-import { RESERVED, type BinaryOp, type Cursor, type Expr } from "./parser.ts";
+import { isToken } from "./lexer.ts";
+import { block, RESERVED, type BinaryOp, type Cursor, type Expr, type ObjectProp } from "./parser.ts";
+import { isPropertyName, parameters, propertyName, returnAnnotation, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -51,7 +53,7 @@ function postfix(c: Cursor): Expr {
       const name = c.ident();
       e = { kind: "member", object: e, name: name.text, start: e.start, end: name.end };
     } else if (c.eat("(")) {
-      const args = c.list(() => expression(c), ")");
+      const args = c.list(() => element(c), ")");
       e = { kind: "call", callee: e, args, start: e.start, end: c.end() };
     } else if (c.peek().kind === "template" || c.peek().kind === "templateHead") {
       const quoted = template(c);
@@ -89,6 +91,9 @@ export function primary(c: Cursor): Expr {
     const close = t.text.lastIndexOf("/");
     return { kind: "regex", pattern: t.text.slice(1, close), flags: t.text.slice(close + 1), start: t.start, end: t.end };
   }
+  if (c.at("[")) return array(c);
+  if (c.at("{")) return object(c);
+  if (c.at("function") || atAsync(c, "function")) return functionExpression(c);
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {
@@ -112,4 +117,85 @@ export function primary(c: Cursor): Expr {
     return e;
   }
   throw c.error("expected an expression", t);
+}
+
+// An array element or a call argument: an expression, or `...` and one.
+function element(c: Cursor): Expr {
+  const start = c.peek().start;
+  if (!c.eat("...")) return expression(c);
+  const value = expression(c);
+  return { kind: "spread", value, start, end: value.end };
+}
+
+function array(c: Cursor): Expr {
+  const start = c.expect("[").start;
+  const elements: (Expr | undefined)[] = [];
+  while (!c.eat("]")) {
+    if (c.eat(",")) {
+      elements.push(undefined);
+      continue;
+    }
+    elements.push(element(c));
+    if (!c.at("]")) c.expect(",");
+  }
+  return { kind: "array", elements, start, end: c.end() };
+}
+
+function object(c: Cursor): Expr {
+  const start = c.expect("{").start;
+  const props = c.list(() => objectProp(c), "}");
+  return { kind: "object", props, start, end: c.end() };
+}
+
+// `async`, `get` and `set` are modifiers only when a property name follows, so
+// `{ get: 1, async() {} }` has a property and a method with those names.
+function objectProp(c: Cursor): ObjectProp {
+  const start = c.peek().start;
+  if (c.eat("...")) {
+    const value = expression(c);
+    return { kind: "spread", value, start, end: value.end };
+  }
+  const named = (offset: number) => isPropertyName(c.peek(offset)) || isToken(c.peek(offset), "[") || isToken(c.peek(offset), "*");
+  const async = c.at("async") && named(1) && !c.peek(1).newlineBefore && c.eat("async");
+  const generator = c.eat("*");
+  if (!async && !generator && (c.at("get") || c.at("set")) && named(1)) {
+    const kind = c.next().text as "get" | "set";
+    const key = propertyName(c);
+    const { params, returnType, body } = functionRest(c);
+    return { kind, key, params, returnType, body, start, end: c.end() };
+  }
+  const keyToken = c.peek();
+  const key = propertyName(c);
+  if (async || generator || c.at("(") || c.at("<")) {
+    return { kind: "method", key, async, generator, ...functionRest(c), start, end: c.end() };
+  }
+  if (c.eat(":")) {
+    const value = expression(c);
+    return { kind: "property", key, value, start, end: value.end };
+  }
+  if (keyToken.kind !== "ident" || RESERVED.has(keyToken.text)) throw c.error("expected ':'");
+  return { kind: "shorthand", name: keyToken.text, start, end: keyToken.end };
+}
+
+// `async` starts an async function only when `next` follows on the same line.
+function atAsync(c: Cursor, next: string): boolean {
+  return c.at("async") && isToken(c.peek(1), next) && !c.peek(1).newlineBefore;
+}
+
+function functionExpression(c: Cursor): Expr {
+  const start = c.peek().start;
+  const async = c.eat("async");
+  c.expect("function");
+  const generator = c.eat("*");
+  const name = c.at("(") || c.at("<") ? undefined : c.ident().text;
+  return { kind: "function", name, async, generator, ...functionRest(c), start, end: c.end() };
+}
+
+// What follows a function's name: type parameters, parameters, return type and body.
+function functionRest(c: Cursor) {
+  const typeParams = typeParameters(c);
+  const params = parameters(c);
+  const returnType = returnAnnotation(c);
+  const body = block(c);
+  return { typeParams, params, returnType, body };
 }

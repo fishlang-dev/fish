@@ -265,6 +265,7 @@ export function check(items: Item[]): Checked {
     if (p.rest) throw unsupported("rest parameters", p);
     if (p.optional) throw unsupported("optional parameters", p);
     if (p.name === "this") throw unsupported("'this' parameters", p);
+    if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${p.name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     return resolveType(p.type);
   }
@@ -288,6 +289,10 @@ const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" |
   this: "'this' expressions",
   super: "'super' expressions",
   regex: "regular expressions",
+  spread: "spread elements",
+  array: "array literals",
+  object: "object literals",
+  function: "function expressions",
   template: "template literals",
   tagged: "tagged templates",
 };

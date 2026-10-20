@@ -41,6 +41,7 @@ const SIGNATURES: [string, string, string][] = [
   ["(x: i64): x is i64", "type predicates", "x is i64"],
   ["(this: i64)", "'this' parameters", "this: i64"],
   ["<T>(x: i64)", "generic functions", "T"],
+  ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {
@@ -62,6 +63,9 @@ const EXPRESSIONS: [string, string][] = [
   ["super", "'super' expressions"],
   ["/a+/g", "regular expressions"],
   ["`a${1}b`", "template literals"],
+  ["[1, 2]", "array literals"],
+  ["{ a: 1 }", "object literals"],
+  ["function () {}", "function expressions"],
   ["tag`a`", "tagged templates"],
 ];
 

@@ -43,6 +43,13 @@ export type Expr = Span & (
   | { kind: "bool"; value: boolean }
   | { kind: "string"; value: string }
   | { kind: "ident"; name: string }
+  // Only as an array element, an argument, or inside an object literal.
+  | { kind: "spread"; value: Expr }
+  // A hole, as in `[a, , b]`, is undefined.
+  | { kind: "array"; elements: (Expr | undefined)[] }
+  | { kind: "object"; props: ObjectProp[] }
+  | { kind: "function"; name: string | undefined; async: boolean; generator: boolean;
+      typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
   | { kind: "member"; object: Expr; name: string }
   | { kind: "call"; callee: Expr; args: Expr[] }
   | { kind: "unary"; op: "-" | "!"; operand: Expr }
@@ -72,7 +79,16 @@ export type TypeMember = Span & (
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returns: TypeNode | undefined }
 );
 
-export type Param = Span & { name: string; type: TypeNode | undefined; optional: boolean; rest: boolean };
+export type ObjectProp = Span & (
+  | { kind: "property"; key: PropertyName; value: Expr }
+  | { kind: "shorthand"; name: string }
+  | { kind: "spread"; value: Expr }
+  | { kind: "method"; key: PropertyName; async: boolean; generator: boolean; typeParams: TypeParam[];
+      params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
+  | { kind: "get" | "set"; key: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
+);
+
+export type Param = Span & { name: string; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined };
 
 export type TypeParam = Span & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
 
@@ -208,7 +224,7 @@ function func(c: Cursor): Func {
   return { kind: "function", name, typeParams, params, returnType, body, start, end: c.end() };
 }
 
-function block(c: Cursor): Stmt[] {
+export function block(c: Cursor): Stmt[] {
   c.expect("{");
   const stmts: Stmt[] = [];
   while (!c.eat("}")) {

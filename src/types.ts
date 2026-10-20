@@ -32,7 +32,8 @@ function parameter(c: Cursor): Param {
   const name = c.at("this") ? c.next().text : c.ident().text;
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
-  return { name, type, optional, rest, start, end: c.end() };
+  const fallback = c.eat("=") ? expression(c) : undefined;
+  return { name, type, optional, rest, default: fallback, start, end: c.end() };
 }
 
 // `: Type` after a declaration or parameter list.
@@ -299,7 +300,7 @@ function typeMember(c: Cursor): TypeMember {
 }
 
 // Property names may be reserved words, so any identifier is accepted.
-function propertyName(c: Cursor): PropertyName {
+export function propertyName(c: Cursor): PropertyName {
   const t = c.peek();
   if (c.eat("[")) {
     const key = expression(c);
@@ -310,7 +311,7 @@ function propertyName(c: Cursor): PropertyName {
   return c.next().text;
 }
 
-const isPropertyName = (t: Token) => ["ident", "string", "int", "float", "bigint"].includes(t.kind);
+export const isPropertyName = (t: Token) => ["ident", "string", "int", "float", "bigint"].includes(t.kind);
 
 // Type parameters, parameters and an optional return type, as in a method signature.
 function signature(c: Cursor) {
