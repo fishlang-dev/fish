@@ -10,7 +10,7 @@ import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, instanceofCheck, intoMember, intoUnion, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -341,6 +341,11 @@ export function expressions(ctx: Context) {
       if (literalValue(e) !== to.value) throw new CompileError(message, e.start, e.end);
       coercions.set(e, to);
       return;
+    }
+    const shape = !fits(type, to) ? literalShape(e, to, types) : undefined;
+    if (shape) {
+      shape.apply(coercions);
+      type = shape.type;
     }
     if (typeof to !== "string" && to.kind === "interface") {
       const reason = unsatisfied(type, to, members, e);

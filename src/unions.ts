@@ -1,7 +1,8 @@
 import { CompileError } from "./diag.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, membersFor, show, unionType, type ClassType, type LiteralType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fits, membersFor, objectType, show, unionType } from "./typing.ts";
+import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
 
@@ -14,6 +15,34 @@ export type Union = {
   // The class a name declares, unless a variable shadows it.
   classNamed(name: string): ClassType | undefined;
 };
+
+// The shape a fresh object literal takes when its literal-valued properties fit the literal
+// fields of `to`, and how to record that: each such property is coerced to its field's
+// literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
+export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type: Type; apply(coercions: Map<Expr, Type>): void } | undefined {
+  if (e.kind !== "object" || typeof to === "string" || to.kind !== "object") return undefined;
+  const fields: Field[] = [];
+  const steps: ((coercions: Map<Expr, Type>) => void)[] = [];
+  const own = types.get(e) as Exclude<Type, string>;
+  for (const p of e.props) {
+    const name = p.kind === "shorthand" ? p.name : (p as { key: string }).key;
+    const want = field(to, name)?.type;
+    const have = field(own, name)!.type;
+    if (!want) return undefined;
+    const value = p.kind === "property" ? p.value : undefined;
+    const literal = typeof want !== "string" && want.kind === "literal" && !want.owner && value && literalValue(value) === want.value;
+    const nested = value && !literal && !fits(have, want) ? literalShape(value, want, types) : undefined;
+    if (!literal && !nested && !fits(have, want)) return undefined;
+    fields.push({ name, type: literal ? want : nested ? nested.type : have });
+    if (literal) steps.push((coercions) => coercions.set(value!, want));
+    if (nested) steps.push(nested.apply);
+  }
+  const type = objectType(fields);
+  return { type, apply: (coercions) => {
+    steps.forEach((step) => step(coercions));
+    types.set(e, type);
+  } };
+}
 
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
@@ -70,7 +99,15 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
       types.set(e, literal);
       break;
     }
-    const into = membersFor(source, to);
+    let into = membersFor(source, to);
+    // A fresh object literal may fit a member through its literal fields, as `{ ok: true }`
+    // fits `{ ok: true }`; when exactly one member takes it that way, it becomes that shape.
+    const shapes = into.length === 0 && sources.length === 1 ? to.members.map((m) => literalShape(e, m, types)) : [];
+    if (shapes.filter((s) => s).length === 1) {
+      const shape = shapes.find((s) => s)!;
+      shape.apply(coercions);
+      into = [to.members[shapes.indexOf(shape)]!];
+    }
     if (into.length === 0) throw new CompileError(message, e.start, e.end);
     if (into.length > 1) {
       throw new CompileError(`type '${show(source)}' fits more than one member of '${show(to)}': ${into.map((m) => `'${show(m)}'`).join(" and ")}`, e.start, e.end);
