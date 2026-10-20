@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, literalType, objectType, show } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, literalType, objectType, show, widenEnum } from "./typing.ts";
 import type { Access, ClassType, Field, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -404,7 +404,10 @@ export function expressions(ctx: Context) {
   function property(p: ObjectProp): Field {
     if (p.kind === "property") {
       if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
-      return { name: p.key, type: value(p.value) };
+      const type = value(p.value);
+      const widened = widenEnum(type);
+      if (widened !== type) coerce(p.value, type, widened, "");
+      return { name: p.key, type: widened };
     }
     if (p.kind !== "shorthand") {
       throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);

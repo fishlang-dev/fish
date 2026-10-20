@@ -9,7 +9,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { show, type Type } from "./typing.ts";
+import { show, widenEnum, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { expressions } from "./values.ts";
 
@@ -282,7 +282,10 @@ export function check(program: Stmt[]): Checked {
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
           // An interface describes the value, which keeps its own concrete type.
-          declare(d.target.name, annotated && !isInterface(annotated) ? annotated : type, s.keyword === "let", false, s);
+          // A `let` may later hold another member of an enum, so it holds the enum.
+          const widened = s.keyword === "let" && !annotated ? widenEnum(type) : type;
+          if (widened !== type) coerce(d.init, type, widened, "");
+          declare(d.target.name, annotated && !isInterface(annotated) ? annotated : widened, s.keyword === "let", false, s);
           return;
         }
         case "if": {

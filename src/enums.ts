@@ -11,6 +11,7 @@ export type EnumInfo = { type: Type; members: Map<string, LiteralType> };
 export function declareEnum(node: Span & { name: string; const: boolean; members: EnumMember[] }): EnumInfo {
   if (node.const) throw unsupported("const enums", node);
   const members = new Map<string, LiteralType>();
+  const id = enums++;
   let next: bigint | undefined = 0n;
   for (const m of node.members) {
     if (members.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
@@ -19,13 +20,18 @@ export function declareEnum(node: Span & { name: string; const: boolean; members
     if (typeof value === "bigint" && (value > I64_MAX || value < -I64_MAX - 1n)) {
       throw new CompileError(`enum member '${m.name}' is ${value}, which does not fit in i64`, m.start, m.end);
     }
-    members.set(m.name, literalType(value, { enum: node.name, member: m.name }));
+    members.set(m.name, literalType(value, { enum: node.name, member: m.name, id }));
     next = typeof value === "bigint" ? value + 1n : undefined;
   }
-  return { type: unionType([...members.values()], node.name), members };
+  const type = unionType([...members.values()], node.name);
+  for (const member of members.values()) member.owner!.of = type;
+  return { type, members };
 }
 
 const I64_MAX = (1n << 63n) - 1n;
+
+// Tells enums of one name in different programs apart, since literal types are shared.
+let enums = 0;
 
 function constant(e: Expr): bigint | string {
   if (e.kind === "int" || e.kind === "string") return e.value;

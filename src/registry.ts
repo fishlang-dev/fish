@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { fits, show, type ClassType, type Type } from "./typing.ts";
+import { fits, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -74,7 +74,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       };
       const instance = instanceOf(initializer);
       checkBody(instance);
-      return { name: f.name, type: instance.returns, access: f.access };
+      return { name: f.name, type: widenEnum(instance.returns), access: f.access };
     });
   }
 

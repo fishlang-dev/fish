@@ -3,7 +3,7 @@ import { declareClass, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, keyOf, show, typeParameter, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, keyOf, show, typeParameter, widenEnum, type ClassType, type InterfaceType, type ObjectType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -31,6 +31,7 @@ export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: 
 // Binds the type parameters `node` names by matching it against an argument's type.
 export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
+    arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
     if (earlier && earlier !== arg) {
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);

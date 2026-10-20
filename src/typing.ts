@@ -29,7 +29,11 @@ export type ParamType = { kind: "param"; name: string; bound: ObjectType | Inter
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
 // An enum's member is a literal that knows its enum, so a plain literal is never one.
-export type LiteralType = { kind: "literal"; value: string | bigint | boolean; fields: Field[]; owner?: { enum: string; member: string } };
+export type LiteralType = {
+  kind: "literal"; value: string | bigint | boolean; fields: Field[];
+  // For an enum's member: the enum, unique to its declaration, and the enum's own type.
+  owner?: { enum: string; member: string; id: number; of?: Type };
+};
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
 // It has no fields; reaching into one takes narrowing to a member first.
@@ -57,7 +61,7 @@ export function interfaceType(name: string): InterfaceType {
 }
 
 export function literalType(value: string | bigint | boolean, owner?: LiteralType["owner"]): LiteralType {
-  const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member}` : ""}`;
+  const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member} ${owner.id}` : ""}`;
   let t = literals.get(key);
   if (!t) {
     t = { kind: "literal", value, fields: [], owner };
@@ -90,6 +94,12 @@ export function unionType(parts: Type[], name?: string): Type {
 // fits. The checker allows exactly one.
 export function membersFor(type: Type, union: UnionType): Type[] {
   return union.members.includes(type) ? [type] : union.members.filter((m) => fits(type, m));
+}
+
+// An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
+// argument or a property, since the place may later hold another member.
+export function widenEnum(t: Type): Type {
+  return typeof t !== "string" && t.kind === "literal" && t.owner?.of ? t.owner.of : t;
 }
 
 // The type a literal's value belongs to, if Fish has it yet.
