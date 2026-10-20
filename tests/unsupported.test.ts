@@ -51,3 +51,22 @@ for (const [signature, what, part] of SIGNATURES) {
     }));
   });
 }
+
+// Each expression form that parses but has no meaning yet, as a `let` initializer.
+const EXPRESSIONS: [string, string][] = [
+  ["1.5", "floating-point numbers"],
+  ["1n", "bigint literals"],
+  ["null", "'null' values"],
+  ["this", "'this' expressions"],
+  ["super", "'super' expressions"],
+];
+
+for (const [expr, what] of EXPRESSIONS) {
+  test(expr, () => {
+    const src = `function main() {\n  let x = ${expr}\n}`;
+    const start = src.indexOf(expr, src.indexOf("="));
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + expr.length,
+    }));
+  });
+}

@@ -211,6 +211,8 @@ export function check(items: Item[]): Checked {
         }
         case "binary":
           return binaryType(e.op, value(e.left), value(e.right), e);
+        default:
+          throw unsupported(EXPRESSION_FORMS[e.kind], e);
       }
     }
 
@@ -277,6 +279,15 @@ export function check(items: Item[]): Checked {
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
 }
+
+// What each expression form is called when the checker rejects it.
+const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary">, string> = {
+  float: "floating-point numbers",
+  bigint: "bigint literals",
+  null: "'null' values",
+  this: "'this' expressions",
+  super: "'super' expressions",
+};
 
 // What each type form is called when the checker rejects it.
 const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function">, string> = {

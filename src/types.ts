@@ -163,10 +163,11 @@ function primaryType(c: Cursor): TypeNode {
     c.expect(")");
     return inner;
   }
-  if (t.kind === "string" || t.kind === "int" || c.at("true") || c.at("false")) {
+  const isNumber = (t: Token) => t.kind === "int" || t.kind === "float" || t.kind === "bigint";
+  if (t.kind === "string" || isNumber(t) || c.at("true") || c.at("false")) {
     return { kind: "literal", value: primary(c), start: t.start, end: t.end };
   }
-  if (c.at("-") && c.peek(1).kind === "int") {
+  if (c.at("-") && isNumber(c.peek(1))) {
     const value = unary(c);
     return { kind: "literal", value, start: value.start, end: value.end };
   }
@@ -265,7 +266,7 @@ export function typeMembers(c: Cursor): TypeMember[] {
 // read any other way, so `{ get: T; new: U }` declares ordinary properties.
 function typeMember(c: Cursor): TypeMember {
   const start = c.peek().start;
-  const startsName = (t: Token) => t.kind === "ident" || t.kind === "string" || t.kind === "int" || isToken(t, "[");
+  const startsName = (t: Token) => isPropertyName(t) || isToken(t, "[");
   if (c.at("(") || c.at("<")) return { kind: "call", ...signature(c), start, end: c.end() };
   const after = c.peek(1);
   if (c.at("new") && (isToken(after, "(") || isToken(after, "<"))) {
@@ -301,9 +302,11 @@ function propertyName(c: Cursor): PropertyName {
     c.expect("]");
     return key;
   }
-  if (t.kind !== "ident" && t.kind !== "string" && t.kind !== "int") throw c.error("expected a property name");
+  if (!isPropertyName(t)) throw c.error("expected a property name");
   return c.next().text;
 }
+
+const isPropertyName = (t: Token) => ["ident", "string", "int", "float", "bigint"].includes(t.kind);
 
 // Type parameters, parameters and an optional return type, as in a method signature.
 function signature(c: Cursor) {

@@ -1,7 +1,8 @@
 import { CompileError } from "./diag.ts";
 
 export type Token = {
-  kind: "ident" | "int" | "string" | "punct" | "eof";
+  // An `int` is an integer in any base; a `float` has a fraction or exponent; a `bigint` ends in `n`.
+  kind: "ident" | "int" | "float" | "bigint" | "string" | "punct" | "eof";
   // Source text; for strings, the decoded value. Keywords are idents, since most TS keywords are contextual.
   text: string;
   start: number;
@@ -21,9 +22,57 @@ const PUNCT = [
   ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", "!", "|", "&",
 ];
 
-const ESCAPES: Record<string, string> = {
-  n: "\n", t: "\t", r: "\r", "0": "\0", "\\": "\\", "'": "'", '"': '"',
-};
+const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v" };
+
+// Decodes the escape whose backslash is at `i`, returning its value and where it ends.
+// Any other character escapes to itself, as in JavaScript; octal escapes are errors in
+// strict mode, which every module is.
+function escape(src: string, i: number): [string, number] {
+  const c = src[i + 1] ?? "";
+  const simple = ESCAPES[c];
+  if (simple !== undefined) return [simple, i + 2];
+  if (c === "\r" && src[i + 2] === "\n") return ["", i + 3];
+  if (c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029") return ["", i + 2];
+  if (c === "0" && !/[0-9]/.test(src[i + 2] ?? "")) return ["\0", i + 2];
+  if (/[0-9]/.test(c)) throw new CompileError("octal escapes are not allowed; use '\\x' or '\\u'", i, i + 2);
+  const hex = c === "x" ? /^[0-9a-fA-F]{2}/.exec(src.slice(i + 2))
+    : c === "u" ? /^(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})/.exec(src.slice(i + 2))
+    : undefined;
+  if (hex === null) throw new CompileError(`invalid escape '\\${c}'`, i, i + 2);
+  if (hex) {
+    const code = parseInt(hex[0].replace(/[{}]/g, ""), 16);
+    if (code > 0x10ffff) throw new CompileError("unicode escape is out of range", i, i + 2 + hex[0].length);
+    return [String.fromCodePoint(code), i + 2 + hex[0].length];
+  }
+  return [c, i + 2];
+}
+
+// The end of the number starting at `i`, and which kind of number it is.
+function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
+  const radix = { x: /[0-9a-fA-F_]/, o: /[0-7_]/, b: /[01_]/ }[src[i] === "0" ? (src[i + 1] ?? "").toLowerCase() : ""];
+  let end = i + (radix ? 2 : 0);
+  let kind: "int" | "float" | "bigint" = "int";
+  const digits = (pattern: RegExp) => {
+    while (end < src.length && pattern.test(src[end]!)) end++;
+  };
+  if (radix) {
+    digits(radix);
+  } else {
+    digits(/[0-9_]/);
+    if (src[end] === "." && src[end + 1] !== ".") {
+      kind = "float";
+      end++;
+      digits(/[0-9_]/);
+    }
+    if (/[eE]/.test(src[end] ?? "") && /[0-9]|[+-][0-9]/.test(src.slice(end + 1, end + 3))) {
+      kind = "float";
+      end += /[+-]/.test(src[end + 1]!) ? 2 : 1;
+      digits(/[0-9_]/);
+    }
+  }
+  if (kind === "int" && src[end] === "n") return [end + 1, "bigint"];
+  return [end, kind];
+}
 
 export function lex(src: string): Token[] {
   const tokens: Token[] = [];
@@ -49,22 +98,22 @@ export function lex(src: string): Token[] {
       if (close < 0) throw new CompileError("unterminated comment", i, i + 2);
       if (src.slice(i, close).includes("\n")) newlineBefore = true;
       i = close + 2;
-    } else if (/[A-Za-z_$]/.test(c)) {
-      while (i < src.length && /[\w$]/.test(src[i]!)) i++;
+    } else if (/[\p{ID_Start}_$]/u.test(c)) {
+      while (i < src.length && /[\p{ID_Continue}$\u200c\u200d]/u.test(src[i]!)) i++;
       push("ident", src.slice(start, i), start);
-    } else if (/[0-9]/.test(c)) {
-      while (i < src.length && /[\d_]/.test(src[i]!)) i++;
-      push("int", src.slice(start, i), start);
+    } else if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] ?? ""))) {
+      const [end, kind] = number(src, i);
+      i = end;
+      push(kind, src.slice(start, i), start);
     } else if (c === '"' || c === "'") {
       let value = "";
       i++;
       while (src[i] !== c) {
         if (i >= src.length || src[i] === "\n") throw new CompileError("unterminated string literal", start, i);
         if (src[i] === "\\") {
-          const escaped = ESCAPES[src[i + 1] ?? ""];
-          if (escaped === undefined) throw new CompileError(`unsupported escape '\\${src[i + 1]}'`, i, i + 2);
+          const [escaped, end] = escape(src, i);
           value += escaped;
-          i += 2;
+          i = end;
         } else {
           value += src[i++];
         }

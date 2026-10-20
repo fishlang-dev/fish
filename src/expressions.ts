@@ -65,10 +65,15 @@ export function primary(c: Cursor): Expr {
   switch (t.kind) {
     case "int":
       return { kind: "int", value: BigInt(t.text.replaceAll("_", "")), ...span };
+    case "float":
+      return { kind: "float", value: Number(t.text.replaceAll("_", "")), ...span };
+    case "bigint":
+      return { kind: "bigint", value: BigInt(t.text.slice(0, -1).replaceAll("_", "")), ...span };
     case "string":
       return { kind: "string", value: t.text, ...span };
     case "ident":
       if (t.text === "true" || t.text === "false") return { kind: "bool", value: t.text === "true", ...span };
+      if (t.text === "null" || t.text === "this" || t.text === "super") return { kind: t.text, ...span };
       if (RESERVED.has(t.text)) break;
       return { kind: "ident", name: t.text, ...span };
   }

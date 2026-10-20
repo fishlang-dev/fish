@@ -8,7 +8,7 @@ export type Span = { start: number; end: number };
 export type TypeNode = Span & (
   // Keyword types are refs too; `name` is dotted for qualified names, e.g. "A.B".
   | { kind: "ref"; name: string; args: TypeNode[] }
-  // A string, int or bool literal, or `-` applied to an int.
+  // A string, number, bigint or bool literal, or `-` applied to a number or bigint.
   | { kind: "literal"; value: Expr }
   | { kind: "array"; element: TypeNode }
   | { kind: "tuple"; elements: TupleElement[] }
@@ -29,7 +29,12 @@ export type TypeNode = Span & (
 );
 
 export type Expr = Span & (
+  // Every integer form, in any base.
   | { kind: "int"; value: bigint }
+  // Has a fraction or an exponent.
+  | { kind: "float"; value: number }
+  | { kind: "bigint"; value: bigint }
+  | { kind: "null" } | { kind: "this" } | { kind: "super" }
   | { kind: "bool"; value: boolean }
   | { kind: "string"; value: string }
   | { kind: "ident"; name: string }
