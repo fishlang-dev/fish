@@ -63,8 +63,10 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
 // Whether a type has no type parameter in it, so its instance can be compiled.
 export function concrete(t: Type): boolean {
   if (typeof t === "string") return true;
-  if (t.kind === "param") return false;
-  return t.kind === "interface" || t.fields.every((f) => concrete(f.type));
+  // An interface describes values without being one, so only a definition check holds one.
+  if (t.kind === "param" || t.kind === "interface") return false;
+  if (t.kind === "class" && (!(t.generic?.args.every(concrete) ?? true) || (t.base && !concrete(t.base)))) return false;
+  return t.fields.every((f) => concrete(f.type));
 }
 
 // What instantiating needs from the checker.
@@ -166,18 +168,21 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   }
 
   // A parameter typed with an interface or an object type is an implicit type parameter, so
-  // each concrete argument type gets its own instance instead of being copied down.
-  // Constructors and accessors keep such a parameter as it is, since its type is a field's.
+  // each concrete argument type gets its own instance instead of being copied down. A
+  // parameter property and a setter's parameter keep their type, since it is a field's.
   function implicitOf(f: Body): Map<number, ObjectType | InterfaceType> {
     let found = implicits.get(f);
     if (found) return found;
     found = new Map();
     implicits.set(f, found);
-    if (f.self?.constructor || f.accessor) return found;
     const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f)]);
     withScope(scope, () => f.params.forEach((p, i) => {
       const type = p.type && resolveType(p.type);
-      if (type && typeof type !== "string" && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) found!.set(i, type);
+      if (!type || typeof type === "string" || p.modifiers.length > 0) return;
+      if (f.accessor && type.kind === "interface") {
+        throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
+      }
+      if (!f.accessor && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) found!.set(i, type);
     }));
     return found;
   }

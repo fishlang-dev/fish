@@ -66,8 +66,9 @@ export function expressions(ctx: Context) {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = classOf(self!.type.base!);
       types.set(callee, base.type);
-      const instance = instanceOf(base.constructor);
-      args(e.args, e.args.map(value), instance, e);
+      const argTypes = e.args.map(value);
+      const instance = instantiate(base.constructor, [], e.args, argTypes, e);
+      args(e.args, argTypes, instance, e);
       calls.set(e, instance);
       return { type: "void", what: "'super'" };
     }
@@ -235,7 +236,7 @@ export function expressions(ctx: Context) {
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
-        const constructor = instanceOf(c.constructor);
+        const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
         return c.type;
