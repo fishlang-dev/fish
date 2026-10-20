@@ -13,9 +13,9 @@ export type Token = {
 // Longest first, so `===` wins over `==` over `=`. `>>` and `>=` are left to the
 // parser to compose from single `>` tokens once generics arrive, as TS does.
 const PUNCT = [
-  "===", "!==", "=>", "==", "!=", "<=", "&&", "||", "??", "?.", "++", "--",
+  "...", "===", "!==", "=>", "==", "!=", "<=", "&&", "||", "??", "?.", "++", "--",
   "+=", "-=", "*=", "/=", "%=", "{", "}", "(", ")", "[", "]", ";", ",", ".",
-  ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", "!",
+  ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", "!", "|", "&",
 ];
 
 const ESCAPES: Record<string, string> = {

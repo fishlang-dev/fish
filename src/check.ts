@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { BinaryOp, Expr, Func, Param, Span, Stmt, TypeRef } from "./parser.ts";
+import type { BinaryOp, Expr, Func, Item, Param, Span, Stmt, TypeNode } from "./parser.ts";
 
 export type Type = "i64" | "boolean" | "void";
 
@@ -27,9 +27,18 @@ export function isPrint(callee: Expr): boolean {
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
-export function check(funcs: Func[]): Checked {
+export function check(items: Item[]): Checked {
+  const funcs: Func[] = [];
+  for (const item of items) {
+    if (item.kind === "typeAlias") throw unsupported("type aliases", item);
+    if (item.kind === "interface") throw unsupported("interfaces", item);
+    funcs.push(item);
+  }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
+    if (f.typeParams.length > 0) {
+      throw unsupported("generic functions", { start: f.typeParams[0]!.start, end: f.typeParams.at(-1)!.end });
+    }
     if (byName.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
@@ -115,6 +124,10 @@ export function check(funcs: Func[]): Checked {
           condition(s.cond);
           scoped(s.body);
           return;
+        case "typeAlias":
+          throw unsupported("type aliases", s);
+        case "interface":
+          throw unsupported("interfaces", s);
         case "return": {
           const type = s.value ? value(s.value) : "void";
           const expected = declared ?? inferred;
@@ -247,15 +260,43 @@ export function check(funcs: Func[]): Checked {
 
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all.
   function paramType(p: Param): Type {
+    if (p.rest) throw unsupported("rest parameters", p);
+    if (p.optional) throw unsupported("optional parameters", p);
+    if (p.name === "this") throw unsupported("'this' parameters", p);
     if (!p.type) throw new CompileError(`parameter '${p.name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     return resolveType(p.type);
   }
 
-  function resolveType(t: TypeRef): Type {
+  function resolveType(t: TypeNode): Type {
+    if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
+    if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
+    if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
+    if (t.args.length > 0) throw unsupported("generic types", t);
     if (t.name === "i64" || t.name === "boolean" || t.name === "void") return t.name;
     if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
+}
+
+// What each type form is called when the checker rejects it.
+const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function">, string> = {
+  literal: "literal types",
+  array: "array types",
+  tuple: "tuple types",
+  object: "object types",
+  union: "union types",
+  intersection: "intersection types",
+  indexed: "indexed access types",
+  query: "'typeof' types",
+  predicate: "type predicates",
+  import: "import types",
+  conditional: "conditional types",
+  infer: "'infer' types",
+  mapped: "mapped types",
+};
+
+function unsupported(what: string, at: Span): CompileError {
+  return new CompileError(`${what} are not supported yet`, at.start, at.end);
 }
 
 // `while (true)` never finishes, since there is no `break` yet, so nothing after it runs.
