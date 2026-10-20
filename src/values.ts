@@ -25,6 +25,7 @@ export type Context = {
   types: Map<Expr, Type>;
   locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
   coercions: Map<Expr, Type>;
+  calls: Map<Expr, Body>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   returnOf(f: Body, at: Span): Type;
@@ -37,7 +38,7 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, byName, classes, returnOf, classOf, paramType, lookup, self, thisReady } = ctx;
+  const { types, locals, coercions, calls, byName, classes, returnOf, classOf, paramType, lookup, self, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -51,11 +52,6 @@ export function expressions(ctx: Context) {
     const { callee } = e;
     if (e.optional || (callee.kind === "member" && callee.optional)) throw unsupported("optional calls", e);
     if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
-    const target = callee.kind === "ident" ? byName.get(callee.name) : undefined;
-    if (target) {
-      args(e.args, target, e);
-      return target;
-    }
     if (isPrint(callee)) {
       for (const a of e.args) {
         if (a.kind !== "string" && typeof value(a) !== "string") {
@@ -64,8 +60,31 @@ export function expressions(ctx: Context) {
       }
       return undefined;
     }
+    const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee) : undefined;
+    if (target) {
+      args(e.args, target, e);
+      calls.set(e, target);
+      return target;
+    }
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
     throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+  }
+
+  // The method a member call names: a static one on a class name, or an instance one, whose
+  // receiver must be able to change when the method changes it.
+  function method(callee: Extract<Expr, { kind: "member" }>): Body {
+    const { object, name } = callee;
+    const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
+    if (named) {
+      const found = named.statics.get(name);
+      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
+      return found;
+    }
+    const type = value(object);
+    const found = typeof type !== "string" && type.kind === "class" ? classOf(type).methods.get(name) : undefined;
+    if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
+    if (found.self!.mutable && place(object)) changeable(object, `call '${name}' on`);
+    return found;
   }
 
   function args(list: Expr[], target: Body, at: Span) {
@@ -111,6 +130,9 @@ export function expressions(ctx: Context) {
         const object = value(e.object);
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" ? undefined : field(object, e.name);
+        if (!found && typeof object !== "string" && object.kind === "class" && classOf(object).methods.has(e.name)) {
+          throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
+        }
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
         return found.type;
       }
@@ -216,24 +238,42 @@ export function expressions(ctx: Context) {
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
   // `const` is deeply immutable, so no field of a constant can change.
   function assignable(target: Expr): Type {
+    if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
+    const type = value(target);
+    changeable(target, "assign to");
+    return type;
+  }
+
+  // A variable, `this`, or a field inside one: somewhere a value lives, rather than a
+  // temporary.
+  function place(e: Expr): boolean {
+    while (e.kind === "member" && !e.optional) e = e.object;
+    return e.kind === "ident" || e.kind === "this";
+  }
+
+  // Checks that a place, already typed, may change. `const` is deeply immutable, so no field
+  // of a constant can change, and `this` changes only in a constructor or a method declared
+  // `this: Mut<this>`.
+  function changeable(target: Expr, action: string) {
     let root = target;
     let path = "";
-    while (root.kind === "member" && !root.optional) {
+    while (root.kind === "member") {
       path = `.${root.name}${path}`;
       root = root.object;
     }
-    if (root.kind === "this") return value(target);
-    if (root.kind !== "ident") throw new CompileError("can only assign to a variable or a field", target.start, target.end);
-    const type = value(target);
+    if (root.kind === "this") {
+      if (self?.mutable) return;
+      throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
+    }
     const local = locals.get(root)!;
     if (local.param) {
-      throw new CompileError("assigning to a parameter is not supported yet; copy it into a 'let'", target.start, target.end);
+      const what = action === "assign to" ? "assigning to" : "calling a mutating method on";
+      throw new CompileError(`${what} a parameter is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
     if (!local.mutable) {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
-      throw new CompileError(`cannot assign to ${what} is a constant`, target.start, target.end);
+      throw new CompileError(`cannot ${action} ${what} is a constant`, target.start, target.end);
     }
-    return type;
   }
 
   // Fish has no truthiness: a condition is a boolean, never a number tested against zero.

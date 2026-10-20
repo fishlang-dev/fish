@@ -48,7 +48,7 @@ export type Options = { src: string; file: string; release: boolean };
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ funcs, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
+export function codegen({ funcs, calls, types, locals, returns, coercions, jumps }: Checked, { src, file, release }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -78,7 +78,7 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
       return `${llvm(local.type)} %${local.name}.arg`;
     });
-    // A constructor works on its instance through a pointer.
+    // A constructor or method works on its instance through a pointer.
     if (f.self) params.unshift("ptr %this");
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
@@ -253,26 +253,41 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
   }
 
   function effect(e: Expr) {
-    if (e.kind === "call") call(e.callee, e.args);
+    if (e.kind === "call") call(e);
     else value(e);
   }
 
   // Returns the call's result, or undefined for a call that returns nothing.
-  function call(callee: Expr, args: Expr[]): string | undefined {
-    if (callee.kind === "ident" && returns.has(callee.name)) {
-      const type = returnType(callee.name);
-      const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-      const invoke = `call ${llvm(type)} @"fsh.${callee.name}"(${values.join(", ")})`;
-      if (type === "void") {
-        emit(invoke);
-        return undefined;
-      }
-      const result = temp();
-      emit(`${result} = ${invoke}`);
-      return result;
+  // A method gets its receiver first, as a pointer, before the arguments run.
+  function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
+    const target = calls.get(e);
+    if (!target) {
+      if (isPrint(e.callee)) print(e.args);
+      return undefined;
     }
-    if (isPrint(callee)) print(args);
-    return undefined;
+    const type = returnType(target.name);
+    const values = target.self && e.callee.kind === "member" ? [`ptr ${receiver(e.callee.object)}`] : [];
+    for (const a of e.args) values.push(`${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    const invoke = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
+    if (type === "void") {
+      emit(invoke);
+      return undefined;
+    }
+    const result = temp();
+    emit(`${result} = ${invoke}`);
+    return result;
+  }
+
+  // Where a method's receiver lives. A temporary, such as a call's result, gets a slot.
+  function receiver(object: Expr): string {
+    let root = object;
+    while (root.kind === "member") root = root.object;
+    if (root.kind === "ident" || root.kind === "this") return address(object);
+    const type = llvm(types.get(object)!);
+    const slot = temp();
+    allocas.push(`  ${slot} = alloca ${type}`);
+    emit(`store ${type} ${value(object)}, ptr ${slot}`);
+    return slot;
   }
 
   // An expression's value, copied down to the declared type it meets when that is narrower.
@@ -343,7 +358,7 @@ export function codegen({ funcs, types, locals, returns, coercions, jumps }: Che
         return result;
       }
       case "call": {
-        const result = call(e.callee, e.args);
+        const result = call(e);
         if (!result) throw new Error("internal error: void call used as a value");
         return result;
       }
