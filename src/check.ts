@@ -187,8 +187,9 @@ export function check(program: Stmt[]): Checked {
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
   function resultOf(instance: Instance, at: Span): Type {
-    const returns = returnOf(instance, at);
+    // Checking the callee may instantiate from this call again, so its site is read first.
     const site = siteOf(at);
+    const returns = returnOf(instance, at);
     if (!site) return returns;
     const f = instance.body;
     const declared = f.returnType && withScope(new Map([...instance.bindings, ...site]), () => resolveType(f.returnType!));
