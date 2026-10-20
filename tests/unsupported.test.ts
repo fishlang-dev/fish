@@ -125,16 +125,13 @@ test("(1, 2)", () => {
 // Statements that parse but have no meaning yet, inside main().
 const STATEMENTS: [string, string][] = [
   ["function inner() {}", "nested functions"],
-  ["{ print(1) }", "block statements"],
   ["debugger", "'debugger' statements"],
   ["comptime { print(1) }", "comptime blocks"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
-  ["for (;;) {}", "'for' loops"],
   ["for (const k in o) {}", "'for...in' loops"],
   ["for (const x of xs) {}", "'for...of' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
-  ["do {} while (true)", "'do...while' loops"],
   ["switch (1) {}", "'switch' statements"],
   ["here: print(1)", "labeled statements"],
   ["break", "'break' statements"],

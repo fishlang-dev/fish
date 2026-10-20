@@ -505,8 +505,7 @@ function showStmt(s: Stmt): string {
     case "expr":
       return showExpr(s.expr);
     case "for": {
-      const init = s.init === undefined ? "" : "keyword" in s.init ? showStmt(s.init) : showExpr(s.init as Expr);
-      return `for (${init}; ${s.test ? showExpr(s.test) : ""}; ${s.update ? showExpr(s.update) : ""})`;
+      return `for (${s.init ? showStmt(s.init) : ""}; ${s.test ? showExpr(s.test) : ""}; ${s.update ? showExpr(s.update) : ""})`;
     }
     case "forIn":
     case "forOf": {

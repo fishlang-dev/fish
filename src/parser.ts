@@ -107,7 +107,7 @@ export type Stmt = Span & (
   | { kind: "try"; block: Stmt[]; param: Pattern | undefined; paramType: TypeNode | undefined;
       handler: Stmt[] | undefined; finalizer: Stmt[] | undefined }
   // `init` is a declaration or an expression.
-  | { kind: "for"; init: Stmt | Expr | undefined; test: Expr | undefined; update: Expr | undefined; body: Stmt[] }
+  | { kind: "for"; init: Stmt | undefined; test: Expr | undefined; update: Expr | undefined; body: Stmt[] }
   // `left` is a declaration without an initializer, or an assignment target.
   | { kind: "forIn" | "forOf"; await: boolean; left: Stmt | Pattern; right: Expr; body: Stmt[] }
   | { kind: "block"; body: Stmt[] }
@@ -494,7 +494,8 @@ function forStatement(c: Cursor): Stmt {
   c.expect(";");
   const update = c.at(")") ? undefined : sequence(c);
   c.expect(")");
-  return { kind: "for", init, test, update, body: body(c), start, end: c.end() };
+  const initStmt: Stmt | undefined = declared ?? (expr && { kind: "expr", expr, start: expr.start, end: expr.end });
+  return { kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
 }
 
 function switchStatement(c: Cursor): Stmt {

@@ -98,9 +98,7 @@ export function check(program: Stmt[]): Checked {
       if (declaration) throw declaration;
       switch (s.kind) {
         case "expr":
-          // Only a statement may call a function that returns nothing.
-          if (s.expr.kind === "call") call(s.expr);
-          else value(s.expr);
+          effect(s.expr);
           return;
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
@@ -130,19 +128,29 @@ export function check(program: Stmt[]): Checked {
         case "comptime":
           throw unsupported("comptime blocks", s);
         case "block":
-          throw unsupported("block statements", s);
+          scoped(s.body);
+          return;
         case "debugger":
           throw unsupported("'debugger' statements", s);
         case "empty":
           return;
         case "for":
-          throw unsupported("'for' loops", s);
+          // A name declared in the head is scoped to the loop.
+          scopes.push(new Map());
+          if (s.init) statement(s.init);
+          if (s.test) condition(s.test);
+          if (s.update) effect(s.update);
+          scoped(s.body);
+          scopes.pop();
+          return;
         case "forIn":
           throw unsupported("'for...in' loops", s);
         case "forOf":
           throw unsupported(s.await ? "'for await...of' loops" : "'for...of' loops", s);
         case "doWhile":
-          throw unsupported("'do...while' loops", s);
+          scoped(s.body);
+          condition(s.cond);
+          return;
         case "switch":
           throw unsupported("'switch' statements", s);
         case "labeled":
@@ -166,6 +174,12 @@ export function check(program: Stmt[]): Checked {
           return;
         }
       }
+    }
+
+    // Only a statement may call a function that returns nothing.
+    function effect(e: Expr) {
+      if (e.kind === "call") call(e);
+      else value(e);
     }
 
     // Checks a call's arguments; returns the user function it calls, or undefined for print.
@@ -447,10 +461,27 @@ function unsupported(what: string, at: Span): CompileError {
   return new CompileError(`${what} are not supported yet`, at.start, at.end);
 }
 
-// `while (true)` never finishes, since there is no `break` yet, so nothing after it runs.
+// A loop whose condition is always true never finishes, since there is no `break` yet, so
+// nothing after it runs.
 function alwaysReturns(stmts: Stmt[]): boolean {
-  return stmts.some((s) =>
-    s.kind === "return" ||
-    (s.kind === "if" && s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else)) ||
-    (s.kind === "while" && s.cond.kind === "bool" && s.cond.value));
+  return stmts.some((s) => {
+    switch (s.kind) {
+      case "return":
+        return true;
+      case "if":
+        return s.else !== undefined && alwaysReturns(s.then) && alwaysReturns(s.else);
+      case "block":
+        return alwaysReturns(s.body);
+      case "while":
+        return isTrue(s.cond);
+      case "doWhile":
+        return alwaysReturns(s.body) || isTrue(s.cond);
+      case "for":
+        return s.test === undefined || isTrue(s.test);
+      default:
+        return false;
+    }
+  });
 }
+
+const isTrue = (e: Expr) => e.kind === "bool" && e.value;

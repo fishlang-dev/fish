@@ -134,8 +134,10 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
   function statement(s: Stmt) {
     switch (s.kind) {
       case "expr":
-        if (s.expr.kind === "call") call(s.expr.callee, s.expr.args);
-        else value(s.expr);
+        effect(s.expr);
+        return;
+      case "block":
+        s.body.forEach(statement);
         return;
       case "if": {
         const cond = value(s.cond);
@@ -167,6 +169,32 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         startBlock(end);
         return;
       }
+      case "for": {
+        if (s.init) statement(s.init);
+        const [test, loop, next, end] = [label(), label(), label(), label()];
+        emit(`br label %${test}`);
+        startBlock(test);
+        emit(s.test ? `br i1 ${value(s.test)}, label %${loop}, label %${end}` : `br label %${loop}`);
+        startBlock(loop);
+        s.body.forEach(statement);
+        emit(`br label %${next}`);
+        startBlock(next);
+        if (s.update) effect(s.update);
+        emit(`br label %${test}`);
+        startBlock(end);
+        return;
+      }
+      case "doWhile": {
+        const [loop, test, end] = [label(), label(), label()];
+        emit(`br label %${loop}`);
+        startBlock(loop);
+        s.body.forEach(statement);
+        emit(`br label %${test}`);
+        startBlock(test);
+        emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
+        startBlock(end);
+        return;
+      }
       case "return":
         emit(s.value ? `ret ${LLVM[returnType(currentFunction)]} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
@@ -179,6 +207,11 @@ export function codegen({ funcs, types, locals, returns }: Checked, { src, file,
         return;
       }
     }
+  }
+
+  function effect(e: Expr) {
+    if (e.kind === "call") call(e.callee, e.args);
+    else value(e);
   }
 
   // Returns the call's result, or undefined for a call that returns nothing.
