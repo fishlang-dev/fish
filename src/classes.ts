@@ -120,6 +120,7 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers, m, m.name);
+    if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
     const table = m.kind === "get" ? getters : setters;
     if (table.has(m.name)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
@@ -146,13 +147,15 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     if (m.generator) throw unsupported("generator methods", m);
     if (m.typeParams.length > 0) throw unsupported("generic methods", span(m.typeParams));
     if (!m.body) throw unsupported("method overloads", m);
+    if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
     if (table.has(m.name)) throw new CompileError(`duplicate method '${m.name}'`, m.start, m.end);
     const [first, ...rest] = m.params;
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
     table.set(m.name, {
-      name: `${node.name}.${m.name}`,
+      // A static method has its own symbol, since an instance method may share its name.
+      name: `${node.name}.${isStatic ? "static " : ""}${m.name}`,
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,

@@ -240,22 +240,29 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   }
 
   // Returns the call's result, or undefined for a call that returns nothing.
-  // A method gets its receiver first, as a pointer, before the arguments run.
+  // A method's receiver runs before its arguments, as in JavaScript.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) print(e.args, builder, value, (a) => types.get(a)!);
       return undefined;
     }
-    const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
-    return invoke(target, object, values);
+    const pointer = target.self && object ? instance(target, object) : undefined;
+    const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    return invoke(target, pointer, values);
   }
 
-  // Calls a function with its arguments' values, after its receiver when it is a method.
-  function invoke(target: Body, object: Expr | undefined, args: string[]): string | undefined {
+  // A pointer to the instance a method works on: its receiver, or the base embedded in it
+  // that declares the method.
+  function instance(target: Body, object: Expr): string {
+    return upcast(receiver(object), types.get(object) as ClassType, target.owner!);
+  }
+
+  // Calls a function with its arguments' values, after the instance when it is a method.
+  function invoke(target: Body, pointer: string | undefined, args: string[]): string | undefined {
     const type = returnType(target.name);
-    const values = target.self && object ? [`ptr ${upcast(receiver(object), types.get(object) as ClassType, target.owner!)}`, ...args] : args;
+    const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     const call = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
     if (type === "void") {
       emit(call);
@@ -332,7 +339,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
       }
       case "member": {
         const getter = calls.get(e);
-        if (getter) return invoke(getter, e.object, [])!;
+        if (getter) return invoke(getter, instance(getter, e.object), [])!;
         const object = types.get(e.object) as ObjectType | ClassType;
         const result = temp();
         emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
@@ -438,7 +445,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   function store(target: Expr, result: string) {
     const setter = setters.get(target);
     if (setter && target.kind === "member") {
-      invoke(setter, target.object, [`${llvm(types.get(target)!)} ${result}`]);
+      invoke(setter, instance(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
       return;
     }
     emit(`store ${llvm(types.get(target)!)} ${result}, ptr ${address(target)}`);
