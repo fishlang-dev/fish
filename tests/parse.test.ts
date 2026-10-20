@@ -75,7 +75,7 @@ function showName(name: PropertyName): string {
 
 function showParams(params: Param[]): string {
   return params.map((p) => {
-    const name = `${p.modifiers.map((m) => `${m} `).join("")}${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
+    const name = `${p.decorators.map((d) => `@${showExpr(d)} `).join("")}${p.modifiers.map((m) => `${m} `).join("")}${p.rest ? "..." : ""}${showPattern(p.pattern)}${p.optional ? "?" : ""}`;
     const fallback = p.default ? ` = ${showExpr(p.default)}` : "";
     return `${p.type ? `${name}: ${show(p.type)}` : name}${fallback}`;
   }).join(", ");
@@ -569,6 +569,11 @@ const CLASSES: [string, string][] = [
   ["class A { m(): void; m(x?: i64): void {} abstract get v(): i64 }",
     "class A { method m();; method m(x?: i64) { 0 }; abstract get v(); }"],
   ["class A { declare\n  x: i64 }", "class A { field declare; field x: i64 }"],
+  ["@sealed class A {}", "@sealed class A {  }"],
+  ["@a.b @c(1, 2) @(d()) abstract class A {}", "@a.b @c(1, 2) @d() abstract class A {  }"],
+  ["class A { @observable x = 1; @bind @log('m') static m(@inject(T) private t: T) {} }",
+    "class A { @observable field x = 1; @bind @log('m') static method m(@inject(T) private t: T) { 0 } }"],
+  ["class A { @dec [key]() {} }", "class A { @dec method [key]() { 0 } }"],
 ];
 
 for (const [stmt, shape] of CLASSES) {
@@ -582,4 +587,5 @@ for (const [stmt, shape] of CLASSES) {
 test("class expressions", () => {
   expect(showExpr(parseExpr("class extends Base { x = 1 }"))).toBe("class extends Base { field x = 1 }");
   expect(showExpr(parseExpr("#x in obj"))).toBe("(#x in obj)");
+  expect(showExpr(parseExpr("@dec class {}"))).toBe("@dec class {  }");
 });

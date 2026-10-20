@@ -1,4 +1,4 @@
-import { expression, leftHandSide } from "./expressions.ts";
+import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import { block, type ClassMember, type ClassNode, type Cursor, type Expr, type Modifier, type PropertyName, type Stmt } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, type, typeParameters, typeReference } from "./types.ts";
@@ -7,8 +7,8 @@ import { annotation, parameters, propertyName, returnAnnotation, type, typeParam
 // members, modifiers and decorators they carry.
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
-export function classNode(c: Cursor, abstract: boolean, decorators: Expr[]): ClassNode {
-  const start = decorators[0]?.start ?? c.peek().start;
+// `start` is where the class's first decorator or modifier began.
+export function classNode(c: Cursor, start: number, abstract: boolean, decorators: Expr[]): ClassNode {
   c.expect("class");
   // A class expression may be anonymous, and so may `export default class`.
   const name = c.peek().kind === "ident" && !c.at("extends") && !c.at("implements") ? c.ident().text : undefined;
@@ -41,6 +41,7 @@ const MODIFIERS = new Set(["public", "private", "protected", "static", "readonly
 
 function classMember(c: Cursor): ClassMember {
   const start = c.peek().start;
+  const decorators = decoratorList(c);
   const startsName = (t: Token) => ["ident", "string", "int", "float", "bigint", "private"].includes(t.kind) || isToken(t, "[") || isToken(t, "*");
   // A modifier is one only when a member follows it on the same line: `static() {}` is a
   // method named `static`, and `readonly: boolean` a field named `readonly`.
@@ -49,7 +50,7 @@ function classMember(c: Cursor): ClassMember {
     (startsName(c.peek(1)) || (c.at("static") && isToken(c.peek(1), "{")))) {
     modifiers.push(c.next().text as Modifier);
   }
-  const member = { modifiers, decorators: [], start };
+  const member = { modifiers, decorators, start };
   if (modifiers.length === 1 && modifiers[0] === "static" && c.at("{")) {
     return { ...member, modifiers: [], kind: "staticBlock", body: block(c), end: c.end() };
   }
@@ -93,6 +94,34 @@ function memberBody(c: Cursor): Stmt[] | undefined {
   if (c.at("{")) return block(c);
   endMember(c);
   return undefined;
+}
+
+// `@a`, `@a.b`, `@a.b(args)` or `@(expression)`. A decorator never takes `[`, so in
+// `@dec [key]() {}` the brackets are the member's computed name.
+export function decoratorList(c: Cursor): Expr[] {
+  const decorators: Expr[] = [];
+  while (c.at("@")) {
+    c.next();
+    let e: Expr;
+    if (c.eat("(")) {
+      e = sequence(c);
+      c.expect(")");
+    } else {
+      const first = c.ident();
+      e = { kind: "ident", name: first.text, start: first.start, end: first.end };
+      while (c.eat(".")) {
+        const name = c.next();
+        if (name.kind !== "ident" && name.kind !== "private") throw c.error("expected a property name", name);
+        e = { kind: "member", object: e, name: name.text, optional: false, start: e.start, end: name.end };
+      }
+    }
+    if (c.eat("(")) {
+      const args = c.list(() => expression(c), ")");
+      e = { kind: "call", callee: e, typeArgs: [], args, optional: false, start: e.start, end: c.end() };
+    }
+    decorators.push(e);
+  }
+  return decorators;
 }
 
 // Member names may be reserved words or private names such as `#count`.

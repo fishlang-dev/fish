@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
-import { classNode } from "./declarations.ts";
+import { classNode, decoratorList } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
@@ -370,10 +370,12 @@ function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
+  const decorators = decoratorList(c);
   if (c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore)) {
     const abstract = c.eat("abstract");
-    return { kind: "class", ...classNode(c, abstract, []), start };
+    return { kind: "class", ...classNode(c, start, abstract, decorators) };
   }
+  if (decorators.length > 0) throw c.error("expected a class after decorators");
   if (c.at(";")) return { kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);

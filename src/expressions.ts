@@ -4,7 +4,7 @@ import {
   allowingIn, block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Expr, type ObjectProp, type Param, type TypeNode,
   type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
-import { classNode } from "./declarations.ts";
+import { classNode, decoratorList } from "./declarations.ts";
 import { toPattern } from "./patterns.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
 
@@ -299,7 +299,11 @@ export function primary(c: Cursor): Expr {
   if (c.at("{")) return object(c);
   if (c.at("function") || atAsync(c, "function")) return functionExpression(c);
   if (c.at("import")) return importExpression(c);
-  if (c.at("class")) return { kind: "class", ...classNode(c, false, []) };
+  if (c.at("class") || c.at("@")) {
+    const start = c.peek().start;
+    const decorators = decoratorList(c);
+    return { kind: "class", ...classNode(c, start, false, decorators) };
+  }
   if (c.peek().kind === "private") {
     const t = c.next();
     return { kind: "privateName", name: t.text, start: t.start, end: t.end };

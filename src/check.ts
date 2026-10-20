@@ -35,7 +35,7 @@ export function check(program: Stmt[]): Checked {
   for (const s of program) {
     if (s.kind === "typeAlias") throw unsupported("type aliases", s);
     if (s.kind === "interface") throw unsupported("interfaces", s);
-    if (s.kind === "class") throw unsupported("classes", s);
+    if (s.kind === "class") throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -150,7 +150,7 @@ export function check(program: Stmt[]): Checked {
         case "function":
           throw unsupported("nested functions", s);
         case "class":
-          throw unsupported("classes", s);
+          throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
         case "block":
           throw unsupported("block statements", s);
         case "debugger":
@@ -320,6 +320,7 @@ export function check(program: Stmt[]): Checked {
     if (p.rest) throw unsupported("rest parameters", p);
     if (p.optional) throw unsupported("optional parameters", p);
     const name = paramName(p);
+    if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.modifiers.length > 0) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);

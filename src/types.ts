@@ -1,6 +1,7 @@
 import { expression, primary, templateParts, unary } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import type { Cursor, Modifier, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import { decoratorList } from "./declarations.ts";
 import { bindingPattern } from "./patterns.ts";
 
 // The type grammar, and the parameter lists that functions and function types share.
@@ -33,6 +34,7 @@ const PARAMETER_MODIFIERS = ["public", "private", "protected", "readonly", "over
 
 function parameter(c: Cursor): Param {
   const start = c.peek().start;
+  const decorators = decoratorList(c);
   const modifiers: Modifier[] = [];
   while (PARAMETER_MODIFIERS.some((m) => c.at(m)) && !c.peek(1).newlineBefore && startsBinding(c.peek(1))) {
     modifiers.push(c.next().text as Modifier);
@@ -43,7 +45,7 @@ function parameter(c: Cursor): Param {
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { pattern, type, optional, rest, default: fallback, modifiers, decorators: [], start, end: c.end() };
+  return { pattern, type, optional, rest, default: fallback, modifiers, decorators, start, end: c.end() };
 }
 
 const startsBinding = (t: Token) => t.kind === "ident" || isToken(t, "{") || isToken(t, "[");

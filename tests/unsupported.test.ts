@@ -44,6 +44,7 @@ const SIGNATURES: [string, string, string][] = [
   ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
+  ["(@inject x: i64)", "decorators", "@inject x: i64"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {
@@ -137,6 +138,7 @@ const STATEMENTS: [string, string][] = [
   ["throw 1", "'throw' statements"],
   ["try {} finally {}", "'try' statements"],
   ["class A {}", "classes"],
+  ["@sealed class A {}", "decorators"],
 ];
 
 test("let x: i64", () => {
