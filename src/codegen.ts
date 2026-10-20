@@ -39,7 +39,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
   const { operate, arithmetic } = lowering(builder, src, file, release);
-  const { convert } = conversions(builder);
+  const { convert, test } = conversions(builder);
 
   for (const instance of instances) {
     current = instance;
@@ -316,7 +316,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const local = resolved(e);
         const t = temp();
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-        return t;
+        // Where a check narrowed the variable, its value comes out of the union.
+        return convert(t, local.type, types.get(e)!);
       }
       case "member": {
         const getter = calls.get(e);
@@ -400,6 +401,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, e.left, e.right);
+        const tested = test(e, value, (x) => types.get(x)!);
+        if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
         if (!condition) return operate(e.op, a, b, e);

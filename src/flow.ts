@@ -30,3 +30,17 @@ export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<S
 }
 
 const isTrue = (e: Expr) => e.kind === "bool" && e.value;
+
+// The names any assignment, `++` or `--` in these statements writes to.
+export function assignedNames(node: unknown, names = new Set<string>()): Set<string> {
+  if (typeof node !== "object" || node === null) return names;
+  if (Array.isArray(node)) {
+    node.forEach((n) => assignedNames(n, names));
+    return names;
+  }
+  const n = node as { kind?: string; target?: { kind?: string; name?: string }; operand?: { kind?: string; name?: string } };
+  const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
+  if (target?.kind === "ident") names.add(target.name!);
+  Object.values(node).forEach((v) => assignedNames(v, names));
+  return names;
+}

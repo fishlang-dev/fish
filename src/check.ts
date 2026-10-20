@@ -1,7 +1,8 @@
 import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
-import { alwaysReturns } from "./flow.ts";
+import { alwaysReturns, assignedNames } from "./flow.ts";
+import { guard, type Facts } from "./narrow.ts";
 import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { addAlias, paramName, resolver, storable, typeName } from "./resolve.ts";
@@ -251,6 +252,12 @@ export function check(program: Stmt[]): Checked {
     let inferred: Type | undefined;
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
+    // What the conditions guarding the code being checked prove, innermost last. A `let`
+    // narrows only when nothing assigns to its name.
+    const facts: Facts[] = [];
+    const assigned = assignedNames(f.body);
+    const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name);
+    const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -266,22 +273,26 @@ export function check(program: Stmt[]): Checked {
       owner: f.owner,
       superCall,
       thisReady: (e) => unset.size === 0 || e === exempt,
+      proves,
+      assume,
+      narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
     });
 
     const params = paramTypes(instance);
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
-    for (const s of f.body) {
+    statements(f.body, (s, check) => {
       const assigned = unset.size > 0 ? fieldAssignment(s) : undefined;
       exempt = assigned?.object;
       hidden = f.self?.constructor === true && classOf(f.self.type).initializers.has(s);
-      statement(s);
+      const after = check(s);
       exempt = undefined;
       hidden = false;
       if (assigned) unset.delete(assigned.name);
       if (s.kind === "expr" && s.expr === superCall) unset.delete(SUPER);
-    }
+      return after;
+    });
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
@@ -295,7 +306,27 @@ export function check(program: Stmt[]): Checked {
     done.add(instance);
     inProgress.delete(instance);
 
-    function statement(s: Stmt) {
+    // Checks a list of statements in order. What an `if` that leaves early proves holds for
+    // the statements after it.
+    function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
+      const before = facts.length;
+      for (const s of list) {
+        const after = each(s, statement);
+        if (after) facts.push(after);
+      }
+      facts.length = before;
+    }
+
+    function assume<T>(proven: Facts, check: () => T): T {
+      facts.push(proven);
+      try {
+        return check();
+      } finally {
+        facts.pop();
+      }
+    }
+
+    function statement(s: Stmt): Facts | undefined {
       const declaration = unsupportedDeclaration(s);
       if (declaration) throw declaration;
       switch (s.kind) {
@@ -315,14 +346,20 @@ export function check(program: Stmt[]): Checked {
           declare(d.target.name, annotated && !isInterface(annotated) ? annotated : type, s.keyword === "let", false, s);
           return;
         }
-        case "if":
+        case "if": {
           condition(s.cond);
-          scoped(s.then);
-          if (s.else) scoped(s.else);
-          return;
+          const proven = proves(s.cond);
+          assume(proven.yes, () => scoped(s.then));
+          if (s.else) assume(proven.no, () => scoped(s.else!));
+          // A branch that never reaches its end leaves the other's facts for what follows.
+          const [thenLeaves, elseLeaves] = [leaves(s.then), s.else ? leaves(s.else) : false];
+          if (thenLeaves && !elseLeaves) return proven.no;
+          if (elseLeaves && !thenLeaves) return proven.yes;
+          return undefined;
+        }
         case "while":
           condition(s.cond);
-          within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+          within({ stmt: s, kind: "loop" }, () => assume(proves(s.cond).yes, () => scoped(s.body)));
           return;
         case "function":
           throw unsupported("nested functions", s);
@@ -365,7 +402,7 @@ export function check(program: Stmt[]): Checked {
               if (test && test !== type) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              c.body.forEach(statement);
+              statements(c.body);
             }
           });
           scopes.pop();
@@ -437,9 +474,16 @@ export function check(program: Stmt[]): Checked {
       return target.loop;
     }
 
+    // Whether control never reaches the end of these statements, leaving by `return`, `break`
+    // or `continue`.
+    function leaves(stmts: Stmt[]): boolean {
+      const last = stmts.at(-1);
+      return alwaysReturns(stmts, broken, continued) || last?.kind === "break" || last?.kind === "continue";
+    }
+
     function scoped(stmts: Stmt[]) {
       scopes.push(new Map());
-      stmts.forEach(statement);
+      statements(stmts);
       scopes.pop();
     }
 

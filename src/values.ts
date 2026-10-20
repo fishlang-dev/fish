@@ -8,6 +8,7 @@ import { allFields, baseOf, derives, field, fits, literalType, membersFor, objec
 import type { Access, ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
+import { literalValue, TYPEOF, typeofTest, type Facts, type Guard } from "./narrow.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -24,13 +25,6 @@ export function isPrint(callee: Expr): boolean {
 
 const printable = (t: Type): boolean =>
   typeof t === "string" || t.kind === "literal" || (t.kind === "union" && t.members.every(printable));
-
-// The value a literal expression writes, if it is one.
-function literalValue(e: Expr): string | bigint | boolean | undefined {
-  if (e.kind === "string" || e.kind === "bool" || e.kind === "int") return e.value;
-  if (e.kind === "unary" && e.op === "-" && e.operand.kind === "int") return -e.operand.value;
-  return undefined;
-}
 
 // What expression checking needs from the program and the function it is in.
 export type Context = {
@@ -56,11 +50,16 @@ export type Context = {
   superCall: Expr | undefined;
   // Whether this `this` may be used: a constructor's can't until every field is assigned.
   thisReady(e: Expr): boolean;
+  // Narrowing: what a condition proves, checking under what was proven, and a variable's
+  // type where something narrowed it.
+  proves(e: Expr): Guard;
+  assume<T>(proven: Facts, check: () => T): T;
+  narrowed(l: Local): Type | undefined;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, construct, members, returnOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -218,7 +217,7 @@ export function expressions(ctx: Context) {
           throw new CompileError(message, e.start, e.end);
         }
         locals.set(e, local);
-        return local.type;
+        return narrowed(local) ?? local.type;
       }
       // Its literal type: Fish has no runtime strings yet, but a literal's value is known.
       case "string":
@@ -286,7 +285,8 @@ export function expressions(ctx: Context) {
       }
       case "conditional": {
         condition(e.cond);
-        const [then, otherwise] = [value(e.then), value(e.else)];
+        const proven = proves(e.cond);
+        const [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
         if (then !== otherwise) {
           throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
         }
@@ -295,6 +295,16 @@ export function expressions(ctx: Context) {
       case "binary":
         // The migration lint rewrites loose equality to strict, so native code never uses it.
         if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
+        if (e.op === "&&" || e.op === "||") {
+          // The right side runs only when the left is true, for `&&`, or false, for `||`.
+          const left = operand(e.left);
+          const proven = proves(e.left);
+          return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
+        }
+        if (e.op === "===" || e.op === "!==") {
+          const special = typeofComparison(e) ?? unionComparison(e);
+          if (special) return special;
+        }
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         return binaryType(e.op, operand(e.left), operand(e.right), e);
       default:
@@ -468,6 +478,33 @@ export function expressions(ctx: Context) {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError(`cannot ${action} ${what} is a constant`, target.start, target.end);
     }
+  }
+
+  // `typeof x === "number"` checks which kind of value x holds, which for a union is its tag.
+  function typeofComparison(e: Expr): Type | undefined {
+    const test = typeofTest(e);
+    if (!test) return undefined;
+    value(test.operand);
+    if (test.name.kind !== "string" || !TYPEOF.has(test.name.value)) {
+      throw new CompileError(`'typeof' can only be compared with ${[...TYPEOF].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
+    }
+    return "boolean";
+  }
+
+  // `x === v` with x a union is true when x holds v: its member for a literal, or the member
+  // v's type goes into holding the same primitive value.
+  function unionComparison(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
+    const [left, right] = [value(e.left), value(e.right)];
+    const [union, other, otherType] = typeof left !== "string" && left.kind === "union" ? [left, e.right, right]
+      : typeof right !== "string" && right.kind === "union" ? [right, e.left, left] : [];
+    if (!union) return undefined;
+    const literal = literalValue(other!);
+    const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal)
+      ?? membersFor(otherType!, union).find((m) => typeof m === "string");
+    if (!member) {
+      throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
+    }
+    return "boolean";
   }
 
   // An operator works on a literal's base type, so `1` adds like any i64.

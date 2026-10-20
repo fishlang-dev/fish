@@ -1,4 +1,6 @@
 import type { Builder } from "./arithmetic.ts";
+import { category, literalValue, typeofTest } from "./narrow.ts";
+import type { Expr } from "./parser.ts";
 import { field, fieldPath, membersFor, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
@@ -42,7 +44,59 @@ export type Slots = Builder & { alloca(type: string): string };
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca } = b;
-  return { convert };
+  return { convert, test };
+
+  // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
+  // its payload when v isn't a literal. Undefined for any other comparison.
+  function test(e: Expr, value: (e: Expr) => string, typeOf: (e: Expr) => Type): string | undefined {
+    if (e.kind !== "binary" || (e.op !== "===" && e.op !== "!==")) return undefined;
+    const kind = typeofTest(e);
+    let result: string;
+    if (kind) {
+      const [v, type] = [value(kind.operand), typeOf(kind.operand)];
+      const name = (kind.name as { value: string }).value;
+      result = typeof type !== "string" && type.kind === "union"
+        ? holds(v, type, type.members.filter((m) => category(m) === name))
+        : String(category(type) === name);
+    } else {
+      const [left, right] = [typeOf(e.left), typeOf(e.right)];
+      const unionLeft = typeof left !== "string" && left.kind === "union";
+      if (!unionLeft && (typeof right === "string" || right.kind !== "union")) return undefined;
+      const [u, o] = [value(e.left), value(e.right)];
+      const [union, v, other, otherType] = (unionLeft ? [left, u, e.right, right] : [right, o, e.left, left]) as [UnionType, string, Expr, Type];
+      const literal = literalValue(other);
+      const member = union.members.find((m) => typeof m !== "string" && m.kind === "literal" && m.value === literal);
+      result = member ? holds(v, union, [member]) : holdsValue(v, union, membersFor(otherType, union).find((m) => typeof m === "string")!, unionLeft ? o : u);
+    }
+    if (e.op === "===") return result;
+    const negated = temp();
+    emit(`${negated} = xor i1 ${result}, true`);
+    return negated;
+  }
+
+  // Whether a union holds one of these members.
+  function holds(v: string, union: UnionType, members: Type[]): string {
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
+    let result = "false";
+    for (const m of members) {
+      const [is, next] = [temp(), temp()];
+      emit(`${is} = icmp eq i32 ${tag}, ${union.members.indexOf(m)}`);
+      emit(`${next} = or i1 ${result}, ${is}`);
+      result = next;
+    }
+    return result;
+  }
+
+  // Whether a union holds this primitive member with value `o`. The payload is compared only
+  // when the tag matches, since another member's payload may be partly undefined.
+  function holdsValue(v: string, union: UnionType, member: Type, o: string): string {
+    const is = holds(v, union, [member]);
+    const [same, result] = [temp(), temp()];
+    emit(`${same} = icmp eq ${llvm(member)} ${payload(v, union, member)}, ${o}`);
+    emit(`${result} = select i1 ${is}, i1 ${same}, i1 false`);
+    return result;
+  }
 
   // `v`, a value of `from`, as a value of `to`: copied down to fewer fields, built into a class,
   // put into a union, taken out of one, or moved between unions. The checker has made sure
@@ -106,15 +160,17 @@ export function conversions(b: Slots) {
   }
 
   // Moves a value between unions: each member the source may hold goes into the target's
-  // member for it, which may sit at another index.
+  // member for it, which may sit at another index. Narrowing to fewer members leaves some
+  // that can't be held here, and those get no case.
   function retag(v: string, from: UnionType, to: UnionType): string {
     const result = alloca(llvm(to));
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(from)} ${v}, 0`);
-    const cases = from.members.map(() => label());
+    const held = from.members.filter((m) => membersFor(m, to).length > 0);
+    const cases = held.map(() => label());
     const end = label();
-    emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-    from.members.forEach((member, i) => {
+    emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${from.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+    held.forEach((member, i) => {
       startBlock(cases[i]!);
       emit(`store ${llvm(to)} ${inject(payload(v, from, member), member, to)}, ptr ${result}`);
       emit(`br label %${end}`);
