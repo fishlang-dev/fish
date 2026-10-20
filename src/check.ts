@@ -36,6 +36,9 @@ export function check(program: Stmt[]): Checked {
     if (s.kind === "typeAlias") throw unsupported("type aliases", s);
     if (s.kind === "interface") throw unsupported("interfaces", s);
     if (s.kind === "class") throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
+    if (s.kind === "enum") throw unsupported("enums", s);
+    if (s.kind === "namespace") throw unsupported("namespaces", s);
+    if (s.kind === "declare") throw unsupported("ambient declarations", s);
     if (s.kind === "empty") continue;
     // Top-level code with side effects belongs in main(), as migration rule G7 says.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -151,6 +154,12 @@ export function check(program: Stmt[]): Checked {
           throw unsupported("nested functions", s);
         case "class":
           throw unsupported(s.decorators.length > 0 ? "decorators" : "classes", s);
+        case "enum":
+          throw unsupported("enums", s);
+        case "namespace":
+          throw unsupported("namespaces", s);
+        case "declare":
+          throw unsupported("ambient declarations", s);
         case "block":
           throw unsupported("block statements", s);
         case "debugger":

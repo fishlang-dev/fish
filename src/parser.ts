@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
-import { classNode, decoratorList } from "./declarations.ts";
+import { atDeclarationKeyword, classNode, decoratorList } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
@@ -109,6 +109,11 @@ export type Stmt = Span & (
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
+  | { kind: "enum"; name: string; const: boolean; members: EnumMember[] }
+  // `name` is dotted (`A.B`), or the module string in `declare module "m"`, where `quoted` is
+  // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
+  | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
+  | { kind: "declare"; body: Stmt }
 ) | TypeAlias | Interface | Func | (ClassNode & { kind: "class" });
 
 export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
@@ -176,6 +181,8 @@ export type Pattern = Span & (
 
 // In `{ a }` the value is the identifier pattern `a`.
 export type PatternProp = Span & { key: PropertyName; value: Pattern };
+
+export type EnumMember = Span & { name: string; init: Expr | undefined };
 
 // `default:` has no test.
 export type SwitchCase = Span & { test: Expr | undefined; body: Stmt[] };
@@ -366,7 +373,7 @@ function body(c: Cursor): Stmt[] {
 }
 
 // Statements that end in a block need nothing after them; the rest end as in JavaScript.
-function statement(c: Cursor): Stmt {
+export function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
@@ -376,6 +383,8 @@ function statement(c: Cursor): Stmt {
     return { kind: "class", ...classNode(c, start, abstract, decorators) };
   }
   if (decorators.length > 0) throw c.error("expected a class after decorators");
+  const declaration = atDeclarationKeyword(c);
+  if (declaration) return declaration;
   if (c.at(";")) return { kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
@@ -580,7 +589,7 @@ function increment(e: Extract<Expr, { kind: "update" }>): Stmt {
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.
-function endStatement(c: Cursor) {
+export function endStatement(c: Cursor) {
   if (c.eat(";")) return;
   if (!c.at("}") && !c.peek().newlineBefore && c.peek().kind !== "eof") throw c.error("expected ';'");
 }

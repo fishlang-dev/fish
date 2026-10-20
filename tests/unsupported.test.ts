@@ -139,6 +139,9 @@ const STATEMENTS: [string, string][] = [
   ["try {} finally {}", "'try' statements"],
   ["class A {}", "classes"],
   ["@sealed class A {}", "decorators"],
+  ["enum E { A }", "enums"],
+  ["namespace N {}", "namespaces"],
+  ["declare const x: i64", "ambient declarations"],
 ];
 
 test("let x: i64", () => {

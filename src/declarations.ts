@@ -1,10 +1,64 @@
 import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
-import { block, type ClassMember, type ClassNode, type Cursor, type Expr, type Modifier, type PropertyName, type Stmt } from "./parser.ts";
+import {
+  block, endStatement, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
+  type PropertyName, type Stmt,
+} from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, type, typeParameters, typeReference } from "./types.ts";
 
-// Declarations beyond functions, aliases and interfaces: classes, and with them the
-// members, modifiers and decorators they carry.
+// Declarations beyond functions, aliases and interfaces: classes with their members,
+// modifiers and decorators; enums; namespaces; and ambient `declare` forms.
+
+// The declaration starting at the cursor, if its keyword is one of these, or undefined.
+// Each keyword but `enum` is contextual, so it only counts with what follows on its line.
+export function atDeclarationKeyword(c: Cursor): Stmt | undefined {
+  const start = c.peek().start;
+  const next = c.peek(1);
+  const sameLine = !next.newlineBefore;
+  if (c.at("enum") || (c.at("const") && isToken(next, "enum"))) return enumDeclaration(c);
+  if ((c.at("namespace") || c.at("module")) && sameLine && (next.kind === "ident" || (c.at("module") && next.kind === "string"))) {
+    return namespaceDeclaration(c);
+  }
+  if (c.at("declare") && sameLine && (DECLARABLE.has(next.text) && next.kind === "ident")) {
+    c.next();
+    const body = c.at("global") ? namespaceDeclaration(c) : statement(c);
+    return { kind: "declare", body, start, end: body.end };
+  }
+  return undefined;
+}
+
+const DECLARABLE = new Set([
+  "var", "let", "const", "function", "async", "class", "abstract", "enum", "namespace", "module", "global",
+  "interface", "type",
+]);
+
+function enumDeclaration(c: Cursor): Stmt {
+  const start = c.peek().start;
+  const isConst = c.eat("const");
+  c.expect("enum");
+  const name = c.ident().text;
+  c.expect("{");
+  const members = c.list((): EnumMember => {
+    const t = c.next();
+    if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a member name", t);
+    const init = c.eat("=") ? expression(c) : undefined;
+    return { name: t.text, init, start: t.start, end: c.end() };
+  }, "}");
+  return { kind: "enum", name, const: isConst, members, start, end: c.end() };
+}
+
+// `namespace A.B { }`, `module A { }`, `module "m" { }`, `declare module "m";`, `global { }`.
+function namespaceDeclaration(c: Cursor): Stmt {
+  const start = c.peek().start;
+  const global = c.eat("global");
+  if (!global) c.next();
+  const quoted = !global && c.peek().kind === "string";
+  let name = global ? "global" : quoted ? c.next().text : c.ident().text;
+  while (!quoted && !global && c.eat(".")) name += "." + c.ident().text;
+  if (c.at("{")) return { kind: "namespace", name, quoted, global, body: block(c), start, end: c.end() };
+  endStatement(c);
+  return { kind: "namespace", name, quoted, global, body: undefined, start, end: c.end() };
+}
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
 // `start` is where the class's first decorator or modifier began.
