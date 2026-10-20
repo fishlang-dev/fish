@@ -40,6 +40,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
+  // Each combined interface `A & B`, by its sides.
+  const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   let scope = new Map<string, Type>();
   aliases.forEach((a) => {
@@ -126,15 +128,30 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return literalType(value);
   }
 
-  // `A & B` of object types is one object type with the fields of both.
+  // `A & B` of object types is one object type with the fields of both. With an interface it
+  // is a combined bound: an interface with every side's fields and methods.
   function intersection(nodes: TypeNode[]): Type {
     const sides = nodes.map((node) => {
       const t = resolveType(node);
-      if (typeof t !== "string" && t.kind === "object") return t;
-      if (typeof t !== "string" && t.kind === "interface") throw unsupported("intersections with interfaces", node);
+      if (typeof t !== "string" && (t.kind === "object" || t.kind === "interface")) return t;
       throw unsupported(`intersections with ${typeof t === "string" || t.kind === "literal" ? "primitive types" : SIDE_FORMS[t.kind]}`, node);
     });
-    return sides.reduce((a, b) => merged(a, b, nodes[0]!, nodes.at(-1)!));
+    const [from, to] = [nodes[0]!, nodes.at(-1)!];
+    const fields = sides.map((s) => objectType(s.fields)).reduce((a, b) => merged(a, b, from, to));
+    if (sides.every((s) => s.kind === "object")) return fields;
+    const key = sides.map(keyOf).join(" & ");
+    let found = combined.get(key);
+    if (found) return found;
+    combined.set(key, found = interfaceType(sides.map(show).join(" & ")));
+    found.fields.push(...fields.fields);
+    for (const m of sides.flatMap((s) => (s.kind === "interface" ? s.methods : []))) {
+      const same = found.methods.find((x) => x.name === m.name);
+      if (!same) found.methods.push(m);
+      else if (same.returns !== m.returns || same.params.length !== m.params.length || same.params.some((p, i) => p !== m.params[i])) {
+        throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
+      }
+    }
+    return found;
   }
 
   // The interface is registered before its members resolve, so a member may name it.
@@ -221,7 +238,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", interface: "interfaces", object: "object types" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
