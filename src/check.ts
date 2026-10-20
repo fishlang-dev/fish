@@ -1,4 +1,4 @@
-import { declareClass, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Func as Declared, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
@@ -96,6 +96,9 @@ export function check(program: Stmt[]): Checked {
   const inProgress = new Set<Body>();
   let nextId = 0;
 
+  const linked = new Set<ClassInfo>();
+  classes.forEach((c) => link(c, new Set()));
+  classes.forEach(checkOverrides);
   const laidOut = new Set<ClassInfo>();
   classes.forEach(layout);
   classes.forEach((c) => {
@@ -113,9 +116,21 @@ export function check(program: Stmt[]): Checked {
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
+  // Bases are linked first, since a derived constructor may take its base's parameters.
+  function link(c: ClassInfo, path: Set<ClassInfo>) {
+    if (linked.has(c) || c.baseName === undefined) return;
+    if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    const base = classes.get(c.baseName);
+    if (!base) throw new CompileError(`cannot find class '${c.baseName}'`, c.node.extends!.start, c.node.extends!.end);
+    link(base, path.add(c));
+    extend(c, base);
+    linked.add(c);
+  }
+
   function layout(c: ClassInfo) {
     if (laidOut.has(c)) return;
     laidOut.add(c);
+    if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
       if (f.type) return { name: f.name, type: resolveType(f.type), access: f.access };
       const name = `${c.type.name}.${f.name} initializer`;
@@ -127,7 +142,8 @@ export function check(program: Stmt[]): Checked {
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
-    return t.fields.some((f) => f.type === inner || contains(f.type, inner, seen));
+    const parts = [...t.fields.map((f) => f.type), ...(t.kind === "class" && t.base ? [t.base] : [])];
+    return parts.some((p) => p === inner || contains(p, inner, seen));
   }
 
   function classOf(t: ClassType): ClassInfo {
@@ -157,11 +173,15 @@ export function check(program: Stmt[]): Checked {
     // the target of an assignment to one of them, and the constructor can't return.
     const unset = new Set(f.self?.constructor ? classOf(f.self.type).required : []);
     let exempt: Expr | undefined;
+    // A derived constructor's first statement, `super(...)`, fills the embedded base.
+    const superCall = f.self?.constructor && f.self.type.base ? (f.body[0] as Extract<Stmt, { kind: "expr" }>).expr : undefined;
+    if (superCall) unset.add(SUPER);
 
     const { value, condition, effect, coerce } = expressions({
       types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup,
       self: f.self,
       owner: f.owner,
+      superCall,
       thisReady: (e) => unset.size === 0 || e === exempt,
     });
 
@@ -172,6 +192,7 @@ export function check(program: Stmt[]): Checked {
       statement(s);
       exempt = undefined;
       if (assigned) unset.delete(assigned.name);
+      if (s.kind === "expr" && s.expr === superCall) unset.delete(SUPER);
     }
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
@@ -373,6 +394,9 @@ export function check(program: Stmt[]): Checked {
     });
   }
 }
+
+// Stands for the base in a derived constructor's unset fields until `super(...)` runs.
+const SUPER = "super()";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 

@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, derives, field, fits, objectType, show, type Access, type ClassType, type Field, type Type } from "./typing.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Local } from "./check.ts";
 
@@ -36,12 +36,14 @@ export type Context = {
   self: Body["self"];
   // The class whose constructor or method this is, which may reach its non-public members.
   owner: ClassType | undefined;
+  // A derived constructor's `super(...)`, the one place a base constructor may be called.
+  superCall: Expr | undefined;
   // Whether this `this` may be used: a constructor's can't until every field is assigned.
   thisReady(e: Expr): boolean;
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup, self, owner, thisReady } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, returnOf, classOf, paramType, lookup, self, owner, superCall, thisReady } = ctx;
   return { value, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
@@ -55,6 +57,14 @@ export function expressions(ctx: Context) {
     const { callee } = e;
     if (e.optional || (callee.kind === "member" && callee.optional)) throw unsupported("optional calls", e);
     if (e.typeArgs.length > 0) throw unsupported("type arguments on calls", e);
+    if (callee.kind === "super") {
+      if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
+      const base = classOf(self!.type.base!);
+      types.set(callee, base.type);
+      args(e.args, base.constructor, e);
+      calls.set(e, base.constructor);
+      return base.constructor;
+    }
     if (isPrint(callee)) {
       for (const a of e.args) {
         if (a.kind !== "string" && typeof value(a) !== "string") {
@@ -79,27 +89,58 @@ export function expressions(ctx: Context) {
     const { object, name } = callee;
     const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
     if (named) {
-      const found = named.statics.get(name);
+      const found = inherited(named, "statics", name);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
-      visible(found.access, named.type, name, callee);
+      visible(found.access, found.owner!, name, callee);
       return found;
     }
+    if (object.kind === "super") return superMethod(callee);
     const type = value(object);
-    const found = typeof type !== "string" && type.kind === "class" ? classOf(type).methods.get(name) : undefined;
+    const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
     visible(found.access, found.owner!, name, callee);
     if (found.self!.mutable && place(object)) changeable(object, `call '${name}' on`);
     return found;
   }
 
-  // TypeScript's access rules: a private or protected member is reachable only from inside
-  // its own class.
+  // `super.m()` runs the base's `m` on the embedded base.
+  function superMethod(callee: Extract<Expr, { kind: "member" }>): Body {
+    const base = self?.type.base;
+    if (!base) throw new CompileError("'super' can only be used in a class that extends another", callee.start, callee.end);
+    if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
+    const found = inherited(classOf(base), "methods", callee.name);
+    if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'`, callee.start, callee.end);
+    visible(found.access, found.owner!, callee.name, callee);
+    if (found.self!.mutable && !self!.mutable) {
+      throw new CompileError(`cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
+    }
+    types.set(callee.object, base);
+    return found;
+  }
+
+  // A member of a class or of the bases it embeds, nearest first.
+  function inherited(c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
+    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+      const found = b[table].get(name);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  // TypeScript's access rules: a private member is reachable only from inside its class, and
+  // a protected one also from the classes that embed it.
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
     if (!access || access === "public" || owner === declaring) return;
+    if (access === "protected" && owner && derives(owner, declaring)) return;
     const message = name.startsWith("#")
       ? `property '${name}' is not accessible outside class '${declaring.name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
+  }
+
+  // The class whose own fields include `name`: `t` itself or a base it embeds.
+  function declaring(t: ClassType, name: string): ClassType {
+    return t.fields.some((f) => f.name === name) || !t.base ? t : declaring(t.base, name);
   }
 
   function args(list: Expr[], target: Body, at: Span) {
@@ -146,16 +187,16 @@ export function expressions(ctx: Context) {
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" ? undefined : field(object, e.name);
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
-        const getter = !found ? c?.getters.get(e.name) : undefined;
+        const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
           visible(getter.access, getter.owner!, e.name, e);
           calls.set(e, getter);
           return returnOf(getter, e);
         }
-        if (!found && c?.methods.has(e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
-        if (!found && c?.setters.has(e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
+        if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
+        if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
-        if (typeof object !== "string" && object.kind === "class") visible(found.access, object, e.name, e);
+        if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
         return found.type;
       }
       case "object":
@@ -224,6 +265,9 @@ export function expressions(ctx: Context) {
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
     if (type === to) return;
+    if (typeof type !== "string" && type.kind === "class" && typeof to !== "string" && to.kind === "class" && derives(type, to)) {
+      throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
+    }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
     excess(e, to);
     coercions.set(e, to);
@@ -235,7 +279,7 @@ export function expressions(ctx: Context) {
   function builds(e: Expr, type: Type, to: Type): boolean {
     if (e.kind !== "object" || typeof type === "string" || typeof to === "string" || to.kind !== "class") return false;
     classOf(to);
-    for (const f of to.fields) {
+    for (const f of allFields(to)) {
       if ((f.access ?? "public") !== "public") {
         throw new CompileError(`an object literal can't build '${to.name}' because '${f.name}' is ${f.access}; use 'new'`, e.start, e.end);
       }
@@ -307,11 +351,11 @@ export function expressions(ctx: Context) {
     const object = value(target.object);
     if (typeof object === "string" || object.kind !== "class" || field(object, target.name)) return undefined;
     const c = classOf(object);
-    const setter = c.setters.get(target.name);
-    if (!setter && c.getters.has(target.name)) {
+    const setter = inherited(c, "setters", target.name);
+    if (!setter && inherited(c, "getters", target.name)) {
       throw new CompileError(`cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
     }
-    if (setter) visible(setter.access, object, target.name, target);
+    if (setter) visible(setter.access, setter.owner!, target.name, target);
     return setter;
   }
 

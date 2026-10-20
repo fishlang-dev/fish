@@ -2,46 +2,24 @@ import type { Body, Checked, Local, Type } from "./check.ts";
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
+import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
-import { field, type ClassType, type ObjectType } from "./typing.ts";
+import { field, fieldPath, type ClassType, type ObjectType } from "./typing.ts";
 
 const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
 
-// An object is a literal struct of its fields, in their sorted order.
+// An object is a literal struct of its fields, in their sorted order. An instance is a
+// literal struct of the base it embeds, if any, then its own fields in declaration order.
 function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
-  return t.fields.length === 0 ? "{}" : `{ ${t.fields.map((f) => llvm(f.type)).join(", ")} }`;
+  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...t.fields.map((f) => llvm(f.type))];
+  return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
 }
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
 };
 
-// A panic prints its location and reason to stderr and exits with 101, like a Rust panic
-// on the main thread. With nothing to unwind yet, that is all panic=unwind does. stdout is
-// flushed first so earlier output stays ahead of the message even when piped.
-const RUNTIME = [
-  "declare i32 @printf(ptr, ...)",
-  "declare i32 @dprintf(i32, ptr, ...)",
-  "declare i32 @fflush(ptr)",
-  "declare void @exit(i32) noreturn",
-  "declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)",
-  "declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)",
-  "declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)",
-  "",
-  '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
-  '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
-  '@.false = private unnamed_addr constant [6 x i8] c"false\\00"',
-  "",
-  'define internal void @"fsh.panic"(ptr %message) noreturn cold {',
-  "  call i32 @fflush(ptr null)",
-  "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.panic.format, ptr %message)",
-  "  call void @exit(i32 101)",
-  "  unreachable",
-  "}",
-];
-
-const fieldIndex = (t: ObjectType | ClassType, name: string) => t.fields.findIndex((f) => f.name === name);
 
 export type Options = { src: string; file: string; release: boolean };
 
@@ -59,12 +37,16 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   let currentFunction = "";
+  // The class of the constructor or method being emitted, whose instance `%this` points to.
+  let self: ClassType | undefined;
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
-  const { operate, arithmetic } = lowering({ emit, temp, label, startBlock, cString }, src, file, release);
+  const builder = { emit, temp, label, startBlock, cString };
+  const { operate, arithmetic } = lowering(builder, src, file, release);
 
   for (const f of funcs) {
     currentFunction = f.name;
+    self = f.self?.type;
     allocas = [];
     body = [];
     temps = 0;
@@ -262,17 +244,18 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
-      if (isPrint(e.callee)) print(e.args);
+      if (isPrint(e.callee)) print(e.args, builder, value, (a) => types.get(a)!);
       return undefined;
     }
     const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-    return invoke(target, e.callee.kind === "member" ? e.callee.object : undefined, values);
+    const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
+    return invoke(target, object, values);
   }
 
   // Calls a function with its arguments' values, after its receiver when it is a method.
   function invoke(target: Body, object: Expr | undefined, args: string[]): string | undefined {
     const type = returnType(target.name);
-    const values = target.self && object ? [`ptr ${receiver(object)}`, ...args] : args;
+    const values = target.self && object ? [`ptr ${upcast(receiver(object), types.get(object) as ClassType, target.owner!)}`, ...args] : args;
     const call = `call ${llvm(type)} @"fsh.${target.name}"(${values.join(", ")})`;
     if (type === "void") {
       emit(call);
@@ -283,9 +266,21 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
     return result;
   }
 
+  // A pointer to the base embedded in an instance of `from`, through as many bases as it
+  // takes to reach `to`.
+  function upcast(ptr: string, from: ClassType, to: ClassType): string {
+    for (let t = from; t !== to; t = t.base!) {
+      const next = temp();
+      emit(`${next} = getelementptr ${llvm(t)}, ptr ${ptr}, i32 0, i32 0`);
+      ptr = next;
+    }
+    return ptr;
+  }
+
   // Where a method's receiver lives. A temporary, such as a call's result, gets a slot.
   function receiver(object: Expr): string {
-    let root = object;
+    if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
+    let root: Expr = object;
     while (root.kind === "member") root = root.object;
     if (root.kind === "ident" || root.kind === "this") return address(object);
     const type = llvm(types.get(object)!);
@@ -305,13 +300,19 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
   // Builds a value of `to` from the matching fields of a wider value of `from`.
   function project(v: string, from: Type, to: Type): string {
     if (from === to || typeof from === "string" || typeof to === "string") return v;
+    // A class built from a literal starts with its embedded base, built the same way.
+    const embeds = to.kind === "class" && to.base;
     let result = "undef";
+    const insert = (part: string, type: Type, i: number) => {
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(to)} ${result}, ${llvm(type)} ${part}, ${i}`);
+      result = next;
+    };
+    if (embeds) insert(project(v, from, embeds), embeds, 0);
     to.fields.forEach((f, i) => {
       const part = temp();
-      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldIndex(from, f.name)}`);
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(to)} ${result}, ${llvm(f.type)} ${project(part, field(from, f.name)!.type, f.type)}, ${i}`);
-      result = next;
+      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from, f.name).join(", ")}`);
+      insert(project(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
     });
     return result;
   }
@@ -333,7 +334,7 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
         if (getter) return invoke(getter, e.object, [])!;
         const object = types.get(e.object) as ObjectType | ClassType;
         const result = temp();
-        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldIndex(object, e.name)}`);
+        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
         return result;
       }
       case "object": {
@@ -448,7 +449,8 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
     if (target.kind !== "member") return slot(resolved(target));
     const object = types.get(target.object) as ObjectType | ClassType;
     const result = temp();
-    emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, i32 ${fieldIndex(object, target.name)}`);
+    const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
+    emit(`${result} = getelementptr ${llvm(object)}, ptr ${address(target.object)}, i32 0, ${path}`);
     return result;
   }
 
@@ -467,28 +469,6 @@ export function codegen({ funcs, calls, setters, types, locals, returns, coercio
     const result = temp();
     emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
     return result;
-  }
-
-  // `console.log` and `print` are the same: arguments joined by spaces, then a newline.
-  // String literals are folded into the printf format at compile time.
-  function print(args: Expr[]) {
-    let format = "";
-    const values: string[] = [];
-    args.forEach((a, i) => {
-      if (i > 0) format += " ";
-      if (a.kind === "string") {
-        format += a.value.replaceAll("%", "%%");
-      } else if (types.get(a) === "boolean") {
-        const text = temp();
-        emit(`${text} = select i1 ${value(a)}, ptr @.true, ptr @.false`);
-        format += "%s";
-        values.push(`, ptr ${text}`);
-      } else {
-        format += "%lld";
-        values.push(`, i64 ${value(a)}`);
-      }
-    });
-    emit(`call i32 (ptr, ...) @printf(ptr ${cString(format + "\n")}${values.join("")})`);
   }
 
   function cString(s: string): string {

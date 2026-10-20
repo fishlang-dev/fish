@@ -32,6 +32,12 @@ export type ClassInfo = {
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
   getters: Map<string, Body>;
   setters: Map<string, Body>;
+  // The class this one embeds and delegates to, named by `extends`.
+  baseName: string | undefined;
+  base?: ClassInfo;
+  // The initializers and parameter properties a derived constructor runs after `super(...)`.
+  prelude: Stmt[];
+  node: ClassNode;
 };
 
 // Collects a class declaration's fields and builds the constructor it compiles to.
@@ -39,7 +45,9 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
   if (node.abstract) throw unsupported("abstract classes", node);
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   if (node.typeParams.length > 0) throw unsupported("generic classes", span(node.typeParams));
-  if (node.extends) throw unsupported("'extends' clauses", node.extends);
+  if (node.extends && node.extends.kind !== "ident") {
+    throw unsupported(node.extends.kind === "instantiation" ? "generic base classes" : "base class expressions", node.extends);
+  }
   if (node.implements.length > 0) throw unsupported("'implements' clauses", span(node.implements));
   const fields: FieldDecl[] = [];
   const constructors = node.members.filter((m) => m.kind === "constructor");
@@ -100,7 +108,8 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     end: (ctor ?? node).end,
   };
   const required = new Set(fields.filter((f) => !f.init && !properties.includes(f)).map((f) => f.name));
-  return { type, fields, constructor, required, methods, statics, getters, setters };
+  const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
+  return { type, fields, constructor, required, methods, statics, getters, setters, baseName, prelude, node };
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
@@ -155,6 +164,63 @@ export function declareClass(node: ClassNode & { name: string }): ClassInfo {
     fields.push(f);
     return f;
   }
+}
+
+// Links a derived class to the base it embeds. Its constructor must start with
+// `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
+// a constructor of its own it passes its arguments on to the base's.
+export function extend(c: ClassInfo, base: ClassInfo) {
+  c.base = base;
+  c.type.base = base.type;
+  for (let b: ClassInfo | undefined = base; b; b = b.base) {
+    const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
+    if (redeclared) {
+      throw new CompileError(`'${redeclared.name}' is already a field of '${b.type.name}'; with 'extends' as embedding it would be a second, separate field`, redeclared.start, redeclared.end);
+    }
+  }
+  const explicit = c.node.members.find((m) => m.kind === "constructor");
+  const at = { start: c.constructor.start, end: c.constructor.end };
+  if (explicit) {
+    const [first, ...rest] = c.constructor.body.slice(c.prelude.length);
+    if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
+      throw new CompileError("a derived class's constructor must start with 'super(...)'", at.start, at.end);
+    }
+    c.constructor.body = [first, ...c.prelude, ...rest];
+    return;
+  }
+  // Copies, so each constructor has its own parameters, and none of them is a property here.
+  const params = base.constructor.params.map((p) => ({ ...p, modifiers: [] }));
+  const args: Expr[] = params.map((p) => ({ kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end }));
+  const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
+  c.constructor.params = params;
+  c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];
+}
+
+// With embedding, a base's own use of `this.m` keeps reaching the base's `m`, where
+// TypeScript would reach an override. Overriding such a member is an error rather than a
+// silent change in meaning; overriding one the base never reaches through `this` is fine.
+export function checkOverrides(c: ClassInfo) {
+  const own = [...c.methods, ...c.getters, ...c.setters];
+  for (let b = c.base; b; b = b.base) {
+    for (const [name, m] of own) {
+      if (b.fields.some((f) => f.name === name)) throw new CompileError(`'${name}' is already a field of '${b.type.name}'`, m.start, m.end);
+      const inherited = b.methods.has(name) || b.getters.has(name) || b.setters.has(name);
+      if (inherited && usesOnThis(b.node.members, name)) {
+        throw new CompileError(
+          `overriding '${name}' is an error here: '${b.type.name}' reaches it through 'this', and with 'extends' as embedding that would still run '${b.type.name}.${name}'; extract an interface instead`,
+          m.start, m.end);
+      }
+    }
+  }
+}
+
+// Whether any node under `node` is `this.name`.
+function usesOnThis(node: unknown, name: string): boolean {
+  if (typeof node !== "object" || node === null) return false;
+  if (Array.isArray(node)) return node.some((n) => usesOnThis(n, name));
+  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown };
+  if (n.kind === "member" && n.object?.kind === "this" && n.name === name) return true;
+  return Object.values(node).some((v) => usesOnThis(v, name));
 }
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.

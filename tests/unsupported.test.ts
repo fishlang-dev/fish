@@ -57,6 +57,34 @@ for (const [type, what, part] of MEMBERS) {
   });
 }
 
+// Class forms that parse but have no meaning yet: the rejected part is the third column.
+const CLASSES: [string, string, string][] = [
+  ["abstract class A {}", "abstract classes", "abstract class A {}"],
+  ["class A<T> {}", "generic classes", "T"],
+  ["class A implements I {}", "'implements' clauses", "I"],
+  ["class A extends f() {}", "base class expressions", "f()"],
+  ["class A { static n = 1 }", "static fields", "static n = 1"],
+  ["class A { readonly n = 1 }", "'readonly' modifiers", "readonly n = 1"],
+  ["class A { n?: i64 }", "optional fields", "n?: i64"],
+  ["class A { n!: i64 }", "definite assignment assertions", "n!: i64"],
+  ["class A { [k: string]: i64 }", "index signatures", "[k: string]: i64"],
+  ["class A { static {} }", "static blocks", "static {}"],
+  ["class A { static get n(): i64 { return 1 } }", "static accessors", "static get n(): i64 { return 1 }"],
+  ["class A { *g() {} }", "generator methods", "*g() {}"],
+  ["class A { m<T>() {} }", "generic methods", "T"],
+  ["class A { async m() {} }", "'async' modifiers", "async m() {}"],
+];
+
+for (const [decl, what, part] of CLASSES) {
+  test(decl, () => {
+    const src = `${decl}\nfunction main() {}`;
+    const start = src.indexOf(part, decl.startsWith("class A") ? 7 : 0);
+    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+      message: `${what} are not supported yet`, start, end: start + part.length,
+    }));
+  });
+}
+
 // Function signatures: the rejected part is the second column's text.
 const SIGNATURES: [string, string, string][] = [
   ["(x: i64): x is i64", "type predicates", "x is i64"],

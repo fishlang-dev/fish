@@ -10,9 +10,9 @@ export type Field = { name: string; type: Type; access?: Access };
 // Fields are sorted by name, which is also their order in memory.
 export type ObjectType = { kind: "object"; fields: Field[] };
 
-// A class is nominal: one object per declaration, so `===` is identity. Its fields are in
-// declaration order, which is also their order in memory, and are filled in once resolved.
-export type ClassType = { kind: "class"; name: string; fields: Field[] };
+// A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
+// declaration order, filled in once resolved, and follow the base it embeds in memory.
+export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType };
 
 export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType;
 
@@ -40,8 +40,28 @@ export function objectType(fields: Field[]): ObjectType {
   return t;
 }
 
+// A field of an object, or of an instance or the bases it embeds.
 export function field(t: ObjectType | ClassType, name: string): Field | undefined {
-  return t.fields.find((f) => f.name === name);
+  const own = t.fields.find((f) => f.name === name);
+  return own ?? (t.kind === "class" && t.base ? field(t.base, name) : undefined);
+}
+
+// The indices that reach a field inside a value of `t`, through any embedded bases.
+export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
+  const embeds = t.kind === "class" && t.base;
+  const i = t.fields.findIndex((f) => f.name === name);
+  if (i >= 0) return [i + (embeds ? 1 : 0)];
+  return [0, ...fieldPath((t as ClassType).base!, name)];
+}
+
+// Every field of an instance: its bases' first, then its own.
+export function allFields(t: ClassType): Field[] {
+  return [...(t.base ? allFields(t.base) : []), ...t.fields];
+}
+
+// Whether `t` embeds `base`, directly or through another base.
+export function derives(t: ClassType, base: ClassType): boolean {
+  return t.base !== undefined && (t.base === base || derives(t.base, base));
 }
 
 // Whether a value of `from` fits where `to` is declared: the same type, or an object or
