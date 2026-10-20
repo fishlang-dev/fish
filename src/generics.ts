@@ -84,6 +84,7 @@ type Checker = {
 export function instancing({ resolveType, paramType, withScope, members, checking }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, ObjectType | InterfaceType>>();
+  const definitions = new Map<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
@@ -98,11 +99,16 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
 
   // A generic body is checked once at its definition, with placeholders for its type
   // parameters, whether or not anything instantiates it.
+  // It is made once per body: fresh placeholders would make a new instance each time.
   function definition(f: Body): Instance {
     if (!generic(f)) return instanceOf(f);
+    let found = definitions.get(f);
+    if (found) return found;
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), bound));
-    return instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
+    found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
+    definitions.set(f, found);
+    return found;
   }
 
   // A member of a generic class's instance runs with the class's type arguments in scope.
