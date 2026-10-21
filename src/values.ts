@@ -1147,10 +1147,39 @@ export function expressions(ctx: Context) {
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
-    if (typeof object === "string" || !object || !field(object, e.name)?.readonly) return;
+    // Through a mutable reference, the value written is someone else's: in an instance, its
+    // field is as read-only as the field of the type it really is. A copy is the body's own.
+    const locked = field(object as Exclude<Type, string>, e.name)?.readonly || (throughMutable(e.object) && concreteField(e)?.readonly);
+    if (typeof object === "string" || !object || !locked) return;
     if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
     const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
     throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);
+  }
+
+  // Whether a place is reached through a mutable reference anywhere along its path.
+  function throughMutable(e: Expr): boolean {
+    for (let x = e; ; x = x.object) {
+      const t = types.get(x);
+      if (typeof t !== "string" && t?.kind === "ref" && t.mutable) return true;
+      if (x.kind !== "member") return false;
+    }
+  }
+
+  // A field as the concrete types along its path declare it, type parameters taken as what
+  // they stand for in this instance.
+  function concreteField(e: Extract<Expr, { kind: "member" }>): Field | undefined {
+    const holder = concreteType(e.object);
+    return holder && typeof holder !== "string" ? field(holder, e.name) : undefined;
+  }
+
+  function concreteType(e: Expr): Type | undefined {
+    const deref = (t: Type | undefined) => {
+      const low = t && lower(t);
+      return typeof low !== "string" && low?.kind === "ref" ? lower(low.to) : low;
+    };
+    if (e.kind !== "member") return deref(types.get(e));
+    const holder = concreteType(e.object);
+    return holder && typeof holder !== "string" ? deref(field(holder, e.name)?.type) : undefined;
   }
 
   // How a place reads in a message, like `p.inner.x`.
