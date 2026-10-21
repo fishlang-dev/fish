@@ -328,6 +328,8 @@ export function check(program: Stmt[]): Checked {
     const facts: Facts[] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
     const changed: Local[] = [];
+    // The expression an expression statement being checked consists of.
+    let whole: Expr | undefined;
     const assigned = assignedNames(f.body);
     // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
     const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name) || (isRef(l.type) && l.type.mutable);
@@ -421,6 +423,10 @@ export function check(program: Stmt[]): Checked {
     function rewritten(l: Local, at: Expr) {
       const from = facts.findIndex((f) => f.has(l));
       if (from < 0) return;
+      // Inside a larger expression, a condition could still prove the member it had.
+      if (at !== whole) {
+        throw new CompileError(`can't give '${l.name}' another member inside a larger expression while a check narrows it; assign it as a statement of its own`, at.start, at.end);
+      }
       changed.push(l);
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
         throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
@@ -448,6 +454,7 @@ export function check(program: Stmt[]): Checked {
       if (declaration) throw declaration;
       switch (s.kind) {
         case "expr":
+          whole = s.expr;
           effect(s.expr);
           return;
         case "let": {

@@ -246,7 +246,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           return;
         }
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : "'super'";
-        return during(e, () => {
+        // What the call may keep is held once its own loans have ended.
+        let keeps: (() => void) | undefined;
+        during(e, () => {
           // A method's receiver is lent to it for the call, mutably when the method changes it.
           // A mutable receiver is lent shared while the arguments run, so they may read it, and
           // mutably for the call itself.
@@ -268,8 +270,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           }
           // A method that changes its object, or a base's constructor, may keep what is lent.
           const keeper = object ?? (e.callee.kind === "super" ? e.callee : undefined);
-          if (keeper && (self?.mutable || e.callee.kind === "super")) keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
+          if (keeper && (self?.mutable || e.callee.kind === "super")) keeps = () => keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
         });
+        keeps?.();
+        return;
       }
       case "unary":
         return expr(e.operand);
@@ -345,7 +349,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (root.kind === "this" || root.kind === "super") {
       for (const v of values) {
         stored(v);
-        hold(kept, v);
+        if (f.self && holdsRef(f.self.type)) hold(kept, v);
       }
       return;
     }
