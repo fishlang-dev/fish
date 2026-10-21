@@ -1,6 +1,8 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+
+type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
@@ -9,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type RefType, type Type } from "./typing.ts";
+import { closureType, holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -151,6 +153,9 @@ export function check(program: Stmt[]): Checked {
   const continued = new Set<Stmt>();
   const inProgress = new Set<Instance>();
   let nextId = 0;
+  // Every closure's instance, and the instance each closure type calls.
+  const closures: Instance[] = [];
+  const closureBodies = new Map<ClosureType, Instance>();
 
   classes.forEach((c) => link(c, new Set()));
   classes.forEach(checkOverrides);
@@ -167,7 +172,7 @@ export function check(program: Stmt[]): Checked {
   if (main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
-  return { instances: all().filter((i) => i.concrete && compiled.has(i.body)) };
+  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body)), ...closures.filter((i) => i.concrete)] };
 
   // What a function's returned reference borrows from: the parameters with its written
   // lifetime, or by elision `this` for a method, or the only reference parameter.
@@ -316,7 +321,7 @@ export function check(program: Stmt[]): Checked {
     const f = instance.body;
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
-    let declared = returnTypeOf(f, scopeOf(instance));
+    let declared = f.closure ? f.returnType && resolveType(f.returnType) : returnTypeOf(f, scopeOf(instance));
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
@@ -353,7 +358,7 @@ export function check(program: Stmt[]): Checked {
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     const self = f.self && { ...f.self, type: viewed ?? f.self.type };
 
-    const { value, read, condition, effect, coerce } = expressions({
+    const { value, read, condition, effect, coerce, result } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -365,9 +370,11 @@ export function check(program: Stmt[]): Checked {
       reachable: (l) => !caseOnly.has(l),
       rewritten,
       depthOf: (l) => depths.get(l)!,
+      closure,
+      closureBody: (t) => closureBodies.get(t)!,
     });
 
-    const params = paramTypes(instance, scopeOf(instance));
+    const params = f.closure ? f.params.map(closureParam) : paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
@@ -387,7 +394,8 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     const type = declared ?? inferred ?? "void";
-    lifetimes(f);
+    if (f.closure && holdsRef(type)) throw unsupported("closures returning references", f.returnType ?? f.closure.value ?? f);
+    if (!f.closure) lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
     const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
     const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
@@ -447,6 +455,34 @@ export function check(program: Stmt[]): Checked {
       } finally {
         facts.pop();
       }
+    }
+
+    // An arrow function: its own type, and its body checked here, where it is written.
+    function closure(e: Arrow): ClosureType {
+      if (e.async) throw unsupported("async arrow functions", e);
+      if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
+      const value = Array.isArray(e.body) ? undefined : e.body;
+      const body: Body = {
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance },
+        body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
+      };
+      const inner: Instance = {
+        body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+        bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(),
+      };
+      closures.push(inner);
+      checkInstance(inner);
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns);
+      closureBodies.set(type, inner);
+      return type;
+    }
+
+    function closureParam(p: Param): Type {
+      const type = paramType(p);
+      const to = isRef(type) ? type.to : type;
+      if (typeof to !== "string" && to.kind === "interface") throw unsupported("closure parameters of interface types", p);
+      return type;
     }
 
     function statement(s: Stmt): Facts | undefined {
@@ -573,7 +609,8 @@ export function check(program: Stmt[]): Checked {
         case "return": {
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
-          const type = s.value ? value(s.value) : "void";
+          // An arrow's expression body may be a call returning nothing.
+          const type = !s.value ? "void" : s.value === f.closure?.value && s.value.kind === "call" ? result(s.value) : value(s.value);
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);

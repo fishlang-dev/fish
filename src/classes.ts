@@ -2,6 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
+import type { Instance } from "./check.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -22,6 +23,9 @@ export type Body = Span & {
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
   access?: Access;
+  // An arrow function's body, checked inside the instance it is written in. An expression body
+  // is a `return` of it, `value`.
+  closure?: { value?: Expr; parent: Instance };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather

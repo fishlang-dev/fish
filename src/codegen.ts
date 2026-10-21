@@ -64,8 +64,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
       return `${llvm(local.type)} %${local.name}.arg`;
     });
-    // A constructor or method works on its instance through a pointer.
+    // A constructor or method works on its instance through a pointer, and a closure on what
+    // it captured.
     if (f.self) params.unshift("ptr %this");
+    if (f.closure) params.unshift("ptr %env");
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
@@ -231,7 +233,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return;
       }
       case "return":
-        emit(s.value ? `ret ${llvm(current.returns)} ${value(s.value)}` : "ret void");
+        // An arrow's expression body may be a call returning nothing.
+        if (s.value && current.returns === "void") {
+          call(s.value as Extract<Expr, { kind: "call" }>);
+          emit("ret void");
+        } else emit(s.value ? `ret ${llvm(current.returns)} ${value(s.value)}` : "ret void");
         // Anything after a return goes in a fresh block that nothing branches to.
         startBlock(label());
         return;
@@ -269,7 +275,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       return convert(value(object), types.get(object)!, types.get(e)!);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
-    const pointer = target.body.self && object ? thisPointer(target, object) : undefined;
+    const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
     const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
     const result = invoke(target, pointer, values);
     // A call through a type parameter returns what its bound's method declares.
@@ -373,6 +379,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // A field read through an interface or object parameter takes the type its bound declares.
         return convert(result, field(object, e.name)!.type, types.get(e)!);
       }
+      case "arrow":
+        return "zeroinitializer";
       case "object": {
         const type = types.get(e) as ObjectType;
         // Properties run in source order, then fill the fields in their sorted order.

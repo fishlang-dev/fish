@@ -46,7 +46,12 @@ export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?
 // function's lifetime parameter it lives for; it is checked, then erased.
 export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType;
+// A closure: an arrow function and what it captures. Each arrow, in each instance of the body
+// it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
+// as its fields, which are never read by name.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[] };
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -64,6 +69,12 @@ export function classType(name: string, generic?: ClassType["generic"]): ClassTy
 export function interfaceType(name: string): InterfaceType {
   const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
   keys.set(t, `interface ${declared++}`);
+  return t;
+}
+
+export function closureType(names: string[], params: Type[], returns: Type): ClosureType {
+  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields: [] };
+  keys.set(t, `closure ${declared++}`);
   return t;
 }
 
@@ -180,7 +191,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure") return t;
   if (t.kind === "param") return t.concrete ?? t;
   let found = lowered.get(t);
   if (!found) {

@@ -5,7 +5,7 @@ import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, baseOf, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, ClassType, Field, ObjectType, RefType, Type } from "./typing.ts";
+import type { Access, ClassType, ClosureType, Field, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -72,16 +72,24 @@ export type Context = {
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
   depthOf(l: Local): number;
+  // An arrow function's type, its body checked; and the instance a closure type runs.
+  closure(e: Extract<Expr, { kind: "arrow" }>): ClosureType;
+  closureBody(t: ClosureType): Instance;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, rewritten, depthOf } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, rewritten, depthOf, closure, closureBody } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, read, condition, effect, coerce };
+  return { value, read, condition, effect, coerce, result };
+
+  // A call's type, `void` included, or any other expression's.
+  function result(e: Expr): Type {
+    return e.kind === "call" ? call(e).type : value(e);
+  }
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
@@ -118,6 +126,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
+    if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
     const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined;
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -133,6 +142,21 @@ export function expressions(ctx: Context) {
     // was lent to the call, its receiver included.
     if (holdsRef(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, object, e, lends));
     return { type, what: `'${target.name}'` };
+  }
+
+  // A call of a closure held by a variable runs the closure's body.
+  function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
+    const type = value(callee);
+    if (typeof type === "string" || type.kind !== "closure") {
+      throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
+    }
+    if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
+    if (e.args.length !== type.params.length) {
+      throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    }
+    e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
+    calls.set(e, closureBody(type));
+    return { type: type.returns, what: `'${callee.name}'` };
   }
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
@@ -339,7 +363,7 @@ export function expressions(ctx: Context) {
           return shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
-        const found = typeof object === "string" ? undefined : field(object, e.name);
+        const found = typeof object === "string" || object.kind === "closure" ? undefined : field(object, e.name);
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
@@ -367,6 +391,8 @@ export function expressions(ctx: Context) {
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));
+      case "arrow":
+        return closure(e);
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);

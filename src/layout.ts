@@ -164,7 +164,7 @@ export function conversions(b: Slots) {
     if (typeof from !== "string" && from.kind === "union") {
       return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => convert(part, member, to));
     }
-    if (typeof from === "string" || typeof to === "string") return v;
+    if (typeof from === "string" || typeof to === "string" || from.kind === "closure" || to.kind === "closure") return v;
     if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param") {
       throw new Error("internal error: an interface or a type parameter reached codegen");
     }

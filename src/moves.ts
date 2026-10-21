@@ -153,7 +153,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "return":
         if (s.value) {
           expr(s.value, () => "");
-          returned(s.value);
+          // An arrow's expression body may be a call returning nothing.
+          if (types.has(s.value)) returned(s.value);
         }
         state = null;
         return;
@@ -249,6 +250,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
+          // A closure is read to call it.
+          if (e.callee.kind === "ident" && locals.has(e.callee)) expr(e.callee);
           // A method's receiver is lent to it for the call, mutably when the method changes it.
           // A mutable receiver is lent shared while the arguments run, so they may read it, and
           // mutably for the call itself.
