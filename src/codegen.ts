@@ -6,7 +6,7 @@ import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isCopy, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -647,6 +647,58 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     startBlock(end);
   }
 
+  // `push` moves its argument in at the end, growing the buffer when full; `pop` takes the last
+  // element out as an Option, empty when there is none. Both work on the array where it lives.
+  function arrayCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const type = valueType(callee.object) as ArrayType;
+    const t = llvm(type.element);
+    const at = receiver(callee.object);
+    const [lengthAt, dataAt] = [temp(), temp()];
+    const field = (to: string, i: number) => emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
+    if (callee.name === "push") {
+      const v = owned(e.args[0]!);
+      emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(type.element, "1")})`);
+      field(lengthAt, 1);
+      field(dataAt, 0);
+      const [length, data, slot, more] = [temp(), temp(), temp(), temp()];
+      emit(`${length} = load i64, ptr ${lengthAt}`);
+      emit(`${data} = load ptr, ptr ${dataAt}`);
+      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${length}`);
+      emit(`store ${t} ${v}, ptr ${slot}`);
+      emit(`${more} = add i64 ${length}, 1`);
+      emit(`store i64 ${more}, ptr ${lengthAt}`);
+      return undefined;
+    }
+    const option = unionType([type.element, "null"]);
+    field(lengthAt, 1);
+    const [length, empty, some, none, end] = [temp(), temp(), label(), label(), label()];
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${empty} = icmp eq i64 ${length}, 0`);
+    emit(`br i1 ${empty}, label %${none}, label %${some}`);
+    startBlock(some);
+    const [last, data, slot, v] = [temp(), temp(), temp(), temp()];
+    emit(`${last} = sub i64 ${length}, 1`);
+    emit(`store i64 ${last}, ptr ${lengthAt}`);
+    field(dataAt, 0);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${last}`);
+    emit(`${v} = load ${t}, ptr ${slot}`);
+    const held = convert(v, type.element, option);
+    const someEnd = block;
+    emit(`br label %${end}`);
+    startBlock(none);
+    const nothing = convert("zeroinitializer", "null", option);
+    const noneEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    const result = temp();
+    emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+    // Used as a statement, the call has no type of its own; what it took out drops after it.
+    if (types.has(e)) return convert(result, option, types.get(e)!);
+    pending.push({ v: result, type: option });
+    return result;
+  }
+
   // A pointer to an array's element, after the bounds check.
   function element(e: Extract<Expr, { kind: "index" }>, array: string): string {
     const type = valueType(e.object) as ArrayType;
@@ -805,6 +857,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return undefined;
       }
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
       return copied(convert(value(object), types.get(object)!, types.get(e)!), types.get(e)!);

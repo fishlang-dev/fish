@@ -222,6 +222,7 @@ export function expressions(ctx: Context) {
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
+    if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -300,6 +301,30 @@ export function expressions(ctx: Context) {
       coerce(a, t, params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(params[i]!)}'`);
     });
     return { type: returns, what: `'${callee.name}'` };
+  }
+
+  // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or
+  // gives an empty Option. Both change the array.
+  function arrayCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
+    const held = types.get(callee.object)!;
+    if (isRefType(held)) coercions.set(callee.object, array);
+    const count = callee.name === "push" ? 1 : 0;
+    if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
+    if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
+    changeable(callee.object, callee.name === "push" ? "push to" : "pop from");
+    if (callee.name === "pop") return { type: unionType([array.element, "null"]), what: "'pop'" };
+    const t = value(e.args[0]!);
+    coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+    return { type: "void", what: "'push'" };
+  }
+
+  // Whether an expression is an index into an array, a place inside it.
+  function element(e: Expr): e is Extract<Expr, { kind: "index" }> {
+    if (e.kind !== "index") return false;
+    const object = types.get(e.object);
+    return object !== undefined && isArray(isRefType(object) ? object.to : object);
   }
 
   // A string read where a string's property or method is used: a literal becomes its string,
@@ -1014,7 +1039,7 @@ export function expressions(ctx: Context) {
 
   // Whether an expression reaches into a variable or `this`, rather than being a temporary.
   function rooted(e: Expr): boolean {
-    while (e.kind === "member" && !calls.has(e)) e = e.object;
+    while ((e.kind === "member" && !calls.has(e)) || element(e)) e = e.object;
     return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
   }
 
@@ -1225,7 +1250,7 @@ export function expressions(ctx: Context) {
   // temporary.
   // A getter's result is a temporary, so a path through one isn't a place.
   function place(e: Expr): boolean {
-    while (e.kind === "member" && !e.optional && !calls.has(e)) {
+    while ((e.kind === "member" && !e.optional && !calls.has(e)) || element(e)) {
       // An enum's member, and a field every member of a union shares, are values, not places.
       const object = types.get(e.object);
       const held = typeof object !== "string" && object?.kind === "ref" ? object.to : object;
@@ -1244,14 +1269,14 @@ export function expressions(ctx: Context) {
     // Through a mutable reference anything below it may change, whatever variable holds the
     // reference, as long as nothing above it is shared.
     let throughMut = false;
-    while (root.kind === "member") {
-      readonly(root, target, action);
+    while (root.kind === "member" || element(root)) {
+      if (root.kind === "member") readonly(root, target, action);
       const holder = types.get(root.object);
       if (typeof holder !== "string" && holder?.kind === "ref" && holder.mutable) throughMut = true;
       else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
-      path = `.${root.name}${path}`;
+      path = `${root.kind === "member" ? `.${root.name}` : "[...]"}${path}`;
       root = root.object;
     }
     if (root.kind === "this" || root.kind === "super") return changesThis(path, action, target);
@@ -1331,6 +1356,7 @@ export function expressions(ctx: Context) {
   // How a place reads in a message, like `p.inner.x`.
   function placeText(e: Expr): string {
     if (e.kind === "member") return `${placeText(e.object)}.${e.name}`;
+    if (e.kind === "index") return `${placeText(e.object)}[...]`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
 

@@ -312,6 +312,19 @@ void fsh_rt_panic(const char *message) {
   exit(101);
 }
 
+typedef struct { char *data; int64_t length; int64_t capacity; } fsh_array;
+
+// Makes room for one more element of size bytes, doubling the buffer when it is full.
+void fsh_rt_array_reserve(fsh_array *a, int64_t size) {
+  if (a->length < a->capacity) return;
+  int64_t capacity = a->capacity ? a->capacity * 2 : 4;
+  char *data = fsh_rt_alloc(capacity * size);
+  if (a->length) memcpy(data, a->data, a->length * size);
+  fsh_rt_free(a->data);
+  a->data = data;
+  a->capacity = capacity;
+}
+
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
