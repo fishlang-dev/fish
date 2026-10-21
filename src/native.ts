@@ -4,7 +4,7 @@
 // A float is written as JavaScript's `String(x)` writes a number: the fewest digits that read
 // back as the same value, in plain notation for exponents from -7 to 20 and in exponent
 // notation otherwise. An f32 takes the fewest digits that read back as the same f32.
-export const NATIVE = String.raw`
+export const NATIVE = `
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
