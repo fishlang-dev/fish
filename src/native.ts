@@ -315,6 +315,19 @@ static int fsh_put(char *out, uint32_t u) {
   return 3;
 }
 
+// Bytes [a, b) of s, starting and ending at characters, sharing the block they live in.
+static fsh_str *fsh_share(fsh_str *s, int64_t a, int64_t b) {
+  fsh_str *slice = fsh_rt_alloc(sizeof(fsh_str));
+  slice->count = 1;
+  slice->length = b - a;
+  slice->bytes = s->bytes + a;
+  slice->base = s->base ? s->base : s;
+  fsh_rt_str_retain(slice->base);
+  slice->units = -1;
+  slice->crumbs = NULL;
+  return slice;
+}
+
 // UTF-16 units [from, to) of s, with 0 <= from <= to <= its length. The slice shares the bytes
 // of the block they live in; an end that cuts a pair makes it a copy holding that half as a
 // lone surrogate.
@@ -331,13 +344,7 @@ static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
   const unsigned char *bytes = (const unsigned char *)s->bytes;
   fsh_str *slice;
   if (!cut_start && !cut_end) {
-    slice = fsh_rt_alloc(sizeof(fsh_str));
-    slice->count = 1;
-    slice->length = b - a;
-    slice->bytes = s->bytes + a;
-    slice->base = s->base ? s->base : s;
-    fsh_rt_str_retain(slice->base);
-    slice->crumbs = NULL;
+    slice = fsh_share(s, a, b);
   } else {
     int64_t start = cut_start ? a + 4 : a;
     slice = fsh_str_new(3 + (b - start) + 3);
@@ -413,6 +420,60 @@ void fsh_rt_array_reserve(fsh_array *a, int64_t size) {
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
+}
+
+static void fsh_add(fsh_array *out, fsh_str *s) {
+  fsh_rt_array_reserve(out, sizeof(fsh_str *));
+  ((fsh_str **)out->data)[out->length++] = s;
+}
+
+// JavaScript's split by a string, into at most limit parts (taken modulo 2^32, as JavaScript
+// does): no separator gives the whole string; an empty one gives each UTF-16 unit.
+void fsh_rt_str_split(fsh_array *out, fsh_str *s, fsh_str *separator, int64_t limit) {
+  out->data = NULL;
+  out->length = out->capacity = 0;
+  uint32_t most = (uint32_t)limit;
+  if (most == 0) return;
+  int64_t n = fsh_rt_str_units(s);
+  if (!separator) {
+    fsh_rt_str_retain(s);
+    return fsh_add(out, s);
+  }
+  int64_t m = fsh_rt_str_units(separator);
+  if (m == 0) {
+    for (int64_t i = 0; i < n && out->length < most; i++) fsh_add(out, fsh_sub(s, i, i + 1));
+    return;
+  }
+  int64_t from = 0;
+  for (int64_t at; out->length < most && (at = fsh_rt_str_index_of(s, separator, from)) >= 0; from = at + m) fsh_add(out, fsh_sub(s, from, at));
+  if (out->length < most) fsh_add(out, fsh_sub(s, from, n));
+}
+
+// JavaScript's whitespace and line terminators, which trim removes.
+static int fsh_space(uint32_t c) {
+  return (c >= 0x09 && c <= 0x0D) || c == 0x20 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) ||
+         c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 || c == 0xFEFF;
+}
+
+// Trims whitespace from the start (1), the end (2) or both (3), sharing what is left.
+fsh_str *fsh_rt_str_trim(fsh_str *s, int32_t sides) {
+  const unsigned char *p = (const unsigned char *)s->bytes;
+  int64_t a = 0, b = s->length;
+  int half = 0;
+  while (sides & 1 && a < b) {
+    int64_t next = a;
+    if (!fsh_space(fsh_next(p, &next, &half)) || half) break;
+    a = next;
+  }
+  while (sides & 2 && b > a) {
+    int64_t start = b - 1;
+    while (start > a && (p[start] & 0xC0) == 0x80) start--;
+    int64_t at = start;
+    half = 0;
+    if (!fsh_space(fsh_next(p, &at, &half)) || half) break;
+    b = start;
+  }
+  return fsh_share(s, a, b);
 }
 
 // An index past the end panics as Rust's does; at is the "panicked at" line.

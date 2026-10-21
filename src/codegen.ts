@@ -6,7 +6,7 @@ import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -996,6 +996,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         emit(`${result} = icmp sge i64 ${found}, 0`);
         return given(result, "boolean");
       }
+      // An array comes back through memory, as C and LLVM return aggregates differently.
+      case "split": {
+        const out = alloca(ARRAY);
+        emit(`call void @fsh_rt_str_split(ptr ${out}, ptr ${s}, ptr ${args[0] ?? "null"}, i64 ${args[1] ?? "4294967295"})`);
+        emit(`${result} = load ${ARRAY}, ptr ${out}`);
+        return given(result, arrayType("string"));
+      }
+      case "trim":
+      case "trimStart":
+      case "trimEnd":
+        emit(`${result} = call ptr @fsh_rt_str_trim(ptr ${s}, i32 ${callee.name === "trimStart" ? 1 : callee.name === "trimEnd" ? 2 : 3})`);
+        return given(result, "string");
       case "startsWith":
       case "endsWith": {
         const yes = temp();

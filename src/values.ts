@@ -1434,6 +1434,10 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   includes: [["string", "i64"], "boolean", 1],
   startsWith: [["string", "i64"], "boolean", 1],
   endsWith: [["string", "i64"], "boolean", 1],
+  split: [["string", "usize"], arrayType("string"), 0],
+  trim: [[], "string", 0],
+  trimStart: [[], "string", 0],
+  trimEnd: [[], "string", 0],
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
 };

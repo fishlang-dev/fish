@@ -23,6 +23,8 @@ export const RUNTIME = [
   "declare i64 @fsh_rt_str_index_of(ptr, ptr, i64)",
   "declare i32 @fsh_rt_str_starts_with(ptr, ptr, i64)",
   "declare i32 @fsh_rt_str_ends_with(ptr, ptr, i64)",
+  "declare void @fsh_rt_str_split(ptr, ptr, ptr, i64)",
+  "declare ptr @fsh_rt_str_trim(ptr, i32)",
   "declare ptr @fsh_rt_str_slice(ptr, i64, i64, i32)",
   "declare ptr @fsh_rt_str_substring(ptr, i64, i64, i32)",
   "declare void @fsh_rt_panic(ptr) noreturn cold",
