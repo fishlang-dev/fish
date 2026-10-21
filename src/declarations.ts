@@ -41,14 +41,17 @@ function enumDeclaration(c: Cursor): Stmt {
   const isConst = c.eat("const");
   c.expect("enum");
   const name = c.ident().text;
+  const typeParams = c.at("<") ? typeParameters(c) : [];
   c.expect("{");
+  // A member may hold values, `Circle(f64)`, rather than be one.
   const members = c.list((): EnumMember => {
     const t = c.next();
     if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a member name", t);
+    const payload = c.eat("(") ? c.list(() => type(c), ")") : undefined;
     const init = c.eat("=") ? expression(c) : undefined;
-    return { name: t.text, init, start: t.start, end: c.end() };
+    return { name: t.text, init, payload, start: t.start, end: c.end() };
   }, "}");
-  return { kind: "enum", name, const: isConst, members, start, end: c.end() };
+  return { kind: "enum", name, const: isConst, typeParams, members, start, end: c.end() };
 }
 
 // `namespace A.B { }`, `module A { }`, `module "m" { }`, `declare module "m";`, `global { }`.

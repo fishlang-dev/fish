@@ -552,7 +552,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, number][] {
-    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure") return [];
+    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...type.fields.map((f, i): [Type, number] => [f.type, i + base.length])];
   }
@@ -920,6 +920,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       if (isPrint(e.callee)) {
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
         return undefined;
+      }
+      // `Shape.Circle(1.5)`: a variant built from its payload, each value handed to it. Used as a
+      // statement, it is dropped after it.
+      const built = types.get(e.callee);
+      if (built && typeof built !== "string" && built.kind === "variant") {
+        const values = delivered((hand) => e.args.map((a, i) => hand(owned(a), built.fields[i]!.type)));
+        let result = "zeroinitializer";
+        values.forEach((v, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(built)} ${result === "zeroinitializer" ? "undef" : result}, ${llvm(built.fields[i]!.type)} ${v}, ${i}`);
+          result = next;
+        });
+        if (!types.has(e)) pending.push({ v: result, type: built });
+        return result;
       }
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.

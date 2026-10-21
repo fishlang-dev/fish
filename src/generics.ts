@@ -100,6 +100,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "ref") return concrete(t.to);
   if (t.kind === "closure") return t.concrete;
   if (t.kind === "array") return concrete(t.element);
+  if (t.kind === "variant") return t.args.every(concrete) && t.fields.every((f) => concrete(f.type));
   let known = concreteObjects.get(t);
   if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
   return known;

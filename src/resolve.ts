@@ -1,8 +1,8 @@
 import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import type { EnumInfo } from "./enums.ts";
+import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { arrayType, functionType, holdsRef, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { arrayType, variantType, functionType, holdsRef, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -46,12 +46,45 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   let scope = new Map<string, Type>();
+  // The data-carrying enums being made, to catch one that holds itself.
+  const making = new Set<DataEnum>();
   aliases.forEach((a) => {
     const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
     aliasType(a, [...scope.values()], a);
   });
   interfaces.forEach(interfaceOf);
-  return { resolveType, paramType, withScope };
+  return { resolveType, paramType, withScope, enumInstance };
+
+  // A data-carrying enum made with these type arguments: a variant per member, its payload
+  // types resolved with the type parameters bound, and the enum as their union. An enum
+  // holding itself would be infinitely large.
+  function enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance {
+    const data = info.data!;
+    if (args.length !== data.params.length) {
+      const n = data.params.length;
+      throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
+    }
+    const key = args.map(keyOf).join(",");
+    const made = data.instances.get(key);
+    if (made) return made;
+    if (making.has(data)) throw new CompileError(`enum '${data.name}' holds itself, which would make it infinitely large; this isn't supported yet`, at.start, at.end);
+    making.add(data);
+    try {
+      const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
+      const variants = new Map(data.members.map((m) => {
+        const payload = withScope(bindings, () => (m.payload ?? []).map((t) => storable(resolveType(t), t)));
+        return [m.name, variantType(data.name, data.id, m.name, args, payload)];
+      }));
+      const shown = args.length > 0 ? `${data.name}<${args.map(show).join(", ")}>` : data.name;
+      const type = unionType([...variants.values()], shown);
+      for (const v of variants.values()) v.of = type;
+      const instance = { type, variants };
+      data.instances.set(key, instance);
+      return instance;
+    } finally {
+      making.delete(data);
+    }
+  }
 
   function withScope<T>(bindings: Map<string, Type>, f: () => T): T {
     const outer = scope;
@@ -128,6 +161,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (named) return named;
     const [owner, name] = t.name.split(".");
     const e = enums.get(owner!);
+    if (e?.data) {
+      const instance = enumInstance(e, args, t);
+      if (name === undefined) return instance.type;
+      const variant = instance.variants.get(name);
+      if (variant) return variant;
+    }
     if (e && name === undefined) return e.type;
     if (e && e.members.has(name!)) return e.members.get(name!)!;
     const trait = interfaces.get(t.name);
@@ -286,7 +325,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

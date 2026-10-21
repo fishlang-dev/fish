@@ -5,8 +5,8 @@ import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
-import type { Access, ArrayType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
-import type { EnumInfo } from "./enums.ts";
+import type { Access, ArrayType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
@@ -44,6 +44,8 @@ export type Context = {
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   enums: Map<string, EnumInfo>;
+  // A data-carrying enum made with these type arguments.
+  enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
@@ -214,6 +216,7 @@ export function expressions(ctx: Context) {
         if (printable(type)) continue;
         throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
           : isArray(type) ? "printing an array is not supported yet; print its elements"
+          : holdsVariant(type) ? "printing an enum that holds data is not supported yet"
           : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
       return { type: "void", what: "printing" };
@@ -227,6 +230,20 @@ export function expressions(ctx: Context) {
       return traitCall(e, callee, receiver);
     }
     if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    // `Shape.Circle(1.5)` builds a variant from its payload.
+    const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
+    if (named?.data && callee.kind === "member") {
+      const v = variant(callee, named, false);
+      if (e.args.length !== v.fields.length) {
+        throw new CompileError(`'${v.name}' holds ${v.fields.length} value${v.fields.length === 1 ? "" : "s"}, but ${e.args.length} ${e.args.length === 1 ? "was" : "were"} given`, e.start, e.end);
+      }
+      e.args.forEach((a, i) => {
+        const t = value(a);
+        coerce(a, t, v.fields[i]!.type, `argument of type '${show(t)}' is not assignable to '${v.name}', which holds '${show(v.fields[i]!.type)}'`);
+      });
+      types.set(callee, v);
+      return { type: v, what: `'${v.name}'` };
+    }
     // `String(x)`: a string, number or boolean written as JavaScript writes it.
     if (callee.kind === "ident" && callee.name === "String" && !byName.has("String")) {
       if (e.args.length !== 1) throw new CompileError("'String' takes 1 argument", e.start, e.end);
@@ -342,6 +359,17 @@ export function expressions(ctx: Context) {
     else if (type !== "string" && !chained) coerce(object, type, "string", "");
   }
 
+  // A member of a data-carrying enum: a variant, read on its own only when it holds nothing.
+  function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean): VariantType {
+    const data = named.data!;
+    if (data.params.length > 0) throw unsupported("generic enums", e);
+    const found = ctx.enumInstance(named, [], e).variants.get(e.name);
+    if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    if (alone && found.fields.length > 0) throw new CompileError(`'${found.name}' holds ${found.fields.length === 1 ? "a value" : "values"}; build it with '${found.name}(...)'`, e.start, e.end);
+    if (!alone && found.fields.length === 0) throw new CompileError(`'${found.name}' holds nothing, so it isn't called; write '${found.name}'`, e.start, e.end);
+    return found;
+  }
+
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
   // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
   function copies(t: Type): boolean {
@@ -368,7 +396,7 @@ export function expressions(ctx: Context) {
   // The type of a member call's receiver, unless it is `super` or a class's name.
   function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
-    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return undefined;
+    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && (classes.has(object.name) || enums.has(object.name)))) return undefined;
     const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
     return typeof type !== "string" && type.kind === "ref" ? type.to : type;
@@ -621,6 +649,7 @@ export function expressions(ctx: Context) {
       case "member": {
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
+        if (named?.data) return variant(e, named, true);
         if (named) {
           const found = named.members.get(e.name);
           if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
@@ -1452,3 +1481,6 @@ const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind ===
 
 // The methods an array has.
 const ARRAY_METHODS = new Set(["push", "pop"]);
+
+// Whether a type is a data-carrying enum, or one of its variants.
+const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));

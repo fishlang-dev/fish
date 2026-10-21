@@ -46,6 +46,15 @@ export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?
 // function's lifetime parameter it lives for; it is checked, then erased.
 export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
 
+// A member of a data-carrying enum: a nominal value holding positional fields named `0`, `1`,
+// ..., laid out as an object's. One per enum instance and member, so `===` is identity. A
+// generic enum's variant knows the enum's type arguments, to be made again from lowered ones.
+export type VariantType = {
+  kind: "variant"; name: string; member: string; enum: string; fields: Field[]; args: Type[];
+  // The enum it belongs to, a union of its variants, once the enum is made.
+  of?: Type;
+};
+
 // An owned array of elements of one type, growable like Rust's Vec. One per element type, so
 // `===` is identity. It has no fields; its length and elements are reached by name and index.
 export type ArrayType = { kind: "array"; element: Type; fields: Field[] };
@@ -92,7 +101,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -164,6 +173,7 @@ export function membersFor(type: Type, union: UnionType): Type[] {
 // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
 // argument or a property, since the place may later hold another member.
 export function widenEnum(t: Type): Type {
+  if (typeof t !== "string" && t.kind === "variant" && t.of) return t.of;
   return typeof t !== "string" && t.kind === "literal" && t.owner?.of ? t.owner.of : t;
 }
 
@@ -210,6 +220,21 @@ export function arrayType(element: Type): ArrayType {
 
 const arrays = new Map<string, ArrayType>();
 
+// The variant `member` of an enum declaration (by its unique id) with these type arguments.
+export function variantType(enumName: string, id: number, member: string, args: Type[], payload: Type[]): VariantType {
+  const key = `variant ${id} ${member} <${args.map(keyOf).join(",")}>`;
+  let t = variants.get(key);
+  if (!t) {
+    const shown = args.length > 0 ? `${enumName}<${args.map(show).join(", ")}>` : enumName;
+    t = { kind: "variant", name: `${shown}.${member}`, member, enum: enumName, fields: payload.map((type, i) => ({ name: String(i), type })), args };
+    variants.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+const variants = new Map<string, VariantType>();
+
 // Primitives, literals, references, and unions of nothing else are copied; objects,
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
@@ -227,6 +252,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
   if (t.kind === "array") return holdsMut(t.element);
+  if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
@@ -239,6 +265,7 @@ export function holdsRef(t: Type): boolean {
   if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
   if (t.kind === "union") return t.members.some(holdsRef);
   if (t.kind === "array") return holdsRef(t.element);
+  if (t.kind === "variant") return t.fields.some((f) => holdsRef(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
@@ -268,13 +295,14 @@ export function lower(t: Type): Type {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
     else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
     else if (t.kind === "array") found = arrayType(lower(t.element));
+    else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
   return found;
 }
 
-const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType, Type>();
+const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType | VariantType, Type>();
 
 // A type with some of its parts swapped for others, looking inside objects and unions.
 export function replaced(t: Type, swap: Map<Type, Type>): Type {
@@ -286,6 +314,10 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
+  if (typeof t !== "string" && t.kind === "variant") {
+    const args = t.args.map((a) => replaced(a, swap));
+    return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
+  }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
@@ -294,6 +326,13 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
 let instanceClass = (c: ClassType, _args: Type[]): ClassType => c;
 export function lowersClasses(f: typeof instanceClass) {
   instanceClass = f;
+}
+
+// The same variant of a generic enum made with other type arguments, which only the checker
+// can make.
+let instanceVariant = (v: VariantType, _args: Type[]): VariantType => v;
+export function lowersVariants(f: typeof instanceVariant) {
+  instanceVariant = f;
 }
 
 // A string that is the same exactly when two types are, for keying instances.

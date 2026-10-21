@@ -115,7 +115,7 @@ export type Stmt = Span & (
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
-  | { kind: "enum"; name: string; const: boolean; members: EnumMember[] }
+  | { kind: "enum"; name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[] }
   // `name` is dotted (`A.B`), or the module string in `declare module "m"`, where `quoted` is
   // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
@@ -220,7 +220,7 @@ export type PatternProp = Span & { key: PropertyName; value: Pattern };
 // `name` may be a string, as in `import { "a-b" as ab }`.
 export type Specifier = Span & { name: string; alias: string | undefined; typeOnly: boolean };
 
-export type EnumMember = Span & { name: string; init: Expr | undefined };
+export type EnumMember = Span & { name: string; init: Expr | undefined; payload: TypeNode[] | undefined };
 
 // `default:` has no test.
 export type SwitchCase = Span & { test: Expr | undefined; body: Stmt[] };
