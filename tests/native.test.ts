@@ -36,3 +36,17 @@ test("strings join, compare and free", () => {
   expect(stdout).toBe("-120.5 -1 0\n");
   expect(stderr).toBe("");
 });
+
+test("the halves of a surrogate pair join into one character", () => {
+  const { stdout, stderr } = run(`
+    fsh_str *high = fsh_str_of("\\xED\\xA0\\xBD", 3), *low = fsh_str_of("\\xED\\xB8\\x80", 3);
+    high->units = 1; low->units = 1;
+    fsh_str *pair = fsh_rt_str_concat(high, low);
+    fsh_str *emoji = fsh_str_of("\\xF0\\x9F\\x98\\x80", 4);
+    printf("%lld %lld %d\\n", (long long)pair->length, (long long)pair->units, fsh_rt_str_compare(pair, emoji));
+    fsh_rt_str_print(1, high);
+    printf("\\n");
+    fsh_rt_str_release(high); fsh_rt_str_release(low); fsh_rt_str_release(pair); fsh_rt_str_release(emoji);`);
+  expect(stdout).toBe("4 2 0\n�\n");
+  expect(stderr).toBe("");
+});

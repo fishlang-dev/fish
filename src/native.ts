@@ -4,8 +4,10 @@
 // Every allocation goes through fsh_rt_alloc and fsh_rt_free, which count what is live. With
 // FISH_LEAKS=1 in the environment, a program reports at exit what it never freed.
 //
-// A string is a block: a reference count, the length in bytes, then the UTF-8 bytes. A count
-// below zero marks a literal, which lives for the whole program, so retain and release skip it.
+// A string is a block: a reference count, its length in bytes, a pointer to its bytes, the
+// block it shares them with when it is a slice, its UTF-16 length once known (-1 before), its
+// breadcrumbs once built, then any bytes it holds itself. A count below zero marks a literal,
+// which lives for the whole program, so retain and release skip it.
 
 // A float is written as JavaScript's `String(x)` writes a number: the fewest digits that read
 // back as the same value, in plain notation for exponents from -7 to 20 and in exponent
@@ -40,75 +42,130 @@ __attribute__((destructor)) static void fsh_leaks(void) {
   if (check && check[0] == '1' && fsh_live != 0) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)fsh_live);
 }
 
-typedef struct { int64_t count; int64_t length; char bytes[]; } fsh_str;
+typedef struct fsh_str {
+  int64_t count;
+  int64_t length;
+  const char *bytes;
+  struct fsh_str *base;
+  int64_t units;
+  int64_t *crumbs;
+  char own[];
+} fsh_str;
 
 void fsh_rt_str_retain(fsh_str *s) {
   if (s && s->count >= 0) s->count++;
 }
 
 void fsh_rt_str_release(fsh_str *s) {
-  if (s && s->count >= 0 && --s->count == 0) fsh_rt_free(s);
+  if (!s || s->count < 0 || --s->count > 0) return;
+  fsh_rt_str_release(s->base);
+  fsh_rt_free(s->crumbs);
+  fsh_rt_free(s);
 }
 
+// A new block holding room for length bytes of its own, its UTF-16 length not yet known.
 static fsh_str *fsh_str_new(int64_t length) {
   fsh_str *s = fsh_rt_alloc(sizeof(fsh_str) + length);
   s->count = 1;
   s->length = length;
+  s->bytes = s->own;
+  s->base = NULL;
+  s->units = -1;
+  s->crumbs = NULL;
   return s;
 }
 
 static fsh_str *fsh_str_of(const char *bytes, int64_t length) {
   fsh_str *s = fsh_str_new(length);
-  memcpy(s->bytes, bytes, length);
+  memcpy(s->own, bytes, length);
+  return s;
+}
+
+// Text is WTF-8: UTF-8, plus a lone surrogate in its 3-byte form, as JavaScript strings may
+// hold one. A surrogate's 3-byte form starts ED A0 to ED BF; a high one ED A0 to ED AF.
+static int fsh_high_at(const unsigned char *p) { return p[0] == 0xED && p[1] >= 0xA0 && p[1] <= 0xAF; }
+static int fsh_low_at(const unsigned char *p) { return p[0] == 0xED && p[1] >= 0xB0 && p[1] <= 0xBF; }
+static uint32_t fsh_three(const unsigned char *p) { return (p[0] & 0x0F) << 12 | (p[1] & 0x3F) << 6 | (p[2] & 0x3F); }
+
+// Joins strings. Where a lone high surrogate meets a lone low one, the two become the pair's
+// 4-byte form, as joining them in JavaScript makes one character.
+fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
+  int64_t length = 0, units = 0;
+  for (int64_t i = 0; i < n; i++) {
+    length += parts[i]->length;
+    units = units < 0 || parts[i]->units < 0 ? -1 : units + parts[i]->units;
+  }
+  fsh_str *s = fsh_str_new(length);
+  unsigned char *at = (unsigned char *)s->own;
+  for (int64_t i = 0; i < n; i++) {
+    const unsigned char *from = (const unsigned char *)parts[i]->bytes;
+    int64_t size = parts[i]->length;
+    if (size >= 3 && at - (unsigned char *)s->own >= 3 && fsh_high_at(at - 3) && fsh_low_at(from)) {
+      uint32_t code = 0x10000 + ((fsh_three(at - 3) - 0xD800) << 10) + (fsh_three(from) - 0xDC00);
+      at -= 3;
+      *at++ = 0xF0 | code >> 18;
+      *at++ = 0x80 | (code >> 12 & 0x3F);
+      *at++ = 0x80 | (code >> 6 & 0x3F);
+      *at++ = 0x80 | (code & 0x3F);
+      from += 3;
+      size -= 3;
+    }
+    memcpy(at, from, size);
+    at += size;
+  }
+  s->length = at - (unsigned char *)s->own;
+  s->units = units;
   return s;
 }
 
 fsh_str *fsh_rt_str_concat(fsh_str *a, fsh_str *b) {
-  fsh_str *s = fsh_str_new(a->length + b->length);
-  memcpy(s->bytes, a->bytes, a->length);
-  memcpy(s->bytes + a->length, b->bytes, b->length);
-  return s;
+  fsh_str *parts[2] = { a, b };
+  return fsh_rt_str_join(parts, 2);
 }
 
-fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
-  int64_t length = 0;
-  for (int64_t i = 0; i < n; i++) length += parts[i]->length;
-  fsh_str *s = fsh_str_new(length);
-  char *at = s->bytes;
-  for (int64_t i = 0; i < n; i++) {
-    memcpy(at, parts[i]->bytes, parts[i]->length);
-    at += parts[i]->length;
-  }
-  return s;
-}
-
-// The first UTF-16 code unit of the character starting at s: the character itself, or the high
-// surrogate of one beyond U+FFFF.
-static uint32_t fsh_unit(const unsigned char *s) {
-  uint32_t c = s[0];
-  if (c < 0xE0) return c < 0x80 ? c : (c & 0x1F) << 6 | (s[1] & 0x3F);
-  if (c < 0xF0) return (c & 0x0F) << 12 | (s[1] & 0x3F) << 6 | (s[2] & 0x3F);
-  uint32_t code = (c & 0x07) << 18 | (s[1] & 0x3F) << 12 | (s[2] & 0x3F) << 6 | (s[3] & 0x3F);
-  return 0xD800 + ((code - 0x10000) >> 10);
+// The UTF-16 unit at byte *at, moving past it. A 4-byte character is two units: its high
+// surrogate, leaving *at on the character with *half set, then its low one.
+static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
+  const unsigned char *p = s + *at;
+  uint32_t c = p[0];
+  if (c < 0x80) { *at += 1; return c; }
+  if (c < 0xE0) { *at += 2; return (c & 0x1F) << 6 | (p[1] & 0x3F); }
+  if (c < 0xF0) { *at += 3; return fsh_three(p); }
+  uint32_t code = (c & 0x07) << 18 | (p[1] & 0x3F) << 12 | (p[2] & 0x3F) << 6 | (p[3] & 0x3F);
+  if (!*half) { *half = 1; return 0xD800 + ((code - 0x10000) >> 10); }
+  *half = 0;
+  *at += 4;
+  return 0xDC00 + ((code - 0x10000) & 0x3FF);
 }
 
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
-// That is UTF-8 byte order except where a character beyond U+FFFF meets one from U+E000 to
-// U+FFFF, so the first differing character decides by its first code unit, and two with the
-// same high surrogate by their bytes.
+// Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
   int64_t n = a->length < b->length ? a->length : b->length;
   int64_t i = 0;
   while (i < n && a->bytes[i] == b->bytes[i]) i++;
-  if (i == n) return a->length < b->length ? -1 : a->length > b->length ? 1 : 0;
-  while (i > 0 && ((unsigned char)a->bytes[i] & 0xC0) == 0x80) i--;
-  uint32_t x = fsh_unit((const unsigned char *)a->bytes + i), y = fsh_unit((const unsigned char *)b->bytes + i);
-  if (x == y) return memcmp(a->bytes + i, b->bytes + i, n - i) < 0 ? -1 : 1;
-  return x < y ? -1 : 1;
+  while (i > 0 && i < n && ((unsigned char)a->bytes[i] & 0xC0) == 0x80) i--;
+  int64_t x = i, y = i;
+  int hx = 0, hy = 0;
+  while (x < a->length && y < b->length) {
+    uint32_t u = fsh_next((const unsigned char *)a->bytes, &x, &hx), v = fsh_next((const unsigned char *)b->bytes, &y, &hy);
+    if (u != v) return u < v ? -1 : 1;
+  }
+  return x < a->length ? 1 : y < b->length ? -1 : 0;
 }
 
+// A lone surrogate prints as U+FFFD, as a terminal shows one JavaScript prints.
 void fsh_rt_str_print(int32_t stream, fsh_str *s) {
-  fwrite(s->bytes, 1, s->length, stream == 2 ? stderr : stdout);
+  FILE *out = stream == 2 ? stderr : stdout;
+  const unsigned char *p = (const unsigned char *)s->bytes, *end = p + s->length, *from = p;
+  for (; p + 2 < end; p++) {
+    if (!fsh_high_at(p) && !fsh_low_at(p)) continue;
+    fwrite(from, 1, p - from, out);
+    fwrite("\xEF\xBF\xBD", 1, 3, out);
+    from = p + 3;
+    p += 2;
+  }
+  fwrite(from, 1, end - from, out);
 }
 
 fsh_str *fsh_rt_str_from_i64(int64_t v) {

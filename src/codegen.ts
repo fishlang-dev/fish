@@ -1374,11 +1374,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return result;
   }
 
-  // A literal's string block: a count below zero, so it is never freed, its length, its bytes.
+  // A literal's string block: a count below zero, so it is never freed, its length, a pointer
+  // to its bytes, no base, its UTF-16 length, and no breadcrumbs.
   function text(value: string): string {
     const made = texts.get(value);
     if (made) return made;
-    const bytes = new TextEncoder().encode(value);
+    const bytes = wtf8(value);
     let lit = "";
     for (const b of bytes) {
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
@@ -1386,7 +1387,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     }
     const name = `@.text.${globals.length}`;
     texts.set(value, name);
-    globals.push(`${name} = private unnamed_addr constant { i64, i64, [${bytes.length} x i8] } { i64 -1, i64 ${bytes.length}, [${bytes.length} x i8] c"${lit}" }`);
+    globals.push(`${name}.bytes = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
+    globals.push(`${name} = private unnamed_addr constant { i64, i64, ptr, ptr, i64, ptr } { i64 -1, i64 ${bytes.length}, ptr ${name}.bytes, ptr null, i64 ${value.length}, ptr null }`);
     return name;
   }
 
@@ -1401,4 +1403,22 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     globals.push(`${name} = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     return name;
   }
+}
+
+// A string's WTF-8 bytes: UTF-8, with a lone surrogate in its 3-byte form.
+function wtf8(text: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    let c = text.charCodeAt(i);
+    const next = text.charCodeAt(i + 1);
+    if (c >= 0xd800 && c < 0xdc00 && next >= 0xdc00 && next < 0xe000) {
+      c = 0x10000 + ((c - 0xd800) << 10) + (next - 0xdc00);
+      i++;
+    }
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  return out;
 }
