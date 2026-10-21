@@ -39,9 +39,10 @@ const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind ===
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
 
-// A way out of a try that passes through its finally.
-type Exit = { kind: "raise" } | { kind: "return" } | { kind: "jump"; target: Stmt; which: "break" | "continue" };
-type Frame = { kind: "catch"; acc: State } | { kind: "finally"; acc: State; at: Stmt; exits: Exit[] };
+// A way out of a try that passes through its finally, and what the times it was taken had in
+// common.
+type Exit = ({ kind: "raise" } | { kind: "return" } | { kind: "jump"; target: Stmt; which: "break" | "continue" }) & { acc: State };
+type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits: Exit[] };
 
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
@@ -128,7 +129,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // A `finally` runs on every way out. Checked from what the abnormal ways out had in
         // common, each of those then carries on from where it ends; checked again from the
         // normal way out, the code after it carries on.
-        const fin: Frame | undefined = s.finalizer ? { kind: "finally", acc: null, at: s, exits: [] } : undefined;
+        const fin: Frame | undefined = s.finalizer ? { kind: "finally", at: s, exits: [] } : undefined;
         if (fin) frames.push(fin);
         if (s.handler) {
           const handler: Frame = { kind: "catch", acc: null };
@@ -145,19 +146,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (!fin) return;
         frames.pop();
         const normal = state;
-        if (fin.acc && fin.kind === "finally") {
-          state = fin.acc;
-          statements(s.finalizer!);
+        // Each way out runs the finally from its own state, then carries on from where it ends.
+        if (fin.kind === "finally") {
           for (const exit of fin.exits) {
-            const end: State = state;
+            state = exit.acc;
+            statements(s.finalizer!);
             if (exit.kind === "raise") raising();
             else if (exit.kind === "return") returning();
-            else {
-              const table = exit.which === "break" ? exits : nexts;
-              table.set(exit.target, join(table.get(exit.target) ?? null, state));
-              jumping(exit.target, exit.which);
-            }
-            state = end;
+            else jumping(exit.target, exit.which);
           }
         }
         state = normal;
@@ -195,7 +191,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "continue": {
         const target = jumps.get(s)!;
         const table = s.kind === "break" ? exits : nexts;
-        table.set(target, join(table.get(target) ?? null, state));
         jumping(target, s.kind);
         state = null;
         return;
@@ -830,36 +825,37 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function raising() {
     for (let i = frames.length - 1; i >= 0; i--) {
       const frame = frames[i]!;
-      frame.acc = join(frame.acc, state);
-      if (frame.kind === "catch") return;
-      note(frame, { kind: "raise" });
+      if (frame.kind === "catch") return void (frame.acc = join(frame.acc, state));
+      return note(frame, { kind: "raise", acc: null });
     }
   }
 
-  // A `break` or `continue` passes through each finally between it and its target.
+  // A `break` or `continue` reaches its target, or first the innermost finally between them.
   function jumping(target: Stmt, which: "break" | "continue") {
     for (let i = frames.length - 1; i >= 0; i--) {
       const frame = frames[i]!;
       if (frame.kind === "catch") continue;
-      if (target.start >= frame.at.start && target.end <= frame.at.end) return;
-      frame.acc = join(frame.acc, state);
-      note(frame, { kind: "jump", target, which });
+      if (target.start >= frame.at.start && target.end <= frame.at.end) break;
+      return note(frame, { kind: "jump", target, which, acc: null });
     }
+    const table = which === "break" ? exits : nexts;
+    table.set(target, join(table.get(target) ?? null, state));
   }
 
-  // A `return` passes through every enclosing finally.
+  // A `return` passes first through the innermost finally, if any.
   function returning() {
-    for (const frame of frames) {
-      if (frame.kind === "catch") continue;
-      frame.acc = join(frame.acc, state);
-      note(frame, { kind: "return" });
-    }
+    const frame = frames.findLast((f) => f.kind === "finally");
+    if (frame && frame.kind === "finally") note(frame, { kind: "return", acc: null });
   }
 
+  // Records a way out through a finally, joining this state into the times it was taken.
   function note(frame: Extract<Frame, { kind: "finally" }>, exit: Exit) {
     const same = (e: Exit) => e.kind === exit.kind && (e.kind !== "jump" || (exit.kind === "jump" && e.target === exit.target && e.which === exit.which));
-    if (!frame.exits.some(same)) frame.exits.push(exit);
+    const found = frame.exits.find(same);
+    if (found) found.acc = join(found.acc, state);
+    else frame.exits.push({ ...exit, acc: join(null, state) });
   }
+
 
   function revive(place: string) {
     if (!state) return;
