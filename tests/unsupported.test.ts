@@ -175,10 +175,10 @@ for (const [expr, what, part] of PROPERTIES) {
 }
 
 // Operators that parse but have no meaning yet.
-for (const expr of ["2 ** 3", "a ?? b", "a in b", "typeof 1", "await 1"]) {
+for (const expr of ["a ?? b", "a in b", "typeof 1", "await 1"]) {
   test(expr, () => {
     const src = `function main() {\n  let x = ${expr}\n}`;
-    const op = expr.match(/\*\*|\?\?|\bin\b|typeof|await/)![0];
+    const op = expr.match(/\?\?|\bin\b|typeof|await/)![0];
     const start = src.indexOf(expr);
     expect(() => check(parse(src))).toThrow(expect.objectContaining({
       message: `operator '${op}' is not supported yet`, start, end: start + expr.length,

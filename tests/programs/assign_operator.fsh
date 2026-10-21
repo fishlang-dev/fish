@@ -1,5 +1,7 @@
+// '**=' assigns a power.
 function main() {
   let x = 2
   x **= 3
+  print(x)
 }
-// error: operator '**=' is not supported yet
+// expect: 8
