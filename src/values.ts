@@ -1156,12 +1156,13 @@ export function expressions(ctx: Context) {
     throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);
   }
 
-  // Whether a place is reached through a mutable reference anywhere along its path.
+  // Whether a place is reached through a mutable reference anywhere along its path; `this`
+  // is one, to the object the method was called on.
   function throughMutable(e: Expr): boolean {
     for (let x = e; ; x = x.object) {
       const t = types.get(x);
       if (typeof t !== "string" && t?.kind === "ref" && t.mutable) return true;
-      if (x.kind !== "member") return false;
+      if (x.kind !== "member") return x.kind === "this" || x.kind === "super";
     }
   }
 
