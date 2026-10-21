@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsRef, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
+import { field, fits, holdsRef, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -87,6 +87,9 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
   throw new CompileError(`type '${show(type)}' does not satisfy the constraint '${show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
+// Whether each variant is concrete, kept as an object type's answer is.
+const concreteVariants = new WeakMap<VariantType, boolean>();
+
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
 // fields come from its type arguments and base, so those decide it, and an object type's
 // answer is kept, since its fields never change: walking nested types afresh at every level
@@ -100,7 +103,11 @@ export function concrete(t: Type): boolean {
   if (t.kind === "ref") return concrete(t.to);
   if (t.kind === "closure") return t.concrete;
   if (t.kind === "array") return concrete(t.element);
-  if (t.kind === "variant") return t.args.every(concrete) && t.fields.every((f) => concrete(f.type));
+  if (t.kind === "variant") {
+    let known = concreteVariants.get(t);
+    if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));
+    return known;
+  }
   let known = concreteObjects.get(t);
   if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
   return known;

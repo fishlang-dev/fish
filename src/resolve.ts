@@ -72,7 +72,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
       const variants = new Map(data.members.map((m) => {
-        const payload = withScope(bindings, () => (m.payload ?? []).map((t) => storable(resolveType(t), t)));
+        const payload = withScope(bindings, () => (m.payload ?? []).map((t) => {
+          const type = storable(resolveType(t), t);
+          // A held reference would need its enum tracked as a borrower.
+          if (holdsRef(type)) throw unsupported("enum members holding references", t);
+          return type;
+        }));
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
       }));
       const shown = args.length > 0 ? `${data.name}<${args.map(show).join(", ")}>` : data.name;

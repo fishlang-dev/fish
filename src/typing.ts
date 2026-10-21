@@ -228,7 +228,8 @@ export function variantType(enumName: string, id: number, member: string, args: 
     const shown = args.length > 0 ? `${enumName}<${args.map(show).join(", ")}>` : enumName;
     t = { kind: "variant", name: `${shown}.${member}`, member, enum: enumName, fields: payload.map((type, i) => ({ name: String(i), type })), args };
     variants.set(key, t);
-    keys.set(t, key);
+    // A short key of its own, so an enum nested in itself doesn't double its key each level.
+    keys.set(t, `variant#${variants.size}`);
   }
   return t;
 }

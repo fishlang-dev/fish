@@ -246,6 +246,8 @@ export function expressions(ctx: Context) {
     // `Shape.Circle(1.5)` builds a variant from its payload.
     const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
     if (named?.data && callee.kind === "member") {
+      const ahead = expectedVariant(callee, named);
+      if (ahead) e.args.forEach((a, i) => ahead.fields[i] && expect(a, ahead.fields[i]!.type));
       const given = e.args.map(value);
       const v = variant(callee, named, false, given, e.typeArgs);
       if (e.args.length !== v.fields.length) {
@@ -287,18 +289,13 @@ export function expressions(ctx: Context) {
   // An arrow passed where a function type is declared takes its parameter types from it.
   function expectFrom(target: Body, list: Expr[]) {
     const bounds = implicitOf(target);
+    const generic = (target.typeParams?.length ?? 0) > 0 || (target.scope?.size ?? 0) > 0 || bounds.size > 0;
+    const known = generic ? undefined : paramTypes(instanceOf(target));
     list.forEach((a, i) => {
       const t = bounds.get(i);
       if (t?.kind === "function") expect(a, t);
-      // A parameter of a function that isn't generic has a type known before the call.
-      const p = target.params[i];
-      if (a.kind !== "arrow" && p?.type && (target.typeParams?.length ?? 0) === 0 && !target.scope?.size) {
-        try {
-          expect(a, ctx.resolveType(p.type));
-        } catch {
-          // A type the declaration can't give here gives no expectation.
-        }
-      }
+      // A parameter of a function that isn't generic has its type before the call.
+      if (a.kind !== "arrow" && known) expect(a, known[i]!);
     });
   }
 
@@ -360,6 +357,7 @@ export function expressions(ctx: Context) {
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
     changeable(callee.object, callee.name === "push" ? "push to" : "pop from");
     if (callee.name === "pop") return { type: unionType([array.element, "null"]), what: "'pop'" };
+    expect(e.args[0]!, array.element);
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
     return { type: "void", what: "'push'" };
@@ -388,15 +386,17 @@ export function expressions(ctx: Context) {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
     if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    if (typeArgs.length > 0 && typeArgs.length !== data.params.length) {
+      const n = data.params.length;
+      throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, e.start, e.end);
+    }
     const bindings = new Map<string, Type>();
-    if (typeArgs.length > 0) data.params.forEach((p, i) => typeArgs[i] && bindings.set(p, ctx.resolveType(typeArgs[i]!)));
+    const expected = typeArgs.length > 0 ? undefined : expectedVariant(e, named, given);
+    if (typeArgs.length > 0) data.params.forEach((p, i) => bindings.set(p, ctx.resolveType(typeArgs[i]!)));
+    else if (expected) data.params.forEach((p, i) => bindings.set(p, expected.args[i]!));
     else {
       const names = new Set(data.params);
       (member.payload ?? []).forEach((node, i) => given[i] && infer(node, widenLet(given[i]!), names, bindings, e));
-      const want = wanted.get(e);
-      const members = want === undefined ? [] : typeof want !== "string" && want.kind === "union" ? want.members : [want];
-      const instance = members.find((m): m is VariantType => typeof m !== "string" && m.kind === "variant" && m.enum === data.name);
-      data.params.forEach((p, i) => instance && !bindings.has(p) && bindings.set(p, instance.args[i]!));
     }
     const missing = data.params.find((p) => !bindings.has(p));
     if (missing) {
@@ -406,6 +406,20 @@ export function expressions(ctx: Context) {
     if (alone && found.fields.length > 0) throw new CompileError(`'${found.name}' holds ${found.fields.length === 1 ? "a value" : "values"}; build it with '${found.name}(...)'`, e.start, e.end);
     if (!alone && found.fields.length === 0) throw new CompileError(`'${found.name}' holds nothing, so it isn't called; write '${found.name}'`, e.start, e.end);
     return found;
+  }
+
+  // The variant of this enum the type expected here holds: of the instances it names, one whose
+  // fields the payload fits, if it is given, or else the first.
+  function expectedVariant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, given?: Type[]): VariantType | undefined {
+    const want = wanted.get(e);
+    const members = want === undefined ? [] : typeof want !== "string" && want.kind === "union" ? want.members : [want];
+    const candidates = members.flatMap((m) => {
+      if (typeof m === "string" || m.kind !== "variant" || m.enum !== named.data!.name) return [];
+      const v = ctx.enumInstance(named, m.args, e).variants.get(e.name);
+      return v ? [v] : [];
+    });
+    const fitting = given && candidates.find((v) => v.fields.every((f, i) => given[i] === undefined || fits(given[i]!, f.type) || (isNumeric(f.type) && isNumeric(given[i]!))));
+    return fitting ?? candidates[0];
   }
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
@@ -783,6 +797,8 @@ export function expressions(ctx: Context) {
         return self.type;
       case "new": {
         const list = e.args ?? [];
+        const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
+        if (named) expectFrom(named.constructor, list);
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
