@@ -33,6 +33,7 @@ type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
+
 export function checkMoves(body: Stmt[], instance: Instance) {
   const { types, locals, calls, setters, jumps, coercions } = instance;
   let state: State = { moves: new Map(), loans: new Map() };
@@ -43,6 +44,28 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   const passes = new Map<Stmt, number>();
   const last = lastUses(body, instance);
   statements(body);
+
+  // The reference variables declared anywhere inside a statement.
+  function inside(s: Stmt): Local[] {
+    switch (s.kind) {
+      case "let":
+        return isRef(locals.get(s)!.type) ? [locals.get(s)!] : [];
+      case "if":
+        return [...s.then, ...(s.else ?? [])].flatMap(inside);
+      case "block":
+      case "while":
+      case "doWhile":
+        return s.body.flatMap(inside);
+      case "for":
+        return [...(s.init ? [s.init] : []), ...s.body].flatMap(inside);
+      case "labeled":
+        return inside(s.body);
+      case "switch":
+        return s.cases.flatMap((c) => c.body.flatMap(inside));
+      default:
+        return [];
+    }
+  }
 
   // A reference declared in a list of statements lets go of what it holds as the list ends.
   function statements(list: Stmt[]) {
@@ -140,9 +163,17 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       if (!bodyFirst) cond();
       body();
       state = join(state, nexts.get(s)!);
+      // References declared in the body are gone by the time the loop comes round or ends,
+      // however it left the body.
+      for (const local of inside(s)) release(local);
       if (bodyFirst) cond();
       else update?.();
       leaving = join(leaving, exits.get(s)!);
+      const after = state;
+      state = leaving;
+      for (const local of inside(s)) release(local);
+      leaving = state;
+      state = after;
       const next = join(back, state);
       if (same(next, back)) {
         passes.delete(s);
@@ -207,7 +238,7 @@ export function checkMoves(body: Stmt[], instance: Instance) {
           handOver(e.args, name, e);
           if (object && place !== undefined && self?.mutable && state) {
             state.loans.delete(object.start);
-            lend(place, true, object, undefined, name, e, e.end);
+            lend(place, true, object, undefined, name, e, e.end - 1);
           }
         });
       }
@@ -271,8 +302,9 @@ export function checkMoves(body: Stmt[], instance: Instance) {
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
     const place = key(e);
-    // A shared reference passed on is just another pointer, which needs nothing lent.
-    if (place === undefined || !isRef(to) || (isRef(type) && !to.mutable)) return [];
+    // A shared reference passed on is just another pointer, which needs nothing lent; a
+    // mutable one lends itself, shared or mutably as it is passed on.
+    if (place === undefined || !isRef(to) || (isRef(type) && !type.mutable)) return [];
     return [[place, e, to.mutable]];
   }
 
@@ -330,7 +362,7 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         ? `'${lent}' is lent ${loan.mutable ? "mutably " : ""}to ${loan.call} for this call`
         : `${holders.map((h) => `'${h.name}'`).join(" and ")} ${holders.length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${holders.length > 1 ? "are" : "is"} used later`;
       const until = loan.call ? "the call returns" : "the borrow's last use";
-      const earlier = loan.start >= e.start ? " on an earlier pass through this loop" : "";
+      const earlier = loan.start >= e.start && [...passes.values()].some((p) => p > 0) ? " on an earlier pass through this loop" : "";
       throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
         message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here${earlier}, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
         start: loan.start, end: loan.end,
@@ -450,7 +482,12 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals }: Instance): Map<Local, number> {
+function lastUses(body: Stmt[], { locals, types, coercions }: Instance): Map<Local, number> {
+  // An argument lent to the call, as a reference, is in use until the call ends.
+  const lentTo = (a: Expr) => {
+    const t = coercions.get(a) ?? types.get(a);
+    return t !== undefined && isRef(t);
+  };
   const last = new Map<Local, number>();
   const loops: Stmt[] = [];
   const declared = new Map<Local, Stmt[]>();
@@ -516,11 +553,11 @@ function lastUses(body: Stmt[], { locals }: Instance): Map<Local, number> {
         }
         return;
       case "new":
-        for (const a of e.args ?? []) expr(a, e.end);
+        for (const a of e.args ?? []) expr(a, lentTo(a) ? e.end : undefined);
         return;
       case "call":
         if (e.callee.kind === "member") expr(e.callee.object, e.end);
-        for (const a of e.args) expr(a, e.end);
+        for (const a of e.args) expr(a, lentTo(a) ? e.end : undefined);
         return;
       case "unary":
       case "update":

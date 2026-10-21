@@ -486,6 +486,9 @@ export function expressions(ctx: Context) {
   function borrow(e: Expr, type: Type, to: RefType, message: string) {
     // A `?:` choosing between places lends whichever it chooses, where it lives.
     if (e.kind === "conditional" && (rooted(e.then) || rooted(e.else))) {
+      // A side read as its value before is lent instead.
+      coercions.delete(e.then);
+      coercions.delete(e.else);
       coerce(e.then, types.get(e.then)!, to, message);
       coerce(e.else, types.get(e.else)!, to, message);
       types.set(e, to);
