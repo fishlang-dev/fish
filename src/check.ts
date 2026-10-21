@@ -726,7 +726,7 @@ export function check(program: Stmt[]): Checked {
               const numbers = union ? union.members.filter(isNumeric) : [type];
               if (test && test !== type && numbers.length === 1 && adapt(c.test!, numbers[0]!)) test = numbers[0]!;
               // A discriminant whose type is still open takes an integer case's.
-              if (test && test !== type && isInteger(test) && adapt(s.discriminant, test)) test = type;
+              if (test && test !== type && isInteger(test) && !literalOnly(s.discriminant, false) && adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
