@@ -49,7 +49,8 @@ export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
 // as its fields, which are never read by name.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[] };
+// A closure that moves a captured value out of itself can run only once.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once: boolean };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -85,8 +86,8 @@ export function functionType(names: string[], params: Type[], returns: Type): Fu
   return t;
 }
 
-export function closureType(names: string[], params: Type[], returns: Type, fields: Field[]): ClosureType {
-  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields };
+export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: boolean): ClosureType {
+  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once };
   keys.set(t, `closure ${declared++}`);
   return t;
 }
@@ -158,10 +159,12 @@ export function refType(to: Type, mutable: boolean, life?: string): RefType {
 const refs = new Map<string, RefType>();
 
 // Primitives, literals, references, and unions of nothing else are copied; objects,
-// instances, interface values and type parameters move. A mutable reference passed on is
+// instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
 export function isCopy(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "ref") return true;
+  // A closure copies when what it captures does, and it changes nothing through it.
+  if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   return t.kind === "union" && t.members.every(isCopy);
 }
 

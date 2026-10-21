@@ -312,6 +312,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
     if (bound.kind === "function") {
       if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
+      if (typeof type !== "string" && type.kind === "closure" && type.once) throw unsupported("passing closures that run only once", arg);
       return type;
     }
     if (bound.kind === "interface") {

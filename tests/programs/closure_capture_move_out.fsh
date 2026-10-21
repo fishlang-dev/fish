@@ -1,8 +1,8 @@
-// A closure that only borrows what it captures can't move it.
+// A closure can't move a value out of a reference it captures.
 class O { n = 1 }
 function take(o: O) {}
-function main() {
-  const o = new O()
-  const g = () => take(o)
+function f(r: Ref<O>) {
+  const g = () => take(r)
 }
-// error: 'o' can't be moved here: this closure only borrows it; use 'o.clone()'
+function main() {}
+// error: can't move a value out of a reference to it, which only borrows it

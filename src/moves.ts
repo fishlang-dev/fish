@@ -230,9 +230,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (key(e) !== undefined) return use(e, consume);
         return expr(e.object);
       case "arrow":
-        for (const [place, use, , mutable] of captured(e)) {
+        for (const [place, use, from, mutable, held] of captured(e)) {
           usable(use, place);
-          free(place, use, mutable ? "lend mutably" : "read");
+          if (!held || isCopy(from!.type)) free(place, use, mutable && !held ? "lend mutably" : "read");
+          else {
+            free(place, use, "move");
+            state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new Map(passes) });
+          }
         }
         return;
       case "object":
@@ -256,8 +260,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
-          // A closure is read to call it.
-          if (e.callee.kind === "ident" && locals.has(e.callee)) expr(e.callee);
+          // A closure is read to call it, or taken over when it can run only once.
+          const run = e.callee.kind === "ident" ? lower(types.get(e.callee) ?? "void") : undefined;
+          if (e.callee.kind === "ident" && locals.has(e.callee)) {
+            const once = typeof run !== "string" && run?.kind === "closure" && run.once;
+            expr(e.callee, once ? (p) => `'${p}' moved here: calling it runs it once, since it moves out what it captured` : undefined);
+          }
           // A method's receiver is lent to it for the call, mutably when the method changes it.
           // A mutable receiver is lent shared while the arguments run, so they may read it, and
           // mutably for the call itself.
@@ -379,7 +387,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
     // A closure made for a call lends what it captures for the call.
-    if (e.kind === "arrow") return captured(e).map(([place, use, , mutable]) => [place, use as Expr, mutable]);
+    if (e.kind === "arrow") return captured(e).filter(([, , , , held]) => !held).map(([place, use, , mutable]) => [place, use as Expr, mutable]);
     // A call's returned reference lends again what it borrows from, a receiver included.
     const from = borrowsFrom.get(e);
     if (from) return from.flatMap((s) => source(s, (coercions.get(e) ?? types.get(e)!) as RefType));
@@ -417,9 +425,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
-    if (root && instance.captures?.has(root)) {
-      throw new CompileError(`'${text(e)}' can't be moved here: this closure only borrows ${e.kind === "member" ? `'${root.name}'` : "it"}; use '${text(e)}.clone()'`, e.start, e.end);
-    }
     if (root && isRef(root.type)) {
       throw new CompileError(`'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
     }
@@ -432,6 +437,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (place.startsWith("this") && !f.self?.owned) {
       throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
     }
+    // A closure moving out what it captures holds it, and can run only once.
+    if (root && instance.captures?.has(root)) instance.moved!.add(root);
     state.moves.set(place, { start: e.start, end: e.end, note: consume!(text(e)), passes: new Map(passes) });
   }
 
@@ -506,8 +513,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const to = coercions.get(e) ?? type;
     // A closure holds what it captures.
     if (e.kind === "arrow") {
-      for (const [place, use, from, mutable] of captured(e)) {
-        lend(place, mutable, use, holder);
+      for (const [place, use, from, mutable, held] of captured(e)) {
+        if (!held) lend(place, mutable, use, holder);
         if (from && holdsRef(from.type)) inheritFrom(holder, from);
       }
       return;
@@ -751,15 +758,16 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return object === undefined ? undefined : `${object}.${e.name}`;
   }
 
-  // The places a closure captures, where it first uses each, the variable, if not `this`, and
-  // whether it changes it.
-  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined, boolean][] {
+  // The places a closure captures, where it first uses each, the variable, if not `this`,
+  // whether it changes it, and whether it holds it rather than borrowing it.
+  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined, boolean, boolean][] {
     const inner = calls.get(e)!;
-    return [...inner.captures!].flatMap(([alias, from]): [string, Named, Local | undefined, boolean][] => {
+    return [...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;
       const mutable = inner.changed!.has(alias);
+      const held = !isRef(inner.closure!.fields[i]!.type);
       if (!use) return [];
-      return [from === "this" ? ["this", use, undefined, mutable] : [String(from.id), use, from, mutable]];
+      return [from === "this" ? ["this", use, undefined, mutable, false] : [String(from.id), use, from, mutable, held]];
     });
   }
 

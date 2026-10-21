@@ -71,9 +71,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (f.self) params.unshift("ptr %this");
     if (f.closure) params.unshift("ptr %env");
     captured = new Map();
+    // A capture the closure holds lives in its environment; a borrowed one, where it points.
     [...(instance.captures ?? [])].forEach(([alias, from], i) => {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`);
+      if (!isRef(instance.closure!.fields[i]!.type)) return captured.set(alias, at);
       const pointer = from === "this" ? "%this" : temp();
       emit(`${pointer} = load ptr, ptr ${at}`);
       captured.set(alias, pointer);
@@ -391,13 +393,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // A field read through an interface or object parameter takes the type its bound declares.
         return convert(result, field(object, e.name)!.type, types.get(e)!);
       }
-      // A closure's value is a pointer to each variable it captures, or to `this`.
+      // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
         const inner = calls.get(e)!;
         let result = "undef";
         [...inner.captures!.values()].forEach((from, i) => {
+          const type = inner.closure!.fields[i]!.type;
+          let part = from === "this" ? "%this" : slot(from);
+          if (!isRef(type)) {
+            part = temp();
+            emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
+          }
           const next = temp();
-          emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ptr ${from === "this" ? "%this" : slot(from)}, ${i}`);
+          emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ${llvm(type)} ${part}, ${i}`);
           result = next;
         });
         return inner.captures!.size === 0 ? "zeroinitializer" : result;

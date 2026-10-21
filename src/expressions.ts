@@ -58,7 +58,7 @@ export function expression(c: Cursor): Expr {
 
 // What can start an arrow function; the head is then tried in full before committing.
 function atArrow(c: Cursor): boolean {
-  return c.at("(") || c.at("<") || c.at("async") || (c.peek().kind === "ident" && isToken(c.peek(1), "=>"));
+  return c.at("(") || c.at("<") || c.at("async") || c.at("move") || (c.peek().kind === "ident" && isToken(c.peek(1), "=>"));
 }
 
 // The head decides: `(a)` and `(a) => a` differ only at the `=>`, so the head is parsed on a
@@ -72,6 +72,9 @@ function arrowFunction(c: Cursor): Expr | undefined {
 }
 
 function arrowHead(c: Cursor) {
+  // `move` makes a closure take over what it captures. Like `async`, `move => 1` takes a
+  // parameter named `move`, and `move(x)` without `=>` is a call.
+  const move = c.at("move") && !isToken(c.peek(1), "=>") && !c.peek(1).newlineBefore && c.eat("move");
   // `async => 1` takes a parameter named `async`; `async(x)` without `=>` is a call.
   const async = c.at("async") && !isToken(c.peek(1), "=>") && !c.peek(1).newlineBefore && c.eat("async");
   let typeParams: TypeParam[] = [];
@@ -89,7 +92,7 @@ function arrowHead(c: Cursor) {
   // No line break may come before `=>`, as in JavaScript.
   if (c.peek().newlineBefore) throw c.error("expected '=>'");
   c.expect("=>");
-  return { async, typeParams, params, returnType };
+  return { move, async, typeParams, params, returnType };
 }
 
 // Hack-style pipes, as in the TC39 proposal: left-associative, looser than `? :`, with `%`

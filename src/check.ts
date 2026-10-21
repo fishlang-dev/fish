@@ -62,8 +62,9 @@ export type Instance = {
   // and where it, or a closure inside it, first uses each.
   captures?: Map<Local, Local | "this">;
   captureUses?: Map<Local, Expr | ObjectProp>;
-  // The captures it changes, which it captures mutably.
+  // The captures it changes, which it captures mutably, and those it moves out of itself.
   changed?: Set<Local>;
+  moved?: Set<Local>;
   // A closure's own type.
   closure?: ClosureType;
 };
@@ -494,7 +495,7 @@ export function check(program: Stmt[]): Checked {
       if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -505,12 +506,18 @@ export function check(program: Stmt[]): Checked {
       inner.captures = new Map();
       inner.captureUses = new Map();
       inner.changed = new Set();
+      inner.moved = new Set();
       closures.push(inner);
       checkInstance(inner, { lookup, narrowed, thisReady: (t) => unset.size === 0 || t === exempt, noteThis, changesLocal, changesThis });
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns,
-        [...inner.captures].map(([alias, from]) => ({ name: alias.name, type: refType(from === "this" ? self!.type : from.type, inner.changed!.has(alias)) })));
+      // A closure holds what it moves, or everything under `move`, and borrows the rest; `this`
+      // is a reference either way.
+      const fields = [...inner.captures].map(([alias, from]) => ({
+        name: alias.name,
+        type: from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias)),
+      }));
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, inner.moved!.size > 0);
       inner.closure = type;
       calls.set(e, inner);
       closureBodies.set(type, inner);
@@ -739,12 +746,14 @@ export function check(program: Stmt[]): Checked {
     function changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
       const alias = l ?? [...captures!].find(([, from]) => from === "this")![0];
       const from = captures!.get(alias)!;
+      instance.changed!.add(alias);
       if (from === "this") outer!.changesThis(path, action, target);
+      // What a `move` closure holds is its own to change.
+      else if (f.closure!.move) return;
       else {
         if (!path && action === "assign to" && isRef(from.type) && !from.type.mutable) throw unsupported("closures that point captured references elsewhere", target);
         outer!.changesLocal(from, path, action, target, throughMut);
       }
-      instance.changed!.add(alias);
     }
 
     function noteThis(e: Expr) {

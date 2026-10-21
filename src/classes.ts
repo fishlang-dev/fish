@@ -26,7 +26,8 @@ export type Body = Span & {
   // An arrow function's body, checked inside the instance it is written in. An expression body
   // is a `return` of it, `value`.
   // `expected`, the function type it is given to, types parameters it leaves unwritten.
-  closure?: { value?: Expr; parent: Instance; expected?: FunctionType };
+  // `move`: it captures everything by value.
+  closure?: { value?: Expr; parent: Instance; expected?: FunctionType; move: boolean };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather
