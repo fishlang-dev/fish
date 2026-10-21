@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { holdsRef, interfaceType, keyOf, literalType, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { holdsRef, interfaceType, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -119,7 +119,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     const to = resolveType(t.args[0]!);
     if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
-    if (typeof to !== "string" && to.kind === "ref") throw unsupported("references to references", t);
+    // A type parameter standing for a reference makes one too.
+    const real = lower(to);
+    if (typeof real !== "string" && real.kind === "ref") throw unsupported("references to references", t);
     const life = t.args[1];
     if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
     return refType(to, t.name === "Mut", life?.name);

@@ -477,9 +477,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (p.kind === "property") return [p.key as string, value(p.value)];
     if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");
     const local = resolved(p);
+    const to = field(object, p.name)!.type;
+    // A shorthand lent to a reference field points at its variable.
+    if (isRef(to) && !isRef(local.type)) return [p.name, slot(local)];
     const result = temp();
     emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    return [p.name, convert(result, local.type, field(object, p.name)!.type)];
+    return [p.name, convert(result, local.type, to)];
   }
 
   function store(target: Expr, result: string) {

@@ -174,12 +174,14 @@ export function check(program: Stmt[]): Checked {
   function originsOf(f: Body, params: Type[], returns: RefType): Origin[] {
     const at = f.returnType ?? f;
     if (returns.life) {
-      const found = f.params.flatMap((p, i) => (named(p.type).has(returns.life!) ? [i] : []));
+      const found: Origin[] = f.params.flatMap((p, i) => (named(p.type).has(returns.life!) ? [i] : []));
+      // A lifetime of the method's own class is the object's.
+      if (f.owner && classLifetimes(f).has(returns.life)) found.push("this");
       if (found.length === 0) throw new CompileError(`no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
       return found;
     }
     if (f.self && !f.self.constructor) return ["this"];
-    const refs = params.flatMap((p, i) => (isRef(p) ? [i] : []));
+    const refs = params.flatMap((p, i) => (holdsRef(p) ? [i] : []));
     if (refs.length === 1) return refs;
     throw new CompileError(refs.length === 0
       ? "this function returns a reference but borrows nothing it could point into; return an owned value instead"
@@ -191,7 +193,9 @@ export function check(program: Stmt[]): Checked {
   function heldOrigins(f: Body): Origin[] | undefined {
     const names = named(f.returnType);
     if (names.size === 0) return undefined;
-    return f.params.flatMap((p, i) => ([...named(p.type)].some((n) => names.has(n)) ? [i] : []));
+    const found: Origin[] = f.params.flatMap((p, i) => ([...named(p.type)].some((n) => names.has(n)) ? [i] : []));
+    if ([...classLifetimes(f)].some((n) => names.has(n))) found.push("this");
+    return found;
   }
 
   // The lifetime names an annotation writes: on references, and in classes' lifetime slots.
@@ -237,6 +241,11 @@ export function check(program: Stmt[]): Checked {
     };
     f.params.forEach((p) => visit(p.type));
     visit(f.returnType);
+  }
+
+  // The lifetimes a method's class declares.
+  function classLifetimes(f: Body): Set<string> {
+    return new Set((f.owner ? classNode(f.owner.name)?.typeParams ?? [] : []).filter(isLifetime).map((p) => p.name));
   }
 
   // A class's declaration as written, lifetimes included.

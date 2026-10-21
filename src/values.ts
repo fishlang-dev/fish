@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, ClassType, Field, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -149,6 +149,9 @@ export function expressions(ctx: Context) {
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
+    // A copy of a value holding references borrows what it does, but two mutable ones can't be.
+    if (holdsMut(receiver)) throw new CompileError("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing", e.start, e.end);
+    if (holdsRef(receiver)) borrowsFrom.set(e, [callee.object]);
     return { type: receiver, what: "'clone'" };
   }
 
@@ -177,7 +180,7 @@ export function expressions(ctx: Context) {
       coerce(a, type, found.params[i]!, `argument of type '${show(type)}' is not assignable to parameter of type '${show(found.params[i]!)}'`);
     });
     // A reference an interface's method returns borrows from its receiver.
-    if (isRefType(found.returns)) borrowsFrom.set(e, [callee.object]);
+    if (holdsRef(found.returns)) borrowsFrom.set(e, [callee.object]);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, found.returns), what: `'${callee.name}'` };
     return { type: found.returns, what: `'${callee.name}'` };
@@ -196,6 +199,10 @@ export function expressions(ctx: Context) {
 
   // A mutating method's receiver must be a place that could change, or a temporary.
   function mutates(object: Expr, name: string) {
+    const type = types.get(object);
+    if (typeof type !== "string" && type?.kind === "ref" && !type.mutable) {
+      throw new CompileError(`cannot call '${name}' on '${placeText(object)}' because it is a shared reference ('Ref'), which only reads`, object.start, object.end);
+    }
     if (object.kind === "conditional") {
       throw new CompileError(`can't call '${name}' on a '?:', which would change a copy; call it in each branch`, object.start, object.end);
     }
@@ -323,7 +330,7 @@ export function expressions(ctx: Context) {
           calls.set(e, instanceOf(getter));
           const returns = returnOf(instanceOf(getter), e);
           // A getter's reference borrows from its object.
-          if (isRefType(returns)) borrowsFrom.set(e, [e.object]);
+          if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
           return returns;
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
@@ -577,9 +584,16 @@ export function expressions(ctx: Context) {
     const own = types.get(e) as ObjectType;
     const lent = own.fields.map((f) => {
       const want = field(to, f.name)?.type;
-      const p = e.props.find((p) => p.kind === "property" && p.key === f.name) as Extract<ObjectProp, { kind: "property" }> | undefined;
+      const p = e.props.find((p) => (p.kind === "property" && p.key === f.name) || (p.kind === "shorthand" && p.name === f.name));
       if (!want || !p || !holdsRef(want) || fits(f.type, want)) return f;
-      coerce(p.value, types.get(p.value)!, want, message);
+      if (p.kind === "property") coerce(p.value, types.get(p.value)!, want, message);
+      else if (p.kind === "shorthand") {
+        // A shorthand lends its variable where it lives, so only as exactly what it holds.
+        const local = locals.get(p)!;
+        if (typeof want === "string" || want.kind !== "ref" || want.mutable || lower(local.type) !== lower(want.to)) {
+          throw new CompileError(`${message}: write '${p.name}: ${p.name}' to lend '${p.name}' here`, p.start, p.end);
+        }
+      }
       return { ...f, type: want };
     });
     const type = objectType(lent);

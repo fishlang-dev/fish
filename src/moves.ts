@@ -97,7 +97,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         release(local);
         expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
         revive(String(local.id));
-        if (holdsRef(local.type)) hold(local, d.init!);
+        if (holdsRef(local.type)) rehold(local, d.init!);
         return;
       }
       case "if": {
@@ -255,6 +255,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
           }
+          // A method that changes its object, or a base's constructor, may keep what is lent.
+          const keeper = object ?? (e.callee.kind === "super" ? e.callee : undefined);
+          if (keeper && (self?.mutable || e.callee.kind === "super")) keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
         });
       }
       case "unary":
@@ -270,12 +273,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         // Pointing a reference elsewhere lets go of what it held; a value holding references
         // given another one to hold adds it.
-        if (local && holdsRef(local.type)) {
-          release(local);
-          hold(local, e.value);
-        }
-        const owner = e.target.kind === "member" && !setters.has(e.target) ? locals.get(rootOf(e.target) as never) : undefined;
-        if (owner && holdsRef(owner.type) && !isRef(owner.type)) hold(owner, e.value);
+        if (local && holdsRef(local.type)) rehold(local, e.value);
+        // A value given a reference to keep, through a field or a setter, holds it; `this` may
+        // only be given what outlives the call.
+        if (e.target.kind === "member" && holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(e.target.object, [e.value]);
         // An assignment used as a value hands over what it just stored. A setter keeps what it
         // was given, with nothing left to read or hand on.
         if (!discarded && state && !isCopy(types.get(e)!) && setters.has(e.target)) {
@@ -303,6 +304,19 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
     }
+  }
+
+  // A value that may keep references given to it holds them: a holder variable, or `this`, which
+  // may be given only what points into this function's parameters, since it outlives the call.
+  function keep(target: Expr, values: Expr[]) {
+    if (values.length === 0) return;
+    const root = rootOf(target);
+    if (root.kind === "this" || root.kind === "super") {
+      for (const v of values) stored(v);
+      return;
+    }
+    const owner = locals.get(root as never);
+    if (owner && holdsRef(owner.type) && !isRef(owner.type)) for (const v of values) hold(owner, v);
   }
 
   // Arguments are handed over, or lent for the call, in order.
@@ -427,7 +441,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (from) {
       const result = (coercions.get(e) ?? types.get(e)!) as RefType;
       for (const s of from) {
-        if (isRef(coercions.get(s) ?? types.get(s)!)) hold(holder, s);
+        if (holdsRef(coercions.get(s) ?? types.get(s)!) && (isRef(coercions.get(s) ?? types.get(s)!) || key(s) === undefined)) hold(holder, s);
         else if (key(s) !== undefined) {
           lend(key(s)!, result.mutable, s, holder);
           inherit(holder, s);
@@ -444,7 +458,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (e.kind === "object") {
         for (const p of e.props) {
           if (p.kind === "property") hold(holder, p.value);
-          else if (p.kind === "shorthand" && locals.get(p) && holdsRef(locals.get(p)!.type)) inheritFrom(holder, locals.get(p)!);
+          else if (p.kind === "shorthand" && locals.get(p)) {
+            const local = locals.get(p)!;
+            // A shorthand lent to a reference field lends its variable.
+            if (isRef(field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type)) lend(String(local.id), false, p, holder);
+            else if (holdsRef(local.type)) inheritFrom(holder, local);
+          }
         }
       } else inherit(holder, e);
       return;
@@ -517,19 +536,29 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A returned reference may point only into what its lifetime ties it to: a parameter's
   // borrow, or `this`, never this function's own values.
   function returned(e: Expr) {
+    outlives(e, origins, "return", "return an owned value instead");
+  }
+
+  // What a body stores into `this` outlives the call, so it may point only into parameters.
+  function stored(e: Expr) {
+    outlives(e, f.params.map((_, i) => i), "store in 'this'", "store an owned value instead");
+  }
+
+  // A value leaving the body may point only into what `allowed` says outlives it.
+  function outlives(e: Expr, allowed: Origin[], verb: string, instead: string) {
     const type = coercions.get(e) ?? types.get(e)!;
     if (!holdsRef(type)) return;
     for (const place of pointsInto(e)) {
       if (place === TEMPORARY) {
-        throw new CompileError("can't return a reference to a temporary or a copy, which is gone once the function returns; return an owned value instead", e.start, e.end);
+        throw new CompileError(`can't ${verb} a reference to a temporary or a copy, which is gone once the function returns; ${instead}`, e.start, e.end);
       }
       const param = place.startsWith("param ") ? Number(place.slice(6)) : undefined;
-      if (param !== undefined ? origins.includes(param) : place.startsWith("this") && origins.includes("this")) continue;
-      const allowed = origins.map((o) => (o === "this" ? "'this'" : `'${paramName(o)}'`)).join(" or ");
+      if (param !== undefined ? allowed.includes(param) : place.startsWith("this") && allowed.includes("this")) continue;
+      const names = allowed.map((o) => (o === "this" ? "'this'" : `'${paramName(o)}'`)).join(" or ") || "nothing it was given";
       const what = param !== undefined ? `'${paramName(param)}'` : place.startsWith("this") ? `'${pathOf(place)}'` : undefined;
       const message = what
-        ? `the returned reference points into ${what}, but its lifetime ties it to ${allowed}; give ${what} that lifetime, or return an owned value`
-        : `can't return a reference to '${pathOf(place)}', which belongs to this function and is gone once it returns; return an owned value instead`;
+        ? verb === "return" ? `the returned reference points into ${what}, but its lifetime ties it to ${names}; give ${what} that lifetime, or return an owned value` : `the stored reference points into ${what}, but it may only point into ${names}`
+        : `can't ${verb} a reference to '${pathOf(place)}', which belongs to this function and is gone once it returns; ${instead}`;
       throw new CompileError(message, e.start, e.end);
     }
   }
@@ -541,7 +570,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const from = borrowsFrom.get(e);
     if (from) {
       return from.flatMap((s) => {
-        if (isRef(coercions.get(s) ?? types.get(s)!)) return pointsInto(s);
+        const t = coercions.get(s) ?? types.get(s)!;
+        if (isRef(t) || (holdsRef(t) && key(s) === undefined)) return pointsInto(s);
         return key(s) !== undefined && !throughUnion(s) ? within(s) : [TEMPORARY];
       });
     }
@@ -551,8 +581,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // A value holding references points wherever its parts, or the value it copies, do.
       if (!holdsRef(to)) return [];
       if (e.kind === "object") {
-        return e.props.flatMap((p) => p.kind === "property" ? pointsInto(p.value)
-          : p.kind === "shorthand" && locals.get(p) ? heldBy(locals.get(p)!) : []);
+        return e.props.flatMap((p) => {
+          if (p.kind === "property") return pointsInto(p.value);
+          if (p.kind !== "shorthand") return [];
+          const local = locals.get(p);
+          if (!local) return [];
+          return isRef(field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type) ? [String(local.id)] : heldBy(local);
+        });
       }
       const root = locals.get(rootOf(e) as never);
       return root && holdsRef(root.type) ? heldBy(root) : [];
@@ -564,8 +599,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a holder's loans are on, leaving out those inside other holders, whose own
   // loans are held too.
   function heldBy(root: Local): string[] {
-    const holders = new Set([...locals.values()].filter((l) => holdsRef(l.type)).map((l) => String(l.id)));
-    return [...(state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !holders.has(l.place.split(".")[0]!)).map((l) => l.place);
+    const refs = new Set([...locals.values()].filter((l) => isRef(l.type)).map((l) => String(l.id)));
+    return [...(state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!)).map((l) => l.place);
   }
 
   // Where a place lives: itself, or, reached through a reference variable, what that holds; a
@@ -579,6 +614,22 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function paramName(i: number): string {
     const p = f.params[i]!.pattern;
     return p.kind === "ident" ? p.name : `parameter ${i + 1}`;
+  }
+
+  // A holder given a new value lets go of what it held and holds what the value does, which
+  // may be read from the holder itself, so the new holds are gathered first.
+  function rehold(local: Local, e: Expr) {
+    if (!state) return;
+    const gathering: Local = { ...local, id: -local.id - 1 };
+    hold(gathering, e);
+    release(local);
+    for (const [at, loan] of state.loans) {
+      if (!loan.holders.has(gathering)) continue;
+      const holders = new Set([...loan.holders].filter((h) => h !== gathering));
+      // Nothing holds a loan of itself.
+      if (loan.place.split(".")[0] === String(local.id) && holders.size === 0) state.loans.delete(at);
+      else state.loans.set(at, { ...loan, holders: new Set([...holders, local]) });
+    }
   }
 
   // A reference pointed elsewhere, or declared again, lets go of what it held.

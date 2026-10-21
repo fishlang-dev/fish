@@ -141,10 +141,22 @@ export function isCopy(t: Type): boolean {
   return t.kind === "union" && t.members.every(isCopy);
 }
 
+// Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
+export function holdsMut(t: Type): boolean {
+  if (typeof t === "string") return false;
+  if (t.kind === "ref") return t.mutable;
+  if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
+  if (t.kind === "union") return t.members.some(holdsMut);
+  if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
+  return t.kind === "object" && t.fields.some((f) => holdsMut(f.type));
+}
+
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
 export function holdsRef(t: Type): boolean {
   if (typeof t === "string") return false;
   if (t.kind === "ref") return true;
+  // A type parameter holds references when what it stands for, or its bound, does.
+  if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
   if (t.kind === "union") return t.members.some(holdsRef);
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
   return t.kind === "object" && t.fields.some((f) => holdsRef(f.type));

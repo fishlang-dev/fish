@@ -313,6 +313,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
       return type;
     }
+    // A fresh object literal is checked against the parameter's type when lent into it.
+    if (arg.kind === "object" && holdsRef(bound)) return bound;
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
     return arg.kind === "object" ? bound : type;
   }
