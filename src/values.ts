@@ -534,15 +534,7 @@ export function expressions(ctx: Context) {
     if (local && local.type !== type && typeof held !== "string" && held.kind === "union") return false;
     // A field read through a type parameter may be stored as a different type by the concrete
     // type; at a definition, where nothing is concrete, each instance decides.
-    for (let p: Expr = e; p.kind === "member"; p = p.object) {
-      const holder = types.get(p.object);
-      const of = holder && typeof holder !== "string" && holder.kind === "ref" ? holder.to : holder;
-      const stored = of && typeof of !== "string" && of.kind === "param" ? lower(of) : undefined;
-      if (stored && stored !== of && typeof stored !== "string") {
-        const f = stored.kind === "union" ? undefined : field(stored, p.name);
-        if (!f || lower(f.type) !== lower(types.get(p)!)) return false;
-      }
-    }
+    if (e.kind === "member" && lower(stored(e)) !== lower(type)) return false;
     return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : lower(type) === lower(to.to);
   }
 

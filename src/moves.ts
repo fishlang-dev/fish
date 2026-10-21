@@ -419,9 +419,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const result = (coercions.get(e) ?? types.get(e)!) as RefType;
       for (const s of from) {
         if (isRef(coercions.get(s) ?? types.get(s)!)) hold(holder, s);
-        else if (key(s) !== undefined && !throughUnion(s)) {
+        else if (key(s) !== undefined) {
           lend(key(s)!, result.mutable, s, holder);
           inherit(holder, s);
+          if (throughUnion(s)) temporary(holder, s);
         } else temporary(holder, s);
       }
       return;
@@ -466,22 +467,28 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return lower(type) === lower(to.to);
   }
 
-  // Whether a field path passes through a union, or through a type parameter whose concrete
-  // type stores the field as another type, so the field is read as a copy. At a definition,
-  // where nothing is concrete, each instance decides.
+  // Whether a field path passes through a union, or ends where a type parameter's concrete type
+  // stores the field as another type, so the field is read as a copy. At a definition, where
+  // nothing is concrete, each instance decides.
   function throughUnion(e: Expr): boolean {
     for (let p: Expr = e; p.kind === "member"; p = p.object) {
       const holder = types.get(p.object);
       const held = holder && isRef(holder) ? holder.to : holder;
-      if (typeof held === "string" || !held) continue;
-      if (held.kind === "union") return true;
-      const stored = held.kind === "param" ? lower(held) : held;
-      if (held.kind === "param" && stored !== held && typeof stored !== "string") {
-        const f = stored.kind === "union" ? undefined : field(stored, p.name);
-        if (!f || lower(f.type) !== lower(types.get(p)!)) return true;
-      }
+      if (typeof held !== "string" && held?.kind === "union") return true;
     }
-    return false;
+    const stored = storedType(e);
+    return stored !== undefined && lower(stored) !== lower(types.get(e)!);
+  }
+
+  // The type a place is stored as, where an instance knows it: a field read through a type
+  // parameter has its concrete type's field type, as codegen lays it out.
+  function storedType(e: Expr): Type | undefined {
+    if (e.kind !== "member") return types.get(e);
+    const holder = storedType(e.object);
+    const held = holder && isRef(holder) ? holder.to : holder;
+    const concrete = held && typeof held !== "string" ? lower(held) : held;
+    if (typeof concrete === "string" || !concrete || concrete.kind === "union" || concrete.kind === "param") return types.get(e);
+    return field(concrete, e.name)?.type ?? types.get(e);
   }
 
   // A returned reference may point only into what its lifetime ties it to: a parameter's

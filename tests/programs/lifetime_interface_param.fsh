@@ -20,4 +20,4 @@ function h<T extends V>(v: Ref<T>): i64 {
 function main() {
   print(h(new C()))
 }
-// error: returns a reference into its parameter
+// error: returns a reference tied to lifetime 'A' of a parameter

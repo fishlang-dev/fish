@@ -75,7 +75,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     // An interface method's reference borrows from its receiver, so one borrowing from a
     // parameter instead can't stand in for it.
     if (typeof result !== "string" && result.kind === "ref" && result.life) {
-      return `method '${m.name}' returns a reference into its parameter '${result.life}' lives for, where '${trait.name}' borrows from 'this'`;
+      return `method '${m.name}' returns a reference tied to lifetime '${result.life}' of a parameter, where '${trait.name}' borrows from 'this'`;
     }
   }
   return undefined;
