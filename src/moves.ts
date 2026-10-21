@@ -57,6 +57,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // into each had in common, and for a finally, its try and which ways out pass through it.
   const frames: Frame[] = [];
   const nexts = new Map<Stmt, State>();
+  // The guards running now, by where each starts: a guard's loan lasts only while it runs, even
+  // in a state an error carried out of it.
+  const guarding = new Set<number>();
   // How each match arm's block hands on what its `return`s give, as its match does.
   const arms = new Map<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
@@ -464,7 +467,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (arm.guard) {
             const at = -arm.guard.start - 1;
             if (place !== undefined && state) state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
+            guarding.add(arm.guard.start);
             expr(arm.guard);
+            guarding.delete(arm.guard.start);
             state?.loans.delete(at);
             const passed = state;
             state = join(passed, null);
@@ -894,7 +899,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A loan lasts while one of its holders may still be used, or for its call.
   function live(loan: Loan, at: number): boolean {
-    return loan.call !== undefined || loan.guard === true || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
+    if (loan.guard) return guarding.has(loan.start);
+    return loan.call !== undefined || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
   }
 
   // Changing a place needs it free of loans; a setter changes the object it is called on.
@@ -1186,6 +1192,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "binary":
         expr(e.left);
         return expr(e.right);
+      case "array":
+        for (const x of e.elements) if (x) expr(x);
+        return;
     }
   }
   stmts(body);

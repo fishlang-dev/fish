@@ -271,8 +271,11 @@ export function expressions(ctx: Context) {
         if (unit && unit.fields.length === 0) return record({ kind: "variant", variant: unit, args: [] });
         if (p.name === "None" && optional) return record({ kind: "none" });
         // A C-like enum's member may be named bare too, as a data enum's unit member may.
-        const member = members.find((m): m is LiteralType => typeof m !== "string" && m.kind === "literal" && m.owner?.member === p.name);
-        if (member) return record({ kind: "literal", value: member.value, member });
+        const named = members.filter((m): m is LiteralType => typeof m !== "string" && m.kind === "literal" && m.owner?.member === p.name);
+        if (named.length > 1) {
+          throw new CompileError(`'${p.name}' is a member of ${named.map((m) => `'${m.owner!.enum}'`).join(" and ")}; name which, as '${named[0]!.owner!.enum}.${p.name}'`, p.start, p.end);
+        }
+        if (named[0]) return record({ kind: "literal", value: named[0].value, member: named[0] });
         ctx.bind(p.name, borrowing && !isCopy(type) ? refType(type, false) : type, p as Expr);
         return record({ kind: "any" });
       }
@@ -326,7 +329,7 @@ export function expressions(ctx: Context) {
         // A member is ruled out by a field it lacks, or by a literal field the pattern's literal
         // contradicts, as a discriminant does.
         const shapes = members.filter((m): m is Shape => {
-          if (typeof m === "string" || !(m.kind === "object" || m.kind === "class" || (m.kind === "param" && m.bound?.kind === "object"))) return false;
+          if (typeof m === "string" || !(m.kind === "object" || m.kind === "class" || (m.kind === "param" && (m.bound?.kind === "object" || m.bound?.kind === "interface")))) return false;
           return p.props.every((prop, i) => {
             const field = objectFields(m).find((f) => f.name === keys[i]);
             const known = field && typeof field.type !== "string" && field.type.kind === "literal" ? field.type : undefined;

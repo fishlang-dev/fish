@@ -27,8 +27,8 @@ export type PatternInfo = { type: Type } & PatternTest;
 
 export type LiteralValue = string | bigint | boolean | number | null;
 
-// What an object pattern can take apart: an object, an instance, or a type parameter whose
-// bound is an object type, as a parameter typed with one is.
+// What an object pattern can take apart: an object, an instance, or a type parameter bounded by
+// an object type or an interface, as a parameter typed with one is.
 export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
@@ -95,7 +95,7 @@ function cases(t: Type): Case[] {
     if (m === "null") return [{ kind: "none" }];
     if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
     if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
-    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class" || (m.kind === "param" && m.bound?.kind === "object"))) return [{ kind: "object", type: m }];
+    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class" || (m.kind === "param" && (m.bound?.kind === "object" || m.bound?.kind === "interface")))) return [{ kind: "object", type: m }];
     return [{ kind: "open", type: m }];
   });
 }
