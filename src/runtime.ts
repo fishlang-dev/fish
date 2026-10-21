@@ -54,7 +54,7 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
   let values: string[] = [];
   parts.forEach((part, i) => {
     if (i > 0) format += " ";
-    if (typeof part === "string") format += escape(part);
+    if (typeof part === "string") literal(part);
     else piece(...part);
   });
   format += "\n";
@@ -62,7 +62,11 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
 
   function piece(v: string, type: Type) {
     if (typeof type !== "string" && type.kind === "literal") {
-      format += escape(String(type.value));
+      literal(String(type.value));
+    } else if (type === "string") {
+      // Written by the runtime, since its bytes may hold anything printf would read as format.
+      flush();
+      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${v})`);
     } else if (type === "never") {
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
@@ -105,6 +109,16 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       format += signed ? "%lld" : "%llu";
       values.push(`, i64 ${wide}`);
     }
+  }
+
+  // Text holding a NUL would end printf's format early, so the runtime writes it.
+  function literal(text: string) {
+    if (!text.includes("\0")) {
+      format += escape(text);
+      return;
+    }
+    flush();
+    emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${b.text(text)})`);
   }
 
   function flush() {

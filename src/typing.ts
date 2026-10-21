@@ -88,7 +88,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -163,9 +163,15 @@ export function widenEnum(t: Type): Type {
   return typeof t !== "string" && t.kind === "literal" && t.owner?.of ? t.owner.of : t;
 }
 
+// A `let` holds its literal's whole type too, as in TypeScript: `let s = "a"` is a string.
+export function widenLet(t: Type): Type {
+  if (typeof t !== "string" && t.kind === "literal" && !t.owner && typeof t.value === "string") return "string";
+  return widenEnum(t);
+}
+
 // The type a literal's value belongs to, if Fish has it yet.
-export function baseOf(t: LiteralType): "i64" | "boolean" | undefined {
-  return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : undefined;
+export function baseOf(t: LiteralType): "i64" | "boolean" | "string" {
+  return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : "string";
 }
 
 export function typeParameter(name: string, bound: Bound | undefined): ParamType {

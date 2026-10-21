@@ -92,10 +92,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (t.name in INTEGERS || ["boolean", "void", "number", "f32", "f64"].includes(t.name)) {
+    if (t.name in INTEGERS || ["boolean", "void", "number", "f32", "f64", "string"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
-      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void");
+      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
@@ -278,7 +278,7 @@ const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions"
 
 const I64_MAX = (1n << 63n) - 1n;
 
-const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "Ref", "Mut", "Lifetime", "Option", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

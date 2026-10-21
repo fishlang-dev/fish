@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, fits, holdsRef, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
+import { closureType, fits, holdsRef, widenLet, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -600,7 +600,7 @@ export function check(program: Stmt[]): Checked {
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
           // An interface describes the value, which keeps its own concrete type.
           // A `let` may later hold another member of an enum, so it holds the enum.
-          const widened = s.keyword === "let" && !annotated ? widenEnum(type) : type;
+          const widened = s.keyword === "let" && !annotated ? widenLet(type) : type;
           if (widened !== type) coerce(d.init, type, widened, "");
           // So does a function type, which the closure given fits.
           const describes = annotated && (isInterface(annotated) || (typeof annotated !== "string" && annotated.kind === "function"));

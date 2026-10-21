@@ -533,7 +533,7 @@ export function expressions(ctx: Context) {
         locals.set(e, local);
         return narrowed(local) ?? local.type;
       }
-      // Its literal type: Fish has no runtime strings yet, but a literal's value is known.
+      // Its literal type, which a string takes it as.
       case "string":
         return literalType(e.value);
       case "member": {
@@ -692,7 +692,7 @@ export function expressions(ctx: Context) {
         if (e.op === "**") return power(e.left, operand(e.left), e.right, operand(e.right), e);
         if (e.op === "??") return orElse(e);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-        return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right)), e);
+        return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
     }
@@ -771,8 +771,14 @@ export function expressions(ctx: Context) {
     return isNumeric(to) && literalOnly(e, isFloat(to));
   }
 
-  // Two operands of different number types meet as one when either is only literals.
-  function sameNumbers(a: Expr, left: Type, b: Expr, right: Type): [Type, Type] {
+  // Two operands of different number types meet as one when either is only literals. String
+  // literals meet as strings, unless two different ones are compared for equality.
+  function sameNumbers(a: Expr, left: Type, b: Expr, right: Type, equality = false): [Type, Type] {
+    if (isText(left) && isText(right) && (!equality || (left !== right && (left === "string" || right === "string")))) {
+      if (left !== "string") coerce(a, left, "string", "");
+      if (right !== "string") coerce(b, right, "string", "");
+      return ["string", "string"];
+    }
     if (left === right) return [left, right];
     if (adapt(b, left)) return [left, left];
     if (adapt(a, right)) return [right, right];
@@ -1222,7 +1228,8 @@ export function expressions(ctx: Context) {
     const literals = typeof type !== "string" && type.kind === "union" ? type.members : [type];
     const bases = new Set(literals.map((t) => (typeof t !== "string" && t.kind === "literal" ? baseOf(t) : undefined)));
     const base = bases.size === 1 ? [...bases][0] : undefined;
-    if (!base) return type;
+    // A string literal keeps its type, so comparing two different ones is caught.
+    if (!base || base === "string") return type;
     coercions.set(e, base);
     return base;
   }
@@ -1236,3 +1243,6 @@ export function expressions(ctx: Context) {
     }
   }
 }
+
+// A string, or a string literal that isn't an enum's member.
+const isText = (t: Type) => t === "string" || (typeof t !== "string" && t.kind === "literal" && typeof t.value === "string" && !t.owner);

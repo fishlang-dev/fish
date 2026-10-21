@@ -46,6 +46,8 @@ export function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Typ
   if (isNumeric(left) && isNumeric(right) && left !== right) {
     throw new CompileError(`operator '${op}' can't mix '${show(left)}' and '${show(right)}'; convert one side with 'as', like 'x as ${show(left)}'`, at.start, at.end);
   }
+  // Strings compare by their UTF-8 bytes, which is code point order.
+  if (left === "string" && right === "string" && (op === "<" || op === "<=" || op === ">" || op === ">=")) return "boolean";
   const integers = BITWISE.has(op);
   if (integers && left === right && isFloat(left)) {
     throw new CompileError(`operator '${op}' works on integers, and '${show(left)}' is a float; convert it with 'as i64' first`, at.start, at.end);

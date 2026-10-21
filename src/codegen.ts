@@ -66,7 +66,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
-  const builder = { emit, temp, label, startBlock, cString, alloca };
+  const builder = { emit, temp, label, startBlock, cString, alloca, text };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
@@ -272,7 +272,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           // Anything but two values of one primitive type, such as a union or an enum member,
           // compares by value.
           const testType = valueType(c.test);
-          const primitive = typeof subjectType === "string" && testType === subjectType;
+          const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string";
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
           const next = label();
           emit(`br i1 ${equal}, label %${bodies[i]}, label %${next}`);
@@ -857,6 +857,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);
           return result;
         }
+        // Strings compare by the runtime's order: below, equal or above zero.
+        if (type === "string") {
+          const order = temp();
+          emit(`${order} = call i32 @fsh_rt_str_compare(ptr ${a}, ptr ${b})`);
+          emit(`${result} = icmp ${condition} i32 ${order}, 0`);
+          return result;
+        }
         // An ordering of unsigned numbers compares them as unsigned.
         const unsigned = isInteger(type) && !INTEGERS[type].signed && condition.startsWith("s");
         emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${llvm(type)} ${a}, ${b}`);
@@ -977,6 +984,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const result = temp();
     emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
     return result;
+  }
+
+  // A literal's string block: a count below zero, so it is never freed, its length, its bytes.
+  function text(value: string): string {
+    const bytes = new TextEncoder().encode(value);
+    let lit = "";
+    for (const b of bytes) {
+      const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
+      lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
+    }
+    const name = `@.text.${globals.length}`;
+    globals.push(`${name} = private unnamed_addr constant { i64, i64, [${bytes.length} x i8] } { i64 -1, i64 ${bytes.length}, [${bytes.length} x i8] c"${lit}" }`);
+    return name;
   }
 
   function cString(s: string): string {

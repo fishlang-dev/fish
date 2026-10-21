@@ -8,7 +8,7 @@ import { baseOf, field, fieldPath, INTEGERS, isInteger, membersFor, type ClassTy
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
   i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
-  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}",
+  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr",
 };
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
@@ -34,6 +34,7 @@ function size(t: Type): [number, number] {
   if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (t === "null" || t === "never") return [0, 1];
+  if (t === "string") return [8, 8];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
@@ -46,7 +47,8 @@ function size(t: Type): [number, number] {
 }
 
 // What converting needs besides emitting: a slot in the function's entry block.
-export type Slots = Builder & { alloca(type: string): string };
+// `text` gives a pointer to a literal's string block, which lives for the whole program.
+export type Slots = Builder & { alloca(type: string): string; text(value: string): string };
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca } = b;
@@ -98,6 +100,13 @@ export function conversions(b: Slots) {
     }
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
     if (base(aType) === "null") return "true";
+    if (base(aType) === "string") {
+      const order = temp();
+      emit(`${order} = call i32 @fsh_rt_str_compare(ptr ${convert(a, aType, "string")}, ptr ${convert(b, bType, "string")})`);
+      const same = temp();
+      emit(`${same} = icmp eq i32 ${order}, 0`);
+      return same;
+    }
     const result = temp();
     const float = base(aType) === "f32" || base(aType) === "f64";
     emit(`${result} = ${float ? "fcmp oeq" : "icmp eq"} ${llvm(base(aType))} ${value(aType, a)}, ${value(bType, b)}`);
@@ -155,6 +164,8 @@ export function conversions(b: Slots) {
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // A string literal's type takes no space; as a string, it is its static block.
+    if (to === "string" && typeof from !== "string" && from.kind === "literal") return b.text(String(from.value));
     // Code holding a `never` value never runs.
     if (from === "never") return "undef";
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
