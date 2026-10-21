@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, fits, holdsRef, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, fits, holdsRef, isCopy, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -701,8 +701,25 @@ export function check(program: Stmt[]): Checked {
           return;
         case "forIn":
           throw unsupported("'for...in' loops", s);
-        case "forOf":
-          throw unsupported(s.await ? "'for await...of' loops" : "'for...of' loops", s);
+        // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
+        case "forOf": {
+          if (s.await) throw unsupported("'for await...of' loops", s);
+          const left = s.left;
+          if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
+          const d = left.declarations[0]!;
+          if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
+          if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type is the array's element type", d.type.start, d.type.end);
+          const through = value(s.right);
+          const object = isRef(through) ? through.to : through;
+          if (object === "string" || (typeof object !== "string" && object.kind === "literal" && typeof object.value === "string")) throw unsupported("'for...of' loops over strings", s.right);
+          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, not '${show(object)}'`, s.right.start, s.right.end);
+          if (object !== through) coercions.set(s.right, object);
+          scopes.push(new Map());
+          declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);
+          within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+          scopes.pop();
+          return;
+        }
         case "doWhile":
           within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           condition(s.cond);

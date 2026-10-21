@@ -17,7 +17,8 @@ type Move = { start: number; end: number; note: string; passes: Map<Stmt, number
 
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
-type Loan = { place: string; mutable: boolean; start: number; end: number; holders: Set<Local>; call?: string; callAt?: Expr };
+// A `for...of` loop lends its array for as long as it runs, as a call lends for its duration.
+type Loan = { place: string; mutable: boolean; start: number; end: number; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean };
 
 // The places moved, and the loans made, on the way here, or null where control can't reach.
 // Loans are keyed by where they were made.
@@ -81,6 +82,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return s.body.flatMap(inside);
       case "for":
         return [...(s.init ? [s.init] : []), ...s.body].flatMap(inside);
+      case "forOf": {
+        const each = locals.get(s.left as Stmt)!;
+        return [...(holdsRef(each.type) ? [each] : []), ...s.body.flatMap(inside)];
+      }
       case "labeled":
         return inside(s.body);
       case "switch":
@@ -175,6 +180,22 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "for":
         if (s.init) statement(s.init);
         return loop(s, () => s.test, () => statements(s.body), false, () => s.update && expr(s.update, undefined, true));
+      // The loop reads its array once and keeps it lent, shared, until it ends; its variable,
+      // when it is a reference, borrows the array as well.
+      case "forOf": {
+        expr(s.right);
+        const place = key(s.right);
+        const each = locals.get(s.left as Stmt)!;
+        if (place !== undefined && state) {
+          free(place, s.right, "lend");
+          state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
+          if (holdsRef(each.type)) state.loans.set(-s.start - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
+        }
+        // Each pass may end the loop, like a condition that may be false.
+        loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => statements(s.body));
+        state?.loans.delete(s.right.start);
+        return;
+      }
       case "labeled": {
         exits.set(s, null);
         statement(s.body);
@@ -562,10 +583,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const lent = pathOf(loan.place);
       const verb = { read: "use", change: "change", move: "move", lend: "lend", "lend mutably": "mutably lend" }[access];
       const holders = [...loan.holders].filter((h) => (last.get(h) ?? -1) > at);
-      const holder = loan.call
+      const holder = loan.loop ? `a 'for...of' loop is reading '${lent}'`
+        : loan.call
         ? `'${lent}' is lent ${loan.mutable ? "mutably " : ""}to ${loan.call} for this call`
         : `${holders.map((h) => `'${h.name}'`).join(" and ")} ${holders.length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${holders.length > 1 ? "are" : "is"} used later`;
-      const until = loan.call ? "the call returns" : "the borrow's last use";
+      const until = loan.loop ? "the loop ends" : loan.call ? "the call returns" : "the borrow's last use";
       const earlier = loan.start >= e.start && [...passes.values()].some((p) => p > 0) ? " on an earlier pass through this loop" : "";
       throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
         message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here${earlier}, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
@@ -1014,6 +1036,12 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         loops.push(s);
         if (s.test) expr(s.test);
         if (s.update) expr(s.update);
+        stmts(s.body);
+        loops.pop();
+        return;
+      case "forOf":
+        expr(s.right);
+        loops.push(s);
         stmts(s.body);
         loops.pop();
         return;

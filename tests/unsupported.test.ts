@@ -195,7 +195,6 @@ const STATEMENTS: [string, string][] = [
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
   ["for (const k in o) {}", "'for...in' loops"],
-  ["for (const x of xs) {}", "'for...of' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
   ["class A {}", "local classes"],
   ["@sealed class A {}", "decorators"],

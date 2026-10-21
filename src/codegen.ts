@@ -283,6 +283,58 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         scopes.pop();
         return;
       }
+      // The array is read once; one the loop made itself is owned by the loop until it ends.
+      // Each pass gives the variable a pointer to its element, or a copy of a Copy one.
+      case "forOf": {
+        const type = valueType(s.right) as ArrayType;
+        const local = resolved(s.left as Stmt);
+        scopes.push([]);
+        let array: string;
+        if (fresh(s.right)) {
+          array = value(s.right, true);
+          const held = alloca(ARRAY);
+          own(held, type);
+          emit(`store ${ARRAY} ${array}, ptr ${held}`);
+        } else array = value(s.right);
+        settle();
+        const [data, length, counter] = [temp(), temp(), alloca("i64")];
+        emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+        emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+        emit(`store i64 0, ptr ${counter}`);
+        const [test, loop, next, end] = [label(), label(), label(), label()];
+        emit(`br label %${test}`);
+        startBlock(test);
+        const [i, more] = [temp(), temp()];
+        emit(`${i} = load i64, ptr ${counter}`);
+        emit(`${more} = icmp ult i64 ${i}, ${length}`);
+        emit(`br i1 ${more}, label %${loop}, label %${end}`);
+        startBlock(loop);
+        exits.set(s, { exit: end, next, depth: scopes.length });
+        scopes.push([]);
+        allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+        own(slot(local), local.type);
+        const at = temp();
+        emit(`${at} = getelementptr ${llvm(type.element)}, ptr ${data}, i64 ${i}`);
+        if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
+        else {
+          const v = temp();
+          emit(`${v} = load ${llvm(type.element)}, ptr ${at}`);
+          emit(`store ${llvm(local.type)} ${copied(v, type.element)}, ptr ${slot(local)}`);
+        }
+        s.body.forEach(statement);
+        drop(scopes.length - 1);
+        scopes.pop();
+        emit(`br label %${next}`);
+        startBlock(next);
+        const after = temp();
+        emit(`${after} = add i64 ${i}, 1`);
+        emit(`store i64 ${after}, ptr ${counter}`);
+        emit(`br label %${test}`);
+        startBlock(end);
+        drop(scopes.length - 1);
+        scopes.pop();
+        return;
+      }
       case "doWhile": {
         const [loop, test, end] = [label(), label(), label()];
         emit(`br label %${loop}`);

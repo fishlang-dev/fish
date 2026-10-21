@@ -829,7 +829,7 @@ export function expressions(ctx: Context) {
         continue;
       }
       if (!want || have === want) continue;
-      const adapted = adapt(p.value, want) ? want : adaptFields(p.value, have, want);
+      const adapted = adapt(p.value, want) || literalArray(p.value, have, want) ? want : adaptFields(p.value, have, want);
       if (adapted !== have) {
         types.set(p.value, adapted);
         changed = true;
@@ -892,6 +892,18 @@ export function expressions(ctx: Context) {
     return isNumeric(to) && literalOnly(e, isFloat(to));
   }
 
+  // An array literal takes a declared element type, each element meeting it.
+  function literalArray(e: Expr, type: Type, to: Type): boolean {
+    if (e.kind !== "array" || !isArray(type) || !isArray(to) || type === to) return false;
+    // Each element meets the declared type afresh, replacing how it met the literal's own.
+    for (const x of e.elements as Expr[]) {
+      coercions.delete(x);
+      coerce(x, types.get(x)!, to.element, `type '${show(types.get(x)!)}' is not assignable to type '${show(to.element)}'`);
+    }
+    types.set(e, to);
+    return true;
+  }
+
   // `+` with a string on either side joins the two into a new string.
   function join(a: Expr, left: Type, b: Expr, right: Type): Type {
     joined(a, left, "'+'");
@@ -932,12 +944,7 @@ export function expressions(ctx: Context) {
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
     if (type === to) return;
-    // An array literal takes a declared element type, each element meeting it.
-    if (e.kind === "array" && isArray(type) && isArray(to)) {
-      for (const x of e.elements as Expr[]) coerce(x, types.get(x)!, to.element, `type '${show(types.get(x)!)}' is not assignable to type '${show(to.element)}'`);
-      types.set(e, to);
-      return;
-    }
+    if (literalArray(e, type, to)) return;
     if (isNumeric(type) && isNumeric(to)) throw new CompileError(`${message}; convert it with 'as ${show(to)}'`, e.start, e.end);
     if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, to, message);
