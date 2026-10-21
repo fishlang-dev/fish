@@ -733,7 +733,7 @@ export function expressions(ctx: Context) {
     if (!changed) return type;
     const remade = objectType((type as ObjectType).fields.map((f) => {
       const p = e.props.find((q) => q.kind === "property" && q.key === f.name) as { value: Expr } | undefined;
-      return p ? { ...f, type: types.get(p.value)! } : f;
+      return p ? { ...f, type: coercions.get(p.value) ?? types.get(p.value)! } : f;
     }));
     types.set(e, remade);
     return remade;

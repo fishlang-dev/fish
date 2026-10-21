@@ -71,7 +71,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
   let scopes: { slot: string; type: Type }[][] = [];
   // Receivers copied into slots for owning methods, whose leftovers drop after the call.
-  const spills: { slot: string; type: Type }[] = [];
+  const spills: { slot: string; type: Type; copy: { v: string; type: Type } }[] = [];
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
@@ -557,6 +557,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return !needsDrop(from) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
   }
 
+  // A receiver copied into a slot for an owning method: the copy holds references of its own,
+  // pending until the call takes it.
+  function spill(slot: string, type: Type, v: string) {
+    retain(v, type);
+    const copy = { v, type };
+    pending.push(copy);
+    spills.push({ slot, type, copy });
+  }
+
   // A value read for an operand. One read from a place takes a reference of its own while a
   // later operand that might change the place runs, released when the statement ends.
   function operand(e: Expr, later: Expr[]): string {
@@ -658,10 +667,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
-    const result = invoke(target, pointer, values, e);
-    // What an owning method left of a receiver copied for it: the parts of a derived instance
-    // its base's method doesn't drop.
-    for (const { slot, type } of mine) dispose(unstash(slot, type), type);
+    // The call takes the copy; what it leaves, the parts of a derived instance its base's
+    // method doesn't drop, is dropped once it returns or raises.
+    pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
+    const leftovers = () => {
+      for (const { slot, type } of mine) dispose(unstash(slot, type), type);
+    };
+    const result = invoke(target, pointer, values, e, leftovers);
     // A call through a type parameter returns what its bound's method declares.
     return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
   }
@@ -735,17 +747,22 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
-  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr): string | undefined {
+  // `after` runs once the call returns, and before an error it raises goes on.
+  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after = () => {}): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     const call = `call ${resultType(target)} ${symbol(target)}(${values.join(", ")})`;
     if (type === "void" && !target.throws) {
       emit(call);
+      after();
       return undefined;
     }
     const result = temp();
     emit(`${result} = ${call}`);
-    if (!target.throws) return result;
+    if (!target.throws) {
+      after();
+      return result;
+    }
     // A call that failed raises its error where this function sends it.
     const [failed, bad, ok] = [temp(), label(), label()];
     emit(`${failed} = extractvalue ${resultType(target)} ${result}, 0`);
@@ -753,8 +770,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     startBlock(bad);
     const error = temp();
     emit(`${error} = extractvalue ${resultType(target)} ${result}, 2`);
+    after();
     raised(at!, error);
     startBlock(ok);
+    after();
     if (type === "void") return undefined;
     const got = temp();
     emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
@@ -930,10 +949,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       const copy = alloca(llvm(held));
       const v = value(object);
-      if (owns) {
-        retain(v, held);
-        spills.push({ slot: copy, type: held });
-      }
+      if (owns) spill(copy, held, v);
       emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
@@ -941,10 +957,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
     const v = value(object);
-    if (owns) {
-      retain(v, types.get(object)!);
-      spills.push({ slot: spilled, type: types.get(object)! });
-    }
+    if (owns) spill(spilled, types.get(object)!, v);
     emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
   }
