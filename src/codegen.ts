@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isCopy, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -72,6 +72,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let scopes: { slot: string; type: Type }[][] = [];
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
+  // The function dropping, or copying, what a value of each type owns, made once.
+  const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
   const builder = { emit, temp, label, startBlock, cString, alloca, text };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
@@ -102,6 +104,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // it captured.
     if (f.self) params.unshift("ptr %this");
     if (f.closure) params.unshift("ptr %env");
+    // A method owning its object drops it, unless the object moves out first.
+    if (f.self?.owned) own("%this", f.self.type, false);
     captured = new Map();
     // A capture the closure holds lives in its environment; a borrowed one, where it points.
     [...(instance.captures ?? [])].forEach(([alias, from], i) => {
@@ -431,19 +435,74 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (result !== undefined && type) dispose(result, type);
   }
 
-  // Whether a value of the type owns memory it gives back when dropped.
+  // Whether a value of the type owns memory it gives back when dropped: a string, or anything
+  // holding one by value.
   function needsDrop(type: Type | undefined): boolean {
-    return type === "string";
+    if (type === "string") return true;
+    if (type === undefined || typeof type === "string") return false;
+    if (type.kind === "union") return type.members.some(needsDrop);
+    return parts(type).some(([t]) => needsDrop(t));
   }
 
-  // Adds a reference to what a value owns, for a copy.
+  // The parts of an aggregate value, each with its index: an instance's embedded base, then its
+  // fields; an object's or a closure's fields.
+  function parts(type: Exclude<Type, string>): [Type, number][] {
+    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure") return [];
+    const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
+    return [...base, ...type.fields.map((f, i): [Type, number] => [f.type, i + base.length])];
+  }
+
+  // Adds a reference to everything a value owns, for a copy.
   function retain(v: string, type: Type) {
-    if (needsDrop(type)) emit(`call void @fsh_rt_str_retain(ptr ${v})`);
+    touch("copy", v, type);
   }
 
-  // Gives up a value: releases a reference to what it owns.
+  // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
-    if (needsDrop(type)) emit(`call void @fsh_rt_str_release(ptr ${v})`);
+    touch("drop", v, type);
+  }
+
+  function touch(kind: "drop" | "copy", v: string, type: Type) {
+    if (!needsDrop(type)) return;
+    if (type === "string") return emit(`call void @fsh_rt_str_${kind === "copy" ? "retain" : "release"}(ptr ${v})`);
+    emit(`call void ${helper(kind, type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
+  }
+
+  // The function that drops or copies what a value of an aggregate type owns, part by part, or
+  // for a union, in the member it holds. It is named before it is made, so a type holding
+  // itself calls it.
+  function helper(kind: "drop" | "copy", type: Exclude<Type, string>): string {
+    const made = glue[kind].get(type);
+    if (made) return made;
+    const name = `@"fsh.${kind}.${glue[kind].size}"`;
+    glue[kind].set(type, name);
+    const saved = { allocas, body, temps, labels, block };
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    if (type.kind === "union") {
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(type)} %v, 0`);
+      const owners = type.members.filter(needsDrop);
+      const cases = owners.map(() => label());
+      const end = label();
+      emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${type.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+      owners.forEach((m, i) => {
+        startBlock(cases[i]!);
+        touch(kind, convert("%v", type, m), m);
+        emit(`br label %${end}`);
+      });
+      startBlock(end);
+    } else {
+      for (const [t, i] of parts(type)) {
+        if (!needsDrop(t)) continue;
+        const part = temp();
+        emit(`${part} = extractvalue ${llvm(type)} %v, ${i}`);
+        touch(kind, part, t);
+      }
+    }
+    emit("ret void");
+    out.push(`define internal void ${name}(${llvm(type)} %v) {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block } = saved);
+    return name;
   }
 
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
@@ -454,6 +513,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "call":
       case "new":
       case "object":
+      case "arrow":
       case "template":
       case "conditional":
         return true;
@@ -466,11 +526,27 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     }
   }
 
-  // An expression's value for a place to own: one it made, or another reference to what it reads.
+  // An expression's value for a place to own: one it made, the value of a place it moves out
+  // of, which is left empty, or else a copy holding another reference to what it owns. A
+  // conversion that leaves part of a value behind copies the part it keeps.
   function owned(e: Expr): string {
-    const v = value(e, true);
-    if (!fresh(e) && e.kind !== "string") retain(v, valueType(e));
+    const to = coercions.get(e);
+    const whole = !to || keepsAll(types.get(e)!, to);
+    if (whole && fresh(e)) return value(e, true);
+    const v = value(e);
+    if (whole && current.consumes.has(e) && lendable(e)) {
+      emit(`store ${llvm(e.kind === "member" ? stored(e) : types.get(e)!)} zeroinitializer, ptr ${address(e)}`);
+      return v;
+    }
+    if (e.kind !== "string") retain(v, valueType(e));
     return v;
+  }
+
+  // Whether converting a value from one type to another keeps all it owns: putting it in a
+  // union, taking a union's member out, or moving it to a union holding all its members.
+  function keepsAll(from: Type, to: Type): boolean {
+    const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+    return !needsDrop(from) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
   }
 
   // Releases the values made since `mark` that nothing took over, newest first.
@@ -480,9 +556,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // A variable the innermost scope owns. Its slot starts empty, so dropping it before it is set,
   // or again after, does nothing.
-  function own(at: string, type: Type) {
+  function own(at: string, type: Type, empty = true) {
     if (!needsDrop(type)) return;
-    allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
+    if (empty) allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
     scopes.at(-1)!.push({ slot: at, type });
   }
 
@@ -578,6 +654,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function link(e: Expr, object: Expr, compute: () => string | undefined): string | undefined {
     const option = types.get(object) as UnionType;
     const raw = evaluate(object);
+    if (fresh(object)) pending.push({ v: raw, type: option });
     known.set(object, raw);
     const [some, none, end] = [label(), label(), label()];
     emit(`br i1 ${holds(raw, option, ["null"])}, label %${none}, label %${some}`);
@@ -602,7 +679,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // that declares the method.
   function thisPointer(target: Instance, object: Expr): string {
     const held = unwraps(object) ? coercions.get(object)! : referent(types.get(object)!);
-    return upcast(receiver(object), held as ClassType, target.body.owner!);
+    return upcast(receiver(object, target.body.self?.owned), held as ClassType, target.body.owner!);
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
@@ -779,8 +856,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // Where a method's receiver lives. A temporary, such as a call's or a getter's result,
-  // gets a slot.
-  function receiver(object: Expr): string {
+  // gets a slot. A method that `owns` its object drops it: one in place is left empty, and one
+  // in a slot is a copy of its own.
+  function receiver(object: Expr, owns = false): string {
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
     // A reference already points where the receiver lives.
     if (isRef(types.get(object)!)) return evaluate(object);
@@ -802,13 +880,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return at;
       }
       const copy = alloca(llvm(held));
-      emit(`store ${llvm(held)} ${value(object)}, ptr ${copy}`);
+      const v = value(object);
+      if (owns) retain(v, held);
+      emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
     if (lendable(object)) return address(object);
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
-    emit(`store ${type} ${value(object)}, ptr ${spilled}`);
+    const v = value(object);
+    if (owns) retain(v, types.get(object)!);
+    emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
   }
 
@@ -907,9 +989,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         [...inner.captures!.values()].forEach((from, i) => {
           const type = inner.closure!.fields[i]!.type;
           let part = from === "this" ? "%this" : slot(from);
+          // A closure holding a variable's value holds a copy, or moves it in, emptying it.
           if (!isRef(type)) {
             part = temp();
             emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
+            if (isCopy(type)) retain(part, type);
+            else emit(`store ${llvm(type)} zeroinitializer, ptr ${slot(from as Local)}`);
           }
           const next = temp();
           emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ${llvm(type)} ${part}, ${i}`);

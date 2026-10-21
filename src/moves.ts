@@ -525,6 +525,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     // A closure moving out what it captures holds it, and can run only once.
     if (root && instance.captures?.has(root)) instance.moved!.add(root);
+    instance.consumes.add(e);
     state.moves.set(place, { start: e.start, end: e.end, note: consume!(text(e)), passes: new Map(passes) });
   }
 

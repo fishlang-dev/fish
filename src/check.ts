@@ -65,6 +65,8 @@ export type Instance = {
   raises: Map<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
   // The type of what each `try` catches.
   caught: Map<Stmt, Type>;
+  // Each place whose value is handed over rather than copied, which leaves it empty.
+  consumes: Set<Expr | ObjectProp>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -541,7 +543,7 @@ export function check(program: Stmt[]): Checked {
       const inner: Instance = {
         body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();
