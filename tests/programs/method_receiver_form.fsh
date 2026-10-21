@@ -1,6 +1,6 @@
 class Counter {
-  close(this: Own<this>) {}
+  close(this: Box<this>) {}
 }
 
 function main() {}
-// error: receivers other than 'this: Mut<this>' and 'this: Ref<this>' are not supported yet
+// error: receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>' are not supported yet

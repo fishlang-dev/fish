@@ -191,11 +191,23 @@ export function expressions(ctx: Context) {
   // interface it returns is, as for any call, the one concrete type the method returns.
   function concreteMethod(e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type): Type {
     const target = inherited(classOf(c), "methods", callee.name)!;
-    if (target.self!.mutable) mutates(callee.object, callee.name);
+    if (target.self!.owned) takesOver(callee.object, callee.name);
+    else if (target.self!.mutable) mutates(callee.object, callee.name);
     const instance = instantiate(target, [], e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
     calls.set(e, instance);
     if (typeof returns === "string" || returns.kind !== "interface") return returns;
     return wrapped(returns.name, returns, lower(returnOf(instance, e)));
+  }
+
+  // An owning method takes its object over, which can't happen through a borrow.
+  function takesOver(object: Expr, name: string) {
+    const type = types.get(object);
+    if (typeof type !== "string" && type?.kind === "ref") {
+      throw new CompileError(`can't call '${name}' through the reference '${placeText(object)}': it takes its object over, and a reference only borrows it; call it on the value itself`, object.start, object.end);
+    }
+    if (object.kind === "this" && !self?.owned) {
+      throw new CompileError(`can't call '${name}' on 'this' here: it takes its object over, and this method only borrows 'this'; declare 'this: Own<this>' to give it away`, object.start, object.end);
+    }
   }
 
   // A mutating method's receiver must be a place that could change, or a temporary.
@@ -227,7 +239,8 @@ export function expressions(ctx: Context) {
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
     visible(found.access, found.owner!, name, callee);
-    if (found.self!.mutable) mutates(object, name);
+    if (found.self!.owned) takesOver(object, name);
+    else if (found.self!.mutable) mutates(object, name);
     return found;
   }
 

@@ -17,7 +17,8 @@ export type Body = Span & {
   accessor?: boolean;
   // For a member of a generic class's instance: what the class's type parameters stand for.
   scope?: Map<string, Type>;
-  self?: { type: ClassType; constructor: boolean; mutable: boolean };
+  // `owned`: a method declared `this: Own<this>` takes its object over.
+  self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean };
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
   access?: Access;
@@ -178,7 +179,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       body: m.body,
       returnType: m.returnType,
       typeParams: m.typeParams,
-      self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false },
+      self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false, owned: receiver ? owns(receiver) : false },
       owner: type,
       access,
       start: m.start,
@@ -261,12 +262,17 @@ function usesOnThis(node: unknown, name: string): boolean {
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.
 function mutates(p: Param): boolean {
+  if (wraps(p, "Mut") || wraps(p, "Own")) return true;
+  if (wraps(p, "Ref")) return false;
+  throw unsupported("receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>'", p);
+}
+
+// `this: Own<this>` takes the object over: an owner may change it too.
+const owns = (p: Param) => wraps(p, "Own");
+
+function wraps(p: Param, name: string): boolean {
   const t = p.type;
-  const wraps = (name: string) => t?.kind === "ref" && t.name === name && t.args.length === 1 &&
-    t.args[0]!.kind === "ref" && t.args[0]!.name === "this";
-  if (wraps("Mut")) return true;
-  if (wraps("Ref")) return false;
-  throw unsupported("receivers other than 'this: Mut<this>' and 'this: Ref<this>'", p);
+  return t?.kind === "ref" && t.name === name && t.args.length === 1 && t.args[0]!.kind === "ref" && t.args[0]!.name === "this";
 }
 
 // `this.name = value`, as a constructor statement at the span of what it came from.

@@ -215,6 +215,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return locals.has(e) ? use(e, consume) : undefined;
       case "this":
         free("this", e, "read");
+        if (f.self?.owned) return use(e, consume);
         if (consume && state && !isCopy(types.get(e)!)) {
           throw new CompileError("'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy", e.start, e.end);
         }
@@ -248,6 +249,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const object = e.callee.kind === "member" ? e.callee.object : undefined;
           const place = object && key(object);
           const self = calls.get(e)?.body.self;
+          // An owning method takes its receiver over, as an argument it is handed.
+          if (object && self?.owned) {
+            expr(object, (p) => `'${p}' moved here: ${name} takes its object over; call it on '${p}.clone()' to keep a copy`);
+            handOver(e.args, name, e);
+            return;
+          }
           if (object) expr(object);
           if (object && place !== undefined && self) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
@@ -392,7 +399,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         throw new CompileError(`'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
       }
     }
-    if (place.startsWith("this")) {
+    if (place.startsWith("this") && !f.self?.owned) {
       throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
     }
     state.moves.set(place, { start: e.start, end: e.end, note: consume!(text(e)), passes: new Map(passes) });
