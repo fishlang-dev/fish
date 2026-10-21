@@ -108,7 +108,10 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
     const access = modifiers(p.modifiers, p, p.pattern.name);
-    return add({ name: p.pattern.name, type: p.type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end });
+    // An optional parameter property is an Option, as the parameter is.
+    const at = { start: p.start, end: p.end };
+    const type: TypeNode | undefined = p.optional && p.type ? { kind: "union", types: [p.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
+    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end });
   });
 
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {

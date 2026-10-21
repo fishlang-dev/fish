@@ -385,13 +385,20 @@ export function expressions(ctx: Context) {
       throw new CompileError(`can't call '${name}' on a '?:', which would change a copy; call it in each branch`, object.start, object.end);
     }
     // `x!` gives a copy of what x holds, which a change wouldn't reach.
-    let x: Expr = object;
-    while (x.kind === "member") x = x.object;
-    if (x.kind === "nonNull") {
-      throw new CompileError(`can't call '${name}' through '!', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
-    }
+    const through = copied(object);
+    if (through) throw new CompileError(`can't call '${name}' through '${through}', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
     intoMember(object, types, `call '${name}' on`);
     if (place(object)) changeable(object, `call '${name}' on`);
+  }
+
+  // The `!` or `??` a place is read through, if any, which gives a copy of what the place holds,
+  // so a change through it would be lost. A temporary has no place to change.
+  function copied(e: Expr): string | undefined {
+    let x = e;
+    while (x.kind === "member") x = x.object;
+    if (x.kind === "nonNull" && rooted(x.expr)) return "!";
+    if (x.kind === "binary" && x.op === "??" && (rooted(x.left) || rooted(x.right))) return "??";
+    return undefined;
   }
 
   // The method a member call names: a static one on a class name, or an instance one, whose
@@ -828,6 +835,8 @@ export function expressions(ctx: Context) {
     }
     const exact = lower(type) === lower(to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
+    const through = to.mutable ? copied(e) : undefined;
+    if (through) throw new CompileError(`can't lend this mutably through '${through}', which would lend a copy; check '!== null' first and lend the variable`, e.start, e.end);
     // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
     // that isn't a temporary must reach the place.
     if (to.mutable && rooted(e)) {

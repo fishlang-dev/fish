@@ -332,11 +332,24 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
     // A value leaving out an optional field is copied into the parameter's type, which fills
     // it in empty; a reference can't be.
-    const missing = bound.fields.find((f) => !field(type as Exclude<Type, string>, f.name));
-    if (missing && borrowed) throw new CompileError(`${message}: it has no '${missing.name}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
+    const missing = lacks(type, bound);
+    if (missing && borrowed) throw new CompileError(`${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
     return arg.kind === "object" || missing ? bound : type;
   }
 
+}
+
+// The path to a field of `to`, at any depth, that a value of `from` leaves out: an optional one,
+// since `from` fits.
+function lacks(from: Type, to: Type, path = ""): string | undefined {
+  if (typeof from === "string" || typeof to === "string" || to.kind !== "object") return undefined;
+  for (const f of to.fields) {
+    const found = field(from, f.name);
+    const at = `${path}${f.name}`;
+    const deeper = found ? lacks(found.type, f.type, `${at}.`) : at;
+    if (deeper) return deeper;
+  }
+  return undefined;
 }
 
 // Whether a body may call its function-typed parameter `name` more than once: it calls it
