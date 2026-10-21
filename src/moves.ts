@@ -52,12 +52,12 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         return isRef(locals.get(s)!.type) ? [locals.get(s)!] : [];
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
+      // A `for` loop's initializer outlives every pass, so only its body counts.
       case "block":
       case "while":
       case "doWhile":
-        return s.body.flatMap(inside);
       case "for":
-        return [...(s.init ? [s.init] : []), ...s.body].flatMap(inside);
+        return s.body.flatMap(inside);
       case "labeled":
         return inside(s.body);
       case "switch":
