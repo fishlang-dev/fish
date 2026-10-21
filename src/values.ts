@@ -1438,6 +1438,8 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   trim: [[], "string", 0],
   trimStart: [[], "string", 0],
   trimEnd: [[], "string", 0],
+  toUpperCase: [[], "string", 0],
+  toLowerCase: [[], "string", 0],
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
 };

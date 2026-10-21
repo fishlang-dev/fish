@@ -50,3 +50,29 @@ test("the halves of a surrogate pair join into one character", () => {
   expect(stdout).toBe("4 2 0\n�\n");
   expect(stderr).toBe("");
 });
+
+// Every code point's upper and lower case, one at a time, against the JavaScript engine the
+// case tables were made from. Surrogates map to themselves and are left out of the comparison.
+test("case mapping matches JavaScript for every code point", () => {
+  const { stdout, stderr } = run(`
+    for (uint32_t cp = 0; cp <= 0x10FFFF; cp++) {
+      if (cp >= 0xD800 && cp < 0xE000) continue;
+      char bytes[4];
+      fsh_str *s = fsh_str_of(bytes, fsh_put_cp(bytes, cp) - bytes);
+      for (int upper = 1; upper >= 0; upper--) {
+        fsh_str *mapped = fsh_rt_str_case(s, upper);
+        fwrite(mapped->bytes, 1, mapped->length, stdout);
+        fputc('\\n', stdout);
+        fsh_rt_str_release(mapped);
+      }
+      fsh_rt_str_release(s);
+    }`);
+  const expected: string[] = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp < 0xe000) continue;
+    const c = String.fromCodePoint(cp);
+    expected.push(c.toUpperCase(), c.toLowerCase());
+  }
+  expect(stdout === `${expected.join("\n")}\n`).toBe(true);
+  expect(stderr).toBe("");
+});

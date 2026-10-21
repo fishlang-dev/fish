@@ -1,3 +1,5 @@
+import { CASEMAP } from "./casemap.ts";
+
 // The C half of the runtime, compiled by the same clang call as a program's IR. Its entry
 // points are named `fsh_rt_*`.
 
@@ -590,5 +592,101 @@ fsh_str *fsh_rt_str_from_f32(float x) {
   char text[32];
   fsh_format(x, 1, text);
   return fsh_str_of(text, strlen(text));
+}
+` + CASEMAP + String.raw`
+// A code point found in a sorted table of pairs, by its first column.
+static const uint32_t *fsh_lookup(const uint32_t (*table)[2], int64_t n, uint32_t cp) {
+  int64_t lo = 0, hi = n - 1;
+  while (lo <= hi) {
+    int64_t mid = (lo + hi) / 2;
+    if (table[mid][0] == cp) return table[mid];
+    if (table[mid][0] < cp) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return NULL;
+}
+
+static int fsh_in(const uint32_t (*ranges)[2], int64_t n, uint32_t cp) {
+  int64_t lo = 0, hi = n - 1;
+  while (lo <= hi) {
+    int64_t mid = (lo + hi) / 2;
+    if (cp < ranges[mid][0]) hi = mid - 1;
+    else if (cp > ranges[mid][1]) lo = mid + 1;
+    else return 1;
+  }
+  return 0;
+}
+
+#define FSH_COUNT(t) ((int64_t)(sizeof(t) / sizeof(t[0])))
+
+// The code points of WTF-8 text, a lone surrogate as itself, in a buffer the caller frees.
+static uint32_t *fsh_code_points(fsh_str *s, int64_t *n) {
+  uint32_t *cps = fsh_rt_alloc((s->length + 1) * sizeof(uint32_t));
+  const unsigned char *p = (const unsigned char *)s->bytes;
+  *n = 0;
+  for (int64_t at = 0; at < s->length;) {
+    uint32_t c = p[at];
+    if (c < 0x80) at += 1;
+    else if (c < 0xE0) c = (c & 0x1F) << 6 | (p[at + 1] & 0x3F), at += 2;
+    else if (c < 0xF0) c = fsh_three(p + at), at += 3;
+    else c = (c & 0x07) << 18 | (p[at + 1] & 0x3F) << 12 | (p[at + 2] & 0x3F) << 6 | (p[at + 3] & 0x3F), at += 4;
+    cps[(*n)++] = c;
+  }
+  return cps;
+}
+
+static char *fsh_put_cp(char *out, uint32_t c) {
+  if (c < 0x10000) return out + fsh_put(out, c);
+  *out++ = 0xF0 | c >> 18;
+  *out++ = 0x80 | (c >> 12 & 0x3F);
+  *out++ = 0x80 | (c >> 6 & 0x3F);
+  *out++ = 0x80 | (c & 0x3F);
+  return out;
+}
+
+// Whether a capital sigma at i ends a word, so it lowers to a final sigma: a cased letter
+// comes before it and none after, skipping case-ignorable ones, as JavaScript's rule says.
+static int fsh_final_sigma(const uint32_t *cps, int64_t n, int64_t i) {
+  int64_t j = i - 1;
+  while (j >= 0 && fsh_in(fsh_case_ignorable, FSH_COUNT(fsh_case_ignorable), cps[j])) j--;
+  if (j < 0 || !fsh_in(fsh_cased, FSH_COUNT(fsh_cased), cps[j])) return 0;
+  j = i + 1;
+  while (j < n && fsh_in(fsh_case_ignorable, FSH_COUNT(fsh_case_ignorable), cps[j])) j++;
+  return j >= n || !fsh_in(fsh_cased, FSH_COUNT(fsh_cased), cps[j]);
+}
+
+// JavaScript's toUpperCase (upper) or toLowerCase, code point by code point. A code point may
+// become up to three, each at most three times its bytes, so three times the length is room.
+fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
+  int64_t n;
+  uint32_t *cps = fsh_code_points(s, &n);
+  fsh_str *out = fsh_str_new(s->length * 3);
+  char *at = out->own;
+  const uint32_t (*simple)[2] = upper ? fsh_upper : fsh_lower;
+  const uint32_t (*special)[4] = upper ? fsh_upper_special : fsh_lower_special;
+  int64_t simples = upper ? FSH_COUNT(fsh_upper) : FSH_COUNT(fsh_lower);
+  int64_t specials = upper ? FSH_COUNT(fsh_upper_special) : FSH_COUNT(fsh_lower_special);
+  for (int64_t i = 0; i < n; i++) {
+    uint32_t c = cps[i];
+    if (!upper && c == 0x3A3) {
+      at = fsh_put_cp(at, fsh_final_sigma(cps, n, i) ? 0x3C2 : 0x3C3);
+      continue;
+    }
+    const uint32_t *found = fsh_lookup(simple, simples, c);
+    if (found) {
+      at = fsh_put_cp(at, found[1]);
+      continue;
+    }
+    int64_t k = 0;
+    while (k < specials && special[k][0] != c) k++;
+    if (k == specials) {
+      at = fsh_put_cp(at, c);
+      continue;
+    }
+    for (int x = 1; x < 4 && special[k][x]; x++) at = fsh_put_cp(at, special[k][x]);
+  }
+  out->length = at - out->own;
+  fsh_rt_free(cps);
+  return out;
 }
 `;

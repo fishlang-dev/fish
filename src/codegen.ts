@@ -1003,6 +1003,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         emit(`${result} = load ${ARRAY}, ptr ${out}`);
         return given(result, arrayType("string"));
       }
+      case "toUpperCase":
+      case "toLowerCase":
+        emit(`${result} = call ptr @fsh_rt_str_case(ptr ${s}, i32 ${callee.name === "toUpperCase" ? 1 : 0})`);
+        return given(result, "string");
       case "trim":
       case "trimStart":
       case "trimEnd":
