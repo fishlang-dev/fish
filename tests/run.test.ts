@@ -40,9 +40,11 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     expect(errors).toEqual([]);
     if (parseOnly) return;
 
-    const run = Bun.spawnSync([out]);
+    // Every program is checked for leaks: the runtime reports what is still allocated at exit.
+    const run = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
     expect(run.stdout.toString()).toBe(expected);
     for (const text of [...panics, ...failures]) expect(run.stderr.toString()).toContain(text);
+    if (panics.length === 0) expect(run.stderr.toString()).not.toContain("fish: leaked");
     expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
   });
 }
