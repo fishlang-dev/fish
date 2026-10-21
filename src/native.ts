@@ -572,11 +572,16 @@ fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
 // JavaScript's padStart (start) or padEnd: the fill, a space by default, repeated and cut to
 // make the string length units long.
 fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start, const char *at) {
-  if (length < 0) fsh_too_long(at);
   int64_t n = fsh_rt_str_units(s);
   fsh_str *space = fill ? NULL : fsh_str_of(" ", 1);
   if (!fill) fill = space;
   int64_t m = fsh_rt_str_units(fill);
+  // An empty fill leaves the string as it is, however long it was asked to be. A length too
+  // long to make panics before anything is held, so the unwind has nothing here to drop.
+  if (m > 0 && (length < 0 || (length > n && (length - n) / m > FSH_MAX_BYTES / fill->length))) {
+    fsh_rt_str_release(space);
+    fsh_too_long(at);
+  }
   if (length <= n || m == 0) {
     fsh_rt_str_release(space);
     fsh_rt_str_retain(s);
