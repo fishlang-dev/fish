@@ -500,25 +500,28 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     return [...base, ...type.fields.map((f, i): [Type, number] => [f.type, i + base.length])];
   }
 
-  // Adds a reference to everything a value owns, for a copy.
-  function retain(v: string, type: Type) {
-    touch("copy", v, type);
+  // A copy of a value, holding its own reference to each string in it.
+  function copied(v: string, type: Type): string {
+    if (!needsDrop(type)) return v;
+    if (type === "string") {
+      emit(`call void @fsh_rt_str_retain(ptr ${v})`);
+      return v;
+    }
+    const result = temp();
+    emit(`${result} = call ${llvm(type)} ${helper("copy", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
+    return result;
   }
 
   // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
-    touch("drop", v, type);
-  }
-
-  function touch(kind: "drop" | "copy", v: string, type: Type) {
     if (!needsDrop(type)) return;
-    if (type === "string") return emit(`call void @fsh_rt_str_${kind === "copy" ? "retain" : "release"}(ptr ${v})`);
-    emit(`call void ${helper(kind, type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
+    if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
+    emit(`call void ${helper("drop", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
   }
 
-  // The function that drops or copies what a value of an aggregate type owns, part by part, or
-  // for a union, in the member it holds. It is named before it is made, so a type holding
-  // itself calls it.
+  // The function that drops what a value of an aggregate type owns, or returns a copy of it,
+  // part by part, or for a union, in the member it holds. It is named before it is made, so a
+  // type holding itself calls it.
   function helper(kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const made = glue[kind].get(type);
     if (made) return made;
@@ -526,29 +529,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     glue[kind].set(type, name);
     const saved = { allocas, body, temps, labels, block };
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    const t = llvm(type);
+    const each = (v: string, part: Type) => (kind === "drop" ? (dispose(v, part), v) : copied(v, part));
+    let result = "%v";
     if (type.kind === "union") {
+      // The copy starts as the value itself, which is right for members owning nothing.
+      const copy = kind === "copy" ? alloca(t) : "";
+      if (copy) emit(`store ${t} %v, ptr ${copy}`);
       const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(type)} %v, 0`);
+      emit(`${tag} = extractvalue ${t} %v, 0`);
       const owners = type.members.filter(needsDrop);
       const cases = owners.map(() => label());
       const end = label();
       emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${type.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
       owners.forEach((m, i) => {
         startBlock(cases[i]!);
-        touch(kind, convert("%v", type, m), m);
+        const part = each(convert("%v", type, m), m);
+        if (copy) emit(`store ${t} ${convert(part, m, type)}, ptr ${copy}`);
         emit(`br label %${end}`);
       });
       startBlock(end);
+      if (copy) {
+        result = temp();
+        emit(`${result} = load ${t}, ptr ${copy}`);
+      }
     } else {
-      for (const [t, i] of parts(type)) {
-        if (!needsDrop(t)) continue;
-        const part = temp();
-        emit(`${part} = extractvalue ${llvm(type)} %v, ${i}`);
-        touch(kind, part, t);
+      for (const [part, i] of parts(type)) {
+        if (!needsDrop(part)) continue;
+        const v = temp();
+        emit(`${v} = extractvalue ${t} %v, ${i}`);
+        const made = each(v, part);
+        if (kind === "drop") continue;
+        const next = temp();
+        emit(`${next} = insertvalue ${t} ${result}, ${llvm(part)} ${made}, ${i}`);
+        result = next;
       }
     }
-    emit("ret void");
-    out.push(`define internal void ${name}(${llvm(type)} %v) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
+    out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block } = saved);
     return name;
   }
@@ -587,8 +605,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       emit(`store ${llvm(e.kind === "member" ? stored(e) : types.get(e)!)} zeroinitializer, ptr ${address(e)}`);
       return v;
     }
-    if (e.kind !== "string") retain(v, valueType(e));
-    return v;
+    return e.kind === "string" ? v : copied(v, valueType(e));
   }
 
   // Whether converting a value from one type to another keeps all it owns: putting it in a
@@ -598,13 +615,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     return !needsDrop(from) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
   }
 
-  // A receiver copied into a slot for an owning method: the copy holds references of its own,
-  // pending until the call takes it.
-  function spill(slot: string, type: Type, v: string) {
-    retain(v, type);
-    const copy = { v, type };
+  // A receiver copied into a slot for an owning method: the copy is its own, pending until the
+  // call takes it.
+  function spill(slot: string, type: Type, v: string): string {
+    const copy = { v: copied(v, type), type };
     pending.push(copy);
     spills.push({ slot, type, copy });
+    return copy.v;
   }
 
   // A value read for an operand. One read from a place takes a reference of its own while a
@@ -613,9 +630,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const v = value(e);
     const type = valueType(e);
     if (!needsDrop(type) || fresh(e) || e.kind === "string" || !later.some(writes)) return v;
-    retain(v, type);
-    pending.push({ v, type });
-    return v;
+    const copy = copied(v, type);
+    pending.push({ v: copy, type });
+    return copy;
   }
 
   // Whether running an expression might change a place: it assigns, updates or calls.
@@ -699,9 +716,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
-      const copy = convert(value(object), types.get(object)!, types.get(e)!);
-      retain(copy, types.get(e)!);
-      return copy;
+      return copied(convert(value(object), types.get(object)!, types.get(e)!), types.get(e)!);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
@@ -1036,16 +1051,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return at;
       }
       const copy = alloca(llvm(held));
-      const v = value(object);
-      if (owns) spill(copy, held, v);
+      const read = value(object);
+      const v = owns ? spill(copy, held, read) : read;
       emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
     if (lendable(object)) return address(object);
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
-    const v = value(object);
-    if (owns) spill(spilled, types.get(object)!, v);
+    const read = value(object);
+    const v = owns ? spill(spilled, types.get(object)!, read) : read;
     emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
   }
@@ -1157,7 +1172,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
           if (!isRef(type)) {
             part = temp();
             emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
-            if (isCopy(type)) retain(part, type);
+            if (isCopy(type)) part = copied(part, type);
             else emit(`store ${llvm(type)} zeroinitializer, ptr ${slot(from as Local)}`);
           }
           const next = temp();
@@ -1227,21 +1242,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         // run it, which matters when the target is a setter.
         if (op === "&&" || op === "||") {
           return logical(op, value(e.target), () => {
-            const assigned = value(e.value);
-            store(e.target, assigned);
-            return assigned;
+            return store(e.target, value(e.value));
           });
         }
         // The target is read before the right-hand side runs, as in JavaScript.
         const type = types.get(e)!;
         if (op === "+" && type === "string") {
-          const joined = concat(operand(e.target, [e.value]), written(value(e.value), valueType(e.value)));
-          store(e.target, joined);
-          return joined;
+          return store(e.target, concat(operand(e.target, [e.value]), written(value(e.value), valueType(e.value))));
         }
-        const result = op === "=" ? owned(e.value) : numeric(op, value(e.target), value(e.value), e, type);
-        store(e.target, result);
-        return result;
+        return store(e.target, op === "=" ? owned(e.value) : numeric(op, value(e.target), value(e.value), e, type));
       }
       case "update": {
         const old = value(e.operand);
@@ -1323,18 +1332,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     if (isRef(to) && !isRef(local.type)) return [p.name, slot(local)];
     const result = temp();
     emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    const copy = convert(result, local.type, to);
-    retain(copy, to);
-    return [p.name, copy];
+    return [p.name, copied(convert(result, local.type, to), to)];
   }
 
-  function store(target: Expr, result: string) {
+  // Writes a value to a place, giving the assignment's value: what was written, or, for a setter,
+  // which keeps what it is given, a copy of its own released when the statement ends.
+  function store(target: Expr, result: string): string {
     const setter = setters.get(target);
     if (setter && target.kind === "member") {
-      retain(result, types.get(target)!);
-      if (needsDrop(types.get(target))) pending.push({ v: result, type: types.get(target)! });
-      invoke(setter, thisPointer(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
-      return;
+      const type = types.get(target)!;
+      const kept = copied(result, type);
+      if (needsDrop(type)) pending.push({ v: kept, type });
+      invoke(setter, thisPointer(setter, target.object), [`${llvm(type)} ${result}`]);
+      return kept;
     }
     // A whole value written through a mutable reference goes where it points.
     const type = types.get(target)!;
@@ -1343,9 +1353,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       const whole = target.kind === "ident" && type === resolved(target).type;
       const pointer = whole ? temp() : evaluate(target);
       if (whole) emit(`${pointer} = load ptr, ptr ${slot(resolved(target))}`);
-      return replace(pointer, type.to, result);
+      replace(pointer, type.to, result);
+      return result;
     }
     replace(address(target), type, result);
+    return result;
   }
 
   // Writes a value into a place, dropping the one it held.
@@ -1407,8 +1419,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     emit(`br i1 ${holds(v, option, ["null"])}, label %${none}, label %${some}`);
     startBlock(some);
     // The result is a value of its own, like a conditional's.
-    const kept = convert(v, option, type);
-    retain(kept, type);
+    const kept = copied(convert(v, option, type), type);
     const someEnd = block;
     emit(`br label %${end}`);
     startBlock(none);
