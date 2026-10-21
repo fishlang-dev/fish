@@ -1217,8 +1217,10 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "array":
         for (const x of e.elements) if (x) expr(x);
         return;
+      // A pipe's topic is declared where the pipe runs, as a `let` is.
       case "pipe":
         expr(e.value);
+        if (locals.has(e)) declared.set(locals.get(e)!, [...loops]);
         return expr(e.body, call);
       case "int":
       case "float":
