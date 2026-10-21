@@ -41,7 +41,7 @@ const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^":
 export type Intrinsics = Set<string>;
 
 export function lowering({ emit, temp, label, startBlock, cString, alloca }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
-  return { operate, arithmetic };
+  return { operate, arithmetic, panicIf };
 
   function operate(op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
     if (op === "<<" || op === ">>" || op === ">>>") return shift(op, a, b, at, type);

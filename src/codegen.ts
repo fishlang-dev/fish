@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type Numeric, type ObjectType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -61,8 +61,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
   const intrinsics = new Set<string>();
-  const { operate, arithmetic } = lowering(builder, src, file, release, intrinsics);
-  const { convert, test, equals, unionField } = conversions(builder);
+  const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
+  const { convert, test, equals, unionField, holds } = conversions(builder);
 
   for (const instance of instances) {
     current = instance;
@@ -440,6 +440,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return "zeroinitializer";
       case "null":
         return "zeroinitializer";
+      case "nonNull": {
+        const option = types.get(e.expr) as UnionType;
+        const v = value(e.expr);
+        panicIf(holds(v, option, ["null"]), "called `Option::unwrap()` on a `None` value", e);
+        return convert(v, option, types.get(e)!);
+      }
       case "ident": {
         // `undefined` is the empty value, unless a variable takes the name.
         if (!locals.has(e)) return "zeroinitializer";
@@ -571,6 +577,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
+        if (e.op === "??") return orElse(e);
         const tested = test(e, value, valueType);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
@@ -670,6 +677,27 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // The right side runs only when the left side does not already decide the result.
+  // What the left Option holds, or the right side, run only when the left is empty.
+  function orElse(e: Extract<Expr, { kind: "binary" }>): string {
+    const option = types.get(e.left) as UnionType;
+    const type = types.get(e)!;
+    const v = value(e.left);
+    const [some, none, end] = [label(), label(), label()];
+    emit(`br i1 ${holds(v, option, ["null"])}, label %${none}, label %${some}`);
+    startBlock(some);
+    const kept = convert(v, option, type);
+    const someEnd = block;
+    emit(`br label %${end}`);
+    startBlock(none);
+    const fallback = value(e.right);
+    const noneEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    const result = temp();
+    emit(`${result} = phi ${llvm(type)} [ ${kept}, %${someEnd} ], [ ${fallback}, %${noneEnd} ]`);
+    return result;
+  }
+
   function logical(op: "&&" | "||", a: string, right: () => string): string {
     const from = block;
     const rhs = label();

@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, Bound, Integer, Numeric, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, baseOf, unionType, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import type { Access, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -428,6 +428,12 @@ export function expressions(ctx: Context) {
         return "f64";
       case "null":
         return "null";
+      // `x!` is what an Option holds; it panics when there is nothing.
+      case "nonNull": {
+        const option = read(e.expr);
+        if (!isOption(option)) throw new CompileError(`'!' takes the value out of an Option, and this is a '${show(option)}', which is never empty`, e.start, e.end);
+        return held(option);
+      }
       case "bool":
         return "boolean";
       case "ident": {
@@ -603,6 +609,7 @@ export function expressions(ctx: Context) {
         }
         if (e.op === "instanceof") return instanceofCheck(e, unions);
         if (e.op === "**") return power(e.left, operand(e.left), e.right, operand(e.right), e);
+        if (e.op === "??") return orElse(e);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right)), e);
       default:
@@ -659,6 +666,28 @@ export function expressions(ctx: Context) {
       throw new CompileError(`operator '**' cannot be applied to types '${show(left)}' and '${show(right)}'`, at.start, at.end);
     }
     return left;
+  }
+
+  // What an Option holds when it isn't empty.
+  function held(option: UnionType): Type {
+    return unionType(option.members.filter((m) => m !== "null"));
+  }
+
+  // `a ?? b` is what `a` holds, or `b` when `a` is empty, which only then runs. With an Option
+  // for `b`, the result may still be empty.
+  function orElse(e: Extract<Expr, { kind: "binary" }>): Type {
+    const option = read(e.left);
+    if (!isOption(option)) throw new CompileError(`the left side of '??' is a '${show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
+    const inner = held(option);
+    const fallback = value(e.right);
+    const to = fits(fallback, inner) || adaptable(e.right, inner) ? inner : option;
+    coerce(e.right, fallback, to, `type '${show(fallback)}' is not assignable to type '${show(to)}', what '${show(option)}' holds`);
+    return to;
+  }
+
+  // Whether an expression of only literals could take this number type.
+  function adaptable(e: Expr, to: Type): boolean {
+    return isNumeric(to) && literalOnly(e, isFloat(to));
   }
 
   // Two operands of different number types meet as one when either is only literals.

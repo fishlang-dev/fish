@@ -50,7 +50,7 @@ export type Slots = Builder & { alloca(type: string): string };
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca } = b;
-  return { convert, test, equals, unionField };
+  return { convert, test, equals, unionField, holds };
 
   // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
   // its payload when v isn't a literal. Undefined for any other comparison.
