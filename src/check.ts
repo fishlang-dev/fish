@@ -358,7 +358,8 @@ export function check(program: Stmt[]): Checked {
     let whole: Expr | undefined;
     const assigned = assignedNames(f.body);
     // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
-    const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name) || (isRef(l.type) && l.type.mutable);
+    // A capture narrows as a variable of the closure's would.
+    const narrowable = (l: Local) => (captures?.has(l) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && l.type.mutable);
     // How many scopes enclose each binding's declaration.
     const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
@@ -387,7 +388,7 @@ export function check(program: Stmt[]): Checked {
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
-      thisReady: (e) => (outer ? outer.thisReady(e) : unset.size === 0 || e === exempt),
+      thisReady,
       proves,
       assume,
       narrowed,
@@ -458,7 +459,8 @@ export function check(program: Stmt[]): Checked {
     // end of each narrowing scope it is read as declared. A loop inside such a scope could come
     // back to reads already checked as narrowed.
     function rewritten(l: Local, at: Expr) {
-      if (captures?.has(l)) {
+      const outside = captures?.get(l);
+      if (outside && outside !== "this" && outer!.narrowed(outside)) {
         throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
       }
       const from = facts.findIndex((f) => f.has(l));
@@ -508,7 +510,7 @@ export function check(program: Stmt[]): Checked {
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner);
-      checkInstance(inner, { lookup, narrowed, thisReady: (t) => unset.size === 0 || t === exempt, noteThis, changesLocal, changesThis });
+      checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis });
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       // A closure holds what it moves, or everything under `move`, and borrows the rest; `this`
@@ -741,6 +743,12 @@ export function check(program: Stmt[]): Checked {
       }
       const outside = outer?.lookup(name, at);
       return outside && capture(outside, at);
+    }
+
+    // Whether `this` may be used: a constructor's can't until every field is assigned, nor can
+    // a closure's made before then.
+    function thisReady(e: Expr): boolean {
+      return outer ? outer.thisReady(e) : unset.size === 0 || e === exempt;
     }
 
     // A closure changing what it captures captures it mutably, if it may change where the
