@@ -67,7 +67,6 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // constructor's parameters may carry modifiers, which make them parameter properties.
   function paramType(p: Param, property = false): Type {
     if (p.rest) throw unsupported("rest parameters", p);
-    if (p.optional) throw unsupported("optional parameters", p);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.comptime) throw unsupported("comptime parameters", p);
@@ -75,7 +74,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
-    return resolveType(p.type);
+    // A call may leave out an optional parameter, which is then empty.
+    return p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
   }
 
   function resolveType(t: TypeNode): Type {
@@ -244,9 +244,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function member(m: TypeMember): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (m.optional) throw unsupported("optional properties", m);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    return { name: m.name, type: storable(resolveType(m.type), m), ...(m.readonly && { readonly: true }) };
+    // An object may leave out an optional property, which is then empty.
+    const type = m.optional ? unionType([unionMember(m.type), "null"]) : resolveType(m.type);
+    return { name: m.name, type: storable(type, m), ...(m.readonly && { readonly: true }) };
   }
 }
 

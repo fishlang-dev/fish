@@ -38,7 +38,6 @@ const MEMBERS: [string, string, string][] = [
   ["{ new (): i64 }", "construct signatures", "new (): i64"],
   ["{ [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["{ get x(): i64 }", "accessors in object types", "get x(): i64"],
-  ["{ x?: i64 }", "optional properties", "x?: i64"],
   ["{ [k]: i64 }", "computed property names", "k"],
 ];
 
@@ -75,7 +74,6 @@ const CLASSES: [string, string, string][] = [
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A { static n = 1 }", "static fields", "static n = 1"],
   ["class A { override n = 1 }", "'override' modifiers", "override n = 1"],
-  ["class A { n?: i64 }", "optional fields", "n?: i64"],
   ["class A { n!: i64 }", "definite assignment assertions", "n!: i64"],
   ["class A { [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["class A { static {} }", "static blocks", "static {}"],

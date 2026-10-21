@@ -186,6 +186,8 @@ export function conversions(b: Slots) {
     };
     if (embeds) insert(convert(v, from, embeds), embeds, 0);
     to.fields.forEach((f, i) => {
+      // An optional field the value leaves out is empty.
+      if (!field(from, f.name)) return insert(convert("zeroinitializer", "null", f.type), f.type, i + (embeds ? 1 : 0));
       const part = temp();
       emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from as Exclude<typeof from, { kind: "literal" | "union" }>, f.name).join(", ")}`);
       insert(convert(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));

@@ -338,9 +338,11 @@ export function fits(from: Type, to: Type): boolean {
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
   // A type parameter fits through its bound's fields, as any instance of it would.
+  // A value may leave out a field whose type is an Option.
   return to.fields.every((f) => {
     const found = field(from, f.name);
-    return found !== undefined && (found.access ?? "public") === "public" && fits(found.type, f.type);
+    if (!found) return isOption(f.type);
+    return (found.access ?? "public") === "public" && fits(found.type, f.type);
   });
 }
 

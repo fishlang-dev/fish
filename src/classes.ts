@@ -97,10 +97,13 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (m.modifiers.includes("static")) throw unsupported("static fields", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers, m, m.name);
-    if (m.optional) throw unsupported("optional fields", m);
     if (m.definite) throw unsupported("definite assignment assertions", m);
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    add({ name: m.name, type: m.type, init: m.init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end });
+    // An optional field is an Option, empty until assigned.
+    const at = { start: m.start, end: m.end };
+    const type: TypeNode | undefined = m.optional && m.type ? { kind: "union", types: [m.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
+    const init: Expr | undefined = m.optional ? (m.init ?? { kind: "null", ...at }) : m.init;
+    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);

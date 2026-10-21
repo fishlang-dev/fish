@@ -231,6 +231,14 @@ export function expressions(ctx: Context) {
     });
   }
 
+  // A call gives every parameter but the optional ones it leaves out, which come last.
+  function arity(given: number, params: Param[], at: Span) {
+    const required = params.filter((p) => !p.optional).length;
+    if (given >= required && given <= params.length) return;
+    const expected = required === params.length ? `${required}` : `${required}-${params.length}`;
+    throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${given}`, at.start, at.end);
+  }
+
   // A call of a closure held by a variable runs the closure's body.
   function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
     const held = value(callee);
@@ -241,7 +249,9 @@ export function expressions(ctx: Context) {
       throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
     }
     if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
-    if (e.args.length !== type.params.length) {
+    const written = type.kind === "closure" ? closureBody(type).body.params : undefined;
+    if (written) arity(e.args.length, written, e);
+    else if (e.args.length !== type.params.length) {
       throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     }
     e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
@@ -395,9 +405,7 @@ export function expressions(ctx: Context) {
 
   function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
     const params = paramTypes(target);
-    if (list.length !== params.length) {
-      throw new CompileError(`expected ${params.length} argument${params.length === 1 ? "" : "s"}, but got ${list.length}`, at.start, at.end);
-    }
+    arity(list.length, target.body.params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
       coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);

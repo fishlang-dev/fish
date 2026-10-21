@@ -339,11 +339,21 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
-    const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    const values = argValues(e.args, target);
     // A closure may take fewer parameters than the function type it was given as.
     const result = invoke(target, pointer, target.body.closure ? values.slice(0, target.body.params.length) : values);
     // A call through a type parameter returns what its bound's method declares.
     return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
+  }
+
+  // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
+  function argValues(args: Expr[], target: Instance): string[] {
+    const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    for (const p of target.body.params.slice(args.length)) {
+      const type = target.locals.get(p)!.type;
+      values.push(`${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+    }
+    return values;
   }
 
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
@@ -491,7 +501,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // The constructor fills in a slot, which then holds the new instance.
         const type = types.get(e) as ClassType;
         const instance = alloca(llvm(type));
-        const values = (e.args ?? []).map((a) => `, ${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+        const values = argValues(e.args ?? [], calls.get(e)!).map((v) => `, ${v}`);
         emit(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`);
         const result = temp();
         emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
