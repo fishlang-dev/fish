@@ -73,6 +73,7 @@ test("case mapping matches JavaScript for every code point", () => {
     const c = String.fromCodePoint(cp);
     expected.push(c.toUpperCase(), c.toLowerCase());
   }
-  expect(stdout === `${expected.join("\n")}\n`).toBe(true);
+  // A Bun on a newer Unicode version differs until the tables are made again from it.
+  if (stdout !== `${expected.join("\n")}\n`) throw new Error("the case tables differ from this Bun's case mapping; regenerate them with `bun scripts/casemap.ts`");
   expect(stderr).toBe("");
 });

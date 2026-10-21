@@ -14,6 +14,8 @@ function mapping(change: (s: string) => string): [Simple, Special] {
     const from = String.fromCodePoint(cp);
     const to = [...change(from)].map((c) => c.codePointAt(0)!);
     if (to.length === 1 && to[0] === cp) continue;
+    // The runtime's tables hold at most three code points per mapping.
+    if (to.length > 3) throw new Error(`U+${cp.toString(16)} maps to ${to.length} code points; widen the special tables`);
     if (to.length === 1) simple.push([cp, to[0]!]);
     else special.push([cp, to]);
   }

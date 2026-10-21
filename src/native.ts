@@ -232,18 +232,6 @@ static uint16_t *fsh_utf16(fsh_str *s) {
   return units;
 }
 
-// The UTF-16 unit a byte offset at a character's start is.
-static int64_t fsh_unit_of(fsh_str *s, int64_t byte) {
-  if (fsh_rt_str_units(s) == s->length) return byte;
-  int64_t at = 0, n = 0;
-  int half = 0;
-  while (at < byte) {
-    fsh_next((const unsigned char *)s->bytes, &at, &half);
-    n++;
-  }
-  return n;
-}
-
 static int64_t fsh_clamp(int64_t i, int64_t n) {
   return i < 0 ? 0 : i > n ? n : i;
 }
@@ -267,13 +255,26 @@ static int64_t fsh_start_at(fsh_str *s, int64_t i) {
   return half ? at + 4 : at;
 }
 
+// A match's unit is counted from where the search started, whose unit is known, so repeated
+// searches along a string take linear time.
 int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
   int64_t n = fsh_rt_str_units(s);
   from = fsh_clamp(from, n);
   if (needle->length == 0) return from;
   if (fsh_has_lone(needle)) return fsh_find_units(s, needle, from);
-  for (int64_t at = fsh_start_at(s, from); at + needle->length <= s->length; at++) {
-    if (memcmp(s->bytes + at, needle->bytes, needle->length) == 0) return fsh_unit_of(s, at);
+  int half;
+  int64_t start = fsh_seek(s, from, &half);
+  int64_t unit = from;
+  if (half) {
+    start += 4;
+    unit++;
+  }
+  for (int64_t at = start; at + needle->length <= s->length; at++) {
+    if (memcmp(s->bytes + at, needle->bytes, needle->length) != 0) continue;
+    if (n == s->length) return at;
+    int h = 0;
+    for (int64_t i = start; i < at; unit++) fsh_next((const unsigned char *)s->bytes, &i, &h);
+    return unit;
   }
   return -1;
 }
@@ -447,7 +448,22 @@ void fsh_rt_str_split(fsh_array *out, fsh_str *s, fsh_str *separator, int64_t li
     return;
   }
   int64_t from = 0;
-  for (int64_t at; out->length < most && (at = fsh_rt_str_index_of(s, separator, from)) >= 0; from = at + m) fsh_add(out, fsh_sub(s, from, at));
+  if (fsh_has_lone(separator)) {
+    // A separator holding a lone surrogate is matched by units, converted once.
+    uint16_t *a = fsh_utf16(s), *b = fsh_utf16(separator);
+    for (int64_t i = 0; out->length < most && i + m <= n;) {
+      if (memcmp(a + i, b, m * sizeof(uint16_t)) != 0) {
+        i++;
+        continue;
+      }
+      fsh_add(out, fsh_sub(s, from, i));
+      from = i += m;
+    }
+    fsh_rt_free(a);
+    fsh_rt_free(b);
+  } else {
+    for (int64_t at; out->length < most && (at = fsh_rt_str_index_of(s, separator, from)) >= 0; from = at + m) fsh_add(out, fsh_sub(s, from, at));
+  }
   if (out->length < most) fsh_add(out, fsh_sub(s, from, n));
 }
 
@@ -516,9 +532,47 @@ fsh_str *fsh_rt_str_replace(fsh_str *s, fsh_str *pattern, fsh_str *replacement) 
   return result;
 }
 
+// The most bytes a string made by repeating may hold. Past it, making one panics, as
+// JavaScript throws a RangeError; a usize count past i64's range arrives negative.
+#define FSH_MAX_BYTES ((int64_t)1 << 40)
+
+static void fsh_too_long(const char *at) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fsh_rt_panic("invalid string length\n");
+}
+
+fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
+  if (count < 0) fsh_too_long(at);
+  if (count == 0 || s->length == 0) {
+    fsh_str *empty = fsh_str_new(0);
+    empty->units = 0;
+    return empty;
+  }
+  if (count > FSH_MAX_BYTES / s->length) fsh_too_long(at);
+  const unsigned char *b = (const unsigned char *)s->bytes;
+  // A string ending in a lone high surrogate and starting with a lone low one joins a pair at
+  // each seam, which joining does; at least six bytes each, the parts are no more than the text.
+  if (s->length >= 6 && fsh_high_at(b + s->length - 3) && fsh_low_at(b)) {
+    fsh_str **parts = fsh_rt_alloc(count * sizeof(fsh_str *));
+    for (int64_t i = 0; i < count; i++) {
+      fsh_rt_str_retain(s);
+      parts[i] = s;
+    }
+    fsh_str *result = fsh_join_parts(parts, count);
+    fsh_rt_free(parts);
+    return result;
+  }
+  fsh_str *result = fsh_str_new(s->length * count);
+  for (int64_t i = 0; i < count; i++) memcpy(result->own + i * s->length, s->bytes, s->length);
+  result->units = s->units >= 0 ? s->units * count : -1;
+  return result;
+}
+
 // JavaScript's padStart (start) or padEnd: the fill, a space by default, repeated and cut to
 // make the string length units long.
-fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start) {
+fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start, const char *at) {
+  if (length < 0) fsh_too_long(at);
   int64_t n = fsh_rt_str_units(s);
   fsh_str *space = fill ? NULL : fsh_str_of(" ", 1);
   if (!fill) fill = space;
@@ -528,36 +582,17 @@ fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start
     fsh_rt_str_retain(s);
     return s;
   }
-  int64_t missing = length - n, whole = missing / m;
-  fsh_str **parts = fsh_rt_alloc((whole + 2) * sizeof(fsh_str *));
-  int64_t count = 0;
-  if (!start) {
-    fsh_rt_str_retain(s);
-    parts[count++] = s;
-  }
-  for (int64_t i = 0; i < whole; i++) {
-    fsh_rt_str_retain(fill);
-    parts[count++] = fill;
-  }
-  parts[count++] = fsh_sub(fill, 0, missing % m);
+  int64_t missing = length - n;
+  fsh_rt_str_retain(s);
+  fsh_str *body = fsh_rt_str_repeat(fill, missing / m, at), *rest = fsh_sub(fill, 0, missing % m);
+  fsh_str *parts[3] = { s, body, rest };
   if (start) {
-    fsh_rt_str_retain(s);
-    parts[count++] = s;
+    parts[0] = body;
+    parts[1] = rest;
+    parts[2] = s;
   }
-  fsh_str *result = fsh_join_parts(parts, count);
-  fsh_rt_free(parts);
+  fsh_str *result = fsh_join_parts(parts, 3);
   fsh_rt_str_release(space);
-  return result;
-}
-
-fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count) {
-  fsh_str **parts = fsh_rt_alloc((count + 1) * sizeof(fsh_str *));
-  for (int64_t i = 0; i < count; i++) {
-    fsh_rt_str_retain(s);
-    parts[i] = s;
-  }
-  fsh_str *result = fsh_join_parts(parts, count);
-  fsh_rt_free(parts);
   return result;
 }
 
@@ -760,9 +795,14 @@ fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
       at = fsh_put_cp(at, found[1]);
       continue;
     }
-    int64_t k = 0;
-    while (k < specials && special[k][0] != c) k++;
-    if (k == specials) {
+    int64_t lo = 0, hi = specials - 1, k = -1;
+    while (lo <= hi && k < 0) {
+      int64_t mid = (lo + hi) / 2;
+      if (special[mid][0] == c) k = mid;
+      else if (special[mid][0] < c) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    if (k < 0) {
       at = fsh_put_cp(at, c);
       continue;
     }

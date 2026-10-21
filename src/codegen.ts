@@ -1008,10 +1008,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return given(result, "string");
       case "padStart":
       case "padEnd":
-        emit(`${result} = call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0})`);
+        emit(`${result} = call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0}, ptr ${panicAt(e)})`);
         return given(result, "string");
       case "repeat":
-        emit(`${result} = call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]})`);
+        emit(`${result} = call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]}, ptr ${panicAt(e)})`);
         return given(result, "string");
       case "toUpperCase":
       case "toLowerCase":
@@ -1032,6 +1032,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
     }
     throw new Error(`internal error: no lowering for the string method ${callee.name}`);
+  }
+
+  // The "panicked at" line for a panic the runtime raises at an expression.
+  function panicAt(at: Expr): string {
+    const { line, col } = locate(src, at.start);
+    return cString(`panicked at ${file}:${line}:${col}:\n`);
   }
 
   function units(s: string): string {
