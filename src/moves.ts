@@ -60,6 +60,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The guards running now, by where each starts: a guard's loan lasts only while it runs, even
   // in a state an error carried out of it.
   const guarding = new Set<number>();
+  // What each `for...of` over an array reached through a reference holds while it runs.
+  const loopHolders = new Map<Stmt, Local>();
   // How each match arm's block hands on what its `return`s give, as its match does.
   const arms = new Map<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
@@ -196,6 +198,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           free(place, s.right, "lend");
           state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
           if (holdsRef(each.type)) state.loans.set(-s.start - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
+          // An array reached through a reference keeps what that reference borrows lent until
+          // the loop ends, and an element that is a reference holds it too.
+          // One holder per loop, so passes over it reach the same state and the check settles.
+          const loop = loopHolders.get(s) ?? { name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 };
+          loopHolders.set(s, loop);
+          last.set(loop, s.end);
+          inherit(loop, s.right);
+          if (holdsRef(each.type)) inherit(each, s.right);
         }
         // Each pass may end the loop, like a condition that may be false.
         loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => statements(s.body));
@@ -463,6 +473,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const borrowing = bound.filter((l) => isRef(l.type));
           for (const holder of borrowing) {
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder]) });
+            // Through a reference, the binding holds what that reference borrows.
+            inherit(holder, subject);
           }
           if (arm.guard) {
             const at = -arm.guard.start - 1;

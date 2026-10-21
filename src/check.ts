@@ -850,6 +850,10 @@ export function check(program: Stmt[]): Checked {
           if (arm) {
             jumps.set(s, arm.stmt);
             if (arm.wanted && !s.value) throw new CompileError("this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
+            // In TypeScript this would leave the function, which a return in an arm never does.
+            if (!arm.wanted && s.value) {
+              throw new CompileError("this match's value isn't used, so a 'return' in its arm can't give one, and it never leaves the function; return after the match instead", s.start, s.end);
+            }
             if (s.value) arm.gives!.push([s.value, arm.wanted ? value(s.value) : result(s.value)]);
             return;
           }

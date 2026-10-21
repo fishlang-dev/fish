@@ -206,6 +206,8 @@ export function expressions(ctx: Context) {
       expect(e.then, t);
       expect(e.else, t);
     }
+    if (e.kind === "match") for (const arm of e.arms) if (arm.body.kind !== "block") expect(arm.body, t);
+    if (e.kind === "pipe") expect(e.body, t);
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
@@ -254,6 +256,7 @@ export function expressions(ctx: Context) {
     if (numeric) given.forEach(([v, t], i) => t !== numeric && adapt(v, numeric) && (types[i] = numeric));
     for (let i = 0; i < given.length; i++) given[i]![1] = types[i]!;
     const type = types.every((t) => t === types[0]) ? types[0]! : unionType(types);
+    if (type !== types[0] && types.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
     if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
     for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
     return type;
