@@ -79,6 +79,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
 
   function resolveType(t: TypeNode): Type {
+    // `readonly T[]` is a shared borrow of an array.
+    if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);

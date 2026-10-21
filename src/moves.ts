@@ -1,6 +1,6 @@
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
-import { CompileError } from "./diag.ts";
+import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
 import { field, holdsMut, holdsRef, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
@@ -342,6 +342,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (object) expr(object);
           if (object && place !== undefined && self) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
+          // An array's `push` and `pop` change it, which nothing borrowing it may see.
+          if (object && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && array(object)) change(object);
           if (object && place !== undefined && self?.mutable && state) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
@@ -360,7 +362,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         for (const x of e.exprs) expr(x);
         return;
       case "index":
-        expr(e.object);
+        if (consume && element(e) && !isCopy(types.get(e)!)) throw elementMove(e);
+        if (key(e) === undefined) expr(e.object);
+        else use(e, consume);
         return expr(e.index);
       case "update":
         expr(e.operand);
@@ -511,6 +515,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const place = key(e)!;
     usable(e, place);
     const moving = consume !== undefined && !isCopy(type);
+    if (moving && place.includes(".[]")) throw elementMove(e);
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
@@ -882,6 +887,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       return local && String(local.id);
     }
     if (e.kind === "this" || e.kind === "super") return "this";
+    // Every element of an array is one place inside it: borrowing any borrows the array.
+    if (e.kind === "index") {
+      const object = element(e) ? key(e.object) : undefined;
+      return object === undefined ? undefined : `${object}.[]`;
+    }
     if (e.kind !== "member" || calls.has(e) || !types.has(e.object)) return undefined;
     const object = key(e.object);
     return object === undefined ? undefined : `${object}.${e.name}`;
@@ -914,12 +924,30 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
-    return e.kind === "member" ? rootOf(e.object) : e;
+    return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
+  }
+
+  // Whether an expression is an index into an array.
+  function element(e: Named): e is Extract<Expr, { kind: "index" }> {
+    return e.kind === "index" && array(e.object);
+  }
+
+  // Whether an expression's value is an array, or a reference to one.
+  function array(e: Expr): boolean {
+    const t = types.get(e);
+    const held = t !== undefined && isRef(t) ? t.to : t;
+    return held !== undefined && typeof held !== "string" && held.kind === "array";
+  }
+
+  // Moving a value out of an array by index would leave a hole in it, as in Rust.
+  function elementMove(e: Named): CompileError {
+    return new CompileError(`'${text(e)}' can't be moved out of its array; use '${text(e)}.clone()' to take a copy, or 'pop()' to take the last element out`, e.start, e.end);
   }
 
   // How a place reads in a message.
   function text(e: Named): string {
     if (e.kind === "member") return `${text(e.object)}.${e.name}`;
+    if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
     return e.kind === "ident" || e.kind === "shorthand" ? e.name : e.kind === "this" || e.kind === "super" ? "this" : "(...)";
   }
 
@@ -927,7 +955,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function pathOf(place: string): string {
     const [id, ...fields] = place.split(".");
     const local = [...locals.values()].find((l) => String(l.id) === id);
-    return [local?.name ?? id, ...fields].join(".");
+    return [local?.name ?? id, ...fields].join(".").replaceAll(".[]", "[...]");
   }
 }
 

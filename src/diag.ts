@@ -39,3 +39,8 @@ export function formatError(e: CompileError, file: string, src: string): string 
   };
   return [...lines("error", e), ...(e.note ? lines("note", e.note) : [])].join("\n");
 }
+
+// How an index reads in a message: a name or a number as written, anything else as `...`.
+export function indexText(e: { kind: string; name?: string; value?: unknown }): string {
+  return e.kind === "ident" ? e.name! : e.kind === "int" ? String(e.value) : "...";
+}

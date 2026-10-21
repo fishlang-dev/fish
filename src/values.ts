@@ -1,6 +1,6 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import { CompileError } from "./diag.ts";
+import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
@@ -1356,7 +1356,7 @@ export function expressions(ctx: Context) {
   // How a place reads in a message, like `p.inner.x`.
   function placeText(e: Expr): string {
     if (e.kind === "member") return `${placeText(e.object)}.${e.name}`;
-    if (e.kind === "index") return `${placeText(e.object)}[...]`;
+    if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
 

@@ -6,7 +6,7 @@ import { parse } from "../src/parser.ts";
 const TYPES: [string, string][] = [
   ["ReadonlyArray<i64>", "'ReadonlyArray' types"],
   ["keyof A", "'keyof' types"],
-  ["readonly i64[]", "'readonly' types"],
+  ["readonly i64", "'readonly' types"],
   ["unique symbol", "'unique' types"],
   ["A[K]", "indexed access types"],
   ["typeof x", "'typeof' types"],
