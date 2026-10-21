@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, fits, holdsRef, isNumeric, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
+import { closureType, fits, holdsRef, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -62,6 +62,8 @@ export type Instance = {
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   raises: Map<Expr | Stmt, { from: Type; to: Type }>;
+  // The type of what each `try` catches.
+  caught: Map<Stmt, Type>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -291,6 +293,7 @@ export function check(program: Stmt[]): Checked {
     views.set(instance, instance.returns);
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { from: lower(r.from), to: lower(r.to) }));
+    instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
@@ -370,6 +373,8 @@ export function check(program: Stmt[]): Checked {
     // What the conditions guarding the code being checked prove, innermost last. A `let`
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
+    // For each enclosing `try`, the errors its block raises so far, where and of what type.
+    const handlers: [Expr | Stmt, Type][][] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
     const changed: Local[] = [];
     // The expression an expression statement being checked consists of.
@@ -534,7 +539,7 @@ export function check(program: Stmt[]): Checked {
       const inner: Instance = {
         body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();
@@ -697,14 +702,32 @@ export function check(program: Stmt[]): Checked {
           return;
         }
         case "throw": {
-          // `throw` returns an error of the type the function declares.
+          // `throw` returns an error of the type the function declares, or goes to a catch.
           const type = value(s.value);
-          if (errorType) coerce(s.value, type, errorType, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
-          raise(s, errorType ?? type, "'throw'");
+          if (errorType && handlers.length === 0) coerce(s.value, type, errorType, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+          raise(s, errorType && handlers.length === 0 ? errorType : type, "'throw'");
           return;
         }
-        case "try":
-          throw unsupported("'try' statements", s);
+        case "try": {
+          if (s.finalizer) throw unsupported("'finally' blocks", s);
+          if (s.paramType) throw new CompileError("a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
+          // What the block raises goes to the catch, which takes the union of it.
+          handlers.push([]);
+          scoped(s.block);
+          const sites = handlers.pop()!;
+          if (sites.length === 0) throw new CompileError("nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+          const caught = unionType(sites.map(([, t]) => t));
+          for (const [at, from] of sites) instance.raises.set(at, { from, to: caught });
+          instance.caught.set(s, caught);
+          scopes.push(new Map());
+          if (s.param) {
+            if (s.param.kind !== "ident") throw unsupported("destructuring patterns", s.param);
+            declare(s.param.name, caught, true, false, s);
+          }
+          statements(s.handler!);
+          scopes.pop();
+          return;
+        }
         case "return": {
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
@@ -821,6 +844,8 @@ export function check(program: Stmt[]): Checked {
     // `throws` clause it fits.
     function raise(at: Expr | Stmt, type: Type, what: string) {
       if (f.closure) throw unsupported("closures that throw", at);
+      const handler = handlers.at(-1);
+      if (handler) return void handler.push([at, type]);
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
         throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);

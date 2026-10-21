@@ -59,6 +59,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let captured = new Map<Local, string>();
   // The value of an Option an optional chain's link has already evaluated, to read through.
   const known = new Map<Expr, string>();
+  // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
+  // the slot its error goes in.
+  const handlers: { label: string; slot: string }[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
@@ -311,6 +314,28 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         raised(s, value(s.value));
         startBlock(label());
         return;
+      // An error raised in the block is stored where the catch reads it, and the catch runs.
+      case "try": {
+        const local = s.param ? resolved(s) : undefined;
+        const type = current.caught.get(s)!;
+        const handler = { label: label(), slot: alloca(llvm(type)) };
+        const after = label();
+        handlers.push(handler);
+        s.block.forEach(statement);
+        handlers.pop();
+        emit(`br label %${after}`);
+        startBlock(handler.label);
+        if (local) {
+          allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+          const caught = temp();
+          emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
+          emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
+        }
+        s.handler!.forEach(statement);
+        emit(`br label %${after}`);
+        startBlock(after);
+        return;
+      }
       case "let": {
         const local = resolved(s);
         allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
@@ -471,9 +496,16 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     emit(`ret ${type} ${result}`);
   }
 
-  // An error raised by a `throw` or a failed call, which leaves the function with it.
+  // An error raised by a `throw` or a failed call, which goes to the innermost catch, or else
+  // leaves the function with it.
   function raised(at: Expr | Stmt, error: string) {
     const { from, to } = current.raises.get(at)!;
+    const handler = handlers.at(-1);
+    if (handler) {
+      emit(`store ${llvm(to)} ${convert(error, from, to)}, ptr ${handler.slot}`);
+      emit(`br label %${handler.label}`);
+      return;
+    }
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);

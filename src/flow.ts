@@ -12,6 +12,10 @@ export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<S
         return s.else !== undefined && alwaysReturns(s.then, broken, continued) && alwaysReturns(s.else, broken, continued);
       case "block":
         return alwaysReturns(s.body, broken, continued);
+      // Either the block finishes or an error sends control to the catch, so both must leave.
+      case "try":
+        return (alwaysReturns(s.block, broken, continued) && (!s.handler || alwaysReturns(s.handler, broken, continued)))
+          || (s.finalizer !== undefined && alwaysReturns(s.finalizer, broken, continued));
       case "labeled":
         return !broken.has(s) && alwaysReturns([s.body], broken, continued);
       case "while":

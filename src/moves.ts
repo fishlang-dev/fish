@@ -46,6 +46,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
   const exits = new Map<Stmt, State>();
+  // For each enclosing `try`, what the places it could raise from had in common.
+  const catches: State[] = [];
   const nexts = new Map<Stmt, State>();
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
@@ -115,6 +117,20 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       case "block":
         return statements(s.body);
+      // The catch runs from wherever the block raised, so from what all those points had in
+      // common; after the try, either path may have run.
+      case "try": {
+        catches.push(null);
+        statements(s.block);
+        const raised = catches.pop()!;
+        const after = state;
+        state = raised;
+        const caught = s.param && locals.get(s);
+        if (caught) revive(String(caught.id));
+        statements(s.handler!);
+        state = join(after, state);
+        return;
+      }
       case "while":
         return loop(s, () => s.cond, () => statements(s.body));
       case "doWhile":
@@ -150,9 +166,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         state = null;
         return;
       }
-      // A thrown value leaves with the error, as a returned one does.
+      // A thrown value leaves with the error, as a returned one does, or goes to a catch.
       case "throw":
-        expr(s.value, (p) => `'${p}' moved here: throwing it hands it to the caller`);
+        expr(s.value, (p) => `'${p}' moved here: throwing it hands it on`);
+        raising();
         state = null;
         return;
       case "return":
@@ -297,6 +314,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (keeper && (self?.mutable || e.callee.kind === "super")) keeps = () => keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
         });
         keeps?.();
+        if (instance.raises.has(e)) raising();
         return;
       }
       case "unary":
@@ -766,6 +784,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     revive(place);
   }
 
+  // An error raised here goes to the innermost catch, which runs from this state too.
+  function raising() {
+    if (catches.length > 0) catches[catches.length - 1] = join(catches.at(-1)!, state);
+  }
+
   function revive(place: string) {
     if (!state) return;
     for (const moved of [...state.moves.keys()]) if (moved === place || moved.startsWith(`${place}.`)) state.moves.delete(moved);
@@ -862,6 +885,11 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         expr(s.cond);
         stmts(s.then);
         if (s.else) stmts(s.else);
+        return;
+      case "try":
+        stmts(s.block);
+        if (s.handler) stmts(s.handler);
+        if (s.finalizer) stmts(s.finalizer);
         return;
       case "block":
         return stmts(s.body);
