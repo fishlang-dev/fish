@@ -393,12 +393,24 @@ export function expressions(ctx: Context) {
 
   // The `!` or `??` a place is read through, if any, which gives a copy of what the place holds,
   // so a change through it would be lost. A temporary has no place to change.
-  function copied(e: Expr): string | undefined {
-    let x = e;
-    while (x.kind === "member") x = x.object;
-    if (x.kind === "nonNull" && rooted(x.expr)) return "!";
-    if (x.kind === "binary" && x.op === "??" && (rooted(x.left) || rooted(x.right))) return "??";
-    return undefined;
+  function copied(e: Expr, through?: string): string | undefined {
+    switch (e.kind) {
+      // A getter's result is a temporary.
+      case "member":
+        return calls.has(e) ? undefined : copied(e.object, through);
+      case "nonNull":
+        return copied(e.expr, "!");
+      case "binary":
+        return e.op === "??" ? (copied(e.left, "??") ?? copied(e.right, "??")) : undefined;
+      case "conditional":
+        return copied(e.then, through) ?? copied(e.else, through);
+      case "this":
+        return through;
+      case "ident":
+        return through && lookup(e.name) ? through : undefined;
+      default:
+        return undefined;
+    }
   }
 
   // The method a member call names: a static one on a class name, or an instance one, whose
