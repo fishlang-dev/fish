@@ -314,9 +314,11 @@ void fsh_rt_panic(const char *message) {
 
 // An index past the end panics as Rust's does; at is the "panicked at" line.
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
-  char message[512];
-  snprintf(message, sizeof message, "%sindex out of bounds: the len is %lld but the index is %llu\n", at, (long long)length, (unsigned long long)index);
-  fsh_rt_panic(message);
+  char reason[96];
+  snprintf(reason, sizeof reason, "index out of bounds: the len is %lld but the index is %llu\n", (long long)length, (unsigned long long)index);
+  fflush(NULL);
+  fputs(at, stderr);
+  fsh_rt_panic(reason);
 }
 
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.

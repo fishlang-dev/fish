@@ -24,7 +24,8 @@ const FLOAT_COMPARISON: Partial<Record<BinaryOp, string>> = {
 
 const FLOAT_ARITHMETIC: Partial<Record<BinaryOp, string>> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
 
-// Every function has unwind tables and the C personality, whose cleanups run a panic's drops.
+// Every function has unwind tables, and when panics unwind, the C personality, whose cleanups
+// run a panic's drops.
 const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
@@ -45,6 +46,7 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
 export function codegen({ instances }: Checked, { src, file, release, panic }: Options): string {
+  const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -71,7 +73,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string; depth: number }>();
   // Values the statement being emitted made and nothing took over, released when it ends.
-  let pending: { v: string; type: Type }[] = [];
+  // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
+  let pending: { v: string; type: Type; slot?: string }[] = [];
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
   let scopes: { slot: string; type: Type }[][] = [];
   // Receivers copied into slots for owning methods, whose leftovers drop after the call.
@@ -127,7 +130,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     if (type === "void") leave(undefined);
     else emit("unreachable");
-    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${UNWINDS} {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
@@ -448,12 +451,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const assign = result ? `${result} = ` : "";
     const live = pending.some((p) => needsDrop(p.type)) || scopes.some((s) => s.length > 0);
     if (panic === "abort" || (!live && !cleanup)) return emit(assign + call);
+    // A landing pad reads the statement's values back from slots: at -O0 on AArch64, LLVM loses
+    // the second register of a two-register value carried into one. Each call stores them
+    // again, since a value may reach it along a path no earlier store was on.
+    const held = pending.filter((p) => needsDrop(p.type));
+    for (const p of held) {
+      p.slot ??= alloca(llvm(p.type));
+      emit(`store ${llvm(p.type)} ${p.v}, ptr ${p.slot}`);
+    }
     const [ok, pad, caught] = [label(), label(), temp()];
     emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
     startBlock(pad);
     emit(`${caught} = landingpad { ptr, i32 } cleanup`);
     cleanup?.();
-    for (const { v, type } of [...pending].reverse()) dispose(v, type);
+    for (const p of held.reverse()) {
+      const v = temp();
+      emit(`${v} = load ${llvm(p.type)}, ptr ${p.slot}`);
+      dispose(v, p.type);
+    }
     drop(0);
     emit(`resume { ptr, i32 } ${caught}`);
     startBlock(ok);
@@ -533,7 +548,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
     }
     emit("ret void");
-    out.push(`define internal void ${name}(${llvm(type)} %v) ${UNWINDS} {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define internal void ${name}(${llvm(type)} %v) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block } = saved);
     return name;
   }
@@ -681,7 +696,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
         return undefined;
       }
-      if (e.callee.kind === "member" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
       const copy = convert(value(object), types.get(object)!, types.get(e)!);
@@ -964,7 +979,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
   function entry(): string[] {
-    if (!main.throws) return [`define i32 @main() ${UNWINDS} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    if (!main.throws) return [`define i32 @main() ${unwinds} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
     current = main;
     ({ types, locals, calls, setters, coercions, jumps } = main);
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
@@ -982,7 +997,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     write(2, ["Error:", [error, main.throws]], builder, convert);
     dispose(error, main.throws);
     emit("ret i32 1");
-    return [`define i32 @main() ${UNWINDS} {`, "entry:", ...allocas, ...body, "}"];
+    return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
   }
 
   // A pointer to the base embedded in an instance of `from`, through as many bases as it
