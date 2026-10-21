@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsRef, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
+import { field, fits, holdsRef, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -231,6 +231,9 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     for (const [i, bound] of implicitOf(f)) {
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
+      const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
+      const unlocked = lent.get(f)!.get(i)?.mutable ? unlocks(held, bound) : undefined;
+      if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
       if (typeof given !== "string" && given.kind === "closure" && given.once && repeats(f, paramName(f.params[i]!))) {
         throw new CompileError(`'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${given.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
       }

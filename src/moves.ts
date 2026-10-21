@@ -345,6 +345,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "binary": {
         // `a ?? b` hands over whichever it gives.
         const given = e.op === "??" ? consume : undefined;
+        if (e.op === "??") outOfBorrow(e.left, e, consume);
         expr(e.left, given);
         // The right side of `&&`, `||` and `??` may not run.
         const before = join(state, null);
@@ -354,6 +355,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       // `x!` is x's value, handed over or read as x is.
       case "nonNull":
+        outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
     }
   }
@@ -779,6 +781,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Whether a closure holding a copy of this variable holds a mutable reference it lends again.
   function reborrows(from: Local): boolean {
     return isCopy(from.type) && holdsMut(from.type);
+  }
+
+  // What `x!` or `x ?? d` gives, handed over, can't come out of an Option that `x` only borrows.
+  function outOfBorrow(option: Expr, e: Expr, consume?: Consumer) {
+    const t = types.get(option);
+    if (consume && state && t && isRef(t) && !isCopy(types.get(e)!)) {
+      throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+    }
   }
 
   // The places a closure captures, where it first uses each, the variable, if not `this`,

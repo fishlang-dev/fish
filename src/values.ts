@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, unionType, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -164,7 +164,11 @@ export function expressions(ctx: Context) {
 
   // A call's type, `void` included, or any other expression's.
   function result(e: Expr): Type {
-    return e.kind === "call" ? call(e).type : value(e);
+    if (e.kind !== "call") return value(e);
+    // A call returning a value records it, as reading any other value does.
+    const { type } = call(e);
+    if (type !== "void") types.set(e, type);
+    return type;
   }
 
   // Only a statement may call a function that returns nothing.
@@ -847,6 +851,8 @@ export function expressions(ctx: Context) {
     }
     const exact = lower(type) === lower(to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
+    const unlocked = to.mutable ? unlocks(type, to.to) : undefined;
+    if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(to.to)}', which could change it`, e.start, e.end);
     const through = to.mutable ? copied(e) : undefined;
     if (through) throw new CompileError(`can't lend this mutably through '${through}', which would lend a copy; check '!== null' first and lend the variable`, e.start, e.end);
     // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
