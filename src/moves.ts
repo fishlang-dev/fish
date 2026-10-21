@@ -126,9 +126,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // The catch runs from wherever the block raised, so from what all those points had in
       // common; after the try, either path may have run.
       case "try": {
-        // A `finally` runs on every way out. Checked from what the abnormal ways out had in
-        // common, each of those then carries on from where it ends; checked again from the
-        // normal way out, the code after it carries on.
+        // A `finally` runs on every way out. It is checked from each way out's own state, once
+        // per distinct state, and each way out then carries on from where it ends; the code
+        // after the try carries on from the normal way out.
         const fin: Frame | undefined = s.finalizer ? { kind: "finally", at: s, exits: [] } : undefined;
         if (fin) frames.push(fin);
         if (s.handler) {
@@ -146,18 +146,26 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (!fin) return;
         frames.pop();
         const normal = state;
-        // Each way out runs the finally from its own state, then carries on from where it ends.
+        // Ways out that reach the finally in the same state share one check of it, which keeps
+        // nested finallies from multiplying the work.
+        const ends: [State, State][] = [];
+        const through = (from: State): State => {
+          const known = ends.find(([start]) => same(start, from));
+          if (known) return known[1];
+          state = from;
+          statements(s.finalizer!);
+          ends.push([from, state]);
+          return state;
+        };
         if (fin.kind === "finally") {
           for (const exit of fin.exits) {
-            state = exit.acc;
-            statements(s.finalizer!);
+            state = through(exit.acc);
             if (exit.kind === "raise") raising();
             else if (exit.kind === "return") returning();
             else jumping(exit.target, exit.which);
           }
         }
-        state = normal;
-        statements(s.finalizer!);
+        state = through(normal);
         return;
       }
       case "while":
@@ -190,7 +198,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "break":
       case "continue": {
         const target = jumps.get(s)!;
-        const table = s.kind === "break" ? exits : nexts;
         jumping(target, s.kind);
         state = null;
         return;
@@ -855,7 +862,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (found) found.acc = join(found.acc, state);
     else frame.exits.push({ ...exit, acc: join(null, state) });
   }
-
 
   function revive(place: string) {
     if (!state) return;
