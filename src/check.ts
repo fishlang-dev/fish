@@ -180,6 +180,8 @@ export function check(program: Stmt[]): Checked {
   // infers it, and the variables still open to that in the pass being checked.
   const demands = new Map<Stmt, Integer>();
   const candidates = new Map<Local, Stmt>();
+  // How many new demands the body being checked made itself, not counting its callees'.
+  let demanded = 0;
   const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
@@ -354,32 +356,38 @@ export function check(program: Stmt[]): Checked {
   function checkBody(instance: Instance) {
     if (done.has(instance)) return;
     const outer = checking;
+    const outerDemanded = demanded;
     checking = instance;
     try {
-      // A pass that found a new demand is thrown away, whatever it concluded, and the body is
-      // checked again with the demanded types; each pass adds one, so this ends.
+      // A pass whose body made a new demand is thrown away, whatever it concluded, and the body
+      // is checked again with the demanded types; each pass adds one, so this ends.
       for (;;) {
-        const known = demands.size;
-        const made = closures.length;
+        demanded = 0;
         try {
           withScope(scopeOf(instance), () => checkInstance(instance));
         } catch (e) {
-          if (!(e instanceof CompileError) || demands.size === known) throw e;
+          inProgress.delete(instance);
+          if (!(e instanceof CompileError) || demanded === 0) throw e;
         }
-        if (demands.size === known) return;
-        forget(instance, made);
+        if (demanded === 0) return;
+        forget(instance);
       }
     } finally {
       checking = outer;
+      demanded = outerDemanded;
     }
   }
 
-  // Clears what checking an instance recorded, for another pass.
-  function forget(instance: Instance, closuresBefore: number) {
+  // Clears what checking an instance recorded, for another pass: its tables and its closures.
+  // A callee checked during the pass stays checked, closures and all.
+  function forget(instance: Instance) {
     for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes]) table.clear();
     instance.returns = "void";
     delete instance.throws;
-    closures.length = closuresBefore;
+    const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
+    const kept = closures.filter((c) => !within(c));
+    closures.length = 0;
+    closures.push(...kept);
     views.delete(instance);
     done.delete(instance);
     inProgress.delete(instance);
@@ -461,12 +469,19 @@ export function check(program: Stmt[]): Checked {
       implicitOf,
       constructs,
       // A candidate meeting another integer type demands it, for the next pass.
+      // A closure's capture stands for the variable it captures. The first demand decides,
+      // and a different one is the usual mismatch once it applies.
       infer: (e, to) => {
-        const s = e.kind === "ident" ? candidates.get(locals.get(e)!) : undefined;
+        let local = e.kind === "ident" ? locals.get(e) : undefined;
+        for (let at: Instance | undefined = instance; local && at?.captures?.has(local); at = at.body.closure?.parent) {
+          const from = at.captures.get(local)!;
+          local = from === "this" ? undefined : from;
+        }
+        const s = local && candidates.get(local);
         if (!s || !isInteger(to) || to === "i64") return false;
-        // The first demand decides; a different one is the usual mismatch once it applies.
         if (demands.has(s)) return demands.get(s) === to;
         demands.set(s, to);
+        demanded++;
         return true;
       },
     });
@@ -710,6 +725,8 @@ export function check(program: Stmt[]): Checked {
               // A literal case takes the discriminant's type, or its union's one number type.
               const numbers = union ? union.members.filter(isNumeric) : [type];
               if (test && test !== type && numbers.length === 1 && adapt(c.test!, numbers[0]!)) test = numbers[0]!;
+              // A discriminant whose type is still open takes an integer case's.
+              if (test && test !== type && isInteger(test) && adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
