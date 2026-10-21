@@ -2,16 +2,17 @@ import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
+import { bindings, covers, literalOf, spaces, uncovered } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
-import type { Access, ArrayType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import type { Access, ArrayType, LiteralType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, comparable, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -75,6 +76,10 @@ export type Context = {
   // type where something narrowed it.
   proves(e: Expr): Guard;
   assume<T>(proven: Facts, check: () => T): T;
+  // Runs a match arm in a scope of its own, holding the names its pattern binds.
+  arm<T>(check: () => T): T;
+  // Declares a name a pattern binds, read-only, in the arm's scope.
+  bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
@@ -204,7 +209,92 @@ export function expressions(ctx: Context) {
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
     if (e.kind === "call") call(e);
+    else if (e.kind === "match") match(e, false);
     else value(e);
+  }
+
+  // `match`: the subject is read once, then each arm's pattern is tried in order, binding names
+  // in the arm's own scope, then its guard. Every value of the subject's type must be covered.
+  // Used as a statement, its arms may give nothing.
+  function match(e: Extract<Expr, { kind: "match" }>, wanted: boolean): Type {
+    const subject = read(e.subject);
+    const given = e.arms.map((arm) => {
+      if (Array.isArray(arm.body)) throw unsupported("block arms in match", arm);
+      const body = arm.body;
+      return ctx.arm(() => {
+        pattern(arm.pattern, subject);
+        if (arm.guard) condition(arm.guard);
+        return wanted ? value(body) : result(body);
+      });
+    });
+    const missing = spaces(subject).find((space) => !e.arms.some((arm) => !arm.guard && covered(arm.pattern, space)));
+    if (missing) throw new CompileError(uncovered(missing), e.start, e.subject.end + 1);
+    if (!wanted) return "void";
+    const type = given.every((t) => t === given[0]) ? given[0]! : unionType(given);
+    e.arms.forEach((arm, i) => given[i] !== type && coerce(arm.body as Expr, given[i]!, type, `this arm's '${show(given[i]!)}' doesn't fit the match's '${show(type)}'`));
+    return type;
+  }
+
+  // Checks a pattern against the type it meets, declaring what it binds.
+  function pattern(p: Pattern, type: Type) {
+    switch (p.kind) {
+      case "wildcard":
+        return;
+      case "ident":
+        ctx.bind(p.name, type, p as Expr);
+        return;
+      case "literal": {
+        let t = value(p.value);
+        // A number takes the matched type's number type, as a literal operand does.
+        const numeric = spaces(type).find(isNumeric);
+        if (isNumeric(t) && numeric && t !== numeric) {
+          coerce(p.value, t, numeric, `'${show(t)}' can't match a '${show(numeric)}'`);
+          t = numeric;
+        }
+        if (!comparable(type, t) && !(t === "null" && spaces(type).includes("null"))) {
+          throw new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
+        }
+        return;
+      }
+      case "variant": {
+        const member = enumMember(p);
+        if (!member) throw unsupported("variant patterns", p);
+        if (!comparable(type, member)) throw new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
+        types.set(p as unknown as Expr, member);
+        return;
+      }
+      case "or":
+        if (p.patterns.some((alt) => bindings(alt).length > 0)) throw unsupported("alternatives binding names", p);
+        for (const alt of p.patterns) pattern(alt, type);
+        return;
+      default:
+        throw unsupported(`${p.kind} patterns`, p);
+    }
+  }
+
+  // A C-like enum's member named by a pattern, `Color.Red`.
+  function enumMember(p: Extract<Pattern, { kind: "variant" }>): LiteralType | undefined {
+    const [owner, name] = p.name.split(".");
+    return p.args === undefined && name !== undefined && !lookup(owner!) ? enums.get(owner!)?.members.get(name) : undefined;
+  }
+
+  // Whether an arm's pattern covers a case of the matched type, as `spaces` lists them.
+  function covered(p: Pattern, space: Type): boolean {
+    switch (p.kind) {
+      case "wildcard":
+      case "ident":
+        return true;
+      case "literal":
+        return covers(literalOf(p.value), space);
+      case "variant": {
+        const member = enumMember(p);
+        return member !== undefined && (member === space || covers(member.value, space));
+      }
+      case "or":
+        return p.patterns.some((alt) => covered(alt, space));
+      default:
+        return false;
+    }
   }
 
   // Checks a call: what it returns, and how a message names what it calls. A method called in
@@ -825,6 +915,8 @@ export function expressions(ctx: Context) {
         if (type === "void") throw new CompileError(`${what} does not return a value`, e.start, e.end);
         return type;
       }
+      case "match":
+        return match(e, true);
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);

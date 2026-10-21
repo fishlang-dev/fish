@@ -4,7 +4,7 @@ import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
-import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
+import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { arrayType, field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
@@ -530,8 +530,83 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     startBlock(ok);
   }
 
+  // A match: the subject is read once, then each arm's pattern is tested in order; a match binds
+  // its names and runs its guard, and a failing guard drops what it bound and tries the next arm.
+  // The checker made sure some arm matches. As a value, each arm gives one of its own.
+  function lowerMatch(e: Extract<Expr, { kind: "match" }>, wanted: boolean): string | undefined {
+    const subject = value(e.subject);
+    const type = valueType(e.subject);
+    const result = wanted ? types.get(e) : undefined;
+    const slot = result && alloca(llvm(result));
+    const end = label();
+    for (const arm of e.arms) {
+      const [bound, next] = [label(), label()];
+      emit(`br i1 ${matches(arm.pattern, subject, type)}, label %${bound}, label %${next}`);
+      startBlock(bound);
+      scopes.push([]);
+      bind(arm.pattern, subject, type);
+      if (arm.guard) {
+        const mark = pending.length;
+        const ok = value(arm.guard);
+        settle(mark);
+        const [body, failed] = [label(), label()];
+        emit(`br i1 ${ok}, label %${body}, label %${failed}`);
+        startBlock(failed);
+        drop(scopes.length - 1);
+        emit(`br label %${next}`);
+        startBlock(body);
+      }
+      const mark = pending.length;
+      const body = arm.body as Expr;
+      if (result && slot) emit(`store ${llvm(result)} ${needsDrop(result) ? owned(body) : value(body)}, ptr ${slot}`);
+      else effect(body);
+      settle(mark);
+      drop(scopes.length - 1);
+      scopes.pop();
+      emit(`br label %${end}`);
+      startBlock(next);
+    }
+    emit("unreachable");
+    startBlock(end);
+    if (!result || !slot) return undefined;
+    const v = temp();
+    emit(`${v} = load ${llvm(result)}, ptr ${slot}`);
+    return v;
+  }
+
+  // Whether a value of `type` matches a pattern.
+  function matches(p: Pattern, v: string, type: Type): string {
+    switch (p.kind) {
+      case "literal":
+        return equals(v, type, value(p.value), valueType(p.value));
+      case "variant":
+        return equals(v, type, "zeroinitializer", types.get(p as unknown as Expr)!);
+      case "or": {
+        let any = "false";
+        for (const alt of p.patterns) {
+          const [test, next] = [matches(alt, v, type), temp()];
+          emit(`${next} = or i1 ${any}, ${test}`);
+          any = next;
+        }
+        return any;
+      }
+      default:
+        return "true";
+    }
+  }
+
+  // Binds the names a pattern gives, each a copy of the value it names, owned by the arm.
+  function bind(p: Pattern, v: string, type: Type) {
+    if (p.kind !== "ident") return;
+    const local = resolved(p as Expr);
+    allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+    own(slot(local), local.type);
+    emit(`store ${llvm(local.type)} ${copied(convert(v, type, local.type), local.type)}, ptr ${slot(local)}`);
+  }
+
   // An expression run for its effect, dropping any value it makes.
   function effect(e: Expr) {
+    if (e.kind === "match") return void lowerMatch(e, false);
     if (e.kind !== "call") return void value(e);
     const result = call(e);
     // A call whose value goes unused has no type of its own recorded.
@@ -788,6 +863,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       case "template":
       case "conditional":
       case "array":
+      case "match":
         return true;
       case "binary":
         return e.op === "+" || e.op === "??";
@@ -1575,6 +1651,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
       case "assign":
         return fixing(e.target, () => assign(e));
+      case "match":
+        return lowerMatch(e, true)!;
       case "update":
         return fixing(e.operand, () => {
           const old = value(e.operand);

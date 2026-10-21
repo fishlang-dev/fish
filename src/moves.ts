@@ -430,6 +430,20 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
         return;
       }
+      // Each arm runs from the state after the subject, and the match ends in any of theirs.
+      case "match": {
+        expr(e.subject);
+        const before = join(state, null);
+        let after: State = null;
+        for (const arm of e.arms) {
+          state = join(before, null);
+          if (arm.guard) expr(arm.guard);
+          expr(arm.body as Expr, consume, discarded);
+          after = join(after, state);
+        }
+        state = after;
+        return;
+      }
       case "conditional": {
         expr(e.cond);
         const before = join(state, null);
@@ -1111,6 +1125,13 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         expr(e.cond);
         expr(e.then, call);
         return expr(e.else, call);
+      case "match":
+        expr(e.subject);
+        for (const arm of e.arms) {
+          if (arm.guard) expr(arm.guard);
+          expr(arm.body as Expr, call);
+        }
+        return;
       // A closure uses what it captures where it is made; whatever holds it holds that after.
       case "arrow":
         for (const from of calls.get(e)!.captures!.values()) if (from !== "this") used(from, call ?? e.end);

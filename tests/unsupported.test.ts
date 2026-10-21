@@ -124,7 +124,6 @@ const EXPRESSIONS: [string, string][] = [
   ["<T>(x: T) => x", "generic arrow functions"],
   ["1 |> % + 1", "'|>' expressions"],
   ["comptime 1", "comptime expressions"],
-  ["match (1) { case _ => 2 }", "match expressions"],
   ["class {}", "class expressions"],
   ["true[0]", "indexed access expressions"],
   ["f<i64>", "instantiation expressions"],

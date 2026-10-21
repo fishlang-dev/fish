@@ -456,6 +456,18 @@ export function check(program: Stmt[]): Checked {
       thisReady,
       proves,
       assume,
+      arm: (run) => {
+        scopes.push(new Map());
+        try {
+          return run();
+        } finally {
+          scopes.pop();
+        }
+      },
+      bind: (name, type, node) => {
+        declare(name, type, false, false, node);
+        return locals.get(node)!;
+      },
       narrowed,
       captured: (l) => captures?.has(l) ?? false,
       raise,
@@ -874,7 +886,7 @@ export function check(program: Stmt[]): Checked {
       scopes.pop();
     }
 
-    function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param) {
+    function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
       const scope = scopes[scopes.length - 1]!;
       if (scope.has(name)) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = { name, type, mutable, param, id: nextId++ };
