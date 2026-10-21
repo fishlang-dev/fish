@@ -337,7 +337,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // A pointer to a value lent to a reference: where a place holding exactly that type lives,
   // or else a slot holding a copy converted to it.
   function borrowed(e: Expr, to: Type): string {
-    if (types.get(e) === to && lendable(e)) return address(e);
+    if (lendable(e) && stored(e) === to) return address(e);
     const slot = alloca(llvm(to));
     emit(`store ${llvm(to)} ${convert(evaluate(e), types.get(e)!, to)}, ptr ${slot}`);
     return slot;

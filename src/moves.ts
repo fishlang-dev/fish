@@ -3,7 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
-import { field, isCopy, type RefType, type Type } from "./typing.ts";
+import { field, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -33,6 +33,11 @@ type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
+
+const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union";
+
+// The place a temporary or a copy stands for: a reference into one can't be returned.
+const TEMPORARY = "temporary";
 
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
@@ -408,25 +413,66 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       hold(holder, e.else);
       return;
     }
-    // A call's returned reference holds what its sources do.
+    // A call's returned reference holds what its sources do: a receiver where it lives.
     const from = borrowsFrom.get(e);
     if (from) {
+      const result = (coercions.get(e) ?? types.get(e)!) as RefType;
       for (const s of from) {
-        const result = (coercions.get(e) ?? types.get(e)!) as RefType;
-        if (lent(s).length === 0 && key(s) !== undefined && !isRef(types.get(s)!)) lend(key(s)!, result.mutable, s, holder);
-        else hold(holder, s);
+        if (isRef(coercions.get(s) ?? types.get(s)!)) hold(holder, s);
+        else if (key(s) !== undefined && !throughUnion(s)) {
+          lend(key(s)!, result.mutable, s, holder);
+          inherit(holder, s);
+        } else temporary(holder, s);
       }
       return;
     }
-    const place = key(e);
-    if (place === undefined) return;
+    const type = types.get(e)!;
+    const to = coercions.get(e) ?? type;
+    if (!isRef(to)) return;
+    if (!inPlace(e, to)) return temporary(holder, e);
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
     // copied lends itself mutably, so only one of them is used at a time.
     for (const [lentPlace, part, mutable] of lent(e)) lend(lentPlace, mutable, part, holder);
-    // Through a reference, what it holds stays held.
+    inherit(holder, e);
+  }
+
+  // Through a reference, what it holds stays held.
+  function inherit(holder: Local, e: Expr) {
     const root = locals.get(rootOf(e) as never);
-    if (!root || !isRef(root.type) || root === holder) return;
+    if (!state || !root || !isRef(root.type) || root === holder) return;
     for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new Set([...loan.holders, holder]) });
+  }
+
+  // A reference to a temporary or a copy holds that, so it is never returned.
+  function temporary(holder: Local, e: Expr) {
+    state?.loans.set(e.start, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new Set([holder]) });
+  }
+
+  // Whether a reference made from `e` points where `e` lives, rather than at a copy: a place
+  // of exactly the type borrowed, reached through real fields of known layout, or a reference
+  // to the same type or to one member of a union.
+  function inPlace(e: Expr, to: RefType): boolean {
+    const type = types.get(e)!;
+    const local = e.kind === "ident" ? locals.get(e) : undefined;
+    const narrowed = (t: Type) => local !== undefined && local.type !== type && isUnion(t);
+    if (isRef(type)) {
+      if (narrowed(type.to)) return false;
+      const [from, want] = [lower(type.to), lower(to.to)];
+      return from === want || (isUnion(from) && from.members.includes(want));
+    }
+    if (key(e) === undefined || throughUnion(e) || narrowed(type)) return false;
+    return lower(type) === lower(to.to);
+  }
+
+  // Whether a field path passes through a union, or a type parameter whose concrete type may
+  // store the field differently, so the field is read as a copy.
+  function throughUnion(e: Expr): boolean {
+    for (let p: Expr = e; p.kind === "member"; p = p.object) {
+      const holder = types.get(p.object);
+      const held = holder && isRef(holder) ? holder.to : holder;
+      if (typeof held !== "string" && held && (held.kind === "union" || held.kind === "param")) return true;
+    }
+    return false;
   }
 
   // A returned reference may point only into what its lifetime ties it to: a parameter's
@@ -435,6 +481,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const type = coercions.get(e) ?? types.get(e)!;
     if (!isRef(type)) return;
     for (const place of pointsInto(e)) {
+      if (place === TEMPORARY) {
+        throw new CompileError("can't return a reference to a temporary or a copy, which is gone once the function returns; return an owned value instead", e.start, e.end);
+      }
       const param = place.startsWith("param ") ? Number(place.slice(6)) : undefined;
       if (param !== undefined ? origins.includes(param) : place.startsWith("this") && origins.includes("this")) continue;
       const allowed = origins.map((o) => (o === "this" ? "'this'" : `'${paramName(o)}'`)).join(" or ");
@@ -446,17 +495,31 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
   }
 
-  // The places a reference value points into: places it borrows, what the reference variables
-  // it copies hold, and what calls' results borrow.
+  // The places a reference value points into: places it borrows where they live, what the
+  // reference variables it reads through hold, what calls' results borrow, or a temporary.
   function pointsInto(e: Expr): string[] {
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
     const from = borrowsFrom.get(e);
-    if (from) return from.flatMap(pointsInto);
-    const place = key(e);
-    if (place === undefined || !state) return [];
+    if (from) {
+      return from.flatMap((s) => {
+        if (isRef(coercions.get(s) ?? types.get(s)!)) return pointsInto(s);
+        return key(s) !== undefined && !throughUnion(s) ? within(s) : [TEMPORARY];
+      });
+    }
+    const type = types.get(e)!;
+    const to = coercions.get(e) ?? type;
+    if (!isRef(to) || !inPlace(e, to)) return [TEMPORARY];
+    return within(e);
+  }
+
+  // Where a place lives: itself, or, reached through a reference variable, what that holds.
+  function within(e: Expr): string[] {
     const root = locals.get(rootOf(e) as never);
-    if (!root || !isRef(root.type)) return [place];
-    return [...state.loans.values()].filter((l) => l.holders.has(root)).map((l) => l.place);
+    if (!root || !isRef(root.type)) return [key(e)!];
+    const refs = new Set([...locals.values()].filter((l) => isRef(l.type)).map((l) => String(l.id)));
+    return [...(state?.loans.values() ?? [])]
+      .filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!))
+      .map((l) => l.place);
   }
 
   function paramName(i: number): string {
@@ -517,7 +580,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const local = locals.get(e);
       return local && String(local.id);
     }
-    if (e.kind === "this") return "this";
+    if (e.kind === "this" || e.kind === "super") return "this";
     if (e.kind !== "member" || calls.has(e) || !types.has(e.object)) return undefined;
     const object = key(e.object);
     return object === undefined ? undefined : `${object}.${e.name}`;

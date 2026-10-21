@@ -1,6 +1,6 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, fits, keyOf, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
+import { field, fits, keyOf, refType, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -29,6 +29,13 @@ export function unsatisfied(type: Type, trait: InterfaceType, members: Members, 
 
 const assuming = new Set<string>();
 
+// Two parameter types are one when they differ only in a reference's lifetime, which each
+// method names for itself.
+function same(a: Type, b: Type): boolean {
+  const plain = (t: Type) => (typeof t !== "string" && t.kind === "ref" ? refType(t.to, t.mutable) : t);
+  return plain(a) === plain(b);
+}
+
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
@@ -53,7 +60,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   for (const m of trait.methods) {
     const found = typeof type !== "string" && type.kind === "interface" ? type.methods.find((x) => x.name === m.name) : undefined;
     if (found) {
-      if (found.params.some((p, i) => p !== m.params[i]) || found.params.length !== m.params.length || !returns(found.returns, m.returns)) {
+      if (found.params.some((p, i) => !same(p, m.params[i]!)) || found.params.length !== m.params.length || !returns(found.returns, m.returns)) {
         return `types of method '${m.name}' are incompatible`;
       }
       continue;
@@ -61,7 +68,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     const method = c ? inherited(c, "methods", m.name) : undefined;
     if (!method || method.access !== "public") return missing("method", m.name);
     const params = members.paramTypesOf(method);
-    if (params.length !== m.params.length || params.some((p, i) => p !== m.params[i]) || !returns(members.returnOf(method, at), m.returns)) {
+    if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(members.returnOf(method, at), m.returns)) {
       return `types of method '${m.name}' are incompatible`;
     }
   }

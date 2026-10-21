@@ -79,7 +79,7 @@ export function expressions(ctx: Context) {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, read, condition, effect, coerce, stays };
+  return { value, read, condition, effect, coerce };
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
@@ -519,15 +519,6 @@ export function expressions(ctx: Context) {
     coercions.set(e, to);
   }
 
-  // Whether a reference value points somewhere that outlives the expression: into a place lent
-  // where it lives, or wherever a reference variable or a call's result points.
-  function stays(e: Expr, to: RefType): boolean {
-    if (e.kind === "conditional") return stays(e.then, to) && stays(e.else, to);
-    const type = types.get(e)!;
-    if (isRefType(type)) return inPlace(e, to);
-    return place(e) && inPlace(e, to);
-  }
-
   // Whether an expression reaches into a variable or `this`, rather than being a temporary.
   function rooted(e: Expr): boolean {
     while (e.kind === "member" && !calls.has(e)) e = e.object;
@@ -541,6 +532,12 @@ export function expressions(ctx: Context) {
     const local = e.kind === "ident" ? locals.get(e) : undefined;
     const held = typeof type !== "string" && type.kind === "ref" ? type.to : type;
     if (local && local.type !== type && typeof held !== "string" && held.kind === "union") return false;
+    // A field read through a type parameter may be stored as a different type.
+    for (let p: Expr = e; p.kind === "member"; p = p.object) {
+      const holder = types.get(p.object);
+      const of = holder && typeof holder !== "string" && holder.kind === "ref" ? holder.to : holder;
+      if (typeof of !== "string" && of?.kind === "param") return false;
+    }
     return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : lower(type) === lower(to.to);
   }
 

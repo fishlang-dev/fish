@@ -299,7 +299,7 @@ export function check(program: Stmt[]): Checked {
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     const self = f.self && { ...f.self, type: viewed ?? f.self.type };
 
-    const { value, read, condition, effect, coerce, stays } = expressions({
+    const { value, read, condition, effect, coerce } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -496,9 +496,6 @@ export function check(program: Stmt[]): Checked {
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
-          if (s.value && expected && isRef(expected) && !stays(s.value, expected)) {
-            throw new CompileError("can't return a reference to a temporary, which is gone once the function returns; return an owned value instead", s.value.start, s.value.end);
-          }
           const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
           if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;

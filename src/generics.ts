@@ -57,7 +57,7 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     return;
   }
   // `Ref<T>` against a value or a reference borrows a T.
-  if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length === 1 && !names.has(node.name)) {
+  if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length >= 1 && !names.has(node.name)) {
     infer(node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
     return;
   }
@@ -135,12 +135,15 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (!f.returnType) return undefined;
     const t = withScope(scope, () => resolveType(f.returnType!));
     if (typeof t === "string" || t.kind !== "ref") return t;
+    // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = implicitOf(f);
-    for (const [i] of lent.get(f) ?? []) {
-      const bound = implicit.get(i)!;
-      if (lower(t.to) === lower(bound)) return refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life);
-    }
-    return t;
+    const refs = f.params.flatMap((p, i) => {
+      const type = lent.get(f)?.get(i) ?? (p.type && withScope(scope, () => resolveType(p.type!)));
+      return type && typeof type !== "string" && type.kind === "ref" && (!t.life || type.life === t.life) ? [i] : [];
+    });
+    const [i] = refs;
+    const bound = i !== undefined && refs.length === 1 && !(f.self && !f.self.constructor && !t.life) ? implicit.get(i) : undefined;
+    return bound && lent.get(f)?.has(i!) && lower(t.to) === lower(bound) ? refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : t;
   }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
