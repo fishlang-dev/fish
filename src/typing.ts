@@ -49,8 +49,8 @@ export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
 // as its fields, which are never read by name.
-// A closure that moves a captured value out of itself can run only once.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once: boolean };
+// A closure that moves a captured value out of itself can run only once; `once` names one.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -86,7 +86,7 @@ export function functionType(names: string[], params: Type[], returns: Type): Fu
   return t;
 }
 
-export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: boolean): ClosureType {
+export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined): ClosureType {
   const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once };
   keys.set(t, `closure ${declared++}`);
   return t;
@@ -301,9 +301,11 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // A closure fits a function type taking the same parameters, or the first of them, and
   // returning what it returns, or anything when it returns nothing.
+  // A parameter of a function type fits through its signature.
   if (typeof to !== "string" && to.kind === "function") {
-    return typeof from !== "string" && from.kind === "closure" && from.params.length <= to.params.length
-      && from.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(from.returns, to.returns));
+    const sig = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
+    return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
+      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
   }
   if (typeof from !== "string" && from.kind === "ref") return false;
   // An interface is satisfied by members, which only the checker can look up.

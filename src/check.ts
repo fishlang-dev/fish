@@ -517,7 +517,7 @@ export function check(program: Stmt[]): Checked {
         name: alias.name,
         type: from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias)),
       }));
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, inner.moved!.size > 0);
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, [...inner.moved!][0]?.name);
       inner.closure = type;
       calls.set(e, inner);
       closureBodies.set(type, inner);

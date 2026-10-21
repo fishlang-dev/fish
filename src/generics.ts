@@ -3,7 +3,8 @@ import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.t
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { paramName } from "./resolve.ts";
 import { field, fits, holdsRef, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -227,7 +228,13 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
-    for (const [i, bound] of implicitOf(f)) own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound, lent.get(f)!.has(i)));
+    for (const [i, bound] of implicitOf(f)) {
+      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound, lent.get(f)!.has(i)));
+      const given = argTypes[i]!;
+      if (typeof given !== "string" && given.kind === "closure" && given.once && repeats(f, paramName(f.params[i]!))) {
+        throw new CompileError(`'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${given.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
+      }
+    }
     const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
@@ -312,7 +319,6 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
     if (bound.kind === "function") {
       if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
-      if (typeof type !== "string" && type.kind === "closure" && type.once) throw unsupported("passing closures that run only once", arg);
       return type;
     }
     if (bound.kind === "interface") {
@@ -326,6 +332,29 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     return arg.kind === "object" ? bound : type;
   }
 
+}
+
+// Whether a body may call its function-typed parameter `name` more than once: it calls it
+// twice, or in a loop or a closure, which may run again, or uses it any other way, as passing
+// it on. A name shadowing the parameter counts too, which only errs towards caution.
+function repeats(f: Body, name: string): boolean {
+  let calls = 0;
+  let again = false;
+  const walk = (node: unknown, repeated: boolean): void => {
+    if (typeof node !== "object" || node === null) return;
+    if (Array.isArray(node)) return node.forEach((n) => walk(n, repeated));
+    const n = node as Expr | Stmt;
+    if (n.kind === "call" && n.callee.kind === "ident" && n.callee.name === name) {
+      calls++;
+      if (repeated) again = true;
+      return walk(n.args, repeated);
+    }
+    if (n.kind === "ident" && n.name === name) again = true;
+    const loops = n.kind === "while" || n.kind === "doWhile" || n.kind === "for" || n.kind === "forOf" || n.kind === "forIn" || n.kind === "arrow";
+    for (const v of Object.values(node)) if (typeof v === "object") walk(v, repeated || loops);
+  };
+  walk(f.body, false);
+  return again || calls > 1;
 }
 
 // What generic classes need from the checker.
