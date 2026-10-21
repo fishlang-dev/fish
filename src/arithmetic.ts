@@ -12,6 +12,7 @@ export type Builder = {
   label(): string;
   startBlock(name: string): void;
   cString(s: string): string;
+  alloca(type: string): string;
 };
 
 // The wrapping instruction, the checked intrinsic without its signedness, and the verb for
@@ -39,11 +40,12 @@ const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^":
 // Each overflow-checking intrinsic the lowered code calls, which the module declares.
 export type Intrinsics = Set<string>;
 
-export function lowering({ emit, temp, label, startBlock, cString }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
+export function lowering({ emit, temp, label, startBlock, cString, alloca }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
   return { operate, arithmetic };
 
   function operate(op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
     if (op === "<<" || op === ">>" || op === ">>>") return shift(op, a, b, at, type);
+    if (op === "**") return power(a, b, at, type);
     const bitwise = BITWISE[op];
     if (!bitwise) return arithmetic(op as ArithmeticOp, a, b, at, type);
     const result = temp();
@@ -88,6 +90,52 @@ export function lowering({ emit, temp, label, startBlock, cString }: Builder, sr
     emit(`${overflow} = extractvalue { ${ty}, i1 } ${pair}, 1`);
     panicIf(overflow, `attempt to ${verb ?? opVerb} with overflow`, at);
     return result;
+  }
+
+  // Exponentiation by squaring, multiplying as `*` does, so an overflowing power panics with
+  // the same message in debug builds and wraps in release. The base squares only while bits of
+  // the exponent remain, so a power that fits never overflows on the way.
+  function power(a: string, b: string, at: Span, type: Integer): string {
+    const ty = `i${INTEGERS[type].bits}`;
+    const [result, base, exponent] = [alloca(ty), alloca(ty), alloca("i32")];
+    emit(`store ${ty} 1, ptr ${result}`);
+    emit(`store ${ty} ${a}, ptr ${base}`);
+    emit(`store i32 ${b}, ptr ${exponent}`);
+    const [loop, odd, next, square, done] = [label(), label(), label(), label(), label()];
+    const load = (ty: string, slot: string) => {
+      const v = temp();
+      emit(`${v} = load ${ty}, ptr ${slot}`);
+      return v;
+    };
+    emit(`br label %${loop}`);
+    startBlock(loop);
+    const e = load("i32", exponent);
+    const more = temp();
+    emit(`${more} = icmp ne i32 ${e}, 0`);
+    emit(`br i1 ${more}, label %${odd}, label %${done}`);
+    startBlock(odd);
+    const bit = temp();
+    emit(`${bit} = and i32 ${e}, 1`);
+    const set = temp();
+    emit(`${set} = icmp ne i32 ${bit}, 0`);
+    const times = label();
+    emit(`br i1 ${set}, label %${times}, label %${next}`);
+    startBlock(times);
+    emit(`store ${ty} ${arithmetic("*", load(ty, result), load(ty, base), at, type)}, ptr ${result}`);
+    emit(`br label %${next}`);
+    startBlock(next);
+    const rest = temp();
+    emit(`${rest} = lshr i32 ${e}, 1`);
+    emit(`store i32 ${rest}, ptr ${exponent}`);
+    const left = temp();
+    emit(`${left} = icmp ne i32 ${rest}, 0`);
+    emit(`br i1 ${left}, label %${square}, label %${done}`);
+    startBlock(square);
+    const b2 = load(ty, base);
+    emit(`store ${ty} ${arithmetic("*", b2, b2, at, type)}, ptr ${base}`);
+    emit(`br label %${loop}`);
+    startBlock(done);
+    return load(ty, result);
   }
 
   function division(op: "/" | "%", a: string, b: string, at: Span, type: Integer): string {

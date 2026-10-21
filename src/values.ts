@@ -20,7 +20,7 @@ type Call = Extract<Expr, { kind: "call" }>;
 const I64_MAX = (1n << 63n) - 1n;
 
 // The operators an expression of only literals may use and still take its type from context.
-const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>"]);
+const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>"]);
 const BITWISE_OPERATORS = new Set<string>(["&", "|", "^", "<<", ">>", ">>>"]);
 
 export function isPrint(callee: Expr): boolean {
@@ -137,7 +137,8 @@ export function expressions(ctx: Context) {
     }
     if (e.kind === "binary") {
       retype(e.left, to, false);
-      return retype(e.right, to, false);
+      // An integer's exponent stays a `u32`.
+      return retype(e.right, e.op === "**" && isInteger(to) ? "u32" : to, false);
     }
     if (e.kind !== "int" || !isInteger(to)) return;
     const [min, max] = range(to);
@@ -524,7 +525,9 @@ export function expressions(ctx: Context) {
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
         const assigned = op === "=" ? value(e.value) : read(e.value);
-        const type = op === "=" ? assigned : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
+        const type = op === "=" ? assigned
+          : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
+          : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
@@ -576,6 +579,7 @@ export function expressions(ctx: Context) {
           if (special) return special;
         }
         if (e.op === "instanceof") return instanceofCheck(e, unions);
+        if (e.op === "**") return power(e.left, operand(e.left), e.right, operand(e.right), e);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right)), e);
       default:
@@ -606,6 +610,22 @@ export function expressions(ctx: Context) {
     }));
     types.set(e, remade);
     return remade;
+  }
+
+  // `**` raises an integer to a `u32` power, like Rust's `pow`, and a float to a float power of
+  // its own type, like `powf`. A literal base takes its type from the exponent's only when that
+  // is a float.
+  function power(base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
+    if (isFloat(right) && left !== right && adapt(base, right)) left = right;
+    if (isInteger(left) && right !== "u32" && adapt(exponent, "u32")) right = "u32";
+    if (isFloat(left) && left !== right && adapt(exponent, left)) right = left;
+    if (isInteger(left) && right !== "u32") {
+      throw new CompileError(`the exponent of '**' on an integer is a 'u32', as in Rust's 'pow', not '${show(right)}'; convert it with 'as u32'`, exponent.start, exponent.end);
+    }
+    if (!isNumeric(left) || (isFloat(left) && left !== right)) {
+      throw new CompileError(`operator '**' cannot be applied to types '${show(left)}' and '${show(right)}'`, at.start, at.end);
+    }
+    return left;
   }
 
   // Two operands of different number types meet as one when either is only literals.

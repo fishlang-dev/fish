@@ -140,6 +140,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
     if (!isFloat(type)) return operate(op, a, b, at, type as Integer);
     const result = temp();
+    if (op === "**") {
+      const intrinsic = `@llvm.pow.${type}`;
+      intrinsics.add(`declare ${llvm(type)} ${intrinsic}(${llvm(type)}, ${llvm(type)})`);
+      emit(`${result} = call ${llvm(type)} ${intrinsic}(${llvm(type)} ${a}, ${llvm(type)} ${b})`);
+      return result;
+    }
     emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
     return result;
   }

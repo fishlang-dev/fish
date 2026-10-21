@@ -16,7 +16,7 @@ const BITWISE_ON_BOOLEANS: Partial<Record<BinaryOp, string>> = { "&": "&&", "|":
 // The assignment operators that have a meaning so far, and the operator each applies.
 export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
   "=": "=", "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%", "&=": "&", "|=": "|", "^=": "^",
-  "<<=": "<<", ">>=": ">>", ">>>=": ">>>", "&&=": "&&", "||=": "||",
+  "<<=": "<<", ">>=": ">>", ">>>=": ">>>", "&&=": "&&", "||=": "||", "**=": "**",
 };
 
 // The result of a binary operator, or an error when its operands don't suit it.
