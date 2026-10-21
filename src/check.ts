@@ -652,7 +652,7 @@ export function check(program: Stmt[]): Checked {
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           const annotated = (d.type && resolveType(d.type)) || demands.get(s);
-          if (typeof annotated !== "string" && annotated?.kind === "function") expect(d.init, annotated);
+          if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
           // An interface describes the value, which keeps its own concrete type.
@@ -815,6 +815,7 @@ export function check(program: Stmt[]): Checked {
         case "return": {
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
+          if (declared && s.value) expect(s.value, declared);
           // An arrow's expression body may be a call returning nothing.
           const type = !s.value ? "void" : s.value === f.closure?.value && s.value.kind === "call" ? result(s.value) : value(s.value);
           if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions returned from functions", s.value!);

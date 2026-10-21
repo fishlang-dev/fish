@@ -4,6 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
+import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
@@ -110,6 +111,8 @@ export function expressions(ctx: Context) {
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
+  // The type each generic enum's member is expected to have, by the member expression.
+  const wanted = new Map<Expr, Type>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
   // Literals found to fit the type they were given, `-9223372036854775808` among them.
   const fitted = new Set<Expr>();
@@ -171,8 +174,18 @@ export function expressions(ctx: Context) {
     fitted.add(e);
   }
 
-  function expect(e: Expr, t: FunctionType) {
-    if (e.kind === "arrow") expecting.set(e, t);
+  // What a closure or a generic enum's member is expected to be, from where it goes, since
+  // neither can always tell its own type: a closure its parameters', an enum its type arguments.
+  function expect(e: Expr, t: Type) {
+    if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    // An array literal's elements are expected to be its element type, and an object literal's
+    // properties their fields'.
+    if (e.kind === "array" && isArray(t)) for (const x of e.elements) if (x) expect(x, t.element);
+    if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
+      for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
+    }
+    const built = e.kind === "call" ? e.callee : e;
+    if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
   }
 
   // A call's type, `void` included, or any other expression's.
@@ -233,12 +246,13 @@ export function expressions(ctx: Context) {
     // `Shape.Circle(1.5)` builds a variant from its payload.
     const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
     if (named?.data && callee.kind === "member") {
-      const v = variant(callee, named, false);
+      const given = e.args.map(value);
+      const v = variant(callee, named, false, given, e.typeArgs);
       if (e.args.length !== v.fields.length) {
         throw new CompileError(`'${v.name}' holds ${v.fields.length} value${v.fields.length === 1 ? "" : "s"}, but ${e.args.length} ${e.args.length === 1 ? "was" : "were"} given`, e.start, e.end);
       }
       e.args.forEach((a, i) => {
-        const t = value(a);
+        const t = given[i]!;
         coerce(a, t, v.fields[i]!.type, `argument of type '${show(t)}' is not assignable to '${v.name}', which holds '${show(v.fields[i]!.type)}'`);
       });
       types.set(callee, v);
@@ -272,11 +286,19 @@ export function expressions(ctx: Context) {
 
   // An arrow passed where a function type is declared takes its parameter types from it.
   function expectFrom(target: Body, list: Expr[]) {
-    if (!list.some((a) => a.kind === "arrow")) return;
     const bounds = implicitOf(target);
     list.forEach((a, i) => {
       const t = bounds.get(i);
       if (t?.kind === "function") expect(a, t);
+      // A parameter of a function that isn't generic has a type known before the call.
+      const p = target.params[i];
+      if (a.kind !== "arrow" && p?.type && (target.typeParams?.length ?? 0) === 0 && !target.scope?.size) {
+        try {
+          expect(a, ctx.resolveType(p.type));
+        } catch {
+          // A type the declaration can't give here gives no expectation.
+        }
+      }
     });
   }
 
@@ -360,11 +382,27 @@ export function expressions(ctx: Context) {
   }
 
   // A member of a data-carrying enum: a variant, read on its own only when it holds nothing.
-  function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean): VariantType {
+  // A generic enum's type arguments come from those written, then from the payload, then from
+  // the type expected where the value goes.
+  function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
-    if (data.params.length > 0) throw unsupported("generic enums", e);
-    const found = ctx.enumInstance(named, [], e).variants.get(e.name);
-    if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    const member = data.members.find((m) => m.name === e.name);
+    if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    const bindings = new Map<string, Type>();
+    if (typeArgs.length > 0) data.params.forEach((p, i) => typeArgs[i] && bindings.set(p, ctx.resolveType(typeArgs[i]!)));
+    else {
+      const names = new Set(data.params);
+      (member.payload ?? []).forEach((node, i) => given[i] && infer(node, widenLet(given[i]!), names, bindings, e));
+      const want = wanted.get(e);
+      const members = want === undefined ? [] : typeof want !== "string" && want.kind === "union" ? want.members : [want];
+      const instance = members.find((m): m is VariantType => typeof m !== "string" && m.kind === "variant" && m.enum === data.name);
+      data.params.forEach((p, i) => instance && !bindings.has(p) && bindings.set(p, instance.args[i]!));
+    }
+    const missing = data.params.find((p) => !bindings.has(p));
+    if (missing) {
+      throw new CompileError(`can't tell what '${missing}' is for '${data.name}.${e.name}'; give it a declared type, like 'const x: ${data.name}<${data.params.join(", ")}> = ...' with real types`, e.start, e.end);
+    }
+    const found = ctx.enumInstance(named, data.params.map((p) => bindings.get(p)!), e).variants.get(e.name)!;
     if (alone && found.fields.length > 0) throw new CompileError(`'${found.name}' holds ${found.fields.length === 1 ? "a value" : "values"}; build it with '${found.name}(...)'`, e.start, e.end);
     if (!alone && found.fields.length === 0) throw new CompileError(`'${found.name}' holds nothing, so it isn't called; write '${found.name}'`, e.start, e.end);
     return found;
@@ -778,6 +816,7 @@ export function expressions(ctx: Context) {
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
+        if (op === "=") expect(e.value, target);
         const assigned = op === "=" ? value(e.value) : read(e.value);
         // A variable whose type is still open takes the integer type assigned to it.
         if (op === "=" && isInteger(assigned) && assigned !== target && ctx.infer(e.target, assigned)) return assigned;
