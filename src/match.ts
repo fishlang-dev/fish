@@ -1,4 +1,5 @@
 import type { Expr, Pattern } from "./parser.ts";
+import { unsupported } from "./unsupported.ts";
 import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type ParamType, type Type, type VariantType } from "./typing.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
@@ -36,7 +37,14 @@ export function lowerPattern(info: PatternInfo): PatternInfo {
   const type = lower(info.type);
   if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
   if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
-  if (info.kind === "object") return { ...info, type, shapes: info.shapes.map(lower), fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
+  if (info.kind === "object") {
+    const shapes = info.shapes.map(lower);
+    // An interface's field may be an accessor in the instance that meets it.
+    for (const [key, p] of info.fields) {
+      if (shapes.some((s) => typeof s !== "string" && s.kind === "class" && !objectFields(s).some((f) => f.name === key))) throw unsupported("object patterns reading a field a getter provides", p);
+    }
+    return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
+  }
   if (info.kind === "array") return { ...info, type, element: lower(info.element) };
   return { ...info, type };
 }

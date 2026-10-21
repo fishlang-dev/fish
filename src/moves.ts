@@ -514,12 +514,22 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "nonNull":
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
+      case "as":
+        return expr(e.expr, consume, discarded);
+      case "array":
+        for (const x of e.elements) if (x) expr(x, (place) => `'${place}' moved here into the new array; use '${place}.clone()' to keep a copy`);
+        return;
+      case "float":
+      case "null":
+        return;
       // A throw expression hands its value on, and nothing after it runs.
       case "throw":
         expr(e.value, (p) => `'${p}' moved here: throwing it hands it on`);
         raising();
         state = null;
         return;
+      default:
+        throw new Error(`the move checker has no case for '${e.kind}' expressions`);
     }
   }
 
@@ -1195,6 +1205,16 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "array":
         for (const x of e.elements) if (x) expr(x);
         return;
+      case "int":
+      case "float":
+      case "bool":
+      case "string":
+      case "null":
+      case "this":
+      case "super":
+        return;
+      default:
+        throw new Error(`the last-use walk has no case for '${e.kind}' expressions`);
     }
   }
   stmts(body);
