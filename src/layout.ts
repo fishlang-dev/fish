@@ -1,12 +1,15 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { baseOf, field, fieldPath, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
 
-const PRIMITIVES = { i64: "i64", boolean: "i1", void: "void" };
+const PRIMITIVES: Record<Exclude<Type, object>, string> = {
+  i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
+  f32: "float", f64: "double", boolean: "i1", void: "void",
+};
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
 // literal struct of the base it embeds, if any, then its own fields in declaration order. A
@@ -26,7 +29,9 @@ function words(t: UnionType): number {
 // A type's size and alignment in bytes, as LLVM lays out its IR type on the 64-bit targets
 // Fish supports.
 function size(t: Type): [number, number] {
-  if (t === "i64") return [8, 8];
+  if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
+  if (t === "f32") return [4, 4];
+  if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref") return [8, 8];

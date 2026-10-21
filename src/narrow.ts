@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { refType, unionType, type Type } from "./typing.ts";
+import { isNumeric, refType, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -12,7 +12,7 @@ export type Guard = { yes: Facts; no: Facts };
 // What `typeof` says for a value of each type. Every sized number is "number", as in
 // TypeScript, and every object and instance "object".
 export function category(t: Type): string {
-  if (t === "i64") return "number";
+  if (isNumeric(t)) return "number";
   if (typeof t === "string") return t;
   if (t.kind === "literal") return typeof t.value === "bigint" ? "number" : typeof t.value;
   return "object";

@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, Bound, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, baseOf, INTEGERS, isInteger, isNumeric, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import type { Access, Bound, Integer, Numeric, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -18,6 +18,9 @@ import { bothSides, instanceofCheck, intoMember, intoUnion, literalShape, typeof
 type Call = Extract<Expr, { kind: "call" }>;
 
 const I64_MAX = (1n << 63n) - 1n;
+
+// The operators an expression of only literals may use and still take its type from context.
+const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>"]);
 
 export function isPrint(callee: Expr): boolean {
   if (callee.kind === "ident") return callee.name === "print";
@@ -92,11 +95,53 @@ export function expressions(ctx: Context) {
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
+  const oversized: Extract<Expr, { kind: "int" }>[] = [];
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
+    adapt: (e, to) => adapt(e, to),
   };
-  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis };
+  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish };
+
+  // Literals too large for an i64 that nothing gave a wider type.
+  function finish() {
+    const unfit = oversized.find((e) => types.get(e) === "i64");
+    if (unfit) throw new CompileError("integer literal does not fit in i64", unfit.start, unfit.end);
+  }
+
+  // An expression of only number literals and operators takes the number type it meets where
+  // it is written, as `1` does in `let a: u8 = 1` or `a + 1`.
+  function adapt(e: Expr, to: Type): boolean {
+    if (!isNumeric(to) || !literalOnly(e)) return false;
+    retype(e, to, false);
+    return true;
+  }
+
+  function literalOnly(e: Expr): boolean {
+    if (e.kind === "int") return true;
+    if (e.kind === "unary") return (e.op === "-" || e.op === "~") && literalOnly(e.operand);
+    return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && literalOnly(e.left) && literalOnly(e.right);
+  }
+
+  function retype(e: Expr, to: Numeric, negated: boolean) {
+    types.set(e, to);
+    if (e.kind === "unary") {
+      if (e.op === "-" && isInteger(to) && !INTEGERS[to].signed) {
+        throw new CompileError(`'${show(to)}' is unsigned, so it can't be negative; use a signed type like 'i64'`, e.start, e.end);
+      }
+      return retype(e.operand, to, e.op === "-" && !negated);
+    }
+    if (e.kind === "binary") {
+      retype(e.left, to, false);
+      return retype(e.right, to, false);
+    }
+    if (e.kind !== "int" || !isInteger(to)) return;
+    const [min, max] = range(to);
+    const value = negated ? -e.value : e.value;
+    if (value < min || value > max) {
+      throw new CompileError(`'${negated ? "-" : ""}${e.value}' doesn't fit in '${show(to)}', which holds ${min} to ${max}`, e.start, e.end);
+    }
+  }
 
   function expect(e: Expr, t: FunctionType) {
     if (e.kind === "arrow") expecting.set(e, t);
@@ -352,8 +397,9 @@ export function expressions(ctx: Context) {
 
   function typeOf(e: Expr): Type {
     switch (e.kind) {
+      // A literal is an i64 unless where it is written gives it another number type.
       case "int":
-        if (e.value > I64_MAX) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
+        if (e.value > I64_MAX) oversized.push(e);
         return "i64";
       case "bool":
         return "boolean";
@@ -449,8 +495,11 @@ export function expressions(ctx: Context) {
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);
-        if (type !== (e.op === "!" ? "boolean" : "i64")) {
+        if (e.op === "!" ? type !== "boolean" : !isInteger(type)) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
+        }
+        if (e.op === "-" && !INTEGERS[type as Integer].signed) {
+          throw new CompileError(`'${show(type)}' is unsigned, so it can't be negated; convert it to a signed type with 'as' first`, e.start, e.end);
         }
         return type;
       }
@@ -459,7 +508,7 @@ export function expressions(ctx: Context) {
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
         const assigned = op === "=" ? value(e.value) : read(e.value);
-        const type = op === "=" ? assigned : binaryType(op, target, widen(e.value, assigned), e);
+        const type = op === "=" ? assigned : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
@@ -469,13 +518,14 @@ export function expressions(ctx: Context) {
       }
       case "update": {
         const target = assignable(e.operand, true);
-        if (target !== "i64") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
-        return "i64";
+        if (!isInteger(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
+        return target;
       }
       case "conditional": {
         condition(e.cond);
         const proven = proves(e.cond);
         let [then, otherwise] = [assume(proven.yes, () => value(e.then)), assume(proven.no, () => value(e.else))];
+        [then, otherwise] = sameNumbers(e.then, then, e.else, otherwise);
         if (then === otherwise) return then;
         // Two references lend shared what both point to, or a type both fit; otherwise a side
         // that borrows gives its value.
@@ -506,15 +556,48 @@ export function expressions(ctx: Context) {
           return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = typeofComparison(e, unions) ?? unionComparison(e, unions);
+          const special = typeofComparison(e, unions) ?? unionComparison(e, unions, adapt);
           if (special) return special;
         }
         if (e.op === "instanceof") return instanceofCheck(e, unions);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
-        return binaryType(e.op, operand(e.left), operand(e.right), e);
+        return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right)), e);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
     }
+  }
+
+  // A fresh object literal's literal properties take the number types of the fields they meet,
+  // in nested literals too; the literal's type is then made again from its properties.
+  function adaptFields(e: Expr, type: Type, to: Type): Type {
+    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
+    let changed = false;
+    for (const p of e.props) {
+      if (p.kind !== "property" || typeof p.key !== "string") continue;
+      const want = field(to, p.key)?.type;
+      const have = types.get(p.value)!;
+      if (!want || have === want) continue;
+      const adapted = adapt(p.value, want) ? want : adaptFields(p.value, have, want);
+      if (adapted !== have) {
+        types.set(p.value, adapted);
+        changed = true;
+      }
+    }
+    if (!changed) return type;
+    const remade = objectType((type as ObjectType).fields.map((f) => {
+      const p = e.props.find((q) => q.kind === "property" && q.key === f.name) as { value: Expr } | undefined;
+      return p ? { ...f, type: types.get(p.value)! } : f;
+    }));
+    types.set(e, remade);
+    return remade;
+  }
+
+  // Two operands of different number types meet as one when either is only literals.
+  function sameNumbers(a: Expr, left: Type, b: Expr, right: Type): [Type, Type] {
+    if (left === right) return [left, right];
+    if (adapt(b, left)) return [left, left];
+    if (adapt(a, right)) return [right, right];
+    return [left, right];
   }
 
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
@@ -523,6 +606,10 @@ export function expressions(ctx: Context) {
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || lower(type) === lower(to)) return;
+    if (adapt(e, to)) return;
+    type = adaptFields(e, type, to);
+    if (type === to) return;
+    if (isNumeric(type) && isNumeric(to)) throw new CompileError(`${message}; convert it with 'as ${show(to)}'`, e.start, e.end);
     if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, to, message);
       return;

@@ -60,7 +60,28 @@ export type FunctionType = { kind: "function"; name: string; params: Type[]; ret
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType;
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
+// The sized numbers. `isize` and `usize` are 64 bits on every target Fish supports.
+export type Integer = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize";
+export type Numeric = Integer | "f32" | "f64";
+
+export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
+  i8: { bits: 8, signed: true }, i16: { bits: 16, signed: true }, i32: { bits: 32, signed: true },
+  i64: { bits: 64, signed: true }, isize: { bits: 64, signed: true },
+  u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
+  u64: { bits: 64, signed: false }, usize: { bits: 64, signed: false },
+};
+
+export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
+export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
+export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
+
+// The values an integer type holds.
+export function range(t: Integer): [bigint, bigint] {
+  const { bits, signed } = INTEGERS[t];
+  return signed ? [-(1n << BigInt(bits - 1)), (1n << BigInt(bits - 1)) - 1n] : [0n, (1n << BigInt(bits)) - 1n];
+}
+
+export type Type = Numeric | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -320,6 +341,7 @@ export function fits(from: Type, to: Type): boolean {
 
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
+  if (t === "f64") return "number";
   if (typeof t === "string") return t;
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);

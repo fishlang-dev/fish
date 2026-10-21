@@ -1,6 +1,6 @@
 import { llvm, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
-import type { Type } from "./typing.ts";
+import { INTEGERS, type Integer, type Type } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the panic routine.
 
@@ -12,9 +12,6 @@ export const RUNTIME = [
   "declare i32 @dprintf(i32, ptr, ...)",
   "declare i32 @fflush(ptr)",
   "declare void @exit(i32) noreturn",
-  "declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)",
-  "declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)",
-  "declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)",
   "",
   '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
@@ -67,8 +64,15 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
       });
       startBlock(end);
     } else {
-      format += "%lld";
-      values.push(`, i64 ${v}`);
+      // Every integer prints as a 64-bit one, extended by its signedness.
+      const { bits, signed } = INTEGERS[type as Integer];
+      let wide = v;
+      if (bits < 64) {
+        wide = temp();
+        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      }
+      format += signed ? "%lld" : "%llu";
+      values.push(`, i64 ${wide}`);
     }
   }
 

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, fits, membersFor, objectType, show, unionType } from "./typing.ts";
+import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unionType } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
@@ -15,6 +15,8 @@ export type Union = {
   excess(e: Expr, to: Type): void;
   // The class a name declares, unless a variable shadows it.
   classNamed(name: string): ClassType | undefined;
+  // Gives an expression of only number literals the number type it meets.
+  adapt(e: Expr, to: Type): boolean;
 };
 
 // The shape a fresh object literal takes when its literal-valued properties fit the literal
@@ -95,7 +97,10 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
-export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { types, coercions, excess }: Union) {
+export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { types, coercions, excess, adapt }: Union) {
+  // A literal goes into the one number type a union holds.
+  const numbers = to.members.filter(isNumeric);
+  if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
   const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
   for (const source of sources) {
     const value = literalValue(e);
@@ -136,8 +141,12 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }: Union): Type | undefined {
-  const [left, right] = [value(e.left), value(e.right)];
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+  let [left, right] = [value(e.left), value(e.right)];
+  // A literal compared with a union holding one number type takes that type.
+  const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members.filter(isNumeric) : []);
+  if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
+  if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union";
   if (!isUnion(left) && !isUnion(right)) return undefined;
   if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);

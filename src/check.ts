@@ -383,7 +383,7 @@ export function check(program: Stmt[]): Checked {
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis } = expressions({
+    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -419,6 +419,7 @@ export function check(program: Stmt[]): Checked {
       if (s.kind === "expr" && s.expr === superCall) unset.delete(SUPER);
       return after;
     });
+    finish();
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
@@ -629,7 +630,8 @@ export function check(program: Stmt[]): Checked {
             let falling: Facts | null = null;
             for (const c of s.cases) {
               const before = new Set(shared.values());
-              const test = c.test && value(c.test);
+              let test = c.test && value(c.test);
+              if (test && test !== type && adapt(c.test!, type)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);

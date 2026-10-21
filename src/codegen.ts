@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, type ClassType, type ObjectType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isInteger, type ClassType, type Integer, type ObjectType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -45,7 +45,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
-  const { operate, arithmetic } = lowering(builder, src, file, release);
+  const intrinsics = new Set<string>();
+  const { operate, arithmetic } = lowering(builder, src, file, release, intrinsics);
   const { convert, test, equals, unionField } = conversions(builder);
 
   for (const instance of instances) {
@@ -91,6 +92,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     ...globals,
     "",
     ...RUNTIME,
+    ...intrinsics,
     "",
     ...out,
     "define i32 @main() {",
@@ -443,10 +445,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return result;
       }
       case "unary": {
+        // A negative literal is a constant, which may be the type's minimum.
+        if (e.op === "-" && e.operand.kind === "int") return String(-e.operand.value);
         const operand = value(e.operand);
-        if (e.op === "-") return arithmetic("-", "0", operand, e, "negate");
+        const type = types.get(e)!;
+        if (e.op === "-") return arithmetic("-", "0", operand, e, type as Integer, "negate");
         const result = temp();
-        emit(e.op === "~" ? `${result} = xor i64 ${operand}, -1` : `${result} = xor i1 ${operand}, true`);
+        emit(`${result} = xor ${llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
         return result;
       }
       case "assign": {
@@ -461,13 +466,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           });
         }
         // The target is read before the right-hand side runs, as in JavaScript.
-        const result = op === "=" ? value(e.value) : operate(op, value(e.target), value(e.value), e);
+        const result = op === "=" ? value(e.value) : operate(op, value(e.target), value(e.value), e, types.get(e) as Integer);
         store(e.target, result);
         return result;
       }
       case "update": {
         const old = value(e.operand);
-        const result = arithmetic(e.op === "++" ? "+" : "-", old, "1", e);
+        const result = arithmetic(e.op === "++" ? "+" : "-", old, "1", e, types.get(e) as Integer);
         store(e.operand, result);
         return e.prefix ? result : old;
       }
@@ -494,12 +499,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [value(e.left), value(e.right)];
-        if (!condition) return operate(e.op, a, b, e);
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
+        if (!condition) return operate(e.op, a, b, e, type as Integer);
         if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
-        emit(`${result} = icmp ${condition} ${llvm(type)} ${a}, ${b}`);
+        // An ordering of unsigned numbers compares them as unsigned.
+        const unsigned = isInteger(type) && !INTEGERS[type].signed && condition.startsWith("s");
+        emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${llvm(type)} ${a}, ${b}`);
         return result;
       }
       default:

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { functionType, holdsRef, interfaceType, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { functionType, holdsRef, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -92,10 +92,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (t.name === "i64" || t.name === "boolean" || t.name === "void" || t.name === "number") {
+    if (t.name in INTEGERS || t.name === "boolean" || t.name === "void" || t.name === "number") {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.name in INTEGERS) return t.name as Integer;
       if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
-      return t.name;
+      return t.name as "boolean" | "void";
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
@@ -270,7 +271,7 @@ const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions"
 
 const I64_MAX = (1n << 63n) - 1n;
 
-const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number", "Ref", "Mut", "Lifetime"]);
+const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "Ref", "Mut", "Lifetime"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {
