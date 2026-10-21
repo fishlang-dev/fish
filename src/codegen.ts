@@ -216,8 +216,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     block = name;
   }
 
+  // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
   function slot(local: Local): string {
-    return captured.get(local) ?? `%${local.name}.${local.id}`;
+    return captured.get(local) ?? `%${local.name === "%" ? "topic" : local.name}.${local.id}`;
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
@@ -611,6 +612,25 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     return v;
   }
 
+  // A pipe over a value: the value lives in the topic's slot while the right side runs, and is
+  // dropped after it unless the right side moved it out.
+  function lowerPipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
+    const local = locals.get(e)!;
+    scopes.push([]);
+    allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+    own(slot(local), local.type);
+    emit(`store ${llvm(local.type)} ${owned(e.value)}, ptr ${slot(local)}`);
+    const mark = pending.length;
+    const type = types.get(e);
+    let v: string | undefined;
+    if (wanted && type) v = needsDrop(type) ? owned(e.body) : value(e.body);
+    else effect(e.body);
+    settle(mark);
+    drop(scopes.length - 1);
+    scopes.pop();
+    return v;
+  }
+
   // A `return` in a match arm's block: its value goes where the match keeps what it gives, and
   // control leaves the arm, dropping what the scopes inside it own.
   function given(s: Extract<Stmt, { kind: "return" }>, arm: Stmt) {
@@ -785,6 +805,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // An expression run for its effect, dropping any value it makes.
   function effect(e: Expr) {
     if (e.kind === "match") return void lowerMatch(e, false);
+    if (e.kind === "pipe") return void lowerPipe(e, false);
     if (e.kind !== "call") return void value(e);
     const result = call(e);
     // A call whose value goes unused has no type of its own recorded.
@@ -1042,6 +1063,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       case "conditional":
       case "array":
       case "match":
+      case "pipe":
         return true;
       case "binary":
         return e.op === "+" || e.op === "??";
@@ -1834,6 +1856,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return fixing(e.target, () => assign(e));
       case "match":
         return lowerMatch(e, true)!;
+      case "pipe":
+        return lowerPipe(e, true)!;
       case "update":
         return fixing(e.operand, () => {
           const old = value(e.operand);

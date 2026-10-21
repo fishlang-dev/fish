@@ -257,10 +257,19 @@ export function expressions(ctx: Context) {
 
   // `x |> f(%)`. Over a place, the pipe means its right side with the place written for each
   // `%`, so it reads, borrows and moves as that would: the node becomes that expression, and
-  // later stages never see a pipe.
+  // later stages never see a pipe. Over anything else, the value is made once and kept in a
+  // hidden read-only binding each `%` names, dropped when the pipe ends unless moved out.
   function pipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
-    value(e.value);
-    if (!steady(e.value)) throw unsupported("pipes over values that aren't variables or fields", e.value);
+    const type = value(e.value);
+    if (!steady(e.value)) {
+      return ctx.arm(() => {
+        ctx.bind("%", type, e);
+        e.body = topics(e.body, (at) => ({ kind: "ident", name: "%", start: at.start, end: at.end }));
+        const given = wanted ? value(e.body) : result(e.body);
+        if (wanted && holdsRef(given)) throw new CompileError("a pipe over a value can't give a reference yet, since the value is dropped once the pipe ends; give a copy with '.clone()'", e.start, e.end);
+        return given;
+      });
+    }
     const place = e.value;
     const body = topics(e.body, (at) => spanned(structuredClone(place), at));
     for (const key of Object.keys(e)) delete (e as Record<string, unknown>)[key];
