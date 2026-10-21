@@ -266,6 +266,10 @@ export function expressions(ctx: Context) {
   // names, dropped when the pipe ends unless moved out.
   function pipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
     const type = value(e.value);
+    const hidden = steady(e.value) ? hides(e.body, e.value) : undefined;
+    if (hidden?.kind === "ident") {
+      throw new CompileError(`this '${hidden.name}' hides the '${hidden.name}' the pipe reads for '%'; rename it`, hidden.start, hidden.end);
+    }
     if (!steady(e.value) || assigns(e.body, e.value)) {
       return ctx.arm(() => {
         ctx.bind("%", type, e);
@@ -289,21 +293,65 @@ export function expressions(ctx: Context) {
     return "void";
   }
 
-  // Whether an expression assigns the variable a place starts from, or one naming its index.
-  function assigns(body: Expr, place: Expr): boolean {
-    const root = (e: Expr): string | undefined => {
-      while (e.kind === "member" || e.kind === "index") e = e.object;
-      return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : undefined;
-    };
-    const names = new Set<string | undefined>([root(place)]);
+  // A place as a path: its variable or `this`, then its fields, cut where an element is read,
+  // since writing any element of an array may change any other.
+  function path(e: Expr): string[] | undefined {
+    const parts: string[] = [];
+    for (; e.kind === "member" || e.kind === "index"; e = e.object) parts.unshift(e.kind === "member" ? e.name : "[]");
+    const root = e.kind === "ident" ? e.name : e.kind === "this" ? "this" : undefined;
+    if (root === undefined) return undefined;
+    const all = [root, ...parts];
+    return all.includes("[]") ? all.slice(0, all.indexOf("[]")) : all;
+  }
+
+  // The names an index in a place reads.
+  function indexNames(place: Expr): Set<string> {
+    const names = new Set<string>();
     for (let at = place; at.kind === "member" || at.kind === "index"; at = at.object) if (at.kind === "index" && at.index.kind === "ident") names.add(at.index.name);
+    return names;
+  }
+
+  // Whether an expression assigns something the place is, holds or is held in, or an index name.
+  function assigns(body: Expr, place: Expr): boolean {
+    const own = path(place)!;
+    const names = indexNames(place);
+    const overlaps = (target: Expr) => {
+      const p = path(target);
+      if (!p) return false;
+      if (p.length === 1 && names.has(p[0]!)) return true;
+      return own.slice(0, Math.min(own.length, p.length)).every((s, i) => s === p[i]);
+    };
     const visit = (node: unknown): boolean => {
       if (!node || typeof node !== "object") return false;
       const e = node as Expr;
-      if ((e.kind === "assign" && names.has(root(e.target))) || (e.kind === "update" && names.has(root(e.operand)))) return true;
+      if ((e.kind === "assign" && overlaps(e.target)) || (e.kind === "update" && overlaps(e.operand))) return true;
       return Object.values(node).some(visit);
     };
     return visit(body);
+  }
+
+  // A binding the right side declares with a name the place reads, which would capture the
+  // place written in for `%`.
+  function hides(body: Expr, place: Expr): Expr | undefined {
+    const root = path(place)![0]!;
+    const names = new Set([...indexNames(place), ...(root === "this" ? [] : [root])]);
+    let found: Expr | undefined;
+    const declared = (node: unknown) => {
+      if (found || !node || typeof node !== "object") return;
+      const e = node as Expr;
+      if (e.kind === "ident" && names.has(e.name)) found = e;
+      Object.values(node).forEach(declared);
+    };
+    const visit = (node: unknown) => {
+      if (found || !node || typeof node !== "object") return;
+      for (const [key, child] of Object.entries(node)) {
+        // Parameters, `let` declarators, match patterns and catch parameters declare names.
+        if (key === "pattern" || key === "param" || (key === "target" && !("kind" in node))) declared(child);
+        else visit(child);
+      }
+    };
+    visit(body);
+    return found;
   }
 
   // A place reading it again reads the same value: no part of it runs code.
