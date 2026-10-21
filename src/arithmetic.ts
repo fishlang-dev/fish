@@ -163,7 +163,7 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca }: Bui
     const { line, col } = locate(src, at.start);
     emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    emit(`call void @"fsh.panic"(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
+    emit(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
     emit("unreachable");
     startBlock(ok);
   }

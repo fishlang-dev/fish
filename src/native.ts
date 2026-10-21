@@ -18,6 +18,7 @@ export const NATIVE = String.raw`
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unwind.h>
 
 static int64_t fsh_live = 0;
 
@@ -289,11 +290,33 @@ fsh_str *fsh_rt_str_substring(fsh_str *s, int64_t start, int64_t end, int32_t en
   return start < end ? fsh_sub(s, start, end) : fsh_sub(s, end, start);
 }
 
+// Whether this build aborts on a panic; the program's IR defines it, and this default serves a
+// program without one.
+__attribute__((weak)) const int32_t fsh_panic_abort = 0;
+
+static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unwind_Exception_Class kind,
+                                       struct _Unwind_Exception *exception, struct _Unwind_Context *context, void *data) {
+  if (actions & _UA_END_OF_STACK) exit(101);
+  return _URC_NO_REASON;
+}
+
+// Every panic: the message, after what was already printed, then an abort, or an unwind that
+// runs each frame's drops and exits with 101 once it reaches the end of the stack.
+void fsh_rt_panic(const char *message) {
+  static struct _Unwind_Exception exception;
+  fflush(NULL);
+  fputs(message, stderr);
+  if (fsh_panic_abort) abort();
+  exception.exception_class = 0x46495348; // "FISH"
+  _Unwind_ForcedUnwind(&exception, fsh_unwound, NULL);
+  exit(101);
+}
+
 // An index past the end panics as Rust's does; at is the "panicked at" line.
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
-  fflush(NULL);
-  fprintf(stderr, "%sindex out of bounds: the len is %lld but the index is %llu\n", at, (long long)length, (unsigned long long)index);
-  exit(101);
+  char message[512];
+  snprintf(message, sizeof message, "%sindex out of bounds: the len is %lld but the index is %llu\n", at, (long long)length, (unsigned long long)index);
+  fsh_rt_panic(message);
 }
 
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.

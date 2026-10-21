@@ -24,6 +24,9 @@ const FLOAT_COMPARISON: Partial<Record<BinaryOp, string>> = {
 
 const FLOAT_ARITHMETIC: Partial<Record<BinaryOp, string>> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
 
+// Every function has unwind tables and the C personality, whose cleanups run a panic's drops.
+const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
+
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
 function floatConstant(value: number, type: "f32" | "f64"): string {
@@ -36,12 +39,12 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 // which may hold quotes, so those are escaped as LLVM spells them.
 const symbol = (i: Instance) => `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`;
 
-export type Options = { src: string; file: string; release: boolean };
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort" };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release, panic }: Options): string {
   const globals: string[] = [];
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
@@ -124,7 +127,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     if (type === "void") leave(undefined);
     else emit("unreachable");
-    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${UNWINDS} {`, "entry:", ...allocas, ...body, "}", "");
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
@@ -132,6 +135,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   return [
     ...globals,
+    // The runtime reads which way a panic goes.
+    `@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`,
     "",
     ...RUNTIME,
     ...intrinsics,
@@ -509,7 +514,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
     }
     emit("ret void");
-    out.push(`define internal void ${name}(${llvm(type)} %v) {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define internal void ${name}(${llvm(type)} %v) ${UNWINDS} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block } = saved);
     return name;
   }
@@ -940,7 +945,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
   function entry(): string[] {
-    if (!main.throws) return ["define i32 @main() {", '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    if (!main.throws) return [`define i32 @main() ${UNWINDS} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
     current = main;
     ({ types, locals, calls, setters, coercions, jumps } = main);
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
@@ -958,7 +963,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     write(2, ["Error:", [error, main.throws]], builder, convert);
     dispose(error, main.throws);
     emit("ret i32 1");
-    return ["define i32 @main() {", "entry:", ...allocas, ...body, "}"];
+    return [`define i32 @main() ${UNWINDS} {`, "entry:", ...allocas, ...body, "}"];
   }
 
   // A pointer to the base embedded in an instance of `from`, through as many bases as it

@@ -13,6 +13,7 @@ import { parse } from "../src/parser.ts";
 //   // fails: <text>    the program must exit with 1, an error escaping main, and stderr
 //                       containing <text>
 //   // mode: release    build with --release
+//   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
 const dir = join(import.meta.dir, "programs");
 const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
@@ -30,7 +31,7 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
 
     try {
       if (parseOnly) parse(src);
-      else build(file, out, src.includes("// mode: release"));
+      else build(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind");
     } catch (e) {
       if (!(e instanceof CompileError) || errors.length === 0) throw e;
       const message = formatError(e, name, src);
@@ -45,6 +46,7 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     expect(run.stdout.toString()).toBe(expected);
     for (const text of [...panics, ...failures]) expect(run.stderr.toString()).toContain(text);
     if (panics.length === 0) expect(run.stderr.toString()).not.toContain("fish: leaked");
-    expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
+    if (panics.length > 0 && src.includes("// mode: abort")) expect(run.signalCode).toBe("SIGABRT");
+    else expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
   });
 }

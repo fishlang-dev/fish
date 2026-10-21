@@ -2,11 +2,8 @@ import { llvm, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
 import { INTEGERS, show, type Integer, type Type } from "./typing.ts";
 
-// What compiled programs call into: libc's printf, and the panic routine.
-
-// A panic prints its location and reason to stderr and exits with 101, like a Rust panic
-// on the main thread. With nothing to unwind yet, that is all panic=unwind does. stdout is
-// flushed first so earlier output stays ahead of the message even when piped.
+// What compiled programs call into: libc's printf, and the C runtime. A panic is the runtime's
+// `fsh_rt_panic`, which prints its message, then aborts or unwinds, as the build chose.
 export const RUNTIME = [
   "declare i32 @printf(ptr, ...)",
   "declare i32 @dprintf(i32, ptr, ...)",
@@ -25,22 +22,16 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_str_at(ptr, i64)",
   "declare ptr @fsh_rt_str_slice(ptr, i64, i64, i32)",
   "declare ptr @fsh_rt_str_substring(ptr, i64, i64, i32)",
+  "declare void @fsh_rt_panic(ptr) noreturn cold",
   "declare void @fsh_rt_panic_bounds(ptr, i64, i64) noreturn cold",
+  "declare i32 @__gcc_personality_v0(...)",
   "declare ptr @fsh_rt_str_from_i64(i64)",
   "declare ptr @fsh_rt_str_from_u64(i64)",
   "declare ptr @fsh_rt_str_from_f64(double)",
   "declare ptr @fsh_rt_str_from_f32(float)",
   "",
-  '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
   '@.false = private unnamed_addr constant [6 x i8] c"false\\00"',
-  "",
-  'define internal void @"fsh.panic"(ptr %message) noreturn cold {',
-  "  call i32 @fflush(ptr null)",
-  "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.panic.format, ptr %message)",
-  "  call void @exit(i32 101)",
-  "  unreachable",
-  "}",
 ];
 
 // `console.log` and `print` are the same: arguments joined by spaces, then a newline. String
