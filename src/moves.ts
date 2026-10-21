@@ -726,7 +726,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // How a place reads in a message.
   function text(e: Named): string {
     if (e.kind === "member") return `${text(e.object)}.${e.name}`;
-    return e.kind === "ident" || e.kind === "shorthand" ? e.name : e.kind === "this" ? "this" : "(...)";
+    return e.kind === "ident" || e.kind === "shorthand" ? e.name : e.kind === "this" || e.kind === "super" ? "this" : "(...)";
   }
 
   // A place's path as written, from the variable's name.

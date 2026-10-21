@@ -61,7 +61,7 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
 // What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
 // `loop` is the loop it labels, if any.
-type Target = { stmt: Stmt; kind: "loop" | "switch" | "label"; label?: string; loop?: Stmt };
+type Target = { stmt: Stmt; kind: "loop" | "switch" | "label"; label?: string; loop?: Stmt; facts?: number };
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
@@ -327,7 +327,8 @@ export function check(program: Stmt[]): Checked {
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
     const assigned = assignedNames(f.body);
-    const narrowable = (l: Local) => (l.param || !l.mutable || !assigned.has(l.name)) && !(isRef(l.type) && l.type.mutable && assigned.has(l.name));
+    // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
+    const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name) || (isRef(l.type) && l.type.mutable);
     // How many scopes enclose each binding's declaration.
     const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
@@ -358,6 +359,7 @@ export function check(program: Stmt[]): Checked {
       assume,
       narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
       reachable: (l) => !caseOnly.has(l),
+      rewritten,
       depthOf: (l) => depths.get(l)!,
     });
 
@@ -408,6 +410,18 @@ export function check(program: Stmt[]): Checked {
         if (after) facts.push(after);
       }
       facts.length = before;
+    }
+
+    // A whole value written through a narrowed `Mut` may be another member, so from here to the
+    // end of each narrowing scope it is read as declared. A loop inside such a scope could come
+    // back to reads already checked as narrowed.
+    function rewritten(l: Local, at: Expr) {
+      const from = facts.findIndex((f) => f.has(l));
+      if (from < 0) return;
+      if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
+        throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
+      }
+      for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l, l.type);
     }
 
     function assume<T>(proven: Facts, check: () => T): T {
@@ -564,6 +578,7 @@ export function check(program: Stmt[]): Checked {
     }
 
     function within(target: Target, check: () => void) {
+      target.facts = facts.length;
       targets.push(target);
       check();
       targets.pop();

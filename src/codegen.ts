@@ -494,9 +494,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // A whole value written through a mutable reference goes where it points.
     const type = types.get(target)!;
     if (isRef(type) && coercions.has(target)) {
-      // Through the reference as stored, whatever a check narrowed it to.
-      const pointer = target.kind === "ident" ? temp() : evaluate(target);
-      if (target.kind === "ident") emit(`${pointer} = load ptr, ptr ${slot(resolved(target))}`);
+      // Through the reference as stored, unless an update keeps the member it was narrowed to.
+      const whole = target.kind === "ident" && type === resolved(target).type;
+      const pointer = whole ? temp() : evaluate(target);
+      if (whole) emit(`${pointer} = load ptr, ptr ${slot(resolved(target))}`);
       emit(`store ${llvm(type.to)} ${result}, ptr ${pointer}`);
       return;
     }

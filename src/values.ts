@@ -68,13 +68,15 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
+  // Records a whole write through a narrowed mutable reference that may change its member.
+  rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
   depthOf(l: Local): number;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, depthOf } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, rewritten, depthOf } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -403,6 +405,8 @@ export function expressions(ctx: Context) {
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
+        const narrow = local && narrowed(local);
+        if (local && op === "=" && coercions.has(e.target) && narrow && isRefType(narrow) && !fits(type, narrow.to)) rewritten(local, e);
         return target;
       }
       case "update": {
@@ -687,9 +691,12 @@ export function expressions(ctx: Context) {
     if (!setter || target.kind !== "member") {
       const read = value(target);
       // A whole value assigned to a mutable reference is written through it, to what it was
-      // declared to point to, whatever a check narrowed it to.
-      const declared = target.kind === "ident" ? locals.get(target)!.type : read;
-      if ((target.kind === "ident" || target.kind === "member") && isRefType(declared) && declared.mutable) {
+      // declared to point to, whatever a check narrowed it to. An update like `+=` keeps the
+      // member, so it goes through the narrowed reference.
+      const declared = target.kind === "ident" && !reads ? locals.get(target)!.type : read;
+      // A constructor's assignment to a field of `this` sets the field rather than writing through it.
+      const initialises = target.kind === "member" && target.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === target.name);
+      if ((target.kind === "ident" || target.kind === "member") && !initialises && isRefType(declared) && declared.mutable) {
         // What a type parameter stands for may be wider than any value written here.
         if (typeof declared.to !== "string" && declared.to.kind === "param") {
           throw new CompileError(`can't assign a whole value through '${placeText(target)}', which may point to a wider value; assign its fields instead`, target.start, target.end);
