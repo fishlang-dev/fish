@@ -1,3 +1,4 @@
+// A reference can be a type argument.
 type P = { x: i64 }
 
 function id<T>(t: T): i64 {
@@ -9,4 +10,4 @@ function main() {
   const r: Ref<P> = p
   print(id(r))
 }
-// error: references as type arguments are not supported yet
+// expect: 1

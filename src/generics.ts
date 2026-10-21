@@ -217,7 +217,6 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     for (const p of params) {
       const type = bindings.get(p.name);
       if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
-      if (holdsRef(type)) throw unsupported("references as type arguments", at);
       if (typeof type !== "string" && type.kind === "interface") {
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
@@ -374,7 +373,6 @@ export function genericClasses({ classes, templates, register, layout, members, 
     if (found) return found;
     if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
-    if (args.some(holdsRef)) throw unsupported("references as type arguments", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);

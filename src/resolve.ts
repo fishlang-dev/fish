@@ -27,7 +27,6 @@ export function storable(type: Type, at: Span): Type {
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
-  if (holdsRef(type)) throw unsupported("references in fields", at);
   return type;
 }
 
@@ -37,7 +36,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves every alias and interface up front, so an unused one is still checked. A generic
 // alias is checked with placeholders for its type parameters, and resolved again per set of
 // type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>) {
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>) {
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -95,7 +94,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "null" || t.name === "undefined") throw new CompileError(`'${t.name}' is Option in Fish, which is not supported yet`, t.start, t.end);
-    const args = t.args.map(resolveType);
+    // A class's lifetimes, written or left out, are no type arguments.
+    const lifetime = slots.get(t.name);
+    const args = (lifetime && t.args.length === lifetime.length ? t.args.filter((_, i) => !lifetime[i]) : t.args).map(resolveType);
     const alias = aliases.get(t.name);
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);

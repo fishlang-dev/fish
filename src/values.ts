@@ -5,7 +5,7 @@ import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, baseOf, derives, field, fits, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, ClassType, Field, RefType, Type } from "./typing.ts";
+import type { Access, ClassType, Field, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -47,7 +47,7 @@ export type Context = {
   // type parameters, where it passed them.
   resultOf(instance: Instance, at: Span): Type;
   // What a call's returned reference borrows from, and the record of it for each call.
-  sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span): Expr[];
+  sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[];
   borrowsFrom: Map<Expr, Expr[]>;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body): Instance;
@@ -126,7 +126,10 @@ export function expressions(ctx: Context) {
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
     const type = resultOf(instance, e);
-    if (isRefType(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, callee.kind === "member" ? callee.object : undefined, e));
+    const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
+    // A returned reference borrows what its lifetime says; a value holding references, what
+    // was lent to the call, its receiver included.
+    if (holdsRef(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, object, e, lends));
     return { type, what: `'${target.name}'` };
   }
 
@@ -338,12 +341,8 @@ export function expressions(ctx: Context) {
         if (!calls.has(e)) load();
         return found.type;
       }
-      case "object": {
-        const list = e.props.map(property);
-        const ref = list.findIndex((f) => holdsRef(f.type));
-        if (ref >= 0) throw unsupported("references in fields", e.props[ref]!);
-        return objectType(fields(list, e.props));
-      }
+      case "object":
+        return objectType(fields(e.props.map(property), e.props));
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);
@@ -356,6 +355,8 @@ export function expressions(ctx: Context) {
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
+        // An instance holding references borrows from what it was built from.
+        if (holdsRef(c.type)) borrowsFrom.set(e, list.filter(lends));
         return c.type;
       }
       case "call": {
@@ -460,6 +461,7 @@ export function expressions(ctx: Context) {
       coercions.set(e, to);
       return;
     }
+    if (e.kind === "object" && typeof to !== "string" && to.kind === "object" && holdsRef(to)) type = lendFields(e, to, message);
     const shape = !fits(type, to) ? literalShape(e, to, types) : undefined;
     if (shape) {
       shape.apply(coercions);
@@ -519,6 +521,12 @@ export function expressions(ctx: Context) {
     coercions.set(e, to);
   }
 
+  // Whether an argument lends references to what it is passed to: borrowed, a reference, or
+  // a value holding references.
+  function lends(a: Expr): boolean {
+    return holdsRef(coercions.get(a) ?? types.get(a)!);
+  }
+
   // Whether an expression reaches into a variable or `this`, rather than being a temporary.
   function rooted(e: Expr): boolean {
     while (e.kind === "member" && !calls.has(e)) e = e.object;
@@ -561,6 +569,22 @@ export function expressions(ctx: Context) {
     if (!lives || !place(e) || !inPlace(e, to)) {
       throw new CompileError(`'${target.name}' can only be pointed at a variable, or a field of one, declared in its own scope or an enclosing one, so that it lives as long as '${target.name}'`, e.start, e.end);
     }
+  }
+
+  // An object literal meeting a type with fields holding references lends each property to
+  // its field, so the literal holds what it borrows.
+  function lendFields(e: Extract<Expr, { kind: "object" }>, to: ObjectType, message: string): Type {
+    const own = types.get(e) as ObjectType;
+    const lent = own.fields.map((f) => {
+      const want = field(to, f.name)?.type;
+      const p = e.props.find((p) => p.kind === "property" && p.key === f.name) as Extract<ObjectProp, { kind: "property" }> | undefined;
+      if (!want || !p || !holdsRef(want) || fits(f.type, want)) return f;
+      coerce(p.value, types.get(p.value)!, want, message);
+      return { ...f, type: want };
+    });
+    const type = objectType(lent);
+    types.set(e, type);
+    return type;
   }
 
   // An object literal builds a class it is declared as, without its constructor, when it
@@ -694,6 +718,13 @@ export function expressions(ctx: Context) {
     let path = "";
     while (root.kind === "member") {
       readonly(root, target, action);
+      // Nothing changes through a shared reference a field holds; changes through a mutable
+      // one come later.
+      const holder = types.get(root.object);
+      if (typeof holder !== "string" && holder?.kind === "ref") {
+        if (holder.mutable) throw unsupported("changes through 'Mut' references", target);
+        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+      }
       path = `.${root.name}${path}`;
       root = root.object;
     }

@@ -73,6 +73,8 @@ export function check(program: Stmt[]): Checked {
   const templates = new Map<string, ClassNode & { name: string }>();
   const interfaces = new Map<string, Interface>();
   const enums = new Map<string, EnumInfo>();
+  // For each class declaring lifetimes, which of its type parameters are lifetimes.
+  const slots = new Map<string, boolean[]>();
   for (const s of program) {
     if (s.kind === "enum") {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
@@ -90,8 +92,11 @@ export function check(program: Stmt[]): Checked {
     }
     if (s.kind === "class" && s.name !== undefined) {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
-      if (s.typeParams.length > 0) templates.set(s.name, { ...s, name: s.name });
-      else classes.set(s.name, declareClass({ ...s, name: s.name }));
+      // A class's lifetimes are checked and erased, never instanced, so they are set aside.
+      const node = { ...s, name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
+      if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
+      if (node.typeParams.length > 0) templates.set(s.name, node);
+      else classes.set(s.name, declareClass(node));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -129,7 +134,7 @@ export function check(program: Stmt[]): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums);
+  const { resolveType, paramType, withScope } = resolver(aliases, classNamed, interfaces, enums, slots);
   // A class first made while lowering is reported at the function being checked.
   lowersClasses((c, args) => classNamed(c.generic!.name, args, checking?.body ?? { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
@@ -169,7 +174,7 @@ export function check(program: Stmt[]): Checked {
   function originsOf(f: Body, params: Type[], returns: RefType): Origin[] {
     const at = f.returnType ?? f;
     if (returns.life) {
-      const found = params.flatMap((p, i) => (isRef(p) && p.life === returns.life ? [i] : []));
+      const found = f.params.flatMap((p, i) => (named(p.type).has(returns.life!) ? [i] : []));
       if (found.length === 0) throw new CompileError(`no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
       return found;
     }
@@ -181,28 +186,63 @@ export function check(program: Stmt[]): Checked {
       : "this function returns a reference and takes several, so say which it points into: declare '<A extends Lifetime>' and write 'Ref<T, A>' on that parameter and the return type", at.start, at.end);
   }
 
-  // What a call's returned reference borrows from, as the callee's signature says.
-  function sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span): Expr[] {
+  // What a value holding references a body returns may point into: the parameters whose
+  // annotations name a lifetime its type names, or, naming none, whatever was lent.
+  function heldOrigins(f: Body): Origin[] | undefined {
+    const names = named(f.returnType);
+    if (names.size === 0) return undefined;
+    return f.params.flatMap((p, i) => ([...named(p.type)].some((n) => names.has(n)) ? [i] : []));
+  }
+
+  // The lifetime names an annotation writes: on references, and in classes' lifetime slots.
+  function named(t: TypeNode | undefined): Set<string> {
+    const found = new Set<string>();
+    const visit = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      const node = n as { kind?: string; name?: string; args?: (TypeNode & { name?: string })[] };
+      if (node.kind === "ref" && node.args) {
+        if ((node.name === "Ref" || node.name === "Mut") && node.args.length === 2) found.add(node.args[1]!.name!);
+        const lifetime = slots.get(node.name!);
+        if (lifetime && node.args.length === lifetime.length) node.args.forEach((a, i) => lifetime[i] && found.add(a.name!));
+      }
+      for (const v of Object.values(n)) if (v && typeof v === "object") visit(v);
+    };
+    visit(t);
+    return found;
+  }
+
+  // What a call's returned reference, or returned value holding references, borrows from, as
+  // the callee's signature says; with no lifetime written, whatever was lent to the call.
+  function sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
     const f = instance.body;
     const returns = returnOf(instance, at);
-    if (!isRef(returns)) return [];
-    return originsOf(f, paramTypes(instance), returns).flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
+    if (!holdsRef(returns)) return [];
+    const origins = isRef(returns) ? originsOf(f, paramTypes(instance), returns) : heldOrigins(f);
+    if (!origins) return [...args.filter(lends), ...(receiver ? [receiver] : [])];
+    return origins.flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
   }
 
   // Every lifetime a body writes must be one it declares.
   function lifetimes(f: Body) {
-    const declared = new Set((f.typeParams ?? []).filter(isLifetime).map((p) => p.name));
+    const declared = new Set([...(f.typeParams ?? []), ...(f.owner ? classNode(f.owner.name)?.typeParams ?? [] : [])].filter(isLifetime).map((p) => p.name));
     const visit = (t: unknown): void => {
       if (!t || typeof t !== "object") return;
       const node = t as { kind?: string; name?: string; args?: TypeNode[] };
-      if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args?.length === 2) {
-        const life = node.args[1] as Span & { name: string };
+      const lives = node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args?.length === 2 ? [node.args[1]!]
+        : node.kind === "ref" && slots.get(node.name!)?.length === node.args?.length ? node.args!.filter((_, i) => slots.get(node.name!)![i]) : [];
+      for (const life of lives as (Span & { name: string })[]) {
         if (!declared.has(life.name)) throw new CompileError(`cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
       }
       for (const v of Object.values(t)) if (v && typeof v === "object") visit(v);
     };
     f.params.forEach((p) => visit(p.type));
     visit(f.returnType);
+  }
+
+  // A class's declaration as written, lifetimes included.
+  function classNode(name: string): ClassNode | undefined {
+    const base = name.split("<")[0]!;
+    return program.find((s): s is ClassNode & Stmt => s.kind === "class" && s.name === base);
   }
 
   // Codegen sees each type parameter as the concrete type it stands for.
@@ -332,9 +372,10 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     const type = declared ?? inferred ?? "void";
-    if (holdsRef(type) && !isRef(type)) throw unsupported("returning values that hold references", f.returnType ?? f);
     lifetimes(f);
-    const origins = isRef(type) ? originsOf(f, params, type) : [];
+    // A returned value holding references may point into any parameter, or `this`.
+    const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self ? ["this" as const] : [])];
+    const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
     if (type !== "void" && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);

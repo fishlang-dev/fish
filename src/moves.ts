@@ -3,7 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
-import { field, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsRef, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -53,7 +53,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
     const local = locals.get(p);
-    if (local && isRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: local.type.mutable, start: p.start, end: p.end, holders: new Set([local]) });
+    if (local && holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && local.type.mutable, start: p.start, end: p.end, holders: new Set([local]) });
   });
   statements(body);
 
@@ -61,7 +61,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function inside(s: Stmt): Local[] {
     switch (s.kind) {
       case "let":
-        return isRef(locals.get(s)!.type) ? [locals.get(s)!] : [];
+        return holdsRef(locals.get(s)!.type) ? [locals.get(s)!] : [];
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
       case "block":
@@ -82,7 +82,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A reference declared in a list of statements lets go of what it holds as the list ends.
   function statements(list: Stmt[]) {
     for (const s of list) statement(s);
-    for (const s of list) if (s.kind === "let" && isRef(locals.get(s)!.type)) release(locals.get(s)!);
+    for (const s of list) if (s.kind === "let" && holdsRef(locals.get(s)!.type)) release(locals.get(s)!);
   }
 
   function statement(s: Stmt) {
@@ -97,7 +97,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         release(local);
         expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
         revive(String(local.id));
-        if (isRef(local.type)) hold(local, d.init!);
+        if (holdsRef(local.type)) hold(local, d.init!);
         return;
       }
       case "if": {
@@ -268,11 +268,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // The target changes once the value is ready, after the value's reads.
         assign(e.target, e.end);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
-        // Pointing a reference elsewhere lets go of what it held.
-        if (local && isRef(local.type)) {
+        // Pointing a reference elsewhere lets go of what it held; a value holding references
+        // given another one to hold adds it.
+        if (local && holdsRef(local.type)) {
           release(local);
           hold(local, e.value);
         }
+        const owner = e.target.kind === "member" && !setters.has(e.target) ? locals.get(rootOf(e.target) as never) : undefined;
+        if (owner && holdsRef(owner.type) && !isRef(owner.type)) hold(owner, e.value);
         // An assignment used as a value hands over what it just stored. A setter keeps what it
         // was given, with nothing left to read or hand on.
         if (!discarded && state && !isCopy(types.get(e)!) && setters.has(e.target)) {
@@ -354,6 +357,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (root && isRef(root.type)) {
       throw new CompileError(`'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
     }
+    // Nor out of a reference a field holds.
+    for (let p: Named = e; p.kind === "member"; p = p.object) {
+      if (p !== e && isRef(types.get(p)!)) {
+        throw new CompileError(`'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
+      }
+    }
     if (place.startsWith("this")) {
       throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
     }
@@ -429,7 +438,17 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
-    if (!isRef(to)) return;
+    if (!isRef(to)) {
+      // A value holding references holds what its parts do, or what the value it copies does.
+      if (!holdsRef(to)) return;
+      if (e.kind === "object") {
+        for (const p of e.props) {
+          if (p.kind === "property") hold(holder, p.value);
+          else if (p.kind === "shorthand" && locals.get(p) && holdsRef(locals.get(p)!.type)) inheritFrom(holder, locals.get(p)!);
+        }
+      } else inherit(holder, e);
+      return;
+    }
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
     // copied lends itself mutably, so only one of them is used at a time. A copy keeps its
     // source borrowed too, so it can't be told apart from the original while held.
@@ -438,10 +457,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!inPlace(e, to)) temporary(holder, e);
   }
 
-  // Through a reference, what it holds stays held.
+  // Through a reference, or a value holding references, what it holds stays held.
   function inherit(holder: Local, e: Expr) {
     const root = locals.get(rootOf(e) as never);
-    if (!state || !root || !isRef(root.type) || root === holder) return;
+    if (root && holdsRef(root.type)) inheritFrom(holder, root);
+  }
+
+  function inheritFrom(holder: Local, root: Local) {
+    if (!state || root === holder) return;
     for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new Set([...loan.holders, holder]) });
   }
 
@@ -495,7 +518,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // borrow, or `this`, never this function's own values.
   function returned(e: Expr) {
     const type = coercions.get(e) ?? types.get(e)!;
-    if (!isRef(type)) return;
+    if (!holdsRef(type)) return;
     for (const place of pointsInto(e)) {
       if (place === TEMPORARY) {
         throw new CompileError("can't return a reference to a temporary or a copy, which is gone once the function returns; return an owned value instead", e.start, e.end);
@@ -524,18 +547,33 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
-    if (!isRef(to) || !inPlace(e, to)) return [TEMPORARY];
+    if (!isRef(to)) {
+      // A value holding references points wherever its parts, or the value it copies, do.
+      if (!holdsRef(to)) return [];
+      if (e.kind === "object") {
+        return e.props.flatMap((p) => p.kind === "property" ? pointsInto(p.value)
+          : p.kind === "shorthand" && locals.get(p) ? heldBy(locals.get(p)!) : []);
+      }
+      const root = locals.get(rootOf(e) as never);
+      return root && holdsRef(root.type) ? heldBy(root) : [];
+    }
+    if (!inPlace(e, to)) return [TEMPORARY];
     return within(e);
   }
 
-  // Where a place lives: itself, or, reached through a reference variable, what that holds.
+  // The places a holder's loans are on, leaving out those inside other holders, whose own
+  // loans are held too.
+  function heldBy(root: Local): string[] {
+    const holders = new Set([...locals.values()].filter((l) => holdsRef(l.type)).map((l) => String(l.id)));
+    return [...(state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !holders.has(l.place.split(".")[0]!)).map((l) => l.place);
+  }
+
+  // Where a place lives: itself, or, reached through a reference variable, what that holds; a
+  // reference read out of a value holding references points where that value's loans are.
   function within(e: Expr): string[] {
     const root = locals.get(rootOf(e) as never);
-    if (!root || !isRef(root.type)) return [key(e)!];
-    const refs = new Set([...locals.values()].filter((l) => isRef(l.type)).map((l) => String(l.id)));
-    return [...(state?.loans.values() ?? [])]
-      .filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!))
-      .map((l) => l.place);
+    if (!root || !(isRef(root.type) || (isRef(types.get(e)!) && holdsRef(root.type)))) return [key(e)!];
+    return heldBy(root);
   }
 
   function paramName(i: number): string {
@@ -638,7 +676,7 @@ function lastUses(body: Stmt[], { locals, types, coercions }: Instance): Map<Loc
   const loops: Stmt[] = [];
   const declared = new Map<Local, Stmt[]>();
   const used = (local: Local | undefined, at: number) => {
-    if (!local || !isRef(local.type)) return;
+    if (!local || !holdsRef(local.type)) return;
     const outer = loops.find((l) => !(declared.get(local) ?? []).includes(l));
     last.set(local, Math.max(last.get(local) ?? -1, at, outer?.end ?? at));
   };

@@ -146,6 +146,7 @@ export function holdsRef(t: Type): boolean {
   if (typeof t === "string") return false;
   if (t.kind === "ref") return true;
   if (t.kind === "union") return t.members.some(holdsRef);
+  if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
   return t.kind === "object" && t.fields.some((f) => holdsRef(f.type));
 }
 
