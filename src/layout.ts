@@ -97,7 +97,8 @@ export function conversions(b: Slots) {
     }
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
     const result = temp();
-    emit(`${result} = icmp eq ${llvm(base(aType))} ${value(aType, a)}, ${value(bType, b)}`);
+    const float = base(aType) === "f32" || base(aType) === "f64";
+    emit(`${result} = ${float ? "fcmp oeq" : "icmp eq"} ${llvm(base(aType))} ${value(aType, a)}, ${value(bType, b)}`);
     return result;
   }
 

@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, INTEGERS, isInteger, isNumeric, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, INTEGERS, isFloat, isInteger, isNumeric, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, Bound, Integer, Numeric, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -21,6 +21,7 @@ const I64_MAX = (1n << 63n) - 1n;
 
 // The operators an expression of only literals may use and still take its type from context.
 const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>"]);
+const BITWISE_OPERATORS = new Set<string>(["&", "|", "^", "<<", ">>", ">>>"]);
 
 export function isPrint(callee: Expr): boolean {
   if (callee.kind === "ident") return callee.name === "print";
@@ -111,16 +112,17 @@ export function expressions(ctx: Context) {
 
   // An expression of only number literals and operators takes the number type it meets where
   // it is written, as `1` does in `let a: u8 = 1` or `a + 1`.
+  // A float literal only becomes a float type.
   function adapt(e: Expr, to: Type): boolean {
-    if (!isNumeric(to) || !literalOnly(e)) return false;
+    if (!isNumeric(to) || !literalOnly(e, isFloat(to))) return false;
     retype(e, to, false);
     return true;
   }
 
-  function literalOnly(e: Expr): boolean {
-    if (e.kind === "int") return true;
-    if (e.kind === "unary") return (e.op === "-" || e.op === "~") && literalOnly(e.operand);
-    return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && literalOnly(e.left) && literalOnly(e.right);
+  function literalOnly(e: Expr, floats: boolean): boolean {
+    if (e.kind === "int" || (e.kind === "float" && floats)) return true;
+    if (e.kind === "unary") return (e.op === "-" || (e.op === "~" && !floats)) && literalOnly(e.operand, floats);
+    return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && (!floats || !BITWISE_OPERATORS.has(e.op)) && literalOnly(e.left, floats) && literalOnly(e.right, floats);
   }
 
   function retype(e: Expr, to: Numeric, negated: boolean) {
@@ -401,6 +403,8 @@ export function expressions(ctx: Context) {
       case "int":
         if (e.value > I64_MAX) oversized.push(e);
         return "i64";
+      case "float":
+        return "f64";
       case "bool":
         return "boolean";
       case "ident": {
@@ -495,10 +499,10 @@ export function expressions(ctx: Context) {
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);
-        if (e.op === "!" ? type !== "boolean" : !isInteger(type)) {
+        if (e.op === "!" ? type !== "boolean" : e.op === "~" ? !isInteger(type) : !isNumeric(type)) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
         }
-        if (e.op === "-" && !INTEGERS[type as Integer].signed) {
+        if (e.op === "-" && isInteger(type) && !INTEGERS[type].signed) {
           throw new CompileError(`'${show(type)}' is unsigned, so it can't be negated; convert it to a signed type with 'as' first`, e.start, e.end);
         }
         return type;
@@ -518,7 +522,7 @@ export function expressions(ctx: Context) {
       }
       case "update": {
         const target = assignable(e.operand, true);
-        if (!isInteger(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
+        if (!isNumeric(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return target;
       }
       case "conditional": {

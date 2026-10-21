@@ -12,6 +12,8 @@ export const RUNTIME = [
   "declare i32 @dprintf(i32, ptr, ...)",
   "declare i32 @fflush(ptr)",
   "declare void @exit(i32) noreturn",
+  "declare ptr @fsh_rt_format_f64(double, ptr)",
+  "declare ptr @fsh_rt_format_f32(float, ptr)",
   "",
   '@.panic.format = private unnamed_addr constant [3 x i8] c"%s\\00"',
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
@@ -63,6 +65,12 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
         emit(`br label %${end}`);
       });
       startBlock(end);
+    } else if (type === "f32" || type === "f64") {
+      // A float is written out by the runtime, as JavaScript would.
+      const text = temp();
+      emit(`${text} = call ptr @fsh_rt_format_${type}(${llvm(type)} ${v}, ptr ${b.alloca("[32 x i8]")})`);
+      format += "%s";
+      values.push(`, ptr ${text}`);
     } else {
       // Every integer prints as a 64-bit one, extended by its signedness.
       const { bits, signed } = INTEGERS[type as Integer];

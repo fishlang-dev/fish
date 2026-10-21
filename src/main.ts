@@ -1,23 +1,33 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
+import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
 
 export function compile(src: string, file: string, release = false): string {
   return codegen(check(parse(src)), { src, file, release });
 }
 
-// Compiles `file` to a native executable at `out`, piping the IR through clang.
+// Compiles `file` to a native executable at `out`, piping the IR through clang along with the
+// C half of the runtime.
 export function build(file: string, out: string, release = false) {
   const ir = compile(readFileSync(file, "utf8"), file, release);
-  const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-o", out, release ? "-O2" : "-O0"], {
-    stdin: new TextEncoder().encode(ir),
-  });
-  if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-"));
+  const native = join(dir, "native.c");
+  writeFileSync(native, NATIVE);
+  try {
+    const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-x", "c", native, "-o", out, release ? "-O2" : "-O0", "-lm"], {
+      stdin: new TextEncoder().encode(ir),
+    });
+    if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 if (import.meta.main) {

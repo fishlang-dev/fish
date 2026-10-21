@@ -92,11 +92,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (t.name in INTEGERS || t.name === "boolean" || t.name === "void" || t.name === "number") {
+    if (t.name in INTEGERS || ["boolean", "void", "number", "f32", "f64"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
-      if (t.name in INTEGERS) return t.name as Integer;
-      if (t.name === "number") throw new CompileError("'number' (a 64-bit float) is not supported yet; use i64", t.start, t.end);
-      return t.name as "boolean" | "void";
+      // `number` is JavaScript's 64-bit float.
+      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void");
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);

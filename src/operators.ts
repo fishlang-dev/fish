@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { AssignOp, BinaryOp, Span } from "./parser.ts";
-import { isInteger, isNumeric, show, type Type } from "./typing.ts";
+import { isFloat, isInteger, isNumeric, show, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Which operators have a meaning so far, and the types they take and give.
@@ -44,6 +44,9 @@ export function binaryType(op: BinaryOp, left: Type, right: Type, at: Span): Typ
     throw new CompileError(`operator '${op}' can't mix '${show(left)}' and '${show(right)}'; convert one side with 'as', like 'x as ${show(left)}'`, at.start, at.end);
   }
   const integers = BITWISE.has(op);
+  if (integers && left === right && isFloat(left)) {
+    throw new CompileError(`operator '${op}' works on integers, and '${show(left)}' is a float; convert it with 'as i64' first`, at.start, at.end);
+  }
   if (left !== right || !(integers ? isInteger(left) : isNumeric(left))) {
     throw new CompileError(`operator '${op}' cannot be applied to types '${show(left)}' and '${show(right)}'`, at.start, at.end);
   }

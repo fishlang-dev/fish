@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isInteger, type ClassType, type Integer, type ObjectType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type ObjectType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -15,6 +15,21 @@ const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ?
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
 };
+
+// Float comparisons are false for NaN, except `!==`, as in JavaScript.
+const FLOAT_COMPARISON: Partial<Record<BinaryOp, string>> = {
+  "===": "oeq", "!==": "une", "<": "olt", "<=": "ole", ">": "ogt", ">=": "oge",
+};
+
+const FLOAT_ARITHMETIC: Partial<Record<BinaryOp, string>> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
+
+// A float constant as LLVM writes one exactly: the bits of the double holding it, which for
+// an f32 must be a float's value.
+function floatConstant(value: number, type: "f32" | "f64"): string {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
+  return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
+}
 
 // An instance's name in the IR. A generic class's instance is named by its type arguments,
 // which may hold quotes, so those are escaped as LLVM spells them.
@@ -101,6 +116,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     "}",
     "",
   ].join("\n");
+
+  // A binary operator on numbers: floats never overflow, and integers are checked as Rust's are.
+  function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
+    if (!isFloat(type)) return operate(op, a, b, at, type as Integer);
+    const result = temp();
+    emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
+    return result;
+  }
 
   function emit(line: string) {
     body.push(`  ${line}`);
@@ -367,8 +390,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   function evaluate(e: Expr): string {
     switch (e.kind) {
-      case "int":
-        return String(e.value);
+      case "int": {
+        const type = types.get(e)!;
+        return isFloat(type) ? floatConstant(Number(e.value), type) : String(e.value);
+      }
+      case "float":
+        return floatConstant(e.value, types.get(e) as "f32" | "f64");
       case "bool":
         return String(e.value);
       // A string literal on its own has only its literal type, which takes no space.
@@ -445,10 +472,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return result;
       }
       case "unary": {
-        // A negative literal is a constant, which may be the type's minimum.
-        if (e.op === "-" && e.operand.kind === "int") return String(-e.operand.value);
-        const operand = value(e.operand);
         const type = types.get(e)!;
+        // A negative literal is a constant, which may be the type's minimum.
+        if (e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) {
+          return isFloat(type) ? floatConstant(-Number(e.operand.value), type) : String(-e.operand.value);
+        }
+        const operand = value(e.operand);
+        if (e.op === "-" && isFloat(type)) {
+          const result = temp();
+          emit(`${result} = fneg ${llvm(type)} ${operand}`);
+          return result;
+        }
         if (e.op === "-") return arithmetic("-", "0", operand, e, type as Integer, "negate");
         const result = temp();
         emit(`${result} = xor ${llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
@@ -466,13 +500,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           });
         }
         // The target is read before the right-hand side runs, as in JavaScript.
-        const result = op === "=" ? value(e.value) : operate(op, value(e.target), value(e.value), e, types.get(e) as Integer);
+        const result = op === "=" ? value(e.value) : numeric(op, value(e.target), value(e.value), e, types.get(e)!);
         store(e.target, result);
         return result;
       }
       case "update": {
         const old = value(e.operand);
-        const result = arithmetic(e.op === "++" ? "+" : "-", old, "1", e, types.get(e) as Integer);
+        const type = types.get(e)!;
+        const result = numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
         store(e.operand, result);
         return e.prefix ? result : old;
       }
@@ -501,9 +536,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const [a, b] = [value(e.left), value(e.right)];
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
-        if (!condition) return operate(e.op, a, b, e, type as Integer);
+        if (!condition) return numeric(e.op, a, b, e, type);
         if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
+        if (isFloat(type)) {
+          emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);
+          return result;
+        }
         // An ordering of unsigned numbers compares them as unsigned.
         const unsigned = isInteger(type) && !INTEGERS[type].signed && condition.startsWith("s");
         emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${llvm(type)} ${a}, ${b}`);

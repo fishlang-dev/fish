@@ -1,3 +1,6 @@
+// 'number' is JavaScript's 64-bit float, and an integer literal written for one is a float.
 function main() {
-  const x: number = 1  // error: 'number' (a 64-bit float) is not supported yet; use i64
+  const x: number = 1
+  print(x / 4)
 }
+// expect: 0.25
