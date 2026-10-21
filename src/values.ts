@@ -271,8 +271,13 @@ export function expressions(ctx: Context) {
       throw new CompileError(`this '${hidden.name}' hides the '${hidden.name}' the pipe reads for '%'; rename it`, hidden.start, hidden.end);
     }
     if (!steady(e.value) || assigns(e.body, e.value)) {
+      // A place the right side writes is read once, as JavaScript reads it: a copy, or else a
+      // shared borrow, so the write must wait until the topic's last use.
+      const borrowed = steady(e.value) && !isCopy(type);
+      const topic = borrowed ? refType(type, false) : type;
+      if (borrowed) coerce(e.value, type, topic, "");
       return ctx.arm(() => {
-        ctx.bind("%", type, e);
+        ctx.bind("%", topic, e);
         e.body = topics(e.body, (at) => ({ kind: "ident", name: "%", start: at.start, end: at.end }));
         if (!wanted) return effect(e.body), "void";
         const given = value(e.body);
@@ -336,21 +341,28 @@ export function expressions(ctx: Context) {
     const root = path(place)![0]!;
     const names = new Set([...indexNames(place), ...(root === "this" ? [] : [root])]);
     let found: Expr | undefined;
+    const topical = (node: unknown): boolean => !!node && typeof node === "object" && ((node as Expr).kind === "topic" || Object.values(node).some(topical));
     const declared = (node: unknown) => {
       if (found || !node || typeof node !== "object") return;
       const e = node as Expr;
       if (e.kind === "ident" && names.has(e.name)) found = e;
       Object.values(node).forEach(declared);
     };
-    const visit = (node: unknown) => {
+    // A declaration's scope is the closest arrow, match arm, block, loop or `try` around it; it
+    // captures the place only where a `%` is inside that scope.
+    const visit = (node: unknown, scope: unknown) => {
       if (found || !node || typeof node !== "object") return;
+      const n = node as Record<string, unknown>;
+      const opens = ["arrow", "block", "for", "forOf", "forIn", "try"].includes(n.kind as string) || ("guard" in n && "pattern" in n);
+      const within = opens ? node : scope;
       for (const [key, child] of Object.entries(node)) {
         // Parameters, `let` declarators, match patterns and catch parameters declare names.
-        if (key === "pattern" || key === "param" || (key === "target" && !("kind" in node))) declared(child);
-        else visit(child);
+        const declares = key === "pattern" || key === "param" || (key === "target" && !("kind" in node));
+        if (declares && topical(within)) declared(child);
+        else if (!declares) visit(child, within);
       }
     };
-    visit(body);
+    visit(body, body);
     return found;
   }
 
