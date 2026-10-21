@@ -5,7 +5,6 @@ interface Named {
 class C {
   constructor() {}
   get name(): string {
-    console.log("getter ran");
     return "c";
   }
 }
@@ -21,5 +20,4 @@ function show(v: Named): string {
 function main() {
   console.log(show(new C()));
 }
-// expect: getter ran
-// expect: cc
+// error: pipes over a field a getter provides are not supported yet

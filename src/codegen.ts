@@ -2001,8 +2001,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
   function lendable(e: Expr): boolean {
     for (; e.kind === "member" && !calls.has(e); e = e.object) {
+      // A string's or an array's `length` is computed, not a field.
       const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
-      if (!object || (typeof object !== "string" && object.kind === "union")) return false;
+      if (!object || typeof object === "string" || (object.kind !== "object" && object.kind !== "class")) return false;
     }
     if (e.kind === "this") return true;
     // An array's element lives in its buffer, wherever the array itself is.

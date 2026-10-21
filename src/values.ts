@@ -259,14 +259,14 @@ export function expressions(ctx: Context) {
     return type;
   }
 
-  // `x |> f(%)`. Over a place that doesn't copy, the pipe means its right side with the place
-  // written for each `%`, so it reads, borrows and moves as that would: the node becomes that
-  // expression, and later stages never see a pipe. Over anything else, the value is made once
-  // and kept in a hidden read-only binding each `%` names, dropped when the pipe ends unless
-  // moved out; a copy read once is what JavaScript reads, whatever the right side changes.
+  // `x |> f(%)`. Over a place, the pipe means its right side with the place written for each
+  // `%`, so it reads, borrows and moves as that would: the node becomes that expression, and
+  // later stages never see a pipe. Over anything else, or a place the right side assigns, the
+  // value is made once, as JavaScript reads it, and kept in a hidden read-only binding each `%`
+  // names, dropped when the pipe ends unless moved out.
   function pipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
     const type = value(e.value);
-    if (!steady(e.value) || isCopy(type)) {
+    if (!steady(e.value) || assigns(e.body, e.value)) {
       return ctx.arm(() => {
         ctx.bind("%", type, e);
         e.body = topics(e.body, (at) => ({ kind: "ident", name: "%", start: at.start, end: at.end }));
@@ -287,6 +287,23 @@ export function expressions(ctx: Context) {
     if (wanted) return value(e);
     effect(e);
     return "void";
+  }
+
+  // Whether an expression assigns the variable a place starts from, or one naming its index.
+  function assigns(body: Expr, place: Expr): boolean {
+    const root = (e: Expr): string | undefined => {
+      while (e.kind === "member" || e.kind === "index") e = e.object;
+      return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : undefined;
+    };
+    const names = new Set<string | undefined>([root(place)]);
+    for (let at = place; at.kind === "member" || at.kind === "index"; at = at.object) if (at.kind === "index" && at.index.kind === "ident") names.add(at.index.name);
+    const visit = (node: unknown): boolean => {
+      if (!node || typeof node !== "object") return false;
+      const e = node as Expr;
+      if ((e.kind === "assign" && names.has(root(e.target))) || (e.kind === "update" && names.has(root(e.operand)))) return true;
+      return Object.values(node).some(visit);
+    };
+    return visit(body);
   }
 
   // A place reading it again reads the same value: no part of it runs code.
