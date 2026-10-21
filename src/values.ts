@@ -181,6 +181,10 @@ export function expressions(ctx: Context) {
     // An array literal's elements are expected to be its element type, and an object literal's
     // properties their fields'.
     if (e.kind === "array" && isArray(t)) for (const x of e.elements) if (x) expect(x, t.element);
+    if (e.kind === "conditional") {
+      expect(e.then, t);
+      expect(e.else, t);
+    }
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
@@ -418,8 +422,14 @@ export function expressions(ctx: Context) {
       const v = ctx.enumInstance(named, m.args, e).variants.get(e.name);
       return v ? [v] : [];
     });
-    const fitting = given && candidates.find((v) => v.fields.every((f, i) => given[i] === undefined || fits(given[i]!, f.type) || (isNumeric(f.type) && isNumeric(given[i]!))));
-    return fitting ?? candidates[0];
+    // A payload that fits exactly decides first; then a number takes a number type of its own
+    // kind, an integer an integer type and a float a float type.
+    const suits = (exact: boolean) => (v: VariantType) => v.fields.every((f, i) => {
+      const g = given?.[i];
+      if (g === undefined || fits(g, f.type)) return true;
+      return !exact && isNumeric(g) && isNumeric(f.type) && isFloat(g) === isFloat(f.type);
+    });
+    return (given && (candidates.find(suits(true)) ?? candidates.find(suits(false)))) ?? candidates[0];
   }
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a

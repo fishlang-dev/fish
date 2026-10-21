@@ -75,7 +75,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const payload = withScope(bindings, () => (m.payload ?? []).map((t) => {
           const type = storable(resolveType(t), t);
           // A held reference would need its enum tracked as a borrower.
-          if (holdsRef(type)) throw unsupported("enum members holding references", t);
+          // Said where the enum is used when its type argument brought the reference.
+          if (holdsRef(type)) throw unsupported("enum members holding references", args.some(holdsRef) ? at : t);
           return type;
         }));
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
