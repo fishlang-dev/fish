@@ -50,6 +50,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
   const last = lastUses(body, instance);
+  // What `this` keeps stays held to the end of the body, and after it.
+  const kept: Local = { name: "this", type: "void", mutable: false, param: false, id: -1 };
+  last.set(kept, Infinity);
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
     const local = locals.get(p);
@@ -340,7 +343,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     const root = rootOf(target);
     if (root.kind === "this" || root.kind === "super") {
-      for (const v of values) stored(v);
+      for (const v of values) {
+        stored(v);
+        hold(kept, v);
+      }
       return;
     }
     const owner = locals.get(root as never);

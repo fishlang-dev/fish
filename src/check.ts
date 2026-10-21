@@ -326,6 +326,8 @@ export function check(program: Stmt[]): Checked {
     // What the conditions guarding the code being checked prove, innermost last. A `let`
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
+    // Each narrowed `Mut` given a whole value of another member, in order.
+    const changed: Local[] = [];
     const assigned = assignedNames(f.body);
     // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
     const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name) || (isRef(l.type) && l.type.mutable);
@@ -406,8 +408,9 @@ export function check(program: Stmt[]): Checked {
     function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
       const before = facts.length;
       for (const s of list) {
+        const mark = changed.length;
         const after = each(s, statement);
-        if (after) facts.push(after);
+        if (after) facts.push(current(after, mark));
       }
       facts.length = before;
     }
@@ -418,10 +421,17 @@ export function check(program: Stmt[]): Checked {
     function rewritten(l: Local, at: Expr) {
       const from = facts.findIndex((f) => f.has(l));
       if (from < 0) return;
+      changed.push(l);
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
         throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
       }
       for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l, l.type);
+    }
+
+    // Facts proven before a statement that carry past it, less any it gave another member.
+    function current(proven: Facts, mark: number): Facts {
+      const gone = changed.slice(mark);
+      return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
     }
 
     function assume<T>(proven: Facts, check: () => T): T {
@@ -523,9 +533,10 @@ export function check(program: Stmt[]): Checked {
               }
               const tested: Facts = c.test ? proves({ kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
               const reaching: Facts = falling ? either(falling, tested) : tested;
+              const mark = changed.length;
               assume(reaching, () => statements(c.body));
               for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
-              falling = leaves(c.body) ? null : reaching;
+              falling = leaves(c.body) ? null : current(reaching, mark);
             }
           });
           scopes.pop();
