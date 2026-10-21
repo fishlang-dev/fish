@@ -1,6 +1,6 @@
-import { checkOverrides, declareClass, extend, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias } from "./parser.ts";
+import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
@@ -9,7 +9,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -53,6 +53,8 @@ export type Instance = {
   coercions: Map<Expr, Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
   jumps: Map<Stmt, Stmt>;
+  // The arguments, or the receiver, each call returning a reference borrows from.
+  borrowsFrom: Map<Expr, Expr[]>;
 };
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
@@ -135,7 +137,7 @@ export function check(program: Stmt[]): Checked {
   const done = new Set<Instance>();
   // Each concrete instance's return type as its own body saw it, before lowering.
   const views = new Map<Instance, Type>();
-  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf } = instancing({
+  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
   });
@@ -161,6 +163,47 @@ export function check(program: Stmt[]): Checked {
   if (instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
   return { instances: all().filter((i) => i.concrete && compiled.has(i.body)) };
+
+  // What a function's returned reference borrows from: the parameters with its written
+  // lifetime, or by elision `this` for a method, or the only reference parameter.
+  function originsOf(f: Body, params: Type[], returns: RefType): Origin[] {
+    const at = f.returnType ?? f;
+    if (returns.life) {
+      const found = params.flatMap((p, i) => (isRef(p) && p.life === returns.life ? [i] : []));
+      if (found.length === 0) throw new CompileError(`no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
+      return found;
+    }
+    if (f.self && !f.self.constructor) return ["this"];
+    const refs = params.flatMap((p, i) => (isRef(p) ? [i] : []));
+    if (refs.length === 1) return refs;
+    throw new CompileError(refs.length === 0
+      ? "this function returns a reference but borrows nothing it could point into; return an owned value instead"
+      : "this function returns a reference and takes several, so say which it points into: declare '<A extends Lifetime>' and write 'Ref<T, A>' on that parameter and the return type", at.start, at.end);
+  }
+
+  // What a call's returned reference borrows from, as the callee's signature says.
+  function sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span): Expr[] {
+    const f = instance.body;
+    const returns = returnOf(instance, at);
+    if (!isRef(returns)) return [];
+    return originsOf(f, paramTypes(instance), returns).flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
+  }
+
+  // Every lifetime a body writes must be one it declares.
+  function lifetimes(f: Body) {
+    const declared = new Set((f.typeParams ?? []).filter(isLifetime).map((p) => p.name));
+    const visit = (t: unknown): void => {
+      if (!t || typeof t !== "object") return;
+      const node = t as { kind?: string; name?: string; args?: TypeNode[] };
+      if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args?.length === 2) {
+        const life = node.args[1] as Span & { name: string };
+        if (!declared.has(life.name)) throw new CompileError(`cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
+      }
+      for (const v of Object.values(t)) if (v && typeof v === "object") visit(v);
+    };
+    f.params.forEach((p) => visit(p.type));
+    visit(f.returnType);
+  }
 
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
@@ -191,7 +234,7 @@ export function check(program: Stmt[]): Checked {
     const returns = returnOf(instance, at);
     if (!site) return returns;
     const f = instance.body;
-    const declared = f.returnType && withScope(new Map([...instance.bindings, ...site]), () => resolveType(f.returnType!));
+    const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !isInterface(declared)) return declared;
     const own = scopeOf(instance);
     return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
@@ -199,7 +242,7 @@ export function check(program: Stmt[]): Checked {
 
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
-    const declared = f.returnType && withScope(instance.bindings, () => resolveType(f.returnType!));
+    const declared = returnTypeOf(f, instance.bindings);
     if (declared && !isInterface(declared)) return declared;
     if (inProgress.has(instance)) {
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
@@ -224,7 +267,7 @@ export function check(program: Stmt[]): Checked {
     const f = instance.body;
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
-    let declared = f.returnType && resolveType(f.returnType);
+    let declared = returnTypeOf(f, scopeOf(instance));
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
@@ -256,8 +299,8 @@ export function check(program: Stmt[]): Checked {
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     const self = f.self && { ...f.self, type: viewed ?? f.self.type };
 
-    const { value, read, condition, effect, coerce } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup,
+    const { value, read, condition, effect, coerce, stays } = expressions({
+      types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -289,12 +332,14 @@ export function check(program: Stmt[]): Checked {
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     const type = declared ?? inferred ?? "void";
-    if (holdsRef(type)) throw unsupported("returning references", f.returnType ?? f);
+    if (holdsRef(type) && !isRef(type)) throw unsupported("returning values that hold references", f.returnType ?? f);
+    lifetimes(f);
+    const origins = isRef(type) ? originsOf(f, params, type) : [];
     if (type !== "void" && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
-    checkMoves(f.body, instance);
+    checkMoves(f, instance, origins);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
       throw new CompileError(`a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
@@ -451,6 +496,9 @@ export function check(program: Stmt[]): Checked {
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
+          if (s.value && expected && isRef(expected) && !stays(s.value, expected)) {
+            throw new CompileError("can't return a reference to a temporary, which is gone once the function returns; return an owned value instead", s.value.start, s.value.end);
+          }
           const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
           if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;
@@ -525,6 +573,11 @@ export function check(program: Stmt[]): Checked {
 const SUPER = "super()";
 
 const isInterface = (t: Type) => typeof t !== "string" && t.kind === "interface";
+
+const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
+
+// What a returned reference borrows from: a parameter, by index, or `this`.
+export type Origin = number | "this";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 

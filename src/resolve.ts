@@ -111,12 +111,17 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
+  // `Ref<T, A>` also names the lifetime parameter it lives for, checked by the function.
   function reference(t: Extract<TypeNode, { kind: "ref" }>): Type {
-    if (t.args.length !== 1) throw new CompileError(`type '${t.name}' takes one type argument, the type it borrows`, t.start, t.end);
+    if (t.args.length !== 1 && t.args.length !== 2) {
+      throw new CompileError(`type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
+    }
     const to = resolveType(t.args[0]!);
     if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
     if (typeof to !== "string" && to.kind === "ref") throw unsupported("references to references", t);
-    return refType(to, t.name === "Mut");
+    const life = t.args[1];
+    if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
+    return refType(to, t.name === "Mut", life?.name);
   }
 
   // A union holds values, so an interface, which describes values without being one, can't be
@@ -254,7 +259,7 @@ const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions"
 
 const I64_MAX = (1n << 63n) - 1n;
 
-const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number", "Ref", "Mut"]);
+const BUILT_IN_TYPES = new Set(["i64", "boolean", "void", "number", "Ref", "Mut", "Lifetime"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

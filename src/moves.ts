@@ -1,4 +1,5 @@
-import type { Instance, Local } from "./check.ts";
+import type { Instance, Local, Origin } from "./check.ts";
+import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { isPrint } from "./values.ts";
@@ -34,8 +35,9 @@ type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 
-export function checkMoves(body: Stmt[], instance: Instance) {
-  const { types, locals, calls, setters, jumps, coercions } = instance;
+export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
+  const { types, locals, calls, setters, jumps, coercions, borrowsFrom } = instance;
+  const body = f.body;
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
   const exits = new Map<Stmt, State>();
@@ -43,6 +45,11 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
   const last = lastUses(body, instance);
+  // A reference parameter holds a borrow its caller made, of something outside this function.
+  f.params.forEach((p, i) => {
+    const local = locals.get(p);
+    if (local && isRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: local.type.mutable, start: p.start, end: p.end, holders: new Set([local]) });
+  });
   statements(body);
 
   // The reference variables declared anywhere inside a statement.
@@ -136,7 +143,10 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         return;
       }
       case "return":
-        if (s.value) expr(s.value, () => "");
+        if (s.value) {
+          expr(s.value, () => "");
+          returned(s.value);
+        }
         state = null;
         return;
     }
@@ -299,6 +309,9 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    // A call's returned reference lends again what it borrows from, a receiver included.
+    const from = borrowsFrom.get(e);
+    if (from) return from.flatMap((s) => source(s, (coercions.get(e) ?? types.get(e)!) as RefType));
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
     const place = key(e);
@@ -306,6 +319,15 @@ export function checkMoves(body: Stmt[], instance: Instance) {
     // mutable one lends itself, shared or mutably as it is passed on.
     if (place === undefined || !isRef(to) || (isRef(type) && !type.mutable)) return [];
     return [[place, e, to.mutable]];
+  }
+
+  // What a call's result borrows from one of its sources: what the source lends, or, for a
+  // receiver that is a place, the place itself.
+  function source(s: Expr, result: RefType): [string, Expr, boolean][] {
+    const parts = lent(s);
+    const place = key(s);
+    if (parts.length > 0 || place === undefined || isRef(types.get(s)!)) return parts;
+    return [[place, s, result.mutable]];
   }
 
   // Runs a call's arguments, then ends the loans made for it.
@@ -386,6 +408,16 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       hold(holder, e.else);
       return;
     }
+    // A call's returned reference holds what its sources do.
+    const from = borrowsFrom.get(e);
+    if (from) {
+      for (const s of from) {
+        const result = (coercions.get(e) ?? types.get(e)!) as RefType;
+        if (lent(s).length === 0 && key(s) !== undefined && !isRef(types.get(s)!)) lend(key(s)!, result.mutable, s, holder);
+        else hold(holder, s);
+      }
+      return;
+    }
     const place = key(e);
     if (place === undefined) return;
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
@@ -395,6 +427,41 @@ export function checkMoves(body: Stmt[], instance: Instance) {
     const root = locals.get(rootOf(e) as never);
     if (!root || !isRef(root.type) || root === holder) return;
     for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new Set([...loan.holders, holder]) });
+  }
+
+  // A returned reference may point only into what its lifetime ties it to: a parameter's
+  // borrow, or `this`, never this function's own values.
+  function returned(e: Expr) {
+    const type = coercions.get(e) ?? types.get(e)!;
+    if (!isRef(type)) return;
+    for (const place of pointsInto(e)) {
+      const param = place.startsWith("param ") ? Number(place.slice(6)) : undefined;
+      if (param !== undefined ? origins.includes(param) : place.startsWith("this") && origins.includes("this")) continue;
+      const allowed = origins.map((o) => (o === "this" ? "'this'" : `'${paramName(o)}'`)).join(" or ");
+      const what = param !== undefined ? `'${paramName(param)}'` : place.startsWith("this") ? `'${pathOf(place)}'` : undefined;
+      const message = what
+        ? `the returned reference points into ${what}, but its lifetime ties it to ${allowed}; give ${what} that lifetime, or return an owned value`
+        : `can't return a reference to '${pathOf(place)}', which belongs to this function and is gone once it returns; return an owned value instead`;
+      throw new CompileError(message, e.start, e.end);
+    }
+  }
+
+  // The places a reference value points into: places it borrows, what the reference variables
+  // it copies hold, and what calls' results borrow.
+  function pointsInto(e: Expr): string[] {
+    if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
+    const from = borrowsFrom.get(e);
+    if (from) return from.flatMap(pointsInto);
+    const place = key(e);
+    if (place === undefined || !state) return [];
+    const root = locals.get(rootOf(e) as never);
+    if (!root || !isRef(root.type)) return [place];
+    return [...state.loans.values()].filter((l) => l.holders.has(root)).map((l) => l.place);
+  }
+
+  function paramName(i: number): string {
+    const p = f.params[i]!.pattern;
+    return p.kind === "ident" ? p.name : `parameter ${i + 1}`;
   }
 
   // A reference pointed elsewhere, or declared again, lets go of what it held.

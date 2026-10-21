@@ -42,8 +42,9 @@ export type LiteralType = {
 export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?: string };
 
 // A borrow of a value that lives elsewhere: `Ref<T>` shared, `Mut<T>` mutable. It is a pointer
-// to the value, reads through to it, and copies like a pointer.
-export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[] };
+// to the value, reads through to it, and copies like a pointer. A written lifetime names the
+// function's lifetime parameter it lives for; it is checked, then erased.
+export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
 
 export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType;
 
@@ -119,11 +120,11 @@ export function typeParameter(name: string, bound: ObjectType | InterfaceType | 
   return t;
 }
 
-export function refType(to: Type, mutable: boolean): RefType {
-  const key = `${mutable ? "mut" : "ref"} ${keyOf(to)}`;
+export function refType(to: Type, mutable: boolean, life?: string): RefType {
+  const key = `${mutable ? "mut" : "ref"} ${keyOf(to)}${life ? ` ${life}` : ""}`;
   let t = refs.get(key);
   if (!t) {
-    t = { kind: "ref", to, mutable, fields: [] };
+    t = { kind: "ref", to, mutable, fields: [], life };
     refs.set(key, t);
     keys.set(t, key);
   }
@@ -171,7 +172,7 @@ export function lower(t: Type): Type {
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
-    else if (t.kind === "ref") found = refType(lower(t.to), t.mutable);
+    else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
@@ -188,7 +189,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     const args = t.generic?.args.map((a) => replaced(a, swap));
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
-  if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable);
+  if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
@@ -247,7 +248,7 @@ export function fits(from: Type, to: Type): boolean {
   // In an instance, a type parameter and the concrete type it stands for are one value.
   if (from === to || lower(from) === lower(to)) return true;
   // A reference reads the value where it lives, so it fits only a reference to the same type;
-  // a mutable one also lends itself as shared.
+  // a mutable one also lends itself as shared. Lifetimes are checked on their own.
   if (typeof to !== "string" && to.kind === "ref") {
     return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
   }

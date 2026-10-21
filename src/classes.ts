@@ -23,6 +23,10 @@ export type Body = Span & {
   access?: Access;
 };
 
+// A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather
+// than instantiated.
+export const isLifetime = (p: TypeParam) => p.constraint?.kind === "ref" && p.constraint.name === "Lifetime" && p.constraint.args.length === 0;
+
 // A field as declared: its annotation, its initializer, or both give its type.
 export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean };
 
@@ -158,7 +162,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator) throw unsupported("generator methods", m);
-    if (m.typeParams.length > 0) throw unsupported("generic methods", span(m.typeParams));
+    if (m.typeParams.some((p) => !isLifetime(p))) throw unsupported("generic methods", span(m.typeParams));
     if (!m.body) throw unsupported("method overloads", m);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
@@ -173,6 +177,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,
+      typeParams: m.typeParams,
       self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false },
       owner: type,
       access,

@@ -25,6 +25,8 @@ export function isPrint(callee: Expr): boolean {
     callee.object.kind === "ident" && callee.object.name === "console";
 }
 
+const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
+
 const printable = (t: Type): boolean =>
   typeof t === "string" || t.kind === "literal" || (t.kind === "union" && t.members.every(printable));
 
@@ -44,6 +46,9 @@ export type Context = {
   // What a call returns as the calling body sees it: in terms of the calling instance's own
   // type parameters, where it passed them.
   resultOf(instance: Instance, at: Span): Type;
+  // What a call's returned reference borrows from, and the record of it for each call.
+  sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span): Expr[];
+  borrowsFrom: Map<Expr, Expr[]>;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body): Instance;
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
@@ -68,13 +73,13 @@ export type Context = {
 };
 
 export function expressions(ctx: Context) {
-  const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
+  const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, depthOf } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, read, condition, effect, coerce };
+  return { value, read, condition, effect, coerce, stays };
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
@@ -120,7 +125,9 @@ export function expressions(ctx: Context) {
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
-    return { type: resultOf(instance, e), what: `'${target.name}'` };
+    const type = resultOf(instance, e);
+    if (isRefType(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, callee.kind === "member" ? callee.object : undefined, e));
+    return { type, what: `'${target.name}'` };
   }
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
@@ -166,6 +173,8 @@ export function expressions(ctx: Context) {
       const type = value(a);
       coerce(a, type, found.params[i]!, `argument of type '${show(type)}' is not assignable to parameter of type '${show(found.params[i]!)}'`);
     });
+    // A reference an interface's method returns borrows from its receiver.
+    if (isRefType(found.returns)) borrowsFrom.set(e, [callee.object]);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, found.returns), what: `'${callee.name}'` };
     return { type: found.returns, what: `'${callee.name}'` };
@@ -309,7 +318,10 @@ export function expressions(ctx: Context) {
         if (getter) {
           visible(getter.access, getter.owner!, e.name, e);
           calls.set(e, instanceOf(getter));
-          return returnOf(instanceOf(getter), e);
+          const returns = returnOf(instanceOf(getter), e);
+          // A getter's reference borrows from its object.
+          if (isRefType(returns)) borrowsFrom.set(e, [e.object]);
+          return returns;
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
@@ -507,6 +519,15 @@ export function expressions(ctx: Context) {
     coercions.set(e, to);
   }
 
+  // Whether a reference value points somewhere that outlives the expression: into a place lent
+  // where it lives, or wherever a reference variable or a call's result points.
+  function stays(e: Expr, to: RefType): boolean {
+    if (e.kind === "conditional") return stays(e.then, to) && stays(e.else, to);
+    const type = types.get(e)!;
+    if (isRefType(type)) return inPlace(e, to);
+    return place(e) && inPlace(e, to);
+  }
+
   // Whether an expression reaches into a variable or `this`, rather than being a temporary.
   function rooted(e: Expr): boolean {
     while (e.kind === "member" && !calls.has(e)) e = e.object;
@@ -528,7 +549,18 @@ export function expressions(ctx: Context) {
   // scope or an enclosing one.
   function rebind(target: Local, e: Expr) {
     const to = target.type as RefType;
-    let root = e;
+    // A `?:`, or a call's result, lives as long as what it points into.
+    if (e.kind === "conditional") {
+      rebind(target, e.then);
+      rebind(target, e.else);
+      return;
+    }
+    const from = borrowsFrom.get(e);
+    if (from) {
+      from.forEach((s) => rebind(target, s));
+      return;
+    }
+    let root: Expr = e;
     while (root.kind === "member" && !calls.has(root)) root = root.object;
     const local = root.kind === "ident" ? locals.get(root) : undefined;
     const lives = root.kind === "this" || (local !== undefined && depthOf(local) <= depthOf(target));

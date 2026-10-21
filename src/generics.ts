@@ -1,5 +1,5 @@
 import type { Instance } from "./check.ts";
-import { declareClass, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -39,6 +39,11 @@ function classPlaceholders(params: TypeParam[], resolve: (t: TypeNode, scope: Ma
 }
 
 const classScopes = new WeakMap<TypeParam[], Map<string, Type>>();
+
+// A body's type parameters, leaving out its lifetimes.
+export function typeParamsOf(f: Body): TypeParam[] {
+  return (f.typeParams ?? []).filter((p) => !isLifetime(p));
+}
 
 // Binds the type parameters `node` names by matching it against an argument's type.
 export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
@@ -113,8 +118,8 @@ type Checker = {
 export function instancing({ resolveType, paramType, withScope, members, checking, classParams }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, ObjectType | InterfaceType>>();
-  // Which implicit parameters are references to their type, and whether mutable.
-  const lent = new Map<Body, Map<number, boolean>>();
+  // Which implicit parameters are references to their type, and how.
+  const lent = new Map<Body, Map<number, RefType>>();
   const definitions = new Map<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
@@ -122,7 +127,21 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new WeakMap<Span, Map<string, Type>>();
-  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at) };
+  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf };
+
+  // A body's written return type. A reference to the type a reference parameter borrows is
+  // to what that parameter points at, which may be wider, so a caller reads it as it is.
+  function returnTypeOf(f: Body, scope: Map<string, Type>): Type | undefined {
+    if (!f.returnType) return undefined;
+    const t = withScope(scope, () => resolveType(f.returnType!));
+    if (typeof t === "string" || t.kind !== "ref") return t;
+    const implicit = implicitOf(f);
+    for (const [i] of lent.get(f) ?? []) {
+      const bound = implicit.get(i)!;
+      if (lower(t.to) === lower(bound)) return refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life);
+    }
+    return t;
+  }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
   // type, which is what an interface's method signature is compared with.
@@ -133,8 +152,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
   function lentAs(f: Body, i: number, t: Type | undefined): Type | undefined {
-    const mutable = lent.get(f)?.get(i);
-    return t && mutable !== undefined ? refType(t, mutable) : t;
+    const ref = lent.get(f)?.get(i);
+    return t && ref ? refType(t, ref.mutable, ref.life) : t;
   }
 
   // A generic body is checked once at its definition, with placeholders for its type
@@ -159,14 +178,14 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     let found = byKey.get(key);
     if (!found) {
       // Every type parameter, implicit ones included, needs a concrete binding to compile.
-      const complete = (f.typeParams ?? []).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`));
+      const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`));
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       const count = [...byKey.values()].filter((i) => i.concrete).length;
       found = {
         body: f, symbol: generic && isConcrete ? `${f.name}#${count}` : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(),
       };
       byKey.set(key, found);
       pending.push(found);
@@ -177,7 +196,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
   function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance {
-    const params = f.typeParams ?? [];
+    const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
@@ -232,19 +251,19 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const stands = (name: string) => instance.bindings.get(name)!;
     const outer = classParams(f);
     const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
-    const names = [...(f.typeParams ?? []).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
+    const names = [...typeParamsOf(f).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
     if (!known(names)) return outer.length > 0 ? scope : instance.bindings;
-    for (const [name, t] of placeholders(f.typeParams ?? [], (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
+    for (const [name, t] of placeholders(typeParamsOf(f), (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), bound, stands(`#${i}`)));
     return scope;
   }
 
   function generic(f: Body): boolean {
-    return (f.typeParams?.length ?? 0) > 0 || implicitOf(f).size > 0;
+    return typeParamsOf(f).length > 0 || implicitOf(f).size > 0;
   }
 
   function explicitPlaceholders(f: Body): Map<string, Type> {
-    return placeholders(f.typeParams ?? [], (t, scope) => withScope(scope, () => resolveType(t)));
+    return placeholders(typeParamsOf(f), (t, scope) => withScope(scope, () => resolveType(t)));
   }
 
   // A parameter typed with an interface or an object type is an implicit type parameter, so
@@ -259,7 +278,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
-    const borrows = new Map<number, boolean>();
+    const borrows = new Map<number, RefType>();
     lent.set(f, borrows);
     withScope(scope, () => f.params.forEach((p, i) => {
       const written = p.type && resolveType(p.type);
@@ -271,7 +290,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       }
       if (!f.accessor && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) {
         found!.set(i, type);
-        if (written !== type) borrows.set(i, (written as RefType).mutable);
+        if (written !== type) borrows.set(i, written as RefType);
       }
     }));
     return found;

@@ -3,4 +3,4 @@ function f(r: Ref): i64 {
 }
 
 function main() {}
-// error: type 'Ref' takes one type argument, the type it borrows
+// error: type 'Ref' takes the type it borrows, and optionally a lifetime
