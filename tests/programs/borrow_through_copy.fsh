@@ -7,4 +7,4 @@ function main() {
   p.x = 2
   print(s.x)
 }
-// error: cannot change 'p.x' while 'r' and 's' borrow 'p' and are used later
+// error: cannot change 'p.x' while 's' borrows 'p' and is used later

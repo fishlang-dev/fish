@@ -44,8 +44,10 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   const last = lastUses(body, instance);
   statements(body);
 
+  // A reference declared in a list of statements lets go of what it holds as the list ends.
   function statements(list: Stmt[]) {
     for (const s of list) statement(s);
+    for (const s of list) if (s.kind === "let" && isRef(locals.get(s)!.type)) release(locals.get(s)!);
   }
 
   function statement(s: Stmt) {
@@ -56,10 +58,10 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         const d = s.declarations[0]!;
         const name = d.target.kind === "ident" ? d.target.name : "";
         const local = locals.get(s)!;
-        expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
-        // A declaration run again by a loop makes a fresh variable.
-        revive(String(local.id));
+        // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
+        expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
+        revive(String(local.id));
         if (isRef(local.type)) hold(local, d.init!);
         return;
       }
@@ -166,6 +168,7 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       case "ident":
         return locals.has(e) ? use(e, consume) : undefined;
       case "this":
+        free("this", e, "read");
         if (consume && state && !isCopy(types.get(e)!)) {
           throw new CompileError("'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy", e.start, e.end);
         }
@@ -194,13 +197,18 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : "'super'";
         return during(e, () => {
           // A method's receiver is lent to it for the call, mutably when the method changes it.
-          if (e.callee.kind === "member") {
-            expr(e.callee.object);
-            const place = key(e.callee.object);
-            const target = calls.get(e);
-            if (place !== undefined && target?.body.self) lend(place, target.body.self.mutable, e.callee.object, undefined, name, e);
-          }
+          // A mutable receiver is lent shared while the arguments run, so they may read it, and
+          // mutably for the call itself.
+          const object = e.callee.kind === "member" ? e.callee.object : undefined;
+          const place = object && key(object);
+          const self = calls.get(e)?.body.self;
+          if (object) expr(object);
+          if (object && place !== undefined && self) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
+          if (object && place !== undefined && self?.mutable && state) {
+            state.loans.delete(object.start);
+            lend(place, true, object, undefined, name, e, e.end);
+          }
         });
       }
       case "unary":
@@ -211,7 +219,8 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       case "assign": {
         if (e.op !== "=") expr(e.target);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
-        assign(e.target);
+        // The target changes once the value is ready, after the value's reads.
+        assign(e.target, e.end);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         // Pointing a reference elsewhere lets go of what it held.
         if (local && isRef(local.type)) {
@@ -251,10 +260,20 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   function handOver(args: Expr[], name: string, call: Expr) {
     for (const a of args) {
       expr(a, (p) => `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`);
-      const to = coercions.get(a);
-      const place = key(a);
-      if (to && isRef(to) && !isRef(types.get(a)!) && place !== undefined) lend(place, to.mutable, a, undefined, name, call);
+      for (const [place, part, mutable] of lent(a)) lend(place, mutable, part, undefined, name, call);
     }
+  }
+
+  // The places an expression lends a reference to, and how: a place borrowed, a reference
+  // passed on, which lends what it points to again, or either side of a `?:`.
+  function lent(e: Expr): [string, Expr, boolean][] {
+    if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    const type = types.get(e)!;
+    const to = coercions.get(e) ?? type;
+    const place = key(e);
+    // A shared reference passed on is just another pointer, which needs nothing lent.
+    if (place === undefined || !isRef(to) || (isRef(type) && !to.mutable)) return [];
+    return [[place, e, to.mutable]];
   }
 
   // Runs a call's arguments, then ends the loans made for it.
@@ -299,28 +318,29 @@ export function checkMoves(body: Stmt[], instance: Instance) {
   // A place can't be accessed in a way a live loan of it, of something inside it or of
   // something it is inside forbids: a mutable loan forbids everything, a shared one changes,
   // moves and mutable loans.
-  function free(place: string, e: Named, access: Access) {
+  function free(place: string, e: Named, access: Access, at = e.start) {
     if (!state) return;
     for (const loan of state.loans.values()) {
-      if (!overlaps(loan.place, place) || !live(loan, e.start)) continue;
+      if (!overlaps(loan.place, place) || !live(loan, at)) continue;
       if (!loan.mutable && (access === "read" || access === "lend")) continue;
       const lent = pathOf(loan.place);
-      const what = lent === text(e) ? `'${lent}'` : `'${text(e)}'`;
       const verb = { read: "use", change: "change", move: "move", lend: "lend", "lend mutably": "mutably lend" }[access];
+      const holders = [...loan.holders].filter((h) => (last.get(h) ?? -1) > at);
       const holder = loan.call
         ? `'${lent}' is lent ${loan.mutable ? "mutably " : ""}to ${loan.call} for this call`
-        : `${[...loan.holders].map((h) => `'${h.name}'`).join(" and ")} ${loan.holders.size > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${loan.holders.size > 1 ? "are" : "is"} used later`;
+        : `${holders.map((h) => `'${h.name}'`).join(" and ")} ${holders.length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${holders.length > 1 ? "are" : "is"} used later`;
       const until = loan.call ? "the call returns" : "the borrow's last use";
-      throw new CompileError(`cannot ${verb} ${what} while ${holder}`, e.start, e.end, {
-        message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
+      const earlier = loan.start >= e.start ? " on an earlier pass through this loop" : "";
+      throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
+        message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here${earlier}, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
         start: loan.start, end: loan.end,
       });
     }
   }
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
-  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr) {
-    free(place, e, mutable ? "lend mutably" : "lend");
+  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at = e.start) {
+    free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
     state.loans.set(e.start, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
   }
@@ -334,10 +354,11 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       hold(holder, e.else);
       return;
     }
-    const to = coercions.get(e);
     const place = key(e);
     if (place === undefined) return;
-    if (to && isRef(to) && !isRef(types.get(e)!)) lend(place, to.mutable, e, holder);
+    // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
+    // copied lends itself mutably, so only one of them is used at a time.
+    for (const [lentPlace, part, mutable] of lent(e)) lend(lentPlace, mutable, part, holder);
     // Through a reference, what it holds stays held.
     const root = locals.get(rootOf(e) as never);
     if (!root || !isRef(root.type) || root === holder) return;
@@ -360,21 +381,23 @@ export function checkMoves(body: Stmt[], instance: Instance) {
     return loan.call !== undefined || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
   }
 
-  // Changing a place needs it free of loans.
-  function change(target: Expr) {
-    const place = key(target);
-    if (place !== undefined && !setters.has(target)) free(place, target, "change");
+  // Changing a place needs it free of loans; a setter changes the object it is called on.
+  function change(target: Expr, at = target.start) {
+    const changed = setters.has(target) && target.kind === "member" ? target.object : target;
+    const place = key(changed);
+    if (place !== undefined) free(place, changed, "change", at);
   }
 
   // Assigning a place gives it a value again, along with everything inside it, but nothing
   // can be assigned inside a value that has moved, nor while it is lent.
-  function assign(target: Expr) {
+  function assign(target: Expr, at: number) {
     const place = key(target);
     if (place === undefined || setters.has(target)) {
       if (target.kind === "member") expr(target.object);
+      change(target, at);
       return;
     }
-    change(target);
+    change(target, at);
     if (!state) return;
     for (const [moved, move] of state.moves) {
       if (place.startsWith(`${moved}.`)) {
@@ -485,7 +508,7 @@ function lastUses(body: Stmt[], { locals }: Instance): Map<Local, number> {
       case "ident":
         return used(locals.get(e), call ?? e.end);
       case "member":
-        return expr(e.object);
+        return expr(e.object, call);
       case "object":
         for (const p of e.props) {
           if (p.kind === "property") expr(p.value);

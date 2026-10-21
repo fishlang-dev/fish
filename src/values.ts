@@ -184,6 +184,9 @@ export function expressions(ctx: Context) {
 
   // A mutating method's receiver must be a place that could change, or a temporary.
   function mutates(object: Expr, name: string) {
+    if (object.kind === "conditional") {
+      throw new CompileError(`can't call '${name}' on a '?:', which would change a copy; call it in each branch`, object.start, object.end);
+    }
     intoMember(object, types, `call '${name}' on`);
     if (place(object)) changeable(object, `call '${name}' on`);
   }
@@ -481,6 +484,13 @@ export function expressions(ctx: Context) {
   // lives, so it must be exactly the type borrowed; a temporary is converted first. Lending
   // mutably needs a place that could be assigned.
   function borrow(e: Expr, type: Type, to: RefType, message: string) {
+    // A `?:` choosing between places lends whichever it chooses, where it lives.
+    if (e.kind === "conditional" && (rooted(e.then) || rooted(e.else))) {
+      coerce(e.then, types.get(e.then)!, to, message);
+      coerce(e.else, types.get(e.else)!, to, message);
+      types.set(e, to);
+      return;
+    }
     const exact = lower(type) === lower(to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
     // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
