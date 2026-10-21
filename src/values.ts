@@ -1336,4 +1336,6 @@ const isText = (t: Type) => t === "string" || (typeof t !== "string" && t.kind =
 // Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   charCodeAt: [["usize"], "u16", 1],
+  slice: [["i64", "i64"], "string", 1],
+  substring: [["i64", "i64"], "string", 1],
 };

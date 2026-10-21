@@ -173,6 +173,7 @@ static void fsh_crumbs(fsh_str *s) {
 static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
   *half = 0;
   if (fsh_rt_str_units(s) == s->length) return i;
+  if (i >= s->units) return s->length;
   int64_t at = 0, unit = 0;
   if (!s->crumbs && s->count >= 0 && s->units > FSH_STRIDE) fsh_crumbs(s);
   if (s->crumbs) {
@@ -209,6 +210,81 @@ fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
   fsh_str *one = fsh_str_of(bytes, n);
   one->units = 1;
   return one;
+}
+
+// Writes UTF-16 unit u, below 0x10000, as WTF-8.
+static int fsh_put(char *out, uint32_t u) {
+  if (u < 0x80) {
+    out[0] = u;
+    return 1;
+  }
+  if (u < 0x800) {
+    out[0] = 0xC0 | u >> 6;
+    out[1] = 0x80 | (u & 0x3F);
+    return 2;
+  }
+  out[0] = 0xE0 | u >> 12;
+  out[1] = 0x80 | (u >> 6 & 0x3F);
+  out[2] = 0x80 | (u & 0x3F);
+  return 3;
+}
+
+// UTF-16 units [from, to) of s, with 0 <= from <= to <= its length. The slice shares the bytes
+// of the block they live in; an end that cuts a pair makes it a copy holding that half as a
+// lone surrogate.
+static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
+  if (from == to) {
+    fsh_str *empty = fsh_str_new(0);
+    empty->units = 0;
+    return empty;
+  }
+  int cut_start, cut_end;
+  int64_t a = fsh_seek(s, from, &cut_start), b = fsh_seek(s, to, &cut_end);
+  const unsigned char *bytes = (const unsigned char *)s->bytes;
+  fsh_str *slice;
+  if (!cut_start && !cut_end) {
+    slice = fsh_rt_alloc(sizeof(fsh_str));
+    slice->count = 1;
+    slice->length = b - a;
+    slice->bytes = s->bytes + a;
+    slice->base = s->base ? s->base : s;
+    fsh_rt_str_retain(slice->base);
+    slice->crumbs = NULL;
+  } else {
+    int64_t start = cut_start ? a + 4 : a;
+    slice = fsh_str_new(3 + (b - start) + 3);
+    char *out = slice->own;
+    int half = 1;
+    int64_t at = a;
+    if (cut_start) out += fsh_put(out, fsh_next(bytes, &at, &half));
+    memcpy(out, s->bytes + start, b - start);
+    out += b - start;
+    half = 0;
+    at = b;
+    if (cut_end) out += fsh_put(out, fsh_next(bytes, &at, &half));
+    slice->length = out - slice->own;
+  }
+  slice->units = to - from;
+  return slice;
+}
+
+// JavaScript's slice: a negative bound counts from the end, bounds clamp to the length, and
+// reversed bounds give the empty string.
+fsh_str *fsh_rt_str_slice(fsh_str *s, int64_t start, int64_t end, int32_t ended) {
+  int64_t n = fsh_rt_str_units(s);
+  if (!ended) end = n;
+  start = start < 0 ? (start + n < 0 ? 0 : start + n) : (start > n ? n : start);
+  end = end < 0 ? (end + n < 0 ? 0 : end + n) : (end > n ? n : end);
+  return fsh_sub(s, start, start < end ? end : start);
+}
+
+// JavaScript's substring: bounds clamp to 0 and the length, and reversed bounds swap.
+fsh_str *fsh_rt_str_substring(fsh_str *s, int64_t start, int64_t end, int32_t ended) {
+  int64_t n = fsh_rt_str_units(s);
+  if (!ended) end = n;
+  start = start < 0 ? 0 : start > n ? n : start;
+  end = end < 0 ? 0 : end > n ? n : end;
+  return start < end ? fsh_sub(s, start, end) : fsh_sub(s, end, start);
 }
 
 // An index past the end panics as Rust's does; at is the "panicked at" line.

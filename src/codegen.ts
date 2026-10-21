@@ -698,11 +698,22 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const s = operand(callee.object, e.args);
     const args = e.args.map((a) => value(a));
     const result = temp();
+    // A call used as a statement has no type of its own; a string it makes is released when the
+    // statement ends.
+    const given = (v: string, type: Type) => {
+      if (types.has(e)) return convert(v, type, types.get(e)!);
+      if (needsDrop(type)) pending.push({ v, type });
+      return v;
+    };
     switch (callee.name) {
       case "charCodeAt":
         inBounds(s, args[0]!, e);
         emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${args[0]})`);
-        return convert(result, "u16", types.get(e)!);
+        return given(result, "u16");
+      case "slice":
+      case "substring":
+        emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
+        return given(result, "string");
     }
     throw new Error(`internal error: no lowering for the string method ${callee.name}`);
   }
