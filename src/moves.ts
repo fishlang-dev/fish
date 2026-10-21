@@ -429,11 +429,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
     if (!isRef(to)) return;
-    if (!inPlace(e, to)) return temporary(holder, e);
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
-    // copied lends itself mutably, so only one of them is used at a time.
+    // copied lends itself mutably, so only one of them is used at a time. A copy keeps its
+    // source borrowed too, so it can't be told apart from the original while held.
     for (const [lentPlace, part, mutable] of lent(e)) lend(lentPlace, mutable, part, holder);
     inherit(holder, e);
+    if (!inPlace(e, to)) temporary(holder, e);
   }
 
   // Through a reference, what it holds stays held.
@@ -445,7 +446,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A reference to a temporary or a copy holds that, so it is never returned.
   function temporary(holder: Local, e: Expr) {
-    state?.loans.set(e.start, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new Set([holder]) });
+    // Keyed beside any loan made at the same place, which it must not replace.
+    state?.loans.set(e.start + 0.5, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new Set([holder]) });
   }
 
   // Whether a reference made from `e` points where `e` lives, rather than at a copy: a place
@@ -464,13 +466,20 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return lower(type) === lower(to.to);
   }
 
-  // Whether a field path passes through a union, or a type parameter whose concrete type may
-  // store the field differently, so the field is read as a copy.
+  // Whether a field path passes through a union, or through a type parameter whose concrete
+  // type stores the field as another type, so the field is read as a copy. At a definition,
+  // where nothing is concrete, each instance decides.
   function throughUnion(e: Expr): boolean {
     for (let p: Expr = e; p.kind === "member"; p = p.object) {
       const holder = types.get(p.object);
       const held = holder && isRef(holder) ? holder.to : holder;
-      if (typeof held !== "string" && held && (held.kind === "union" || held.kind === "param")) return true;
+      if (typeof held === "string" || !held) continue;
+      if (held.kind === "union") return true;
+      const stored = held.kind === "param" ? lower(held) : held;
+      if (held.kind === "param" && stored !== held && typeof stored !== "string") {
+        const f = stored.kind === "union" ? undefined : field(stored, p.name);
+        if (!f || lower(f.type) !== lower(types.get(p)!)) return true;
+      }
     }
     return false;
   }

@@ -68,8 +68,14 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     const method = c ? inherited(c, "methods", m.name) : undefined;
     if (!method || method.access !== "public") return missing("method", m.name);
     const params = members.paramTypesOf(method);
-    if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(members.returnOf(method, at), m.returns)) {
+    const result = members.returnOf(method, at);
+    if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(result, m.returns)) {
       return `types of method '${m.name}' are incompatible`;
+    }
+    // An interface method's reference borrows from its receiver, so one borrowing from a
+    // parameter instead can't stand in for it.
+    if (typeof result !== "string" && result.kind === "ref" && result.life) {
+      return `method '${m.name}' returns a reference into its parameter '${result.life}' lives for, where '${trait.name}' borrows from 'this'`;
     }
   }
   return undefined;
