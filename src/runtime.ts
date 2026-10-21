@@ -35,10 +35,12 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
   const { emit, temp, label, startBlock, cString } = b;
   let format = "";
   let values: string[] = [];
+  // Every argument runs before anything prints, as in JavaScript.
+  const evaluated = args.map((a) => (a.kind === "string" ? "" : value(a)));
   args.forEach((a, i) => {
     if (i > 0) format += " ";
     if (a.kind === "string") format += escape(a.value);
-    else piece(value(a), typeOf(a));
+    else piece(evaluated[i]!, typeOf(a));
   });
   format += "\n";
   flush();

@@ -173,10 +173,16 @@ export function expressions(ctx: Context) {
     else value(e);
   }
 
-  // Checks a call: what it returns, and how a message names what it calls.
+  // Checks a call: what it returns, and how a message names what it calls. A method called in
+  // an optional chain gives an Option.
   function call(e: Call): { type: Type; what: string } {
+    const result = callee(e);
+    return e.callee.kind === "member" && linked(e.callee) && result.type !== "void" ? { ...result, type: unionType([result.type, "null"]) } : result;
+  }
+
+  function callee(e: Call): { type: Type; what: string } {
     const { callee } = e;
-    if (e.optional || (callee.kind === "member" && callee.optional)) throw unsupported("optional calls", e);
+    if (e.optional) throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = classOf(self!.type.base!);
@@ -287,9 +293,35 @@ export function expressions(ctx: Context) {
   function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
     if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && classes.has(object.name))) return undefined;
-    const type = value(object);
+    const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
     return typeof type !== "string" && type.kind === "ref" ? type.to : type;
+  }
+
+  // Whether a field read or method call is a link of an optional chain: written `?.`, or after
+  // one in the same chain. Such a link reads what the Option holds, and gives an Option, empty
+  // when the chain was.
+  function linked(e: Extract<Expr, { kind: "member" }>): boolean {
+    return e.optional || chained(e.object);
+  }
+
+  function chained(e: Expr): boolean {
+    for (let x = e; x.kind === "member" || x.kind === "call"; x = x.kind === "member" ? x.object : x.callee) {
+      if (x.kind === "member" && x.optional) return true;
+    }
+    return false;
+  }
+
+  // The object a link reads, as what its Option holds.
+  function unwrapped(object: Expr, written: boolean): Type {
+    const option = value(object);
+    if (!isOption(option)) {
+      if (written) throw new CompileError(`'?.' reads through an Option, and this is a '${show(option)}', which is never empty; use '.'`, object.start, object.end);
+      return option;
+    }
+    const inner = held(option);
+    coercions.set(object, inner);
+    return inner;
   }
 
   // A method of an interface, called while checking a generic body at its definition on a
@@ -456,7 +488,6 @@ export function expressions(ctx: Context) {
       case "string":
         return literalType(e.value);
       case "member": {
-        if (e.optional) throw unsupported("optional chains", e);
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
         if (named) {
@@ -464,14 +495,14 @@ export function expressions(ctx: Context) {
           if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
           return found;
         }
-        const through = value(e.object);
+        const through = linked(e) ? unwrapped(e.object, e.optional) : value(e.object);
         const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
         // A field read through a reference loads what it points to; a getter gets the pointer.
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
           load();
-          return shared;
+          return linked(e) ? unionType([shared, "null"]) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" || object.kind === "closure" ? undefined : field(object, e.name);
@@ -483,7 +514,7 @@ export function expressions(ctx: Context) {
           const returns = returnOf(instanceOf(getter), e);
           // A getter's reference borrows from its object.
           if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
-          return returns;
+          return linked(e) ? unionType([returns, "null"]) : returns;
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
@@ -498,7 +529,7 @@ export function expressions(ctx: Context) {
           calls.set(e, instance);
         }
         if (!calls.has(e)) load();
-        return found.type;
+        return linked(e) ? unionType([found.type, "null"]) : found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));

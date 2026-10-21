@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -57,6 +57,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let self: ClassType | undefined;
   // In a closure, where each variable it captures lives, loaded from its environment.
   let captured = new Map<Local, string>();
+  // The value of an Option an optional chain's link has already evaluated, to read through.
+  const known = new Map<Expr, string>();
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
@@ -325,8 +327,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return result;
   }
 
-  // A method's receiver runs before its arguments, as in JavaScript.
+  // A method's receiver runs before its arguments, as in JavaScript. A method called in an
+  // optional chain runs only when the chain isn't empty.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
+    if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
+    return run(e);
+  }
+
+  function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) {
@@ -356,10 +364,58 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return values;
   }
 
+  // A field read, or a getter's result.
+  function member(e: Extract<Expr, { kind: "member" }>): string {
+    const getter = calls.get(e);
+    if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
+    // An enum member's value is known, and the enum's name is no value to evaluate.
+    if (!types.has(e.object)) return "zeroinitializer";
+    // Through a reference, the value it points to.
+    const shared = coercions.get(e.object) ?? types.get(e.object)!;
+    if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
+    const object = shared as ObjectType | ClassType;
+    const result = temp();
+    emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
+    // A field read through an interface or object parameter takes the type its bound declares.
+    return convert(result, field(object, e.name)!.type, types.get(e)!);
+  }
+
+  // Whether an expression is an Option a link of an optional chain reads through.
+  function unwraps(object: Expr): boolean {
+    const option = types.get(object);
+    return option !== undefined && isOption(option) && coercions.has(object);
+  }
+
+  // A link of an optional chain: empty when the Option it reads through is, and otherwise
+  // `compute`, which reads what the Option holds. Its result is already the link's Option.
+  function link(e: Expr, object: Expr, compute: () => string | undefined): string | undefined {
+    const option = types.get(object) as UnionType;
+    const raw = evaluate(object);
+    known.set(object, raw);
+    const [some, none, end] = [label(), label(), label()];
+    emit(`br i1 ${holds(raw, option, ["null"])}, label %${none}, label %${some}`);
+    startBlock(some);
+    const got = compute();
+    const someEnd = block;
+    emit(`br label %${end}`);
+    startBlock(none);
+    const type = types.get(e);
+    const empty = got !== undefined && type ? convert("zeroinitializer", "null", type) : undefined;
+    const noneEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    known.delete(object);
+    if (got === undefined || !type || empty === undefined) return undefined;
+    const result = temp();
+    emit(`${result} = phi ${llvm(type)} [ ${got}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    return result;
+  }
+
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
   // that declares the method.
   function thisPointer(target: Instance, object: Expr): string {
-    return upcast(receiver(object), referent(types.get(object)!) as ClassType, target.body.owner!);
+    const held = unwraps(object) ? coercions.get(object)! : referent(types.get(object)!);
+    return upcast(receiver(object), held as ClassType, target.body.owner!);
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
@@ -393,6 +449,18 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
     // A reference already points where the receiver lives.
     if (isRef(types.get(object)!)) return evaluate(object);
+    // In an optional chain, what the Option holds: in place when it is one member of it.
+    if (unwraps(object)) {
+      const option = types.get(object) as UnionType;
+      if (lendable(object) && option.members.includes(coercions.get(object)!)) {
+        const at = temp();
+        emit(`${at} = getelementptr ${llvm(option)}, ptr ${address(object)}, i32 0, i32 1`);
+        return at;
+      }
+      const slot = alloca(llvm(coercions.get(object)!));
+      emit(`store ${llvm(coercions.get(object)!)} ${value(object)}, ptr ${slot}`);
+      return slot;
+    }
     if (lendable(object)) return address(object);
     const type = llvm(types.get(object)!);
     const slot = alloca(type);
@@ -405,7 +473,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const to = coercions.get(e);
     const type = types.get(e)!;
     if (to && typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) return borrowed(e, to.to);
-    const result = evaluate(e);
+    const result = known.get(e) ?? evaluate(e);
     return to ? convert(result, type, to) : result;
   }
 
@@ -455,20 +523,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // Where a check narrowed the variable, its value comes out of the union.
         return convert(t, local.type, types.get(e)!);
       }
-      case "member": {
-        const getter = calls.get(e);
-        if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
-        // An enum member's value is known, and the enum's name is no value to evaluate.
-        if (!types.has(e.object)) return "zeroinitializer";
-        // Through a reference, the value it points to.
-        const shared = coercions.get(e.object) ?? types.get(e.object)!;
-        if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
-        const object = shared as ObjectType | ClassType;
-        const result = temp();
-        emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
-        // A field read through an interface or object parameter takes the type its bound declares.
-        return convert(result, field(object, e.name)!.type, types.get(e)!);
-      }
+      case "member":
+        return unwraps(e.object) ? link(e, e.object, () => member(e))! : member(e);
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
         const inner = calls.get(e)!;
