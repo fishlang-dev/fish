@@ -82,12 +82,29 @@ fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
   return s;
 }
 
-// a < b, a === b and a > b as -1, 0 and 1: byte order, which for UTF-8 is code point order.
+// The first UTF-16 code unit of the character starting at s: the character itself, or the high
+// surrogate of one beyond U+FFFF.
+static uint32_t fsh_unit(const unsigned char *s) {
+  uint32_t c = s[0];
+  if (c < 0xE0) return c < 0x80 ? c : (c & 0x1F) << 6 | (s[1] & 0x3F);
+  if (c < 0xF0) return (c & 0x0F) << 12 | (s[1] & 0x3F) << 6 | (s[2] & 0x3F);
+  uint32_t code = (c & 0x07) << 18 | (s[1] & 0x3F) << 12 | (s[2] & 0x3F) << 6 | (s[3] & 0x3F);
+  return 0xD800 + ((code - 0x10000) >> 10);
+}
+
+// a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
+// That is UTF-8 byte order except where a character beyond U+FFFF meets one from U+E000 to
+// U+FFFF, so the first differing character decides by its first code unit, and two with the
+// same high surrogate by their bytes.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
   int64_t n = a->length < b->length ? a->length : b->length;
-  int c = memcmp(a->bytes, b->bytes, n);
-  if (c != 0) return c < 0 ? -1 : 1;
-  return a->length < b->length ? -1 : a->length > b->length ? 1 : 0;
+  int64_t i = 0;
+  while (i < n && a->bytes[i] == b->bytes[i]) i++;
+  if (i == n) return a->length < b->length ? -1 : a->length > b->length ? 1 : 0;
+  while (i > 0 && ((unsigned char)a->bytes[i] & 0xC0) == 0x80) i--;
+  uint32_t x = fsh_unit((const unsigned char *)a->bytes + i), y = fsh_unit((const unsigned char *)b->bytes + i);
+  if (x == y) return memcmp(a->bytes + i, b->bytes + i, n - i) < 0 ? -1 : 1;
+  return x < y ? -1 : 1;
 }
 
 void fsh_rt_str_print(int32_t stream, fsh_str *s) {

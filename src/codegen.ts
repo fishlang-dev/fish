@@ -70,6 +70,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let pending: { v: string; type: Type }[] = [];
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
   let scopes: { slot: string; type: Type }[][] = [];
+  // Receivers copied into slots for owning methods, whose leftovers drop after the call.
+  const spills: { slot: string; type: Type }[] = [];
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
@@ -285,9 +287,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return;
       }
       case "switch": {
-        const subject = value(s.discriminant);
-        // A subject the switch made is released on the way into the body that runs.
-        const held = pending.splice(0);
+        const subject = operand(s.discriminant, s.cases.flatMap((c) => (c.test ? [c.test] : [])));
+        // A subject the switch made is released on the way into the body that runs, and stays
+        // pending through the tests, so an error raised in one drops it too.
+        const held = [...pending];
         const enter = (body: string) => {
           if (held.length === 0) return body;
           const via = label();
@@ -311,13 +314,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           const testType = valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string";
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
-          settle();
+          settle(held.length);
           const next = label();
           emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
           startBlock(next);
         });
         const fallback = s.cases.findIndex((c) => !c.test);
         emit(`br label %${enter(fallback < 0 ? end : bodies[fallback]!)}`);
+        pending = [];
         for (const [via, body] of entries) {
           startBlock(via);
           for (const { v, type } of held) dispose(v, type);
@@ -402,6 +406,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         if (region) {
           finallies.pop();
           startBlock(region.label);
+          // What a way out keeps while the finally runs is dropped if the finally leaves its own way.
+          scopes.push([]);
+          for (const { slot, type } of region.slots.values()) own(slot, type);
           scoped(s.finalizer!);
           const chosen = temp();
           emit(`${chosen} = load i32, ptr ${region.chosen}`);
@@ -411,6 +418,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
             startBlock(targets[i]!);
             e.resume();
           });
+          scopes.pop();
         }
         startBlock(after);
         return;
@@ -549,6 +557,42 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return !needsDrop(from) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
   }
 
+  // A value read for an operand. One read from a place takes a reference of its own while a
+  // later operand that might change the place runs, released when the statement ends.
+  function operand(e: Expr, later: Expr[]): string {
+    const v = value(e);
+    const type = valueType(e);
+    if (!needsDrop(type) || fresh(e) || e.kind === "string" || !later.some(writes)) return v;
+    retain(v, type);
+    pending.push({ v, type });
+    return v;
+  }
+
+  // Whether running an expression might change a place: it assigns, updates or calls.
+  function writes(node: unknown): boolean {
+    if (typeof node !== "object" || node === null) return false;
+    if (Array.isArray(node)) return node.some(writes);
+    const kind = (node as { kind?: string }).kind;
+    if (kind === "arrow") return false;
+    if (kind === "assign" || kind === "update" || kind === "call" || kind === "new") return true;
+    if (kind === "member" && calls.has(node as Expr)) return true;
+    return Object.values(node).some(writes);
+  }
+
+  // Owned values handed to something not yet called or built: dropped if an error leaves before
+  // it takes them.
+  function delivered<T>(make: (hand: (v: string, type: Type) => string) => T): T {
+    const handed: { v: string; type: Type }[] = [];
+    const result = make((v, type) => {
+      const entry = { v, type };
+      pending.push(entry);
+      handed.push(entry);
+      return v;
+    });
+    pending = pending.filter((entry) => !handed.includes(entry));
+    return result;
+  }
+
   // Releases the values made since `mark` that nothing took over, newest first.
   function settle(mark = 0) {
     for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
@@ -599,7 +643,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) {
-        print(e.args, builder, value, valueType, convert);
+        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
         return undefined;
       }
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
@@ -609,17 +653,23 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       return copy;
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
+    const before = spills.length;
     const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
-    const values = argValues(e.args, target);
+    const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
-    const result = invoke(target, pointer, target.body.closure ? values.slice(0, target.body.params.length) : values, e);
+    const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
+    const result = invoke(target, pointer, values, e);
+    // What an owning method left of a receiver copied for it: the parts of a derived instance
+    // its base's method doesn't drop.
+    for (const { slot, type } of mine) dispose(unstash(slot, type), type);
     // A call through a type parameter returns what its bound's method declares.
     return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
   }
 
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
-  function argValues(args: Expr[], target: Instance): string[] {
-    const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${owned(a)}`);
+  // Arguments past `taken` run for their effects only.
+  function argValues(args: Expr[], target: Instance, taken = args.length): string[] {
+    const values = delivered((hand) => args.flatMap((a, i) => (i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
     for (const p of target.body.params.slice(args.length)) {
       const type = target.locals.get(p)!.type;
       values.push(`${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
@@ -659,7 +709,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const [some, none, end] = [label(), label(), label()];
     emit(`br i1 ${holds(raw, option, ["null"])}, label %${none}, label %${some}`);
     startBlock(some);
+    const mark = pending.length;
     const got = compute();
+    settle(mark);
     const someEnd = block;
     emit(`br label %${end}`);
     startBlock(none);
@@ -719,7 +771,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
   // control left, each way out with how to resume it, the labels made before the region, and
   // how many catches and scopes enclosed it.
-  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; slots: Map<string, string> };
+  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; slots: Map<string, { slot: string; type: Type }> };
 
   function enter(): Region {
     const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, slots: new Map() };
@@ -736,11 +788,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // A slot a region keeps a value in while its `finally` runs.
-  function stash(region: Region, key: string, type: string, v: string): string {
-    let slot = region.slots.get(key);
-    if (!slot) region.slots.set(key, (slot = alloca(type)));
-    emit(`store ${type} ${v}, ptr ${slot}`);
+  function stash(region: Region, key: string, type: Type, v: string): string {
+    let slot = region.slots.get(key)?.slot;
+    if (!slot) region.slots.set(key, { slot: (slot = alloca(llvm(type))), type });
+    emit(`store ${llvm(type)} ${v}, ptr ${slot}`);
     return slot;
+  }
+
+  // Takes a value back out of a region's slot, leaving it empty.
+  function unstash(slot: string, type: Type): string {
+    const v = temp();
+    emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
+    emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
+    return v;
   }
 
   // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
@@ -760,15 +820,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const region = finallies.at(-1);
     drop(region?.depth ?? 0);
     if (region) {
-      const kept = v === undefined ? undefined : stash(region, "return", llvm(current.returns), v);
-      return exit(region, "return", () => {
-        let back: string | undefined;
-        if (kept) {
-          back = temp();
-          emit(`${back} = load ${llvm(current.returns)}, ptr ${kept}`);
-        }
-        leave(back);
-      });
+      const kept = v === undefined ? undefined : stash(region, "return", current.returns, v);
+      return exit(region, "return", () => leave(kept && unstash(kept, current.returns)));
     }
     if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
     const type = resultType(current);
@@ -800,12 +853,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const region = finallies.at(-1);
     if (region && handlers.length <= region.handlers) {
       drop(region.depth);
-      const kept = stash(region, "error", llvm(to), error);
-      return exit(region, "error", () => {
-        const back = temp();
-        emit(`${back} = load ${llvm(to)}, ptr ${kept}`);
-        route(back, to);
-      });
+      const kept = stash(region, "error", to, error);
+      return exit(region, "error", () => route(unstash(kept, to), to));
     }
     const handler = handlers.at(-1);
     drop(handler?.depth ?? 0);
@@ -881,7 +930,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       const copy = alloca(llvm(held));
       const v = value(object);
-      if (owns) retain(v, held);
+      if (owns) {
+        retain(v, held);
+        spills.push({ slot: copy, type: held });
+      }
       emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
@@ -889,7 +941,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
     const v = value(object);
-    if (owns) retain(v, types.get(object)!);
+    if (owns) {
+      retain(v, types.get(object)!);
+      spills.push({ slot: spilled, type: types.get(object)! });
+    }
     emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
   }
@@ -952,7 +1007,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         e.quasis.forEach((q, i) => {
           if (q !== "") parts.push(text(q));
           const x = e.exprs[i];
-          if (x) parts.push(written(value(x), valueType(x)));
+          if (x) parts.push(written(operand(x, e.exprs.slice(i + 1)), valueType(x)));
         });
         const array = alloca(`[${parts.length} x ptr]`);
         parts.forEach((part, i) => {
@@ -1005,7 +1060,10 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "object": {
         const type = types.get(e) as ObjectType;
         // Properties run in source order, then fill the fields in their sorted order.
-        const values = new Map(e.props.map((p) => property(p, type)));
+        const values = delivered((hand) => new Map(e.props.map((p) => {
+          const [name, v] = property(p, type);
+          return [name, hand(v, field(type, name)!.type)];
+        })));
         let result = "undef";
         type.fields.forEach((f, i) => {
           const next = temp();
@@ -1067,7 +1125,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // The target is read before the right-hand side runs, as in JavaScript.
         const type = types.get(e)!;
         if (op === "+" && type === "string") {
-          const joined = concat(value(e.target), written(value(e.value), valueType(e.value)));
+          const joined = concat(operand(e.target, [e.value]), written(value(e.value), valueType(e.value)));
           store(e.target, joined);
           return joined;
         }
@@ -1109,11 +1167,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
         if (e.op === "??") return orElse(e);
-        if (e.op === "+" && types.get(e) === "string") return concat(written(value(e.left), valueType(e.left)), written(value(e.right), valueType(e.right)));
-        const tested = test(e, value, valueType);
+        if (e.op === "+" && types.get(e) === "string") return concat(written(operand(e.left, [e.right]), valueType(e.left)), written(value(e.right), valueType(e.right)));
+        const first = (x: Expr) => (x === e.left ? operand(x, [e.right]) : value(x));
+        const tested = test(e, first, valueType);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
-        const [a, b] = [value(e.left), value(e.right)];
+        const [a, b] = [first(e.left), value(e.right)];
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
         if (!condition) return numeric(e.op, a, b, e, type);
@@ -1162,6 +1221,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function store(target: Expr, result: string) {
     const setter = setters.get(target);
     if (setter && target.kind === "member") {
+      retain(result, types.get(target)!);
+      if (needsDrop(types.get(target))) pending.push({ v: result, type: types.get(target)! });
       invoke(setter, thisPointer(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
       return;
     }

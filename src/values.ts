@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -717,6 +717,12 @@ export function expressions(ctx: Context) {
       if (p.kind !== "property" || typeof p.key !== "string") continue;
       const want = field(to, p.key)?.type;
       const have = types.get(p.value)!;
+      // A string literal widened for the object keeps its literal type where one is wanted.
+      if (want && want !== "string" && coercions.get(p.value) === "string" && fits(have, want)) {
+        coercions.delete(p.value);
+        changed = true;
+        continue;
+      }
       if (!want || have === want) continue;
       const adapted = adapt(p.value, want) ? want : adaptFields(p.value, have, want);
       if (adapted !== have) {
@@ -1032,7 +1038,7 @@ export function expressions(ctx: Context) {
     if (p.kind === "property") {
       if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
       const type = value(p.value);
-      const widened = widenEnum(type);
+      const widened = widenLet(type);
       if (widened !== type) coerce(p.value, type, widened, "");
       return { name: p.key, type: widened };
     }
