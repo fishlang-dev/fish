@@ -150,6 +150,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         state = null;
         return;
       }
+      // A thrown value leaves with the error, as a returned one does.
+      case "throw":
+        expr(s.value, (p) => `'${p}' moved here: throwing it hands it to the caller`);
+        state = null;
+        return;
       case "return":
         if (s.value) {
           expr(s.value, () => "");
@@ -885,6 +890,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         }
         return;
       case "return":
+      case "throw":
         if (s.value) expr(s.value);
         return;
     }

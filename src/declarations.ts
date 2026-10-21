@@ -4,7 +4,7 @@ import {
   block, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
-import { annotation, parameters, propertyName, returnAnnotation, type, typeParameters, typeReference } from "./types.ts";
+import { annotation, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters, typeReference } from "./types.ts";
 
 // Declarations beyond functions, aliases and interfaces: classes with their members,
 // modifiers and decorators; enums; namespaces; and ambient `declare` forms.
@@ -145,7 +145,8 @@ function classMember(c: Cursor): ClassMember {
     const typeParams = typeParameters(c);
     const params = parameters(c);
     const returnType = returnAnnotation(c);
-    return { ...member, kind: "method", name, optional, generator, typeParams, params, returnType, body: memberBody(c), end: c.end() };
+    const throws = throwsClause(c);
+    return { ...member, kind: "method", name, optional, generator, typeParams, params, returnType, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const definite = !optional && c.eat("!");
   const fieldType = c.at(":") ? annotation(c) : undefined;

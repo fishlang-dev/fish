@@ -2,7 +2,7 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
-import { print, RUNTIME } from "./runtime.ts";
+import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
 import { field, fieldPath, INTEGERS, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
@@ -101,9 +101,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
-    const end = type === "void" ? "ret void" : "unreachable";
-    out.push(`define ${llvm(type)} ${symbol(instance)}(${params.join(", ")}) {`, "entry:", ...allocas, ...body, `  ${end}`, "}", "");
+    if (type === "void") leave(undefined);
+    else emit("unreachable");
+    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) {`, "entry:", ...allocas, ...body, "}", "");
   }
+  const main = instances.find((i) => i.symbol === "main")!;
+  // Built before the module is put together, since its message adds a global.
+  const start = entry();
 
   return [
     ...globals,
@@ -112,10 +116,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     ...intrinsics,
     "",
     ...out,
-    "define i32 @main() {",
-    '  call void @"fsh.main"()',
-    "  ret i32 0",
-    "}",
+    ...start,
     "",
   ].join("\n");
 
@@ -301,9 +302,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // An arrow's expression body may be a call returning nothing.
         if (s.value && current.returns === "void") {
           call(s.value as Extract<Expr, { kind: "call" }>);
-          emit("ret void");
-        } else emit(s.value ? `ret ${llvm(current.returns)} ${value(s.value)}` : "ret void");
+          leave(undefined);
+        } else leave(s.value ? value(s.value) : undefined);
         // Anything after a return goes in a fresh block that nothing branches to.
+        startBlock(label());
+        return;
+      case "throw":
+        raised(s, value(s.value));
         startBlock(label());
         return;
       case "let": {
@@ -349,7 +354,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
     const values = argValues(e.args, target);
     // A closure may take fewer parameters than the function type it was given as.
-    const result = invoke(target, pointer, target.body.closure ? values.slice(0, target.body.params.length) : values);
+    const result = invoke(target, pointer, target.body.closure ? values.slice(0, target.body.params.length) : values, e);
     // A call through a type parameter returns what its bound's method declares.
     return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
   }
@@ -419,17 +424,83 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
-  function invoke(target: Instance, pointer: string | undefined, args: string[]): string | undefined {
+  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    const call = `call ${llvm(type)} ${symbol(target)}(${values.join(", ")})`;
-    if (type === "void") {
+    const call = `call ${resultType(target)} ${symbol(target)}(${values.join(", ")})`;
+    if (type === "void" && !target.throws) {
       emit(call);
       return undefined;
     }
     const result = temp();
     emit(`${result} = ${call}`);
-    return result;
+    if (!target.throws) return result;
+    // A call that failed raises its error where this function sends it.
+    const [failed, bad, ok] = [temp(), label(), label()];
+    emit(`${failed} = extractvalue ${resultType(target)} ${result}, 0`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(bad);
+    const error = temp();
+    emit(`${error} = extractvalue ${resultType(target)} ${result}, 2`);
+    raised(at!, error);
+    startBlock(ok);
+    if (type === "void") return undefined;
+    const got = temp();
+    emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
+    return got;
+  }
+
+  // The IR type a function returns: its value, or for a throwing one, whether it failed, then
+  // its value (`{}` for none) and its error.
+  function resultType(i: Instance): string {
+    if (!i.throws) return llvm(i.returns);
+    return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
+  }
+
+  // Leaves the function being emitted with a value, or with none.
+  function leave(v: string | undefined) {
+    if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
+    const type = resultType(current);
+    let result = temp();
+    emit(`${result} = insertvalue ${type} undef, i1 false, 0`);
+    if (v !== undefined) {
+      const next = temp();
+      emit(`${next} = insertvalue ${type} ${result}, ${llvm(current.returns)} ${v}, 1`);
+      result = next;
+    }
+    emit(`ret ${type} ${result}`);
+  }
+
+  // An error raised by a `throw` or a failed call, which leaves the function with it.
+  function raised(at: Expr | Stmt, error: string) {
+    const { from, to } = current.raises.get(at)!;
+    const type = resultType(current);
+    const [a, b] = [temp(), temp()];
+    emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
+    emit(`${b} = insertvalue ${type} ${a}, ${llvm(to)} ${convert(error, from, to)}, 2`);
+    emit(`ret ${type} ${b}`);
+  }
+
+  // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
+  function entry(): string[] {
+    if (!main.throws) return ["define i32 @main() {", '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    current = main;
+    ({ types, locals, calls, setters, coercions, jumps } = main);
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    const type = resultType(main);
+    const [result, failed, bad, ok, error] = [temp(), temp(), label(), label(), temp()];
+    emit(`${result} = call ${type} @"fsh.main"()`);
+    emit(`${failed} = extractvalue ${type} ${result}, 0`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(ok);
+    emit("ret i32 0");
+    startBlock(bad);
+    emit(`${error} = extractvalue ${type} ${result}, 2`);
+    // Output printed before the error stays ahead of it, as a panic's does.
+    emit("call i32 @fflush(ptr null)");
+    write(2, ["Error:", [error, main.throws]], builder, convert);
+    emit("ret i32 1");
+    return ["define i32 @main() {", "entry:", ...allocas, ...body, "}"];
   }
 
   // A pointer to the base embedded in an instance of `from`, through as many bases as it

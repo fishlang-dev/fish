@@ -10,6 +10,8 @@ import { parse } from "../src/parser.ts";
 //   // expect: <line>   the next line of stdout, in order
 //   // error: <text>    compilation must fail with a message containing <text>
 //   // panic: <text>    the program must exit with 101 and stderr containing <text>
+//   // fails: <text>    the program must exit with 1, an error escaping main, and stderr
+//                       containing <text>
 //   // mode: release    build with --release
 //   // mode: parse      only parse; passing means it parsed
 const dir = join(import.meta.dir, "programs");
@@ -22,6 +24,7 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     const expected = [...src.matchAll(/\/\/ expect: (.*)/g)].map((m) => m[1] + "\n").join("");
     const errors = [...src.matchAll(/\/\/ error: (.*)/g)].map((m) => m[1]!);
     const panics = [...src.matchAll(/\/\/ panic: (.*)/g)].map((m) => m[1]!);
+    const failures = [...src.matchAll(/\/\/ fails: (.*)/g)].map((m) => m[1]!);
     const out = join(tmp, name.replace(/\.fsh$/, ""));
     const parseOnly = src.includes("// mode: parse");
 
@@ -39,7 +42,7 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
 
     const run = Bun.spawnSync([out]);
     expect(run.stdout.toString()).toBe(expected);
-    for (const panic of panics) expect(run.stderr.toString()).toContain(panic);
-    expect(run.exitCode).toBe(panics.length > 0 ? 101 : 0);
+    for (const text of [...panics, ...failures]) expect(run.stderr.toString()).toContain(text);
+    expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
   });
 }

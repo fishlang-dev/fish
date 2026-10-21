@@ -1,6 +1,6 @@
 import { llvm, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
-import { INTEGERS, type Integer, type Type } from "./typing.ts";
+import { INTEGERS, show, type Integer, type Type } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the panic routine.
 
@@ -32,15 +32,21 @@ export const RUNTIME = [
 // printed by branching on its tag, so the format is flushed before it and each branch prints
 // its member.
 export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf: (e: Expr) => Type, convert: Convert) {
+  // Every argument runs before anything prints, as in JavaScript.
+  const evaluated = args.map((a) => (a.kind === "string" ? "" : value(a)));
+  write(1, args.map((a, i) => (a.kind === "string" ? a.value : [evaluated[i]!, typeOf(a)])), b, convert);
+}
+
+// Writes text and values, joined by spaces and ending in a newline, to stdout (1) or stderr (2).
+// A value of a type with no printed form, like an object, prints as its type's name.
+export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
   const { emit, temp, label, startBlock, cString } = b;
   let format = "";
   let values: string[] = [];
-  // Every argument runs before anything prints, as in JavaScript.
-  const evaluated = args.map((a) => (a.kind === "string" ? "" : value(a)));
-  args.forEach((a, i) => {
+  parts.forEach((part, i) => {
     if (i > 0) format += " ";
-    if (a.kind === "string") format += escape(a.value);
-    else piece(evaluated[i]!, typeOf(a));
+    if (typeof part === "string") format += escape(part);
+    else piece(...part);
   });
   format += "\n";
   flush();
@@ -50,6 +56,8 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
       format += escape(String(type.value));
     } else if (type === "null") {
       format += "null";
+    } else if (typeof type !== "string" && type.kind !== "union") {
+      format += escape(show(type));
     } else if (type === "boolean") {
       const text = temp();
       emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
@@ -90,7 +98,7 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
 
   function flush() {
     if (format === "") return;
-    emit(`call i32 (ptr, ...) @printf(ptr ${cString(format)}${values.join("")})`);
+    emit(stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${cString(format)}${values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${cString(format)}${values.join("")})`);
     format = "";
     values = [];
   }

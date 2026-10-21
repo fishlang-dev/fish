@@ -75,6 +75,9 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
+  // Records an error a call raises, and what the instance called may throw.
+  raise(at: Expr, type: Type, what: string): void;
+  errorOf(instance: Instance): Type | undefined;
   // Whether a binding stands for a variable a closure captures, and whether this is a closure;
   // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
@@ -98,7 +101,7 @@ export type Context = {
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -226,6 +229,8 @@ export function expressions(ctx: Context) {
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
+    const error = errorOf(instance);
+    if (error) raise(e, error, `'${target.name}'`);
     const type = resultOf(instance, e);
     const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what

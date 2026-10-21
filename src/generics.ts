@@ -195,7 +195,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       found = {
         body: f, symbol: generic && isConcrete ? `${f.name}#${count}` : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(),
       };
       byKey.set(key, found);
       pending.push(found);

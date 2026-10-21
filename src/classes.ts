@@ -12,6 +12,8 @@ export type Body = Span & {
   params: Param[];
   body: Stmt[];
   returnType: TypeNode | undefined;
+  // The error type a `throws` clause declares.
+  throws?: TypeNode;
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.
@@ -190,6 +192,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,
+      ...(m.throws && { throws: m.throws }),
       typeParams: m.typeParams,
       self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false, owned: receiver ? owns(receiver) : false },
       owner: type,

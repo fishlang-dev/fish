@@ -3,7 +3,7 @@ import { expression, sequence } from "./expressions.ts";
 import { isToken, lexer, type Token } from "./lexer.ts";
 import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
-import { annotation, parameters, returnAnnotation, type, typeMembers, typeParameters, typeReference } from "./types.ts";
+import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 
 export type Span = { start: number; end: number };
 
@@ -174,7 +174,7 @@ export type ClassNode = Span & {
 export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } & (
   | { kind: "field"; name: PropertyName; optional: boolean; definite: boolean; type: TypeNode | undefined; init: Expr | undefined }
   | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
-      params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
+      params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "constructor"; params: Param[]; body: Stmt[] | undefined }
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
   | { kind: "index"; params: Param[]; type: TypeNode }
@@ -234,8 +234,8 @@ export type Interface = Span & { kind: "interface"; name: string; typeParams: Ty
 export type Func = Span & {
   // `macro` marks `macro function`, a comptime function over syntax trees.
   kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean;
-  // Undefined for an overload signature or a `declare function`.
-  typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined;
+  // Undefined for an overload signature or a `declare function`. `throws` is the error type.
+  typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined;
 };
 
 export type BinaryOp =
@@ -389,11 +389,12 @@ export function func(c: Cursor, anonymous = false): Func {
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);
+  const throws = throwsClause(c);
   // An overload signature or a `declare function` ends where its body would start.
   let body: Stmt[] | undefined;
   if (c.at("{")) body = block(c);
   else endStatement(c);
-  return { kind: "function", name, async, generator, macro: false, typeParams, params, returnType, body, start, end: c.end() };
+  return { kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
 }
 
 export function block(c: Cursor): Stmt[] {

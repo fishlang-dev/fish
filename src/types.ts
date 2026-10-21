@@ -64,6 +64,13 @@ export function returnAnnotation(c: Cursor): TypeNode | undefined {
   return returnType(c);
 }
 
+// `throws T` after a function's result or parameters: the error type it may throw.
+export function throwsClause(c: Cursor): TypeNode | undefined {
+  if (!c.at("throws") || c.peek().newlineBefore) return undefined;
+  c.next();
+  return type(c);
+}
+
 // `x is T`, `asserts x is T` and `asserts x`; otherwise an ordinary type.
 function returnType(c: Cursor): TypeNode {
   const start = c.peek().start;

@@ -6,6 +6,7 @@ export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<S
   return stmts.some((s) => {
     switch (s.kind) {
       case "return":
+      case "throw":
         return true;
       case "if":
         return s.else !== undefined && alwaysReturns(s.then, broken, continued) && alwaysReturns(s.else, broken, continued);

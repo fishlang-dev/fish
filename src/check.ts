@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, holdsRef, isNumeric, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
+import { closureType, fits, holdsRef, isNumeric, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -57,6 +57,11 @@ export type Instance = {
   jumps: Map<Stmt, Stmt>;
   // The arguments, or the receiver, each call returning a reference borrows from.
   borrowsFrom: Map<Expr, Expr[]>;
+  // The error type a `throws` clause declares.
+  throws?: Type;
+  // Each fallible call and `throw`, the error it raises, and the error type that error
+  // becomes where it goes: the function's own, which returns it.
+  raises: Map<Expr | Stmt, { from: Type; to: Type }>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -285,6 +290,8 @@ export function check(program: Stmt[]): Checked {
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
+    instance.raises.forEach((r, at) => instance.raises.set(at, { from: lower(r.from), to: lower(r.to) }));
+    if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
     instance.returns = lower(instance.returns);
@@ -314,6 +321,12 @@ export function check(program: Stmt[]): Checked {
     if (declared && !isInterface(declared)) return declared;
     const own = scopeOf(instance);
     return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
+  }
+
+  // What a call of an instance may throw, as its caller sees it.
+  function errorOf(instance: Instance): Type | undefined {
+    const f = instance.body;
+    return f.throws && withScope(instance.bindings, () => resolveType(f.throws!));
   }
 
   function returnOf(instance: Instance, at: Span): Type {
@@ -398,6 +411,8 @@ export function check(program: Stmt[]): Checked {
       assume,
       narrowed,
       captured: (l) => captures?.has(l) ?? false,
+      raise,
+      errorOf,
       noteThis,
       closing: f.closure !== undefined,
       changesCapture,
@@ -414,6 +429,11 @@ export function check(program: Stmt[]): Checked {
     // A call leaves out only the last parameters, so none may be required after an optional one.
     const late = f.params.find((p, i) => !p.optional && f.params.slice(0, i).some((q) => q.optional));
     if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
+    // What the function may throw: any value's type.
+    const errorType = f.throws && resolveType(f.throws);
+    if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
+    if (errorType && holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
+    instance.throws = errorType;
     const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
@@ -514,7 +534,7 @@ export function check(program: Stmt[]): Checked {
       const inner: Instance = {
         body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();
@@ -676,8 +696,13 @@ export function check(program: Stmt[]): Checked {
           (s.kind === "break" ? broken : continued).add(target);
           return;
         }
-        case "throw":
-          throw unsupported("'throw' statements", s);
+        case "throw": {
+          // `throw` returns an error of the type the function declares.
+          const type = value(s.value);
+          if (errorType) coerce(s.value, type, errorType, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+          raise(s, errorType ?? type, "'throw'");
+          return;
+        }
         case "try":
           throw unsupported("'try' statements", s);
         case "return": {
@@ -790,6 +815,20 @@ export function check(program: Stmt[]): Checked {
       const from = captures?.get(l);
       if (from && from !== "this") return outer!.constant(from);
       return !l.mutable || l.param;
+    }
+
+    // An error raised by a call or a `throw` goes to the function's caller, which needs a
+    // `throws` clause it fits.
+    function raise(at: Expr | Stmt, type: Type, what: string) {
+      if (f.closure) throw unsupported("closures that throw", at);
+      if (!errorType) {
+        const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
+        throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
+      }
+      if (!fits(type, errorType)) {
+        throw new CompileError(`${what} can throw '${show(type)}', which isn't the '${show(errorType)}' that '${f.name}' throws`, at.start, at.end);
+      }
+      instance.raises.set(at, { from: type, to: errorType });
     }
 
     function noteThis(e: Expr) {
