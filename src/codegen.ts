@@ -306,7 +306,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "return":
         // An arrow's expression body may be a call returning nothing.
         if (s.value && current.returns === "void") {
-          call(s.value as Extract<Expr, { kind: "call" }>);
+          if (s.value.kind === "call") call(s.value);
+          else value(s.value);
           leave(undefined);
         } else leave(s.value ? value(s.value) : undefined);
         // Anything after a return goes in a fresh block that nothing branches to.
@@ -673,6 +674,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const type = types.get(e)!;
     if (to && typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) return borrowed(e, to.to);
     const result = known.get(e) ?? evaluate(e);
+    // Nothing runs after a value of `never`, so it stands for any value at all.
+    if (type === "never") return "undef";
     return to ? convert(result, type, to) : result;
   }
 

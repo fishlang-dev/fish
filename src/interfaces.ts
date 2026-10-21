@@ -67,6 +67,9 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     }
     const method = c ? inherited(c, "methods", m.name) : undefined;
     if (!method || method.access !== "public") return missing("method", m.name);
+    // An interface's methods can't declare what they throw yet, so a throwing one can't
+    // stand in for one.
+    if (method.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
     const params = members.paramTypesOf(method);
     const result = members.returnOf(method, at);
     if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(result, m.returns)) {

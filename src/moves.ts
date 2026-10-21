@@ -39,6 +39,10 @@ const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind ===
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
 
+// A way out of a try that passes through its finally.
+type Exit = { kind: "raise" } | { kind: "return" } | { kind: "jump"; target: Stmt; which: "break" | "continue" };
+type Frame = { kind: "catch"; acc: State } | { kind: "finally"; acc: State; at: Stmt; exits: Exit[] };
+
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, coercions, borrowsFrom } = instance;
@@ -46,10 +50,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
   const exits = new Map<Stmt, State>();
-  // For each enclosing `try`, what the places it could raise from had in common.
-  const catches: State[] = [];
-  // For each enclosing `finally`, what the ways out through it had in common.
-  const leaving: State[] = [];
+  // The catches and finallies enclosing the code being checked, innermost last: what the ways
+  // into each had in common, and for a finally, its try and which ways out pass through it.
+  const frames: Frame[] = [];
   const nexts = new Map<Stmt, State>();
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
@@ -122,27 +125,43 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // The catch runs from wherever the block raised, so from what all those points had in
       // common; after the try, either path may have run.
       case "try": {
-        // A `finally` runs on every way out: checked once from all of them for its own uses,
-        // and again from the normal way out, where the code after it carries on.
-        if (s.finalizer) leaving.push(null);
+        // A `finally` runs on every way out. Checked from what the abnormal ways out had in
+        // common, each of those then carries on from where it ends; checked again from the
+        // normal way out, the code after it carries on.
+        const fin: Frame | undefined = s.finalizer ? { kind: "finally", acc: null, at: s, exits: [] } : undefined;
+        if (fin) frames.push(fin);
         if (s.handler) {
-          catches.push(null);
+          const handler: Frame = { kind: "catch", acc: null };
+          frames.push(handler);
           statements(s.block);
-          const raised = catches.pop()!;
+          frames.pop();
           const after = state;
-          state = raised;
+          state = handler.acc;
           const caught = s.param && locals.get(s);
           if (caught) revive(String(caught.id));
           statements(s.handler);
           state = join(after, state);
         } else statements(s.block);
-        if (!s.finalizer) return;
-        const left = leaving.pop()!;
+        if (!fin) return;
+        frames.pop();
         const normal = state;
-        state = join(left, normal);
-        statements(s.finalizer);
+        if (fin.acc && fin.kind === "finally") {
+          state = fin.acc;
+          statements(s.finalizer!);
+          for (const exit of fin.exits) {
+            const end: State = state;
+            if (exit.kind === "raise") raising();
+            else if (exit.kind === "return") returning();
+            else {
+              const table = exit.which === "break" ? exits : nexts;
+              table.set(exit.target, join(table.get(exit.target) ?? null, state));
+              jumping(exit.target, exit.which);
+            }
+            state = end;
+          }
+        }
         state = normal;
-        statements(s.finalizer);
+        statements(s.finalizer!);
         return;
       }
       case "while":
@@ -177,7 +196,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const target = jumps.get(s)!;
         const table = s.kind === "break" ? exits : nexts;
         table.set(target, join(table.get(target) ?? null, state));
-        leaves();
+        jumping(target, s.kind);
         state = null;
         return;
       }
@@ -193,7 +212,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // An arrow's expression body may be a call returning nothing.
           if (types.has(s.value)) returned(s.value);
         }
-        leaves();
+        returning();
         state = null;
         return;
     }
@@ -809,13 +828,37 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // An error raised here goes to the innermost catch, which runs from this state too, and any
   // `finally` it leaves through.
   function raising() {
-    if (catches.length > 0) catches[catches.length - 1] = join(catches.at(-1)!, state);
-    leaves();
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const frame = frames[i]!;
+      frame.acc = join(frame.acc, state);
+      if (frame.kind === "catch") return;
+      note(frame, { kind: "raise" });
+    }
   }
 
-  // Control leaving here may pass through each enclosing `finally`.
-  function leaves() {
-    for (let i = 0; i < leaving.length; i++) leaving[i] = join(leaving[i]!, state);
+  // A `break` or `continue` passes through each finally between it and its target.
+  function jumping(target: Stmt, which: "break" | "continue") {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const frame = frames[i]!;
+      if (frame.kind === "catch") continue;
+      if (target.start >= frame.at.start && target.end <= frame.at.end) return;
+      frame.acc = join(frame.acc, state);
+      note(frame, { kind: "jump", target, which });
+    }
+  }
+
+  // A `return` passes through every enclosing finally.
+  function returning() {
+    for (const frame of frames) {
+      if (frame.kind === "catch") continue;
+      frame.acc = join(frame.acc, state);
+      note(frame, { kind: "return" });
+    }
+  }
+
+  function note(frame: Extract<Frame, { kind: "finally" }>, exit: Exit) {
+    const same = (e: Exit) => e.kind === exit.kind && (e.kind !== "jump" || (exit.kind === "jump" && e.target === exit.target && e.which === exit.which));
+    if (!frame.exits.some(same)) frame.exits.push(exit);
   }
 
   function revive(place: string) {

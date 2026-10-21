@@ -856,9 +856,10 @@ export function check(program: Stmt[]): Checked {
     // An error raised by a call or a `throw` goes to the function's caller, which needs a
     // `throws` clause it fits.
     function raise(at: Expr | Stmt, type: Type, what: string) {
-      if (f.closure) throw unsupported("closures that throw", at);
+      if (holdsRef(type)) throw unsupported("errors holding references", at);
       const handler = handlers.at(-1);
       if (handler) return void handler.push([at, type]);
+      if (f.closure) throw unsupported("closures that throw", at);
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
         throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);

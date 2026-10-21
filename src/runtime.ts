@@ -54,6 +54,8 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
   function piece(v: string, type: Type) {
     if (typeof type !== "string" && type.kind === "literal") {
       format += escape(String(type.value));
+    } else if (type === "never") {
+      // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
       format += "null";
     } else if (typeof type !== "string" && type.kind !== "union") {

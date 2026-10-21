@@ -155,6 +155,8 @@ export function conversions(b: Slots) {
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // Code holding a `never` value never runs.
+    if (from === "never") return "undef";
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     if (typeof from !== "string" && from.kind === "ref") {
