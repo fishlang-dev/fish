@@ -264,8 +264,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return expr(e.operand);
       case "update":
         expr(e.operand);
+        if (e.operand.kind === "ident" && isRef(types.get(e.operand)!) && coercions.has(e.operand)) return;
         return change(e.operand);
       case "assign": {
+        // A whole value written through a mutable reference uses the reference, not its place.
+        if (e.target.kind === "ident" && isRef(types.get(e.target)!) && coercions.has(e.target)) {
+          expr(e.target);
+          expr(e.value, (p) => `'${p}' moved here into what '${text(e.target)}' points to; use '${p}.clone()' to keep a copy`);
+          return;
+        }
         if (e.op !== "=") expr(e.target);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         // The target changes once the value is ready, after the value's reads.

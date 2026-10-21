@@ -491,7 +491,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       invoke(setter, thisPointer(setter, target.object), [`${llvm(types.get(target)!)} ${result}`]);
       return;
     }
-    emit(`store ${llvm(types.get(target)!)} ${result}, ptr ${address(target)}`);
+    // A whole value written through a mutable reference goes where it points.
+    const type = types.get(target)!;
+    if (isRef(type) && coercions.has(target)) {
+      emit(`store ${llvm(type.to)} ${result}, ptr ${evaluate(target)}`);
+      return;
+    }
+    emit(`store ${llvm(type)} ${result}, ptr ${address(target)}`);
   }
 
   // Where an assignment target lives: a variable's slot, or a field inside one.

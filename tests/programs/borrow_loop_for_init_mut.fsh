@@ -1,13 +1,13 @@
+// A mutable reference declared in a for initializer keeps what it borrows, and assigning to
+// it writes through, on every pass.
 type P = { x: i64 }
 
 function main() {
-  let p: P = { x: 1 }
   let q: P = { x: 2 }
   let i = 0
   for (let m: Mut<P> = q; i < 3; i++) {
-    print(p.x)
-    print(m.x)
-    m = p
+    m = { x: m.x + 10 }
   }
+  print(q.x)
 }
-// error: cannot use 'p.x' while 'm' borrows 'p' mutably and is used later
+// expect: 32

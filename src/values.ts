@@ -388,7 +388,7 @@ export function expressions(ctx: Context) {
         const type = op === "=" ? assigned : binaryType(op, target, widen(e.value, assigned), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
-        if (local && typeof local.type !== "string" && local.type.kind === "ref") rebind(local, e.value);
+        if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
         return target;
       }
       case "update": {
@@ -669,7 +669,16 @@ export function expressions(ctx: Context) {
     intoMember(target, types);
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
-      value(target);
+      const read = value(target);
+      // A whole value assigned to a mutable reference is written through it.
+      if (target.kind === "ident" && isRefType(read) && read.mutable) {
+        // What a type parameter stands for may be wider than any value written here.
+        if (typeof read.to !== "string" && read.to.kind === "param") {
+          throw new CompileError(`can't assign a whole value through '${target.name}', which may point to a wider value; assign its fields instead`, target.start, target.end);
+        }
+        coercions.set(target, read.to);
+        return read.to;
+      }
       intoMember(target, types);
       changeable(target, "assign to");
       const type = stored(target);
@@ -690,7 +699,9 @@ export function expressions(ctx: Context) {
   // in an instance it is stored as the concrete type's field, which may be narrower.
   function stored(target: Expr): Type {
     if (target.kind !== "member") return types.get(target)!;
-    const object = lower(stored(target.object));
+    // Through a reference, what it points to stores the field.
+    const holder = lower(stored(target.object));
+    const object = typeof holder !== "string" && holder.kind === "ref" ? lower(holder.to) : holder;
     if (typeof object !== "string" && object.kind === "union") {
       throw new CompileError(`can't assign to '${target.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
@@ -733,11 +744,11 @@ export function expressions(ctx: Context) {
     let path = "";
     while (root.kind === "member") {
       readonly(root, target, action);
-      // Nothing changes through a shared reference a field holds; changes through a mutable
-      // one come later.
+      // Nothing changes through a shared reference; through a mutable one, anything below it
+      // may change, whatever holds the reference.
       const holder = types.get(root.object);
       if (typeof holder !== "string" && holder?.kind === "ref") {
-        if (holder.mutable) throw unsupported("changes through 'Mut' references", target);
+        if (holder.mutable) return;
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
       path = `.${root.name}${path}`;
@@ -748,10 +759,10 @@ export function expressions(ctx: Context) {
       throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
     }
     const local = locals.get(root)!;
-    // A shared reference never changes what it points to; changing through a mutable one
-    // comes later.
-    if (path && typeof local.type !== "string" && local.type.kind === "ref") {
-      if (local.type.mutable) throw unsupported("changes through 'Mut' references", target);
+    // A shared reference never changes what it points to; a mutable one may, whatever holds
+    // it, and a method may change through it.
+    if ((path || action !== "assign to") && typeof local.type !== "string" && local.type.kind === "ref") {
+      if (local.type.mutable) return;
       throw new CompileError(`cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
     if (local.param) {
@@ -767,7 +778,8 @@ export function expressions(ctx: Context) {
   // A readonly field can't change once constructed, nor can anything inside it. Only its own
   // class's constructor may assign it, through `this`.
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
-    const object = types.get(e.object);
+    const found = types.get(e.object);
+    const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
     if (typeof object === "string" || !object || !field(object, e.name)?.readonly) return;
     if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
     const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
