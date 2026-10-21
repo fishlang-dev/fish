@@ -206,13 +206,29 @@ export function expressions(ctx: Context) {
       expect(e.then, t);
       expect(e.else, t);
     }
-    if (e.kind === "match") for (const arm of e.arms) if (arm.body.kind !== "block") expect(arm.body, t);
+    if (e.kind === "match") for (const arm of e.arms) for (const v of armValues(arm.body)) expect(v, t);
     if (e.kind === "pipe") expect(e.body, t);
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
+  }
+
+  // What a match arm gives: its expression, or each value its block's `return`s give, leaving
+  // out those of closures and matches inside it, which are theirs.
+  function armValues(body: Expr | Stmt): Expr[] {
+    if (body.kind !== "block") return [body as Expr];
+    const found: Expr[] = [];
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== "object") return;
+      const n = node as { kind?: string; value?: Expr };
+      if (n.kind === "arrow" || n.kind === "function" || n.kind === "match") return;
+      if (n.kind === "return" && n.value) found.push(n.value);
+      Object.values(node).forEach(visit);
+    };
+    visit(body);
+    return found;
   }
 
   // A call's type, `void` included, or any other expression's.

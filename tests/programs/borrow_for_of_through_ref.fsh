@@ -7,4 +7,4 @@ function main() {
     console.log(t.length);
   }
 }
-// error: cannot change 'o' while 'for...of' and 't' borrow 'o'
+// error: cannot change 'o' while a 'for...of' loop and 't' borrow 'o'

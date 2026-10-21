@@ -20,6 +20,12 @@ function show(r: Res<i64, string>): string {
 function main() {
   const n = 3;
   const r: Res<i64, string> = n |> Res.Ok(%);
-  console.log(show(f(0)), show(f(2)), show(r));
+  const blk: Res<i64, string> = match (n) {
+    case 3 => {
+      return Res.Ok(3);
+    },
+    case _ => Res.Err("b"),
+  };
+  console.log(show(f(0)), show(f(2)), show(r), show(blk));
 }
-// expect: ok 1 err x2 ok 3
+// expect: ok 1 err x2 ok 3 ok 3

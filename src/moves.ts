@@ -675,6 +675,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A place can't be accessed in a way a live loan of it, of something inside it or of
   // something it is inside forbids: a mutable loan forbids everything, a shared one changes,
   // moves and mutable loans.
+  // Holders as a message names them, each once.
+  function named(holders: Local[]): string[] {
+    return [...new Set(holders.map((h) => (h.name === "for...of" ? "a 'for...of' loop" : `'${h.name}'`)))];
+  }
+
   function free(place: string, e: Named, access: Access, at = e.start) {
     if (!state) return;
     for (const loan of state.loans.values()) {
@@ -687,7 +692,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         : loan.guard ? `a match guard is reading '${lent}', and later arms still test it`
         : loan.call
         ? `'${lent}' is lent ${loan.mutable ? "mutably " : ""}to ${loan.call} for this call`
-        : `${holders.map((h) => `'${h.name}'`).join(" and ")} ${holders.length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${holders.length > 1 ? "are" : "is"} used later`;
+        : `${named(holders).join(" and ")} ${named(holders).length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${named(holders).length > 1 ? "are" : "is"} used later`;
       const until = loan.loop ? "the loop ends" : loan.guard ? "the guard ends" : loan.call ? "the call returns" : "the borrow's last use";
       const earlier = loan.start >= e.start && [...passes.values()].some((p) => p > 0) ? " on an earlier pass through this loop" : "";
       throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
