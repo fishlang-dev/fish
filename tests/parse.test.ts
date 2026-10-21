@@ -250,7 +250,7 @@ function showExpr(e: Expr): string {
     case "match": {
       const arms = e.arms.map((a) => {
         const guard = a.guard ? ` if ${showExpr(a.guard)}` : "";
-        const body = Array.isArray(a.body) ? `{ ${a.body.length} statements }` : showExpr(a.body);
+        const body = a.body.kind === "block" ? `{ ${a.body.body.length} statements }` : showExpr(a.body);
         return `case ${showPattern(a.pattern)}${guard} => ${body}`;
       });
       return `match (${showExpr(e.subject)}) { ${arms.join(", ")} }`;

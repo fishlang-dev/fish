@@ -97,8 +97,9 @@ type Outer = {
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
 // What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
-// `loop` is the loop it labels, if any.
-type Target = { stmt: Stmt; kind: "loop" | "switch" | "label"; label?: string; loop?: Stmt; facts?: number };
+// `loop` is the loop it labels, if any. A match arm's block is where its `return`s go, with
+// whether the match gives a value and what they gave.
+type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: number; wanted?: boolean; gives?: [Expr, Type][] };
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
@@ -468,6 +469,14 @@ export function check(program: Stmt[]): Checked {
           scopes.pop();
         }
       },
+      block: (arm, wanted) => {
+        const target: Target = { stmt: arm, kind: "arm", wanted, gives: [] };
+        within(target, () => statement(arm));
+        if (wanted && !alwaysReturns(arm.body, broken, continued)) {
+          throw new CompileError("this arm can reach its end without giving a value; give one with 'return', as in an arrow's block", arm.end - 1, arm.end);
+        }
+        return target.gives!;
+      },
       bind: (name, type, node) => {
         declare(name, type, false, false, node);
         return locals.get(node)!;
@@ -829,6 +838,14 @@ export function check(program: Stmt[]): Checked {
           return;
         }
         case "return": {
+          // A `return` in a match arm gives the arm its value, and never leaves the function.
+          const arm = targets.findLast((t) => t.kind === "arm");
+          if (arm) {
+            jumps.set(s, arm.stmt);
+            if (arm.wanted && !s.value) throw new CompileError("this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
+            if (s.value) arm.gives!.push([s.value, arm.wanted ? value(s.value) : result(s.value)]);
+            return;
+          }
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           if (declared && s.value) expect(s.value, declared);
@@ -864,13 +881,18 @@ export function check(program: Stmt[]): Checked {
     }
 
     function jumpTarget(s: Jump): Stmt {
+      const fits = (t: Target) => (s.label === undefined ? t.kind === "loop" || (s.kind === "break" && t.kind === "switch") : t.label === s.label);
+      const found = targets.findLast((t) => t.kind === "arm" || fits(t));
+      // A match arm is a body of its own, as an arrow's is.
+      if (found?.kind === "arm" && targets.some(fits)) {
+        throw new CompileError(`'${s.kind}' can't leave a match arm, which is a body of its own like an arrow's; 'return' a value and act on it after the match`, s.start, s.end);
+      }
+      const target = found?.kind === "arm" ? undefined : found;
       if (s.label === undefined) {
-        const target = targets.findLast((t) => t.kind === "loop" || (s.kind === "break" && t.kind === "switch"));
         if (target) return target.stmt;
         const message = s.kind === "break" ? "'break' can only be used inside a loop or 'switch'" : "'continue' can only be used inside a loop";
         throw new CompileError(message, s.start, s.end);
       }
-      const target = targets.findLast((t) => t.label === s.label);
       if (!target) throw new CompileError(`cannot find label '${s.label}'`, s.start, s.end);
       if (s.kind === "break") return target.stmt;
       if (!target.loop) throw new CompileError("'continue' can only jump to a label on a loop", s.start, s.end);

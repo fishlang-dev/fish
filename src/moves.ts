@@ -57,6 +57,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // into each had in common, and for a finally, its try and which ways out pass through it.
   const frames: Frame[] = [];
   const nexts = new Map<Stmt, State>();
+  // How each match arm's block hands on what its `return`s give, as its match does.
+  const arms = new Map<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
   const last = lastUses(body, instance);
@@ -231,6 +233,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         state = null;
         return;
       case "return":
+        // A `return` in a match arm hands its value to the match and leaves the arm.
+        if (jumps.has(s)) {
+          const arm = jumps.get(s)!;
+          if (s.value) expr(s.value, ...arms.get(arm)!);
+          jumping(arm, "break");
+          state = null;
+          return;
+        }
         if (s.value) {
           expr(s.value, () => "");
           // An arrow's expression body may be a call returning nothing.
@@ -445,7 +455,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder]) });
           }
           if (arm.guard) expr(arm.guard);
-          expr(arm.body as Expr, consume, discarded);
+          if (arm.body.kind === "block") {
+            arms.set(arm.body, [consume, discarded]);
+            exits.set(arm.body, null);
+            statement(arm.body);
+            state = join(state, exits.get(arm.body)!);
+          } else expr(arm.body, consume, discarded);
           for (const holder of borrowing) release(holder);
           after = join(after, state);
         }
@@ -1137,7 +1152,8 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         expr(e.subject);
         for (const arm of e.arms) {
           if (arm.guard) expr(arm.guard);
-          expr(arm.body as Expr, call);
+          if (arm.body.kind === "block") stmt(arm.body);
+          else expr(arm.body, call);
         }
         return;
       // A closure uses what it captures where it is made; whatever holds it holds that after.

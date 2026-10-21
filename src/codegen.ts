@@ -70,7 +70,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   const known = new Map<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
   // the slot its error goes in.
-  const handlers: { label: string; slot: string; depth: number }[] = [];
+  const handlers: { label: string; slot: string; depth: number; floor: number }[] = [];
   // The `finally` regions enclosing the code being emitted, innermost last.
   const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
@@ -78,6 +78,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Values the statement being emitted made and nothing took over, released when it ends.
   // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
   let pending: { v: string; type: Type; slot?: string }[] = [];
+  // Where the statement being lowered starts in `pending`: a statement in a match arm's block
+  // runs inside an expression whose own values are pending below it.
+  let floor = 0;
+  // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
+  const arms = new Map<Stmt, { slot: string; type: Type } | undefined>();
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
   let scopes: { slot: string; type: Type }[][] = [];
   // Receivers copied into slots for owning methods, whose leftovers drop after the call.
@@ -104,6 +109,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     labels = 0;
     block = "entry";
     pending = [];
+    floor = 0;
     scopes = [[]];
     const type = instance.returns;
     // Parameters are copied into slots like any other binding.
@@ -356,7 +362,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         const subject = operand(s.discriminant, s.cases.flatMap((c) => (c.test ? [c.test] : [])));
         // A subject the switch made is released on the way into the body that runs, and stays
         // pending through the tests, so an error raised in one drops it too.
-        const held = [...pending];
+        const held = pending.slice(floor);
         const enter = (body: string) => {
           if (held.length === 0) return body;
           const via = label();
@@ -387,7 +393,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         });
         const fallback = s.cases.findIndex((c) => !c.test);
         emit(`br label %${enter(fallback < 0 ? end : bodies[fallback]!)}`);
-        pending = [];
+        pending.length = floor;
         for (const [via, body] of entries) {
           startBlock(via);
           for (const { v, type } of held) dispose(v, type);
@@ -419,8 +425,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return;
       }
       case "return":
-        // An arrow's expression body may be a call returning nothing.
-        if (s.value && current.returns === "void") {
+        if (jumps.has(s)) {
+          given(s, jumps.get(s)!);
+        } else if (s.value && current.returns === "void") {
+          // An arrow's expression body may be a call returning nothing.
           effect(s.value);
           settle();
           leave(undefined);
@@ -434,7 +442,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return;
       case "throw":
         raised(s, owned(s.value));
-        pending = [];
+        pending.length = floor;
         startBlock(label());
         return;
       // An error raised in the block is stored where the catch reads it, and the catch runs.
@@ -449,7 +457,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         } else {
           const local = s.param ? resolved(s) : undefined;
           const type = current.caught.get(s)!;
-          const handler = { label: label(), slot: alloca(llvm(type)), depth: scopes.length };
+          const handler = { label: label(), slot: alloca(llvm(type)), depth: scopes.length, floor };
           handlers.push(handler);
           scoped(s.block);
           handlers.pop();
@@ -573,10 +581,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         startBlock(body);
       }
       const mark = pending.length;
-      const body = arm.body as Expr;
-      if (result && slot) emit(`store ${llvm(result)} ${needsDrop(result) ? owned(body) : value(body)}, ptr ${slot}`);
-      else effect(body);
-      settle(mark);
+      if (arm.body.kind === "block") {
+        const given = label();
+        exits.set(arm.body, { exit: given, depth: scopes.length });
+        arms.set(arm.body, result && slot ? { slot, type: result } : undefined);
+        const outer = floor;
+        floor = mark;
+        statement(arm.body);
+        floor = outer;
+        emit(`br label %${given}`);
+        startBlock(given);
+      } else {
+        if (result && slot) emit(`store ${llvm(result)} ${needsDrop(result) ? owned(arm.body) : value(arm.body)}, ptr ${slot}`);
+        else effect(arm.body);
+        settle(mark);
+      }
       drop(scopes.length - 1);
       scopes.pop();
       emit(`br label %${end}`);
@@ -590,6 +609,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const v = temp();
     emit(`${v} = load ${llvm(result)}, ptr ${slot}`);
     return v;
+  }
+
+  // A `return` in a match arm's block: its value goes where the match keeps what it gives, and
+  // control leaves the arm, dropping what the scopes inside it own.
+  function given(s: Extract<Stmt, { kind: "return" }>, arm: Stmt) {
+    const into = arms.get(arm);
+    if (s.value && into) emit(`store ${llvm(into.type)} ${needsDrop(into.type) ? owned(s.value) : value(s.value)}, ptr ${into.slot}`);
+    else if (s.value) effect(s.value);
+    settle();
+    const target = exits.get(arm)!;
+    jump(target.exit, target.depth);
   }
 
   // Tests a value against a pattern, going on when it matches and to `no` when it doesn't. A
@@ -1093,7 +1123,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // Releases the values made since `mark` that nothing took over, newest first.
-  function settle(mark = 0) {
+  function settle(mark = floor) {
     for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
   }
 
@@ -1433,10 +1463,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
   // control left, each way out with how to resume it, the labels made before the region, and
   // how many catches and scopes enclosed it.
-  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; slots: Map<string, { slot: string; type: Type }> };
+  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; floor: number; slots: Map<string, { slot: string; type: Type }> };
 
   function enter(): Region {
-    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, slots: new Map() };
+    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, floor, slots: new Map() };
     finallies.push(region);
     return region;
   }
@@ -1509,11 +1539,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
 
   // Sends an error of type `to` to the innermost catch, through any `finally` in between, or
   // else leaves the function with it.
-  // What the statement made so far, and what the scopes left own, are dropped on the way.
+  // What the statement made so far, and what the scopes left own, are dropped on the way; in a
+  // match arm's block, so are the values pending in the expressions it leaves.
   function route(error: string, to: Type) {
-    for (const { v, type } of [...pending].reverse()) dispose(v, type);
     const region = finallies.at(-1);
-    if (region && handlers.length <= region.handlers) {
+    const toRegion = region !== undefined && handlers.length <= region.handlers;
+    const kept = toRegion ? region.floor : handlers.at(-1)?.floor ?? 0;
+    for (const { v, type } of pending.slice(kept).reverse()) dispose(v, type);
+    if (region && toRegion) {
       drop(region.depth);
       const kept = stash(region, "error", to, error);
       return exit(region, "error", () => route(unstash(kept, to), to));

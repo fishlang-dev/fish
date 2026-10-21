@@ -78,6 +78,8 @@ export type Context = {
   assume<T>(proven: Facts, check: () => T): T;
   // Runs a match arm in a scope of its own, holding the names its pattern binds.
   arm<T>(check: () => T): T;
+  // Checks a match arm's block, whose `return`s give the arm its value: each value and its type.
+  block(arm: Extract<Stmt, { kind: "block" }>, wanted: boolean): [Expr, Type][];
   // What each match pattern tests, for codegen.
   patterns: Map<Pattern, PatternInfo>;
   // Declares a name a pattern binds, read-only, in the arm's scope.
@@ -218,25 +220,25 @@ export function expressions(ctx: Context) {
   // `match`: the subject is read once, then each arm's pattern is tried in order, binding names
   // in the arm's own scope, then its guard. Every value of the subject's type must be covered.
   // Used as a statement, its arms may give nothing. Matching a value just made, the bindings own
-  // its parts; matching a place, they borrow them.
+  // its parts; matching a place, they borrow them. A block arm gives what its `return`s do.
   function match(e: Extract<Expr, { kind: "match" }>, wanted: boolean): Type {
     const subject = read(e.subject);
     const owning = made(e.subject);
-    const given = e.arms.map((arm) => {
-      if (Array.isArray(arm.body)) throw unsupported("block arms in match", arm);
-      const body = arm.body;
-      return ctx.arm(() => {
-        pattern(arm.pattern, subject, !owning);
-        if (arm.guard) condition(arm.guard);
-        return wanted ? value(body) : result(body);
-      });
-    });
+    const given = e.arms.flatMap((arm) => ctx.arm((): [Expr, Type][] => {
+      pattern(arm.pattern, subject, !owning);
+      if (arm.guard) condition(arm.guard);
+      if (arm.body.kind === "block") return ctx.block(arm.body, wanted);
+      return [[arm.body, wanted ? value(arm.body) : result(arm.body)]];
+    }));
     const example = uncovered(e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
     if (example) throw new CompileError(missing(example[0]!, subject), e.start, e.subject.end + 1);
     if (!wanted) return "void";
-    const type = given.every((t) => t === given[0]) ? given[0]! : unionType(given);
+    // Arms that only throw give nothing, so some other arm has to.
+    if (given.length === 0) throw new CompileError("no arm of this match gives a value; 'return' one from an arm", e.start, e.subject.end + 1);
+    const types = given.map(([, t]) => t);
+    const type = types.every((t) => t === types[0]) ? types[0]! : unionType(types);
     if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
-    e.arms.forEach((arm, i) => given[i] !== type && coerce(arm.body as Expr, given[i]!, type, `this arm's '${show(given[i]!)}' doesn't fit the match's '${show(type)}'`));
+    for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
     return type;
   }
 

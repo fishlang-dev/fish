@@ -428,7 +428,8 @@ function matchArm(c: Cursor): MatchArm {
   const pattern = matchPattern(c);
   const guard = c.eat("if") ? binary(c) : undefined;
   c.expect("=>");
-  const body = c.at("{") ? block(c) : expression(c);
+  const at = c.peek().start;
+  const body: MatchArm["body"] = c.at("{") ? { kind: "block", body: block(c), start: at, end: c.end() } : expression(c);
   return { pattern, guard, body, start, end: c.end() };
 }
 

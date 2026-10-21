@@ -212,7 +212,7 @@ export type Pattern = Span & (
 );
 
 // `body` reads like an arrow function's: an expression, or a block's statements.
-export type MatchArm = Span & { pattern: Pattern; guard: Expr | undefined; body: Expr | Stmt[] };
+export type MatchArm = Span & { pattern: Pattern; guard: Expr | undefined; body: Expr | Extract<Stmt, { kind: "block" }> };
 
 // In `{ a }` the value is the identifier pattern `a`.
 export type PatternProp = Span & { key: PropertyName; value: Pattern };
