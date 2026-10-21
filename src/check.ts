@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, fits, holdsRef, widenLet, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
+import { closureType, fits, holdsRef, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -176,6 +176,10 @@ export function check(program: Stmt[]): Checked {
   const done = new Set<Instance>();
   // Each concrete instance's return type as its own body saw it, before lowering.
   const views = new Map<Instance, Type>();
+  // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
+  // infers it, and the variables still open to that in the pass being checked.
+  const demands = new Map<Stmt, Integer>();
+  const candidates = new Map<Local, Stmt>();
   const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
@@ -352,10 +356,33 @@ export function check(program: Stmt[]): Checked {
     const outer = checking;
     checking = instance;
     try {
-      withScope(scopeOf(instance), () => checkInstance(instance));
+      // A pass that found a new demand is thrown away, whatever it concluded, and the body is
+      // checked again with the demanded types; each pass adds one, so this ends.
+      for (;;) {
+        const known = demands.size;
+        const made = closures.length;
+        try {
+          withScope(scopeOf(instance), () => checkInstance(instance));
+        } catch (e) {
+          if (!(e instanceof CompileError) || demands.size === known) throw e;
+        }
+        if (demands.size === known) return;
+        forget(instance, made);
+      }
     } finally {
       checking = outer;
     }
+  }
+
+  // Clears what checking an instance recorded, for another pass.
+  function forget(instance: Instance, closuresBefore: number) {
+    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes]) table.clear();
+    instance.returns = "void";
+    delete instance.throws;
+    closures.length = closuresBefore;
+    views.delete(instance);
+    done.delete(instance);
+    inProgress.delete(instance);
   }
 
   function checkInstance(instance: Instance, outer?: Outer) {
@@ -409,7 +436,7 @@ export function check(program: Stmt[]): Checked {
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish } = expressions({
+    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -433,6 +460,15 @@ export function check(program: Stmt[]): Checked {
       resolveType,
       implicitOf,
       constructs,
+      // A candidate meeting another integer type demands it, for the next pass.
+      infer: (e, to) => {
+        const s = e.kind === "ident" ? candidates.get(locals.get(e)!) : undefined;
+        if (!s || !isInteger(to) || to === "i64") return false;
+        // The first demand decides; a different one is the usual mismatch once it applies.
+        if (demands.has(s)) return demands.get(s) === to;
+        demands.set(s, to);
+        return true;
+      },
     });
 
     // A call leaves out only the last parameters, so none may be required after an optional one.
@@ -596,7 +632,7 @@ export function check(program: Stmt[]): Checked {
           const d = s.declarations[0]!;
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
-          const annotated = d.type && resolveType(d.type);
+          const annotated = (d.type && resolveType(d.type)) || demands.get(s);
           if (typeof annotated !== "string" && annotated?.kind === "function") expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
@@ -607,6 +643,7 @@ export function check(program: Stmt[]): Checked {
           // So does a function type, which the closure given fits.
           const describes = annotated && (isInterface(annotated) || (typeof annotated !== "string" && annotated.kind === "function"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
+          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
           return;
         }
         case "if": {

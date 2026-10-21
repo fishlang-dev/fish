@@ -99,6 +99,8 @@ export type Context = {
   // Rejects a constructor call lending a value mutably as a type parameter that would let its
   // read-only fields be written.
   constructs(f: Body, args: Expr[], argTypes: Type[]): void;
+  // Whether a variable whose type is still open takes `to`, for a use needing it.
+  infer(e: Expr, to: Type): boolean;
 };
 
 export function expressions(ctx: Context) {
@@ -116,7 +118,7 @@ export function expressions(ctx: Context) {
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
     adapt: (e, to) => adapt(e, to),
   };
-  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish };
+  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly };
 
   // Literals too large for an i64 that nothing gave a wider type.
   function finish() {
@@ -133,7 +135,8 @@ export function expressions(ctx: Context) {
   // it is written, as `1` does in `let a: u8 = 1` or `a + 1`.
   // A float literal only becomes a float type.
   function adapt(e: Expr, to: Type): boolean {
-    if (!isNumeric(to) || !literalOnly(e, isFloat(to))) return false;
+    if (!isNumeric(to)) return false;
+    if (!literalOnly(e, isFloat(to))) return ctx.infer(e, to);
     retype(e, to, false);
     return true;
   }
@@ -640,6 +643,8 @@ export function expressions(ctx: Context) {
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
         const assigned = op === "=" ? value(e.value) : read(e.value);
+        // A variable whose type is still open takes the integer type assigned to it.
+        if (op === "=" && isInteger(assigned) && assigned !== target && ctx.infer(e.target, assigned)) return assigned;
         const type = op === "=" ? assigned
           : op === "+" && target === "string" ? join(e.target, target, e.value, widen(e.value, assigned))
           : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
