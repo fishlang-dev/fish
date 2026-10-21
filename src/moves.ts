@@ -52,12 +52,12 @@ export function checkMoves(body: Stmt[], instance: Instance) {
         return isRef(locals.get(s)!.type) ? [locals.get(s)!] : [];
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
-      // A `for` loop's initializer outlives every pass, so only its body counts.
       case "block":
       case "while":
       case "doWhile":
-      case "for":
         return s.body.flatMap(inside);
+      case "for":
+        return [...(s.init ? [s.init] : []), ...s.body].flatMap(inside);
       case "labeled":
         return inside(s.body);
       case "switch":
@@ -164,8 +164,8 @@ export function checkMoves(body: Stmt[], instance: Instance) {
       body();
       state = join(state, nexts.get(s)!);
       // References declared in the body are gone by the time the loop comes round or ends,
-      // however it left the body.
-      for (const local of inside(s)) release(local);
+      // however it left the body; a `for` loop's initializer outlives every pass.
+      for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(local);
       if (bodyFirst) cond();
       else update?.();
       leaving = join(leaving, exits.get(s)!);
