@@ -2,6 +2,7 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
+import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
@@ -655,6 +656,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
         return undefined;
       }
+      if (e.callee.kind === "member" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
       const copy = convert(value(object), types.get(object)!, types.get(e)!);
@@ -689,6 +691,40 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return values;
   }
 
+  // A string method's call. The string is read before its arguments run, as in JavaScript. In
+  // an optional chain, the result is the chain's Option.
+  function stringCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
+    const s = operand(callee.object, e.args);
+    const args = e.args.map((a) => value(a));
+    const result = temp();
+    switch (callee.name) {
+      case "charCodeAt":
+        inBounds(s, args[0]!, e);
+        emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${args[0]})`);
+        return convert(result, "u16", types.get(e)!);
+    }
+    throw new Error(`internal error: no lowering for the string method ${callee.name}`);
+  }
+
+  function units(s: string): string {
+    const result = temp();
+    emit(`${result} = call i64 @fsh_rt_str_units(ptr ${s})`);
+    return result;
+  }
+
+  // Panics, as Rust's indexing does, unless a `usize` index is below the string's UTF-16 length.
+  function inBounds(s: string, index: string, at: Expr) {
+    const length = units(s);
+    const [outside, fail, ok] = [temp(), label(), label()];
+    emit(`${outside} = icmp uge i64 ${index}, ${length}`);
+    emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
+    startBlock(fail);
+    const { line, col } = locate(src, at.start);
+    emit(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${file}:${line}:${col}:\n`)}, i64 ${length}, i64 ${index})`);
+    emit("unreachable");
+    startBlock(ok);
+  }
+
   // A field read, or a getter's result.
   function member(e: Extract<Expr, { kind: "member" }>): string {
     const getter = calls.get(e);
@@ -697,6 +733,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (!types.has(e.object)) return "zeroinitializer";
     // Through a reference, the value it points to.
     const shared = coercions.get(e.object) ?? types.get(e.object)!;
+    if (shared === "string") return convert(units(value(e.object)), "usize", types.get(e)!);
     if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
     const object = shared as ObjectType | ClassType;
     const result = temp();
@@ -1388,7 +1425,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const name = `@.text.${globals.length}`;
     texts.set(value, name);
     globals.push(`${name}.bytes = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
-    globals.push(`${name} = private unnamed_addr constant { i64, i64, ptr, ptr, i64, ptr } { i64 -1, i64 ${bytes.length}, ptr ${name}.bytes, ptr null, i64 ${value.length}, ptr null }`);
+    // Non-ASCII text longer than one breadcrumb's stride gets its breadcrumbs, as the runtime
+    // would make them.
+    const crumbs = bytes.length !== value.length && value.length > STRIDE ? breadcrumbs(value) : undefined;
+    if (crumbs) globals.push(`${name}.crumbs = private unnamed_addr constant [${crumbs.length} x i64] [${crumbs.map((c) => `i64 ${c}`).join(", ")}]`);
+    globals.push(`${name} = private unnamed_addr constant { i64, i64, ptr, ptr, i64, ptr } { i64 -1, i64 ${bytes.length}, ptr ${name}.bytes, ptr null, i64 ${value.length}, ptr ${crumbs ? `${name}.crumbs` : "null"} }`);
     return name;
   }
 
@@ -1403,6 +1444,24 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     globals.push(`${name} = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     return name;
   }
+}
+
+// The runtime's breadcrumb stride, in UTF-16 units.
+const STRIDE = 64;
+
+// Where every STRIDE-th UTF-16 unit of a string is: its character's byte offset times two,
+// plus one when the unit is a pair's second half.
+function breadcrumbs(text: string): number[] {
+  const crumbs: number[] = [];
+  let at = 0;
+  for (let unit = 0; unit < text.length; unit++) {
+    const c = text.charCodeAt(unit);
+    const second = c >= 0xdc00 && c < 0xe000 && unit > 0 && text.charCodeAt(unit - 1) >= 0xd800 && text.charCodeAt(unit - 1) < 0xdc00;
+    if (unit % STRIDE === 0) crumbs.push(at * 2 + (second ? 1 : 0));
+    const paired = c >= 0xd800 && c < 0xdc00 && text.charCodeAt(unit + 1) >= 0xdc00 && text.charCodeAt(unit + 1) < 0xe000;
+    if (!paired) at += second ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+  }
+  return crumbs;
 }
 
 // A string's WTF-8 bytes: UTF-8, with a lone surrogate in its 3-byte form.

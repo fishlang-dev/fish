@@ -138,6 +138,66 @@ static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
   return 0xDC00 + ((code - 0x10000) & 0x3FF);
 }
 
+// The UTF-16 length, counted once and kept.
+int64_t fsh_rt_str_units(fsh_str *s) {
+  if (s->units >= 0) return s->units;
+  int64_t at = 0, n = 0;
+  int half = 0;
+  while (at < s->length) {
+    fsh_next((const unsigned char *)s->bytes, &at, &half);
+    n++;
+  }
+  return s->units = n;
+}
+
+// Breadcrumbs: where every 64th UTF-16 unit is, as its character's byte offset times two, plus
+// one when the unit is a pair's second half. A literal's are made by the compiler.
+#define FSH_STRIDE 64
+
+static void fsh_crumbs(fsh_str *s) {
+  int64_t *crumbs = fsh_rt_alloc((s->units / FSH_STRIDE + 1) * sizeof(int64_t));
+  int64_t at = 0;
+  int half = 0;
+  for (int64_t unit = 0; unit < s->units; unit++) {
+    if (unit % FSH_STRIDE == 0) crumbs[unit / FSH_STRIDE] = at * 2 + half;
+    fsh_next((const unsigned char *)s->bytes, &at, &half);
+  }
+  s->crumbs = crumbs;
+}
+
+// Where UTF-16 unit i is: the byte its character starts at, and whether it is the second half
+// of a pair. All-ASCII text is indexed directly; other text walks on from the breadcrumb at
+// or before i, at most 63 units.
+// ponytail: building breadcrumbs writes to a string that may be shared; once strings cross
+// threads this needs an atomic publish.
+static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
+  *half = 0;
+  if (fsh_rt_str_units(s) == s->length) return i;
+  int64_t at = 0, unit = 0;
+  if (!s->crumbs && s->count >= 0 && s->units > FSH_STRIDE) fsh_crumbs(s);
+  if (s->crumbs) {
+    int64_t crumb = s->crumbs[i / FSH_STRIDE];
+    at = crumb / 2;
+    *half = crumb % 2;
+    unit = i / FSH_STRIDE * FSH_STRIDE;
+  }
+  for (; unit < i; unit++) fsh_next((const unsigned char *)s->bytes, &at, half);
+  return at;
+}
+
+uint16_t fsh_rt_str_unit(fsh_str *s, int64_t i) {
+  int half;
+  int64_t at = fsh_seek(s, i, &half);
+  return fsh_next((const unsigned char *)s->bytes, &at, &half);
+}
+
+// An index past the end panics as Rust's does; at is the "panicked at" line.
+void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
+  fflush(NULL);
+  fprintf(stderr, "%sindex out of bounds: the len is %lld but the index is %llu\n", at, (long long)length, (unsigned long long)index);
+  exit(101);
+}
+
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {

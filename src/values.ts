@@ -220,6 +220,7 @@ export function expressions(ctx: Context) {
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
+    if (callee.kind === "member" && receiver !== undefined && isText(receiver)) return stringCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -281,6 +282,31 @@ export function expressions(ctx: Context) {
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
     return { type: type.returns, what: `'${callee.name}'` };
+  }
+
+  // A call of one of a string's methods, which takes its arguments as the method's parameters.
+  function stringCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
+    text(callee.object, receiver, linked(callee));
+    const method = STRING_METHODS[callee.name];
+    if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
+    const [params, returns, required] = method;
+    if (e.args.length < required || e.args.length > params.length) {
+      const count = required === params.length ? `${required}` : `${required} or ${params.length}`;
+      throw new CompileError(`'${callee.name}' takes ${count} argument${params.length === 1 ? "" : "s"}`, e.start, e.end);
+    }
+    e.args.forEach((a, i) => {
+      const t = value(a);
+      coerce(a, t, params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(params[i]!)}'`);
+    });
+    return { type: returns, what: `'${callee.name}'` };
+  }
+
+  // A string read where a string's property or method is used: a literal becomes its string,
+  // and a reference is read through. In an optional chain, the chain reads the Option.
+  function text(object: Expr, type: Type, chained: boolean) {
+    const held = types.get(object);
+    if (held && isRefType(held)) coercions.set(object, "string");
+    else if (type !== "string" && !chained) coerce(object, type, "string", "");
   }
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
@@ -562,6 +588,12 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
+        // A string's one property is its length in UTF-16 code units.
+        if (isText(object)) {
+          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'`, e.start, e.end);
+          text(e.object, object, linked(e));
+          return linked(e) ? optional("usize", e) : "usize";
+        }
         const found = typeof object === "string" || object.kind === "closure" ? undefined : field(object, e.name);
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
@@ -1284,3 +1316,8 @@ export function expressions(ctx: Context) {
 
 // A string, or a string literal that isn't an enum's member.
 const isText = (t: Type) => t === "string" || (typeof t !== "string" && t.kind === "literal" && typeof t.value === "string" && !t.owner);
+
+// Each string method: its parameters, what it returns, and how many arguments it needs.
+const STRING_METHODS: Record<string, [Type[], Type, number]> = {
+  charCodeAt: [["usize"], "u16", 1],
+};
