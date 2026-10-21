@@ -180,7 +180,7 @@ export function check(program: Stmt[]): Checked {
       if (found.length === 0) throw new CompileError(`no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
       return found;
     }
-    if (f.self && !f.self.constructor) return ["this"];
+    if (f.self && !f.self.constructor && !f.self.owned) return ["this"];
     const refs = params.flatMap((p, i) => (holdsRef(p) ? [i] : []));
     if (refs.length === 1) return refs;
     throw new CompileError(refs.length === 0
@@ -327,7 +327,7 @@ export function check(program: Stmt[]): Checked {
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
     const assigned = assignedNames(f.body);
-    const narrowable = (l: Local) => l.param || !l.mutable || !assigned.has(l.name);
+    const narrowable = (l: Local) => (l.param || !l.mutable || !assigned.has(l.name)) && !(isRef(l.type) && l.type.mutable && assigned.has(l.name));
     // How many scopes enclose each binding's declaration.
     const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
@@ -383,7 +383,7 @@ export function check(program: Stmt[]): Checked {
     const type = declared ?? inferred ?? "void";
     lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
-    const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self ? ["this" as const] : [])];
+    const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
     const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
     if (type !== "void" && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;

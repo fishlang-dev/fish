@@ -213,6 +213,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       case "ident":
         return locals.has(e) ? use(e, consume) : undefined;
+      case "super":
       case "this":
         free("this", e, "read");
         if (f.self?.owned) return use(e, consume);
@@ -271,13 +272,18 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return expr(e.operand);
       case "update":
         expr(e.operand);
-        if (e.operand.kind === "ident" && isRef(types.get(e.operand)!) && coercions.has(e.operand)) return;
         return change(e.operand);
       case "assign": {
-        // A whole value written through a mutable reference uses the reference, not its place.
-        if (e.target.kind === "ident" && isRef(types.get(e.target)!) && coercions.has(e.target)) {
+        // A whole value written through a mutable reference changes everything it points to,
+        // and can't keep references there, nor be handed on as well.
+        if (isRef(types.get(e.target)!) && coercions.has(e.target)) {
           expr(e.target);
           expr(e.value, (p) => `'${p}' moved here into what '${text(e.target)}' points to; use '${p}.clone()' to keep a copy`);
+          change(e.target, e.end);
+          if (holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(e.target, [e.value]);
+          if (consume && !isCopy(types.get(e)!)) {
+            throw new CompileError(`this assignment's value can't be used: it was moved into what '${text(e.target)}' points to, which only borrows it`, e.start, e.end);
+          }
           return;
         }
         if (e.op !== "=") expr(e.target);

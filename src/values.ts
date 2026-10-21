@@ -205,7 +205,7 @@ export function expressions(ctx: Context) {
     if (typeof type !== "string" && type?.kind === "ref") {
       throw new CompileError(`can't call '${name}' through the reference '${placeText(object)}': it takes its object over, and a reference only borrows it; call it on the value itself`, object.start, object.end);
     }
-    if (object.kind === "this" && !self?.owned) {
+    if ((object.kind === "this" || object.kind === "super") && !self?.owned) {
       throw new CompileError(`can't call '${name}' on 'this' here: it takes its object over, and this method only borrows 'this'; declare 'this: Own<this>' to give it away`, object.start, object.end);
     }
   }
@@ -256,6 +256,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
     }
     types.set(callee.object, base);
+    if (found.self!.owned) takesOver(callee.object, callee.name);
     return found;
   }
 
@@ -457,6 +458,8 @@ export function expressions(ctx: Context) {
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
+    // A mutable reference lent on must be reachable only through mutable references.
+    if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || lower(type) === lower(to)) return;
     if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, to, message);
@@ -683,14 +686,18 @@ export function expressions(ctx: Context) {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);
-      // A whole value assigned to a mutable reference is written through it.
-      if (target.kind === "ident" && isRefType(read) && read.mutable) {
+      // A whole value assigned to a mutable reference is written through it, to what it was
+      // declared to point to, whatever a check narrowed it to.
+      const declared = target.kind === "ident" ? locals.get(target)!.type : read;
+      if ((target.kind === "ident" || target.kind === "member") && isRefType(declared) && declared.mutable) {
         // What a type parameter stands for may be wider than any value written here.
-        if (typeof read.to !== "string" && read.to.kind === "param") {
-          throw new CompileError(`can't assign a whole value through '${target.name}', which may point to a wider value; assign its fields instead`, target.start, target.end);
+        if (typeof declared.to !== "string" && declared.to.kind === "param") {
+          throw new CompileError(`can't assign a whole value through '${placeText(target)}', which may point to a wider value; assign its fields instead`, target.start, target.end);
         }
-        coercions.set(target, read.to);
-        return read.to;
+        if (target.kind === "member") changeable(target, "assign to");
+        types.set(target, declared);
+        coercions.set(target, declared.to);
+        return declared.to;
       }
       intoMember(target, types);
       changeable(target, "assign to");
@@ -755,23 +762,25 @@ export function expressions(ctx: Context) {
   function changeable(target: Expr, action: string) {
     let root = target;
     let path = "";
+    // Through a mutable reference anything below it may change, whatever variable holds the
+    // reference, as long as nothing above it is shared.
+    let throughMut = false;
     while (root.kind === "member") {
       readonly(root, target, action);
-      // Nothing changes through a shared reference; through a mutable one, anything below it
-      // may change, whatever holds the reference.
       const holder = types.get(root.object);
-      if (typeof holder !== "string" && holder?.kind === "ref") {
-        if (holder.mutable) return;
+      if (typeof holder !== "string" && holder?.kind === "ref" && holder.mutable) throughMut = true;
+      else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
       path = `.${root.name}${path}`;
       root = root.object;
     }
-    if (root.kind === "this") {
+    if (root.kind === "this" || root.kind === "super") {
       if (self?.mutable) return;
       throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
     }
     const local = locals.get(root)!;
+    if (throughMut) return;
     // A shared reference never changes what it points to; a mutable one may, whatever holds
     // it, and a method may change through it.
     if ((path || action !== "assign to") && typeof local.type !== "string" && local.type.kind === "ref") {
