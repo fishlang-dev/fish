@@ -129,7 +129,12 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new WeakMap<Span, Map<string, Type>>();
-  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf };
+  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf, constructs };
+
+  // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.
+  function constructs(f: Body, args: Expr[], argTypes: Type[]) {
+    readOnlyKept(f.params, classParams(f), new Map(f.scope ?? []), argTypes, args, f.owner?.name ?? f.name);
+  }
 
   // A body's written return type. A reference to the type a reference parameter borrows is
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
@@ -225,6 +230,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       if (typeof type !== "string" && type.kind === "function") throw unsupported("function types as type arguments", at);
     }
     withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
+    readOnlyKept(f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
@@ -245,6 +251,22 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     const instance = instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
     if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     return instance;
+  }
+
+  // A value lent as `Mut<T>`, for a type parameter `T` bounded by a type that declares one of its
+  // read-only fields writable, could be changed there.
+  function readOnlyKept(written: Param[], params: TypeParam[], bindings: Map<string, Type>, argTypes: Type[], args: Expr[], name: string) {
+    written.forEach((p, i) => {
+      const node = p.type;
+      const inner = node?.kind === "ref" && node.name === "Mut" ? node.args[0] : undefined;
+      const param = inner?.kind === "ref" ? params.find((q) => q.name === inner.name) : undefined;
+      const given = argTypes[i];
+      if (!param?.constraint || given === undefined) return;
+      const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
+      const bound = withScope(bindings, () => resolveType(param.constraint!));
+      const unlocked = unlocks(held, bound);
+      if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${name}' takes it mutably as '${show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
+    });
   }
 
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its

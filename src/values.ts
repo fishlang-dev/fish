@@ -91,11 +91,14 @@ export type Context = {
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
+  // Rejects a constructor call lending a value mutably as a type parameter that would let its
+  // read-only fields be written.
+  constructs(f: Body, args: Expr[], argTypes: Type[]): void;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf, resolveType } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -590,6 +593,7 @@ export function expressions(ctx: Context) {
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+        constructs(c.constructor, list, argTypes);
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
@@ -1143,10 +1147,7 @@ export function expressions(ctx: Context) {
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
-    // In an instance, a type parameter's field is as read-only as the field of what it stands for.
-    const concrete = object && lower(object);
-    const locked = (t: Type | undefined) => typeof t !== "string" && t !== undefined && field(t, e.name)?.readonly;
-    if (typeof object === "string" || !object || !(locked(object) || locked(concrete))) return;
+    if (typeof object === "string" || !object || !field(object, e.name)?.readonly) return;
     if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
     const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
     throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);

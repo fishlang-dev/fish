@@ -5,4 +5,4 @@ class Box<T extends { id: i64 }> {
   set(this: Mut<this>) { this.m.id = 7 }
 }
 function main() { let a = new A(); let b = new Box(a); b.set(); print(a.id) }
-// error: cannot assign to 'id' because it is a read-only property
+// error: 'id' is read-only here, but 'Box<A>' takes it mutably

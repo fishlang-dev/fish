@@ -77,6 +77,8 @@ type Outer = {
   noteThis(e: Expr): void;
   changesLocal(l: Local, path: string, action: string, target: Expr, throughMut: boolean): void;
   changesThis(path: string, action: string, target: Expr): void;
+  // Whether a variable, followed through captures to where it is declared, can't change.
+  constant(l: Local): boolean;
 };
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
@@ -164,7 +166,7 @@ export function check(program: Stmt[]): Checked {
   const done = new Set<Instance>();
   // Each concrete instance's return type as its own body saw it, before lowering.
   const views = new Map<Instance, Type>();
-  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf } = instancing({
+  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
   });
@@ -406,6 +408,7 @@ export function check(program: Stmt[]): Checked {
       closureBody: (t) => closureBodies.get(t)!,
       resolveType,
       implicitOf,
+      constructs,
     });
 
     // A call leaves out only the last parameters, so none may be required after an optional one.
@@ -518,7 +521,7 @@ export function check(program: Stmt[]): Checked {
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner);
-      checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis });
+      checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant });
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       // A closure holds what it moves, or everything under `move`, and borrows the rest; `this`
@@ -770,12 +773,23 @@ export function check(program: Stmt[]): Checked {
       instance.changed!.add(alias);
       if (from === "this") outer!.changesThis(path, action, target);
       // What a `move` closure holds is its own to change, unless the change goes through a
-      // mutable reference it holds a copy of.
-      else if (f.closure!.move && !(isRef(from.type) && (path || throughMut))) return;
+      // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
+      else if (f.closure!.move && !(isRef(from.type) && (path || throughMut))) {
+        if (outer!.constant(from)) {
+          throw new CompileError(`cannot ${action} '${from.name}${path}' in this closure because '${from.name}' is a constant; declare it with 'let'`, target.start, target.end);
+        }
+        return;
+      }
       else {
         if (!path && action === "assign to" && isRef(from.type) && !from.type.mutable) throw unsupported("closures that point captured references elsewhere", target);
         outer!.changesLocal(from, path, action, target, throughMut);
       }
+    }
+
+    function constant(l: Local): boolean {
+      const from = captures?.get(l);
+      if (from && from !== "this") return outer!.constant(from);
+      return !l.mutable || l.param;
     }
 
     function noteThis(e: Expr) {
