@@ -222,6 +222,7 @@ export function expressions(ctx: Context) {
   function effect(e: Expr) {
     if (e.kind === "call") call(e);
     else if (e.kind === "match") match(e, false);
+    else if (e.kind === "pipe") pipe(e, false);
     else value(e);
   }
 
@@ -252,6 +253,59 @@ export function expressions(ctx: Context) {
     if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
     for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
     return type;
+  }
+
+  // `x |> f(%)`. Over a place, the pipe means its right side with the place written for each
+  // `%`, so it reads, borrows and moves as that would: the node becomes that expression, and
+  // later stages never see a pipe.
+  function pipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
+    value(e.value);
+    if (!steady(e.value)) throw unsupported("pipes over values that aren't variables or fields", e.value);
+    const place = e.value;
+    const body = topics(e.body, (at) => spanned(structuredClone(place), at));
+    for (const key of Object.keys(e)) delete (e as Record<string, unknown>)[key];
+    Object.assign(e, body);
+    if (wanted) return value(e);
+    effect(e);
+    return "void";
+  }
+
+  // A place reading it again reads the same value: no part of it runs code.
+  function steady(e: Expr): boolean {
+    if (!place(e)) return false;
+    for (let at = e; at.kind === "member" || at.kind === "index"; at = at.object) {
+      if (at.kind === "index" && at.index.kind !== "int" && at.index.kind !== "ident") return false;
+    }
+    return true;
+  }
+
+  // Calls a pipe's every `%` what `replace` makes of it: in its right side, and in the left
+  // side of a pipe inside it, whose own right side has a topic of its own.
+  function topics(body: Expr, replace: (topic: Expr) => Expr): Expr {
+    if (body.kind === "topic") return replace(body);
+    const visit = (node: Record<string, unknown>) => {
+      for (const [key, child] of Object.entries(node)) {
+        if (!child || typeof child !== "object") continue;
+        const kind = (child as { kind?: unknown }).kind;
+        if (kind === "topic") node[key] = replace(child as Expr);
+        else if (kind === "pipe") {
+          const inner = child as Extract<Expr, { kind: "pipe" }>;
+          inner.value = topics(inner.value, replace);
+        } else visit(child as Record<string, unknown>);
+      }
+    };
+    visit(body as unknown as Record<string, unknown>);
+    return body;
+  }
+
+  // A copy of an expression standing where `at` was, for messages and for keys by position.
+  function spanned(e: Expr, at: Expr): Expr {
+    const visit = (node: Record<string, unknown>) => {
+      if ("start" in node && "end" in node) [node.start, node.end] = [at.start, at.end];
+      for (const child of Object.values(node)) if (child && typeof child === "object") visit(child as Record<string, unknown>);
+    };
+    visit(e as unknown as Record<string, unknown>);
+    return e;
   }
 
   // Checks a pattern against the type of the value it meets, declaring what it binds and
@@ -996,6 +1050,8 @@ export function expressions(ctx: Context) {
       }
       case "match":
         return match(e, true);
+      case "pipe":
+        return pipe(e, true);
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);

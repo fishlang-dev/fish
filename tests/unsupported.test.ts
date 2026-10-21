@@ -122,7 +122,6 @@ const EXPRESSIONS: [string, string][] = [
   ["function () {}", "function expressions"],
   ["async (x: i64) => x", "async arrow functions"],
   ["<T>(x: T) => x", "generic arrow functions"],
-  ["1 |> % + 1", "'|>' expressions"],
   ["comptime 1", "comptime expressions"],
   ["class {}", "class expressions"],
   ["true[0]", "indexed access expressions"],
