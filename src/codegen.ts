@@ -386,7 +386,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
           const testType = valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string";
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
-          settle(held.length);
+          settle(floor + held.length);
           const next = label();
           emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
           startBlock(next);

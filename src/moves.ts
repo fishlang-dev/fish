@@ -19,7 +19,7 @@ type Move = { start: number; end: number; note: string; passes: Map<Stmt, number
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
 // A `for...of` loop lends its array for as long as it runs, as a call lends for its duration.
-type Loan = { place: string; mutable: boolean; start: number; end: number; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean };
+type Loan = { place: string; mutable: boolean; start: number; end: number; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
 
 // The places moved, and the loans made, on the way here, or null where control can't reach.
 // Loans are keyed by where they were made.
@@ -441,20 +441,37 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
         return;
       }
-      // Each arm runs from the state after the subject, and the match ends in any of theirs.
-      // A binding borrowing from the matched place holds a loan of it until its arm ends.
+      // Each arm runs from the state after the subject and any guards before it that failed,
+      // and the match ends in any of theirs. A binding borrowing from the matched place holds a
+      // loan of it until its arm ends; a guard holds one while it runs, since later arms still
+      // test the place.
       case "match": {
         expr(e.subject);
-        const place = key(e.subject);
-        const before = join(state, null);
+        let subject = e.subject;
+        while (subject.kind === "nonNull") subject = subject.expr;
+        const place = key(subject);
+        let entry = join(state, null);
         let after: State = null;
         for (const arm of e.arms) {
-          state = join(before, null);
-          const borrowing = bindings(arm.pattern).flatMap((b) => locals.get(b as Expr) ?? []).filter((l) => isRef(l.type));
+          state = join(entry, null);
+          const bound = bindings(arm.pattern).flatMap((b) => locals.get(b as Expr) ?? []);
+          // Each time an arm is entered, its bindings are new, as a loop's `let` is.
+          for (const local of bound) revive(String(local.id));
+          const borrowing = bound.filter((l) => isRef(l.type));
           for (const holder of borrowing) {
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder]) });
           }
-          if (arm.guard) expr(arm.guard);
+          if (arm.guard) {
+            const at = -arm.guard.start - 1;
+            if (place !== undefined && state) state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
+            expr(arm.guard);
+            state?.loans.delete(at);
+            const passed = state;
+            state = join(passed, null);
+            for (const holder of borrowing) release(holder);
+            entry = join(entry, state);
+            state = passed;
+          }
           if (arm.body.kind === "block") {
             arms.set(arm.body, [consume, discarded]);
             exits.set(arm.body, null);
@@ -628,10 +645,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const verb = { read: "use", change: "change", move: "move", lend: "lend", "lend mutably": "mutably lend" }[access];
       const holders = [...loan.holders].filter((h) => (last.get(h) ?? -1) > at);
       const holder = loan.loop ? `a 'for...of' loop is reading '${lent}'`
+        : loan.guard ? `a match guard is reading '${lent}', and later arms still test it`
         : loan.call
         ? `'${lent}' is lent ${loan.mutable ? "mutably " : ""}to ${loan.call} for this call`
         : `${holders.map((h) => `'${h.name}'`).join(" and ")} ${holders.length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${holders.length > 1 ? "are" : "is"} used later`;
-      const until = loan.loop ? "the loop ends" : loan.call ? "the call returns" : "the borrow's last use";
+      const until = loan.loop ? "the loop ends" : loan.guard ? "the guard ends" : loan.call ? "the call returns" : "the borrow's last use";
       const earlier = loan.start >= e.start && [...passes.values()].some((p) => p > 0) ? " on an earlier pass through this loop" : "";
       throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
         message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here${earlier}, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
@@ -876,7 +894,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A loan lasts while one of its holders may still be used, or for its call.
   function live(loan: Loan, at: number): boolean {
-    return loan.call !== undefined || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
+    return loan.call !== undefined || loan.guard === true || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
   }
 
   // Changing a place needs it free of loans; a setter changes the object it is called on.

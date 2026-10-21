@@ -1,5 +1,5 @@
 import type { Expr, Pattern } from "./parser.ts";
-import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type VariantType } from "./typing.ts";
+import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type ParamType, type Type, type VariantType } from "./typing.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -26,6 +26,10 @@ export type PatternTest =
 export type PatternInfo = { type: Type } & PatternTest;
 
 export type LiteralValue = string | bigint | boolean | number | null;
+
+// What an object pattern can take apart: an object, an instance, or a type parameter whose
+// bound is an object type, as a parameter typed with one is.
+export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
 export function lowerPattern(info: PatternInfo): PatternInfo {
@@ -79,7 +83,7 @@ type Case =
   | { kind: "none" }
   | { kind: "some"; inner: Type }
   | { kind: "variant"; variant: VariantType }
-  | { kind: "object"; type: ObjectType | ClassType }
+  | { kind: "object"; type: Shape }
   | { kind: "open"; type: Type };
 
 function cases(t: Type): Case[] {
@@ -91,7 +95,7 @@ function cases(t: Type): Case[] {
     if (m === "null") return [{ kind: "none" }];
     if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
     if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
-    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class")) return [{ kind: "object", type: m }];
+    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class" || (m.kind === "param" && m.bound?.kind === "object"))) return [{ kind: "object", type: m }];
     return [{ kind: "open", type: m }];
   });
 }
@@ -162,8 +166,8 @@ function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => Pa
 
 // The fields an object pattern can test: an object's, or an instance's public ones, its bases'
 // included.
-export function objectFields(t: ObjectType | ClassType): Field[] {
-  if (t.kind === "object") return t.fields;
+export function objectFields(t: Shape): Field[] {
+  if (t.kind === "object" || t.kind === "param") return t.fields;
   return [...(t.base ? objectFields(t.base) : []), ...t.fields].filter((f) => (f.access ?? "public") === "public");
 }
 

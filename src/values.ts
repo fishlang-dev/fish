@@ -3,7 +3,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
-import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest } from "./match.ts";
+import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
@@ -150,6 +150,14 @@ export function expressions(ctx: Context) {
   // A float literal only becomes a float type.
   function adapt(e: Expr, to: Type): boolean {
     if (!isNumeric(to)) return false;
+    // A `?:` or match whose every branch is a number literal gives the number type it meets.
+    if (e.kind === "conditional" || e.kind === "match") {
+      const branches = e.kind === "conditional" ? [e.then, e.else] : e.arms.map((a) => a.body);
+      if (!branches.every((b) => b.kind !== "block" && literalOnly(b, isFloat(to)))) return false;
+      for (const b of branches) retype(b as Expr, to, false);
+      types.set(e, to);
+      return true;
+    }
     if (!literalOnly(e, isFloat(to))) return ctx.infer(e, to);
     retype(e, to, false);
     return true;
@@ -235,7 +243,11 @@ export function expressions(ctx: Context) {
     if (!wanted) return "void";
     // Arms that only throw give nothing, so some other arm has to.
     if (given.length === 0) throw new CompileError("no arm of this match gives a value; 'return' one from an arm", e.start, e.subject.end + 1);
+    // Number literals in an arm take the number type another arm gives, as a conditional's do.
     const types = given.map(([, t]) => t);
+    const numeric = types.find((t) => isNumeric(t) && given.every(([v, u]) => u === t || literalOnly(v, isFloat(t))));
+    if (numeric) given.forEach(([v, t], i) => t !== numeric && adapt(v, numeric) && (types[i] = numeric));
+    for (let i = 0; i < given.length; i++) given[i]![1] = types[i]!;
     const type = types.every((t) => t === types[0]) ? types[0]! : unionType(types);
     if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
     for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
@@ -258,6 +270,9 @@ export function expressions(ctx: Context) {
         const unit = variantNamed(members, p.name);
         if (unit && unit.fields.length === 0) return record({ kind: "variant", variant: unit, args: [] });
         if (p.name === "None" && optional) return record({ kind: "none" });
+        // A C-like enum's member may be named bare too, as a data enum's unit member may.
+        const member = members.find((m): m is LiteralType => typeof m !== "string" && m.kind === "literal" && m.owner?.member === p.name);
+        if (member) return record({ kind: "literal", value: member.value, member });
         ctx.bind(p.name, borrowing && !isCopy(type) ? refType(type, false) : type, p as Expr);
         return record({ kind: "any" });
       }
@@ -270,6 +285,9 @@ export function expressions(ctx: Context) {
         let t = value(p.value);
         // A number takes the matched type's number type, as a literal operand does.
         const numeric = members.find(isNumeric);
+        if (isNumeric(t) && members.filter(isNumeric).length > 1) {
+          throw new CompileError(`a number can't be matched against '${show(type)}', which holds several number types; convert the value with 'as' first`, p.start, p.end);
+        }
         if (isNumeric(t) && numeric && t !== numeric) {
           coerce(p.value, t, numeric, `'${show(t)}' can't match a '${show(numeric)}'`);
           t = numeric;
@@ -305,9 +323,15 @@ export function expressions(ctx: Context) {
           if (typeof prop.key !== "string") throw unsupported("computed keys in patterns", prop);
           return prop.key;
         });
-        const shapes = members.filter((m): m is ObjectType | ClassType => {
-          if (typeof m === "string" || (m.kind !== "object" && m.kind !== "class")) return false;
-          return keys.every((k) => objectFields(m).some((f) => f.name === k));
+        // A member is ruled out by a field it lacks, or by a literal field the pattern's literal
+        // contradicts, as a discriminant does.
+        const shapes = members.filter((m): m is Shape => {
+          if (typeof m === "string" || !(m.kind === "object" || m.kind === "class" || (m.kind === "param" && m.bound?.kind === "object"))) return false;
+          return p.props.every((prop, i) => {
+            const field = objectFields(m).find((f) => f.name === keys[i]);
+            const known = field && typeof field.type !== "string" && field.type.kind === "literal" ? field.type : undefined;
+            return field && !(known && prop.value.kind === "literal" && literalOf(prop.value.value) !== known.value);
+          });
         });
         if (shapes.length === 0) throw never();
         const fields = p.props.map((prop, i): [string, Pattern, Type] => {
@@ -1050,7 +1074,7 @@ export function expressions(ctx: Context) {
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [operand(e.left), operand(e.right)];
-          if (isText(left) || isText(right)) return join(e.left, left, e.right, right);
+          if (stringLike(left) || stringLike(right)) return join(e.left, left, e.right, right);
         }
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       default:
@@ -1164,7 +1188,7 @@ export function expressions(ctx: Context) {
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
   function joined(e: Expr, type: Type, into: string) {
-    if (isText(type)) {
+    if (stringLike(type)) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
