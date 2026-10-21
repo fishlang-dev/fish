@@ -78,6 +78,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
   }
 
+  // An array of an element type. Arrays of references, and of functions, which would need their
+  // calls boxed, aren't supported yet.
+  function array(element: Type, at: TypeNode): Type {
+    if (holdsRef(element)) throw unsupported("arrays of references", at);
+    if (typeof element !== "string" && (element.kind === "function" || element.kind === "closure")) throw unsupported("arrays of functions", at);
+    return arrayType(element);
+  }
+
   function resolveType(t: TypeNode): Type {
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
@@ -91,7 +99,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "literal") return literal(t.value);
     if (t.kind === "union") return unionType(t.types.map(unionMember));
     if (t.kind === "intersection") return intersection(t.types);
-    if (t.kind === "array") return arrayType(resolveType(t.element));
+    if (t.kind === "array") return array(resolveType(t.element), t);
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
@@ -100,7 +108,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
     }
-    if (t.name === "Array" && t.args.length === 1) return arrayType(resolveType(t.args[0]!));
+    if (t.name === "Array" && t.args.length === 1) return array(resolveType(t.args[0]!), t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "null" || t.name === "undefined") {

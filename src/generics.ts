@@ -67,6 +67,9 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
     return;
   }
+  // `T[]` and `Array<T>` against an array match its element type.
+  const element = node.kind === "array" ? node.element : node.kind === "ref" && node.name === "Array" && node.args.length === 1 ? node.args[0] : undefined;
+  if (element && typeof arg !== "string" && arg.kind === "array") return infer(element, arg.element, names, bindings, at);
   if (node.kind !== "object" || typeof arg === "string") return;
   for (const m of node.members) {
     if (m.kind !== "property" || typeof m.name !== "string" || !m.type) continue;

@@ -81,6 +81,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   let scopes: { slot: string; type: Type }[][] = [];
   // Receivers copied into slots for owning methods, whose leftovers drop after the call.
   const spills: { slot: string; type: Type; copy: { v: string; type: Type } }[] = [];
+  // The index values an assignment ran ahead of its value, by index expression.
+  const fixed = new Map<Expr, string>();
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
@@ -752,9 +754,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pointer to an array's element, after the bounds check.
-  function element(e: Extract<Expr, { kind: "index" }>, array: string): string {
+  // An array that is a place is read after the index runs, which may change it; a temporary
+  // one runs first, as JavaScript runs an index's object. An index an assignment already ran is
+  // reused, with the bounds checked again.
+  function element(e: Extract<Expr, { kind: "index" }>): string {
     const type = valueType(e.object) as ArrayType;
-    const index = value(e.index);
+    let index = fixed.get(e.index);
+    let array: string;
+    if (index === undefined && !lendable(e.object)) {
+      array = value(e.object);
+      index = value(e.index);
+    } else {
+      index ??= value(e.index);
+      array = value(e.object);
+    }
     const [data, length, at] = [temp(), temp(), temp()];
     emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
     bounds(length, index, e);
@@ -989,6 +1002,30 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${file}:${line}:${col}:\n`)}, i64 ${length}, i64 ${index})`);
     emit("unreachable");
     startBlock(ok);
+  }
+
+  function assign(e: Extract<Expr, { kind: "assign" }>): string {
+    const op = ASSIGNMENTS[e.op]!;
+    // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
+    // run it, which matters when the target is a setter.
+    if (op === "&&" || op === "||") return logical(op, value(e.target), () => store(e.target, value(e.value)));
+    // The target is read before the right-hand side runs, as in JavaScript.
+    const type = types.get(e)!;
+    if (op === "+" && type === "string") {
+      return store(e.target, concat(operand(e.target, [e.value]), written(value(e.value), valueType(e.value))));
+    }
+    return store(e.target, op === "=" ? owned(e.value) : numeric(op, value(e.target), value(e.value), e, type));
+  }
+
+  // Runs an assignment to a target, having first run the indexes into arrays along its path,
+  // outermost first, so each runs once and before the value, as in JavaScript.
+  function fixing(target: Expr, run: () => string): string {
+    const nodes: Expr[] = [];
+    for (let e = target; e.kind === "member" || e.kind === "index"; e = e.object) if (e.kind === "index" && isArray(valueType(e.object))) nodes.unshift(e.index);
+    for (const index of nodes) fixed.set(index, value(index));
+    const result = run();
+    for (const index of nodes) fixed.delete(index);
+    return result;
   }
 
   // A field read, or a getter's result.
@@ -1325,7 +1362,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         const object = valueType(e.object);
         if (typeof object !== "string" && object.kind === "array") {
           const v = temp();
-          emit(`${v} = load ${llvm(object.element)}, ptr ${element(e, operand(e.object, [e.index]))}`);
+          emit(`${v} = load ${llvm(object.element)}, ptr ${element(e)}`);
           return v;
         }
         const s = operand(e.object, [e.index]);
@@ -1462,29 +1499,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         emit(`${result} = xor ${llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
         return result;
       }
-      case "assign": {
-        const op = ASSIGNMENTS[e.op]!;
-        // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
-        // run it, which matters when the target is a setter.
-        if (op === "&&" || op === "||") {
-          return logical(op, value(e.target), () => {
-            return store(e.target, value(e.value));
-          });
-        }
-        // The target is read before the right-hand side runs, as in JavaScript.
-        const type = types.get(e)!;
-        if (op === "+" && type === "string") {
-          return store(e.target, concat(operand(e.target, [e.value]), written(value(e.value), valueType(e.value))));
-        }
-        return store(e.target, op === "=" ? owned(e.value) : numeric(op, value(e.target), value(e.value), e, type));
-      }
-      case "update": {
-        const old = value(e.operand);
-        const type = types.get(e)!;
-        const result = numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
-        store(e.operand, result);
-        return e.prefix ? result : old;
-      }
+      case "assign":
+        return fixing(e.target, () => assign(e));
+      case "update":
+        return fixing(e.operand, () => {
+          const old = value(e.operand);
+          const type = types.get(e)!;
+          const result = numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
+          store(e.operand, result);
+          return e.prefix ? result : old;
+        });
       case "conditional": {
         const cond = value(e.cond);
         const [then, otherwise, end] = [label(), label(), label()];
@@ -1597,7 +1621,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
     if (target.kind === "this") return "%this";
-    if (target.kind === "index") return element(target, value(target.object));
+    if (target.kind === "index") return element(target);
     if (target.kind !== "member") {
       // A union narrowed to one member keeps it in place as its payload.
       const local = resolved(target);

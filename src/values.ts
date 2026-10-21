@@ -681,7 +681,8 @@ export function expressions(ctx: Context) {
         if (spread) throw unsupported("spread elements", spread);
         const given = elements.map((x) => {
           const t = value(x);
-          if (typeof t !== "string" && t.kind === "closure") throw unsupported("functions stored in arrays", x);
+          if (typeof t !== "string" && t.kind === "closure") throw unsupported("arrays of functions", x);
+          if (holdsRef(t)) throw unsupported("arrays of references", x);
           const widened = widenLet(t);
           if (widened !== t) coerce(x, t, widened, "");
           return widened;
@@ -894,6 +895,12 @@ export function expressions(ctx: Context) {
 
   // An array literal takes a declared element type, each element meeting it.
   function literalArray(e: Expr, type: Type, to: Type): boolean {
+    // Meeting a union, it takes the union's one array member, and then joins the union.
+    const members = typeof to !== "string" && to.kind === "union" ? to.members.filter(isArray) : [];
+    if (e.kind === "array" && isArray(type) && members.length === 1 && literalArray(e, type, members[0]!)) {
+      coerce(e, members[0]!, to, "");
+      return true;
+    }
     if (e.kind !== "array" || !isArray(type) || !isArray(to) || type === to) return false;
     // Each element meets the declared type afresh, replacing how it met the literal's own.
     for (const x of e.elements as Expr[]) {
@@ -1186,6 +1193,9 @@ export function expressions(ctx: Context) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
     }
     const holder = target.kind === "member" ? types.get(target.object) : undefined;
+    if (holder && isArray(isRefType(holder) ? holder.to : holder)) {
+      throw new CompileError("an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
+    }
     if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     }

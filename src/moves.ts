@@ -361,10 +361,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             return;
           }
           if (object) expr(object);
-          if (object && place !== undefined && self) lend(place, false, object, undefined, name, e);
+          // An array's `push` and `pop` change it: it is lent shared while the arguments run, as
+          // a mutating method's object is, then changed, which nothing borrowing it may see.
+          const changes = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && array(object);
+          if (object && place !== undefined && (self || changes)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
-          // An array's `push` and `pop` change it, which nothing borrowing it may see.
-          if (object && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && array(object)) change(object);
+          if (object && changes) {
+            state?.loans.delete(object.start);
+            change(object);
+          }
           if (object && place !== undefined && self?.mutable && state) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
@@ -404,6 +409,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           return;
         }
         if (e.op !== "=") expr(e.target);
+        // A target's indexes run before the value, as in JavaScript.
+        else for (const index of indexes(e.target)) expr(index);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         // The target changes once the value is ready, after the value's reads.
         assign(e.target, e.end);
@@ -947,6 +954,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   function rootOf(e: Named): Named {
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
+  }
+
+  // The indexes into arrays along a place's path, outermost first.
+  function indexes(e: Expr): Expr[] {
+    const found: Expr[] = [];
+    for (; e.kind === "member" || e.kind === "index"; e = e.object) if (element(e)) found.unshift(e.index);
+    return found;
   }
 
   // Whether an expression is an index into an array.
