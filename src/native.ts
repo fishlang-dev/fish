@@ -213,6 +213,91 @@ fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
   return one;
 }
 
+// Searching. A search with no lone surrogate matches whole characters, so it compares bytes;
+// one holding a lone surrogate may match half of a pair, so it compares UTF-16 units.
+static int fsh_has_lone(fsh_str *s) {
+  const unsigned char *p = (const unsigned char *)s->bytes;
+  for (int64_t i = 0; i + 1 < s->length; i++) if (p[i] == 0xED && p[i + 1] >= 0xA0) return 1;
+  return 0;
+}
+
+// The UTF-16 units of s, in a buffer the caller frees.
+static uint16_t *fsh_utf16(fsh_str *s) {
+  uint16_t *units = fsh_rt_alloc((fsh_rt_str_units(s) + 1) * sizeof(uint16_t));
+  int64_t at = 0, n = 0;
+  int half = 0;
+  while (at < s->length) units[n++] = fsh_next((const unsigned char *)s->bytes, &at, &half);
+  return units;
+}
+
+// The UTF-16 unit a byte offset at a character's start is.
+static int64_t fsh_unit_of(fsh_str *s, int64_t byte) {
+  if (fsh_rt_str_units(s) == s->length) return byte;
+  int64_t at = 0, n = 0;
+  int half = 0;
+  while (at < byte) {
+    fsh_next((const unsigned char *)s->bytes, &at, &half);
+    n++;
+  }
+  return n;
+}
+
+static int64_t fsh_clamp(int64_t i, int64_t n) {
+  return i < 0 ? 0 : i > n ? n : i;
+}
+
+// Where needle first occurs in s at or after unit from, by units, or -1.
+static int64_t fsh_find_units(fsh_str *s, fsh_str *needle, int64_t from) {
+  int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle), found = -1;
+  uint16_t *a = fsh_utf16(s), *b = fsh_utf16(needle);
+  for (int64_t i = from; found < 0 && i + m <= n; i++) {
+    if (memcmp(a + i, b, m * sizeof(uint16_t)) == 0) found = i;
+  }
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return found;
+}
+
+// The byte where whole characters start at or after unit i: past a pair whose second half i is.
+static int64_t fsh_start_at(fsh_str *s, int64_t i) {
+  int half;
+  int64_t at = fsh_seek(s, i, &half);
+  return half ? at + 4 : at;
+}
+
+int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  int64_t n = fsh_rt_str_units(s);
+  from = fsh_clamp(from, n);
+  if (needle->length == 0) return from;
+  if (fsh_has_lone(needle)) return fsh_find_units(s, needle, from);
+  for (int64_t at = fsh_start_at(s, from); at + needle->length <= s->length; at++) {
+    if (memcmp(s->bytes + at, needle->bytes, needle->length) == 0) return fsh_unit_of(s, at);
+  }
+  return -1;
+}
+
+int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {
+  int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
+  position = fsh_clamp(position, n);
+  if (m == 0) return 1;
+  if (position + m > n) return 0;
+  if (fsh_has_lone(needle)) return fsh_find_units(s, needle, position) == position;
+  int half;
+  int64_t at = fsh_seek(s, position, &half);
+  return !half && at + needle->length <= s->length && memcmp(s->bytes + at, needle->bytes, needle->length) == 0;
+}
+
+int32_t fsh_rt_str_ends_with(fsh_str *s, fsh_str *needle, int64_t end) {
+  int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
+  end = fsh_clamp(end, n);
+  if (m == 0) return 1;
+  if (end - m < 0) return 0;
+  if (fsh_has_lone(needle)) return fsh_find_units(s, needle, end - m) == end - m;
+  int half;
+  int64_t at = fsh_seek(s, end, &half);
+  return !half && at - needle->length >= 0 && memcmp(s->bytes + at - needle->length, needle->bytes, needle->length) == 0;
+}
+
 // Writes UTF-16 unit u, below 0x10000, as WTF-8.
 static int fsh_put(char *out, uint32_t u) {
   if (u < 0x80) {

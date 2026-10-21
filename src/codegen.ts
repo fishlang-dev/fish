@@ -921,6 +921,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
         return undefined;
       }
+      // `String(x)`: a number's new string, or another reference to a string. Used as a
+      // statement, the call has no type of its own, and the string drops after it.
+      if (e.callee.kind === "ident" && e.callee.name === "String") {
+        const v = written(value(e.args[0]!), valueType(e.args[0]!));
+        const made = pending.at(-1)?.v === v ? pending.pop() : undefined;
+        const result = made ? v : copied(v, "string");
+        if (!types.has(e)) pending.push({ v: result, type: "string" });
+        return result;
+      }
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
@@ -977,6 +986,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       case "substring":
         emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
         return given(result, "string");
+      // A missing position is the start, or for endsWith, the end, which the runtime clamps to.
+      case "indexOf":
+        emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        return given(result, "i64");
+      case "includes": {
+        const found = temp();
+        emit(`${found} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        emit(`${result} = icmp sge i64 ${found}, 0`);
+        return given(result, "boolean");
+      }
+      case "startsWith":
+      case "endsWith": {
+        const yes = temp();
+        const name = callee.name === "startsWith" ? "starts_with" : "ends_with";
+        emit(`${yes} = call i32 @fsh_rt_str_${name}(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? (callee.name === "startsWith" ? 0 : "9223372036854775807")})`);
+        emit(`${result} = icmp ne i32 ${yes}, 0`);
+        return given(result, "boolean");
+      }
     }
     throw new Error(`internal error: no lowering for the string method ${callee.name}`);
   }

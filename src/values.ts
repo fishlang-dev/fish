@@ -227,6 +227,12 @@ export function expressions(ctx: Context) {
       return traitCall(e, callee, receiver);
     }
     if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    // `String(x)`: a string, number or boolean written as JavaScript writes it.
+    if (callee.kind === "ident" && callee.name === "String" && !byName.has("String")) {
+      if (e.args.length !== 1) throw new CompileError("'String' takes 1 argument", e.start, e.end);
+      joined(e.args[0]!, operand(e.args[0]!), "'String'");
+      return { type: "string", what: "'String'" };
+    }
     const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined;
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -1424,6 +1430,10 @@ const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind ==
 // Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   charCodeAt: [["usize"], "u16", 1],
+  indexOf: [["string", "i64"], "i64", 1],
+  includes: [["string", "i64"], "boolean", 1],
+  startsWith: [["string", "i64"], "boolean", 1],
+  endsWith: [["string", "i64"], "boolean", 1],
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
 };
