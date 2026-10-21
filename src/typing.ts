@@ -349,6 +349,7 @@ export function fits(from: Type, to: Type): boolean {
 // A field, by its path, that a value of `from` holds read-only but `to` lets be written: lent
 // mutably as a `to`, it could be changed. A readonly field only fits a writable one by copy.
 export function unlocks(from: Type, to: Type, path = ""): string | undefined {
+  from = lower(from);
   if (typeof from === "string" || typeof to === "string" || (to.kind !== "object" && to.kind !== "interface")) return undefined;
   for (const f of to.fields) {
     const found = field(from, f.name);

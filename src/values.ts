@@ -1143,7 +1143,10 @@ export function expressions(ctx: Context) {
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
-    if (typeof object === "string" || !object || !field(object, e.name)?.readonly) return;
+    // In an instance, a type parameter's field is as read-only as the field of what it stands for.
+    const concrete = object && lower(object);
+    const locked = (t: Type | undefined) => typeof t !== "string" && t !== undefined && field(t, e.name)?.readonly;
+    if (typeof object === "string" || !object || !(locked(object) || locked(concrete))) return;
     if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
     const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
     throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);
