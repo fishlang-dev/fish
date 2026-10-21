@@ -71,9 +71,11 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
-  // Whether a binding stands for a variable a closure captures, and whether this is a closure.
+  // Whether a binding stands for a variable a closure captures, and whether this is a closure;
+  // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
   closing: boolean;
+  changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
   // Records a whole write through a narrowed mutable reference that may change its member.
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
@@ -87,14 +89,14 @@ export type Context = {
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, noteThis, rewritten, depthOf, closure, closureBody, implicitOf } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, read, condition, effect, coerce, result, expect };
+  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis };
 
   function expect(e: Expr, t: FunctionType) {
     if (e.kind === "arrow") expecting.set(e, t);
@@ -768,6 +770,7 @@ export function expressions(ctx: Context) {
           throw new CompileError(`can't assign a whole value through '${placeText(target)}', which may point to a wider value; assign its fields instead`, target.start, target.end);
         }
         if (target.kind === "member") changeable(target, "assign to");
+        else if (captured(locals.get(target)!)) changesCapture(locals.get(target)!, "", "assign to", target, true);
         types.set(target, declared);
         coercions.set(target, declared.to);
         return declared.to;
@@ -848,13 +851,21 @@ export function expressions(ctx: Context) {
       path = `.${root.name}${path}`;
       root = root.object;
     }
-    if (root.kind === "this" || root.kind === "super") {
-      if (closing) throw unsupported("closures that change what they capture", target);
-      if (self?.mutable) return;
-      throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
-    }
-    const local = locals.get(root)!;
-    if (captured(local)) throw unsupported("closures that change what they capture", target);
+    if (root.kind === "this" || root.kind === "super") return changesThis(path, action, target);
+    changesLocal(locals.get(root)!, path, action, target, throughMut);
+  }
+
+  // Whether `this` may change here. A closure changing it changes it where it was made.
+  function changesThis(path: string, action: string, target: Expr) {
+    if (closing) return changesCapture(undefined, path, action, target, false);
+    if (self?.mutable) return;
+    throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
+  }
+
+  // Whether a variable may change here, at `path` inside it, possibly through a mutable
+  // reference. A closure changing what it captures changes the variable where it was made.
+  function changesLocal(local: Local, path: string, action: string, target: Expr, throughMut: boolean) {
+    if (captured(local)) return changesCapture(local, path, action, target, throughMut);
     if (throughMut) return;
     // A shared reference never changes what it points to; a mutable one may, whatever holds
     // it, and a method may change through it.

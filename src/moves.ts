@@ -230,9 +230,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (key(e) !== undefined) return use(e, consume);
         return expr(e.object);
       case "arrow":
-        for (const [place, use] of captured(e)) {
+        for (const [place, use, , mutable] of captured(e)) {
           usable(use, place);
-          free(place, use, "read");
+          free(place, use, mutable ? "lend mutably" : "read");
         }
         return;
       case "object":
@@ -379,7 +379,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
     // A closure made for a call lends what it captures for the call.
-    if (e.kind === "arrow") return captured(e).map(([place, use]) => [place, use as Expr, false]);
+    if (e.kind === "arrow") return captured(e).map(([place, use, , mutable]) => [place, use as Expr, mutable]);
     // A call's returned reference lends again what it borrows from, a receiver included.
     const from = borrowsFrom.get(e);
     if (from) return from.flatMap((s) => source(s, (coercions.get(e) ?? types.get(e)!) as RefType));
@@ -506,8 +506,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const to = coercions.get(e) ?? type;
     // A closure holds what it captures.
     if (e.kind === "arrow") {
-      for (const [place, use, from] of captured(e)) {
-        lend(place, false, use, holder);
+      for (const [place, use, from, mutable] of captured(e)) {
+        lend(place, mutable, use, holder);
         if (from && holdsRef(from.type)) inheritFrom(holder, from);
       }
       return;
@@ -751,13 +751,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return object === undefined ? undefined : `${object}.${e.name}`;
   }
 
-  // The places a closure captures, where it first uses each, and the variable, if not `this`.
-  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined][] {
+  // The places a closure captures, where it first uses each, the variable, if not `this`, and
+  // whether it changes it.
+  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined, boolean][] {
     const inner = calls.get(e)!;
-    return [...inner.captures!].flatMap(([alias, from]): [string, Named, Local | undefined][] => {
+    return [...inner.captures!].flatMap(([alias, from]): [string, Named, Local | undefined, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;
+      const mutable = inner.changed!.has(alias);
       if (!use) return [];
-      return [from === "this" ? ["this", use, undefined] : [String(from.id), use, from]];
+      return [from === "this" ? ["this", use, undefined, mutable] : [String(from.id), use, from, mutable]];
     });
   }
 

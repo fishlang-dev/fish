@@ -62,12 +62,21 @@ export type Instance = {
   // and where it, or a closure inside it, first uses each.
   captures?: Map<Local, Local | "this">;
   captureUses?: Map<Local, Expr | ObjectProp>;
+  // The captures it changes, which it captures mutably.
+  changed?: Set<Local>;
   // A closure's own type.
   closure?: ClosureType;
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
-type Outer = { lookup(name: string, at?: Expr | ObjectProp): Local | undefined; narrowed(l: Local): Type | undefined; thisReady(e: Expr): boolean; noteThis(e: Expr): void };
+type Outer = {
+  lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
+  narrowed(l: Local): Type | undefined;
+  thisReady(e: Expr): boolean;
+  noteThis(e: Expr): void;
+  changesLocal(l: Local, path: string, action: string, target: Expr, throughMut: boolean): void;
+  changesThis(path: string, action: string, target: Expr): void;
+};
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
@@ -372,7 +381,7 @@ export function check(program: Stmt[]): Checked {
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result, expect } = expressions({
+    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? (f.closure.parent.body.owner && f.closure.parent.body.owner === enclosing?.type ? self!.type : f.closure.parent.body.owner) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -384,6 +393,7 @@ export function check(program: Stmt[]): Checked {
       captured: (l) => captures?.has(l) ?? false,
       noteThis,
       closing: f.closure !== undefined,
+      changesCapture,
       reachable: (l) => !caseOnly.has(l),
       rewritten,
       depthOf: (l) => depths.get(l)!,
@@ -447,6 +457,9 @@ export function check(program: Stmt[]): Checked {
     // end of each narrowing scope it is read as declared. A loop inside such a scope could come
     // back to reads already checked as narrowed.
     function rewritten(l: Local, at: Expr) {
+      if (captures?.has(l)) {
+        throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
+      }
       const from = facts.findIndex((f) => f.has(l));
       if (from < 0) return;
       // Inside a larger expression, a condition could still prove the member it had.
@@ -491,12 +504,13 @@ export function check(program: Stmt[]): Checked {
       };
       inner.captures = new Map();
       inner.captureUses = new Map();
+      inner.changed = new Set();
       closures.push(inner);
-      checkInstance(inner, { lookup, narrowed, thisReady: (t) => unset.size === 0 || t === exempt, noteThis });
+      checkInstance(inner, { lookup, narrowed, thisReady: (t) => unset.size === 0 || t === exempt, noteThis, changesLocal, changesThis });
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns,
-        [...inner.captures].map(([alias, from]) => ({ name: alias.name, type: refType(from === "this" ? self!.type : from.type, false) })));
+        [...inner.captures].map(([alias, from]) => ({ name: alias.name, type: refType(from === "this" ? self!.type : from.type, inner.changed!.has(alias)) })));
       inner.closure = type;
       calls.set(e, inner);
       closureBodies.set(type, inner);
@@ -718,6 +732,19 @@ export function check(program: Stmt[]): Checked {
       }
       const outside = outer?.lookup(name, at);
       return outside && capture(outside, at);
+    }
+
+    // A closure changing what it captures captures it mutably, if it may change where the
+    // closure is made.
+    function changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
+      const alias = l ?? [...captures!].find(([, from]) => from === "this")![0];
+      const from = captures!.get(alias)!;
+      if (from === "this") outer!.changesThis(path, action, target);
+      else {
+        if (!path && action === "assign to" && isRef(from.type) && !from.type.mutable) throw unsupported("closures that point captured references elsewhere", target);
+        outer!.changesLocal(from, path, action, target, throughMut);
+      }
+      instance.changed!.add(alias);
     }
 
     function noteThis(e: Expr) {
