@@ -1,6 +1,7 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import { lowerPattern, type PatternInfo } from "./match.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -67,6 +68,8 @@ export type Instance = {
   caught: Map<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty.
   consumes: Set<Expr | ObjectProp>;
+  // What each match pattern tests, and the type of the value it meets.
+  patterns: Map<Pattern, PatternInfo>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -305,6 +308,7 @@ export function check(program: Stmt[]): Checked {
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
+    instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(info)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     if (instance.throws) instance.throws = lower(instance.throws);
@@ -385,7 +389,7 @@ export function check(program: Stmt[]): Checked {
   // Clears what checking an instance recorded, for another pass: its tables and its closures.
   // A callee checked during the pass stays checked, closures and all.
   function forget(instance: Instance) {
-    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes]) table.clear();
+    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes, instance.patterns]) table.clear();
     instance.returns = "void";
     delete instance.throws;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
@@ -449,7 +453,7 @@ export function check(program: Stmt[]): Checked {
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
+      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -610,7 +614,7 @@ export function check(program: Stmt[]): Checked {
       const inner: Instance = {
         body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();

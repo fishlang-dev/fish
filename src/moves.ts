@@ -2,6 +2,7 @@ import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
+import { bindings } from "./match.ts";
 import { isPrint } from "./values.ts";
 import { field, holdsMut, holdsRef, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -431,14 +432,21 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
       // Each arm runs from the state after the subject, and the match ends in any of theirs.
+      // A binding borrowing from the matched place holds a loan of it until its arm ends.
       case "match": {
         expr(e.subject);
+        const place = key(e.subject);
         const before = join(state, null);
         let after: State = null;
         for (const arm of e.arms) {
           state = join(before, null);
+          const borrowing = bindings(arm.pattern).flatMap((b) => locals.get(b as Expr) ?? []).filter((l) => isRef(l.type));
+          for (const holder of borrowing) {
+            if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder]) });
+          }
           if (arm.guard) expr(arm.guard);
           expr(arm.body as Expr, consume, discarded);
+          for (const holder of borrowing) release(holder);
           after = join(after, state);
         }
         state = after;
@@ -1139,6 +1147,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "throw":
         return expr(e.value);
       case "nonNull":
+      case "as":
         return expr(e.expr, call);
       case "binary":
         expr(e.left);

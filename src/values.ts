@@ -3,7 +3,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
-import { bindings, covers, literalOf, spaces, uncovered } from "./match.ts";
+import { bindings, literalOf, made, missing, uncovered, type PatternInfo, type PatternTest } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
@@ -78,6 +78,8 @@ export type Context = {
   assume<T>(proven: Facts, check: () => T): T;
   // Runs a match arm in a scope of its own, holding the names its pattern binds.
   arm<T>(check: () => T): T;
+  // What each match pattern tests, for codegen.
+  patterns: Map<Pattern, PatternInfo>;
   // Declares a name a pattern binds, read-only, in the arm's scope.
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
@@ -215,58 +217,88 @@ export function expressions(ctx: Context) {
 
   // `match`: the subject is read once, then each arm's pattern is tried in order, binding names
   // in the arm's own scope, then its guard. Every value of the subject's type must be covered.
-  // Used as a statement, its arms may give nothing.
+  // Used as a statement, its arms may give nothing. Matching a value just made, the bindings own
+  // its parts; matching a place, they borrow them.
   function match(e: Extract<Expr, { kind: "match" }>, wanted: boolean): Type {
     const subject = read(e.subject);
+    const owning = made(e.subject);
     const given = e.arms.map((arm) => {
       if (Array.isArray(arm.body)) throw unsupported("block arms in match", arm);
       const body = arm.body;
       return ctx.arm(() => {
-        pattern(arm.pattern, subject);
+        pattern(arm.pattern, subject, !owning);
         if (arm.guard) condition(arm.guard);
         return wanted ? value(body) : result(body);
       });
     });
-    const missing = spaces(subject).find((space) => !e.arms.some((arm) => !arm.guard && covered(arm.pattern, space)));
-    if (missing) throw new CompileError(uncovered(missing), e.start, e.subject.end + 1);
+    const example = uncovered(e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
+    if (example) throw new CompileError(missing(example[0]!, subject), e.start, e.subject.end + 1);
     if (!wanted) return "void";
     const type = given.every((t) => t === given[0]) ? given[0]! : unionType(given);
+    if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
     e.arms.forEach((arm, i) => given[i] !== type && coerce(arm.body as Expr, given[i]!, type, `this arm's '${show(given[i]!)}' doesn't fit the match's '${show(type)}'`));
     return type;
   }
 
-  // Checks a pattern against the type it meets, declaring what it binds.
-  function pattern(p: Pattern, type: Type) {
+  // Checks a pattern against the type of the value it meets, declaring what it binds and
+  // recording what it tests. A name is a unit member of the matched enum, or an Option's
+  // `None`, before it is a binding. A borrowing binding of a part that isn't Copy is a shared
+  // reference to it.
+  function pattern(p: Pattern, type: Type, borrowing: boolean) {
+    const record = (test: PatternTest) => ctx.patterns.set(p, { type, ...test });
+    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    const optional = members.includes("null");
+    const never = () => new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
     switch (p.kind) {
       case "wildcard":
-        return;
-      case "ident":
-        ctx.bind(p.name, type, p as Expr);
-        return;
+        return record({ kind: "any" });
+      case "ident": {
+        const unit = variantNamed(members, p.name);
+        if (unit && unit.fields.length === 0) return record({ kind: "variant", variant: unit, args: [] });
+        if (p.name === "None" && optional) return record({ kind: "none" });
+        ctx.bind(p.name, borrowing && !isCopy(type) ? refType(type, false) : type, p as Expr);
+        return record({ kind: "any" });
+      }
       case "literal": {
+        if (p.value.kind === "null") {
+          if (!optional) throw never();
+          value(p.value);
+          return record({ kind: "none" });
+        }
         let t = value(p.value);
         // A number takes the matched type's number type, as a literal operand does.
-        const numeric = spaces(type).find(isNumeric);
+        const numeric = members.find(isNumeric);
         if (isNumeric(t) && numeric && t !== numeric) {
           coerce(p.value, t, numeric, `'${show(t)}' can't match a '${show(numeric)}'`);
           t = numeric;
         }
-        if (!comparable(type, t) && !(t === "null" && spaces(type).includes("null"))) {
-          throw new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
-        }
-        return;
+        if (!comparable(type, t)) throw never();
+        return record({ kind: "literal", value: literalOf(p.value) });
       }
       case "variant": {
+        if (p.name === "Some" && optional && p.args?.length === 1) {
+          const inner = unionType(members.filter((m) => m !== "null"));
+          pattern(p.args[0]!, inner, borrowing);
+          return record({ kind: "some", inner, arg: p.args[0]! });
+        }
         const member = enumMember(p);
-        if (!member) throw unsupported("variant patterns", p);
-        if (!comparable(type, member)) throw new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
-        types.set(p as unknown as Expr, member);
-        return;
+        if (member) {
+          if (!comparable(type, member)) throw never();
+          return record({ kind: "literal", value: member.value, member });
+        }
+        const v = variantNamed(members, p.name);
+        if (!v) throw never();
+        const args = p.args ?? [];
+        if (args.length !== v.fields.length) {
+          throw new CompileError(`'${v.name}' holds ${v.fields.length} value${v.fields.length === 1 ? "" : "s"}, so its pattern takes ${v.fields.length}`, p.start, p.end);
+        }
+        args.forEach((a, i) => pattern(a, v.fields[i]!.type, borrowing));
+        return record({ kind: "variant", variant: v, args });
       }
       case "or":
-        if (p.patterns.some((alt) => bindings(alt).length > 0)) throw unsupported("alternatives binding names", p);
-        for (const alt of p.patterns) pattern(alt, type);
-        return;
+        for (const alt of p.patterns) pattern(alt, type, borrowing);
+        if (p.patterns.some((alt) => bindings(alt).some((b) => locals.has(b as Expr)))) throw unsupported("alternatives binding names", p);
+        return record({ kind: "or", alternatives: p.patterns });
       default:
         throw unsupported(`${p.kind} patterns`, p);
     }
@@ -278,23 +310,12 @@ export function expressions(ctx: Context) {
     return p.args === undefined && name !== undefined && !lookup(owner!) ? enums.get(owner!)?.members.get(name) : undefined;
   }
 
-  // Whether an arm's pattern covers a case of the matched type, as `spaces` lists them.
-  function covered(p: Pattern, space: Type): boolean {
-    switch (p.kind) {
-      case "wildcard":
-      case "ident":
-        return true;
-      case "literal":
-        return covers(literalOf(p.value), space);
-      case "variant": {
-        const member = enumMember(p);
-        return member !== undefined && (member === space || covers(member.value, space));
-      }
-      case "or":
-        return p.patterns.some((alt) => covered(alt, space));
-      default:
-        return false;
-    }
+  // The variant among a type's members that a pattern names: `Circle`, or `Shape.Circle`.
+  function variantNamed(members: Type[], name: string): VariantType | undefined {
+    const parts = name.split(".");
+    const member = parts.at(-1)!;
+    const owner = parts.length > 1 ? parts.slice(0, -1).join(".") : undefined;
+    return members.find((m): m is VariantType => typeof m !== "string" && m.kind === "variant" && m.member === member && (owner === undefined || m.enum === owner));
   }
 
   // Checks a call: what it returns, and how a message names what it calls. A method called in

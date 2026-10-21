@@ -6,6 +6,7 @@ import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
+import { made } from "./match.ts";
 import { arrayType, field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -532,19 +533,34 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
 
   // A match: the subject is read once, then each arm's pattern is tested in order; a match binds
   // its names and runs its guard, and a failing guard drops what it bound and tries the next arm.
-  // The checker made sure some arm matches. As a value, each arm gives one of its own.
+  // The checker made sure some arm matches. As a value, each arm gives one of its own. A value
+  // the match made is its own, in a slot its bindings move parts out of, dropped with what is
+  // left once the match ends; a place is read where it lives, and bindings point into it.
   function lowerMatch(e: Extract<Expr, { kind: "match" }>, wanted: boolean): string | undefined {
-    const subject = value(e.subject);
     const type = valueType(e.subject);
+    scopes.push([]);
+    let subject: string;
+    let at: string | undefined;
+    const owning = made(e.subject) && fresh(e.subject);
+    if (owning) {
+      subject = value(e.subject, true);
+      at = alloca(llvm(type));
+      own(at, type);
+      emit(`store ${llvm(type)} ${subject}, ptr ${at}`);
+    } else {
+      subject = value(e.subject);
+      at = lendable(e.subject) && !coercions.has(e.subject) && stored(e.subject) === type ? address(e.subject) : undefined;
+    }
     const result = wanted ? types.get(e) : undefined;
     const slot = result && alloca(llvm(result));
     const end = label();
     for (const arm of e.arms) {
-      const [bound, next] = [label(), label()];
-      emit(`br i1 ${matches(arm.pattern, subject, type)}, label %${bound}, label %${next}`);
-      startBlock(bound);
+      const next = label();
+      tested(arm.pattern, subject, next);
       scopes.push([]);
-      bind(arm.pattern, subject, type);
+      // A guarded arm copies what it binds, since a failing guard moves on to arms that may bind
+      // the same parts.
+      bindAll(arm.pattern, subject, at, owning && !arm.guard);
       if (arm.guard) {
         const mark = pending.length;
         const ok = value(arm.guard);
@@ -568,40 +584,108 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     }
     emit("unreachable");
     startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
     if (!result || !slot) return undefined;
     const v = temp();
     emit(`${v} = load ${llvm(result)}, ptr ${slot}`);
     return v;
   }
 
-  // Whether a value of `type` matches a pattern.
-  function matches(p: Pattern, v: string, type: Type): string {
-    switch (p.kind) {
+  // Tests a value against a pattern, going on when it matches and to `no` when it doesn't. A
+  // payload is only read once its member's tag is known.
+  function tested(p: Pattern, v: string, no: string) {
+    const info = current.patterns.get(p)!;
+    const pass = (condition: string) => {
+      const ok = label();
+      emit(`br i1 ${condition}, label %${ok}, label %${no}`);
+      startBlock(ok);
+    };
+    const union = typeof info.type !== "string" && info.type.kind === "union" ? info.type : undefined;
+    switch (info.kind) {
+      case "any":
+        return;
       case "literal":
-        return equals(v, type, value(p.value), valueType(p.value));
-      case "variant":
-        return equals(v, type, "zeroinitializer", types.get(p as unknown as Expr)!);
-      case "or": {
-        let any = "false";
-        for (const alt of p.patterns) {
-          const [test, next] = [matches(alt, v, type), temp()];
-          emit(`${next} = or i1 ${any}, ${test}`);
-          any = next;
-        }
-        return any;
+        return pass(info.member ? equals(v, info.type, "zeroinitializer", info.member) : equals(v, info.type, value((p as Extract<Pattern, { kind: "literal" }>).value), valueType((p as Extract<Pattern, { kind: "literal" }>).value)));
+      case "none":
+        return pass(union ? holds(v, union, ["null"]) : "true");
+      case "some": {
+        const empty = temp();
+        emit(`${empty} = xor i1 ${holds(v, union!, ["null"])}, true`);
+        pass(empty);
+        return tested(info.arg, convert(v, info.type, info.inner), no);
       }
-      default:
-        return "true";
+      case "variant": {
+        if (union) pass(holds(v, union, [info.variant]));
+        const payload = union ? convert(v, info.type, info.variant) : v;
+        info.args.forEach((arg, i) => {
+          const field = temp();
+          emit(`${field} = extractvalue ${llvm(info.variant)} ${payload}, ${i}`);
+          tested(arg, field, no);
+        });
+        return;
+      }
+      case "or": {
+        const yes = label();
+        info.alternatives.forEach((alt, i) => {
+          const next = i < info.alternatives.length - 1 ? label() : no;
+          tested(alt, v, next);
+          emit(`br label %${yes}`);
+          if (next !== no) startBlock(next);
+        });
+        startBlock(yes);
+        return;
+      }
     }
   }
 
-  // Binds the names a pattern gives, each a copy of the value it names, owned by the arm.
-  function bind(p: Pattern, v: string, type: Type) {
-    if (p.kind !== "ident") return;
-    const local = resolved(p as Expr);
-    allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
-    own(slot(local), local.type);
-    emit(`store ${llvm(local.type)} ${copied(convert(v, type, local.type), local.type)}, ptr ${slot(local)}`);
+  // Binds the names a pattern gives, in the arm's scope: a pointer into where the value lives,
+  // for a borrowing binding; otherwise the value, moved out of a temporary the match owns, or a
+  // copy. A part with no place of its own to point at is pointed at in a copy of its bits.
+  function bindAll(p: Pattern, v: string, at: string | undefined, move: boolean) {
+    const info = current.patterns.get(p)!;
+    if (info.kind === "any" && p.kind === "ident") {
+      const local = resolved(p as Expr);
+      allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+      if (isRef(local.type)) {
+        let pointer = at;
+        if (!pointer) {
+          pointer = alloca(llvm(info.type));
+          emit(`store ${llvm(info.type)} ${v}, ptr ${pointer}`);
+        }
+        emit(`store ptr ${pointer}, ptr ${slot(local)}`);
+        return;
+      }
+      own(slot(local), local.type);
+      const taken = move && at && needsDrop(info.type);
+      if (taken) emit(`store ${llvm(info.type)} zeroinitializer, ptr ${at}`);
+      emit(`store ${llvm(local.type)} ${taken ? v : copied(v, info.type)}, ptr ${slot(local)}`);
+      return;
+    }
+    if (info.kind === "variant") {
+      const inUnion = info.type !== info.variant;
+      const payload = inUnion ? convert(v, info.type, info.variant) : v;
+      const payloadAt = at && inUnion ? partAt(llvm(info.type), at, 1) : at;
+      info.args.forEach((arg, i) => {
+        const field = temp();
+        emit(`${field} = extractvalue ${llvm(info.variant)} ${payload}, ${i}`);
+        bindAll(arg, field, payloadAt && partAt(llvm(info.variant), payloadAt, i), move);
+      });
+      return;
+    }
+    if (info.kind === "some") {
+      // Only an Option of one member keeps that member in place as its payload.
+      const alone = (info.type as UnionType).members.length === 2;
+      const innerAt = at && alone ? partAt(llvm(info.type), at, 1) : undefined;
+      bindAll(info.arg, convert(v, info.type, info.inner), innerAt, move && innerAt !== undefined);
+    }
+  }
+
+  // A pointer to part `i` of an aggregate in memory.
+  function partAt(type: string, at: string, i: number): string {
+    const part = temp();
+    emit(`${part} = getelementptr ${type}, ptr ${at}, i32 0, i32 ${i}`);
+    return part;
   }
 
   // An expression run for its effect, dropping any value it makes.
