@@ -478,6 +478,89 @@ fsh_str *fsh_rt_str_trim(fsh_str *s, int32_t sides) {
   return fsh_share(s, a, b);
 }
 
+// Joins parts, then releases them: what building a string from slices ends with.
+static fsh_str *fsh_join_parts(fsh_str **parts, int64_t n) {
+  fsh_str *joined = fsh_rt_str_join(parts, n);
+  for (int64_t i = 0; i < n; i++) fsh_rt_str_release(parts[i]);
+  return joined;
+}
+
+// JavaScript's replace with a string pattern: the first match is replaced, and in the
+// replacement $$ is $, $& the match, $ and a backtick (0x60) what comes before it, and $' what
+// comes after.
+fsh_str *fsh_rt_str_replace(fsh_str *s, fsh_str *pattern, fsh_str *replacement) {
+  int64_t at = fsh_rt_str_index_of(s, pattern, 0);
+  if (at < 0) {
+    fsh_rt_str_retain(s);
+    return s;
+  }
+  int64_t n = fsh_rt_str_units(s), end = at + fsh_rt_str_units(pattern);
+  // At most: before, after, and a part per byte of the replacement.
+  fsh_str **parts = fsh_rt_alloc((replacement->length + 3) * sizeof(fsh_str *));
+  int64_t count = 0, from = 0;
+  parts[count++] = fsh_sub(s, 0, at);
+  const char *r = replacement->bytes;
+  for (int64_t i = 0; i + 1 < replacement->length; i++) {
+    if (r[i] != '$' || (r[i + 1] != '$' && r[i + 1] != '&' && r[i + 1] != 0x60 && r[i + 1] != '\'')) continue;
+    parts[count++] = fsh_share(replacement, from, r[i + 1] == '$' ? i + 1 : i);
+    if (r[i + 1] == '&') parts[count++] = fsh_sub(s, at, end);
+    else if (r[i + 1] == 0x60) parts[count++] = fsh_sub(s, 0, at);
+    else if (r[i + 1] == '\'') parts[count++] = fsh_sub(s, end, n);
+    from = i + 2;
+    i++;
+  }
+  parts[count++] = fsh_share(replacement, from, replacement->length);
+  parts[count++] = fsh_sub(s, end, n);
+  fsh_str *result = fsh_join_parts(parts, count);
+  fsh_rt_free(parts);
+  return result;
+}
+
+// JavaScript's padStart (start) or padEnd: the fill, a space by default, repeated and cut to
+// make the string length units long.
+fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start) {
+  int64_t n = fsh_rt_str_units(s);
+  fsh_str *space = fill ? NULL : fsh_str_of(" ", 1);
+  if (!fill) fill = space;
+  int64_t m = fsh_rt_str_units(fill);
+  if (length <= n || m == 0) {
+    fsh_rt_str_release(space);
+    fsh_rt_str_retain(s);
+    return s;
+  }
+  int64_t missing = length - n, whole = missing / m;
+  fsh_str **parts = fsh_rt_alloc((whole + 2) * sizeof(fsh_str *));
+  int64_t count = 0;
+  if (!start) {
+    fsh_rt_str_retain(s);
+    parts[count++] = s;
+  }
+  for (int64_t i = 0; i < whole; i++) {
+    fsh_rt_str_retain(fill);
+    parts[count++] = fill;
+  }
+  parts[count++] = fsh_sub(fill, 0, missing % m);
+  if (start) {
+    fsh_rt_str_retain(s);
+    parts[count++] = s;
+  }
+  fsh_str *result = fsh_join_parts(parts, count);
+  fsh_rt_free(parts);
+  fsh_rt_str_release(space);
+  return result;
+}
+
+fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count) {
+  fsh_str **parts = fsh_rt_alloc((count + 1) * sizeof(fsh_str *));
+  for (int64_t i = 0; i < count; i++) {
+    fsh_rt_str_retain(s);
+    parts[i] = s;
+  }
+  fsh_str *result = fsh_join_parts(parts, count);
+  fsh_rt_free(parts);
+  return result;
+}
+
 // An index past the end panics as Rust's does; at is the "panicked at" line.
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   char reason[96];

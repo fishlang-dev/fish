@@ -1003,6 +1003,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         emit(`${result} = load ${ARRAY}, ptr ${out}`);
         return given(result, arrayType("string"));
       }
+      case "replace":
+        emit(`${result} = call ptr @fsh_rt_str_replace(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
+        return given(result, "string");
+      case "padStart":
+      case "padEnd":
+        emit(`${result} = call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0})`);
+        return given(result, "string");
+      case "repeat":
+        emit(`${result} = call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]})`);
+        return given(result, "string");
       case "toUpperCase":
       case "toLowerCase":
         emit(`${result} = call ptr @fsh_rt_str_case(ptr ${s}, i32 ${callee.name === "toUpperCase" ? 1 : 0})`);

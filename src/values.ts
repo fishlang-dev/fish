@@ -1440,6 +1440,10 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   trimEnd: [[], "string", 0],
   toUpperCase: [[], "string", 0],
   toLowerCase: [[], "string", 0],
+  replace: [["string", "string"], "string", 2],
+  padStart: [["usize", "string"], "string", 1],
+  padEnd: [["usize", "string"], "string", 1],
+  repeat: [["usize"], "string", 1],
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
 };
