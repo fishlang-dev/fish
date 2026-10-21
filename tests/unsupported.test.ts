@@ -127,7 +127,7 @@ const EXPRESSIONS: [string, string][] = [
   ["comptime 1", "comptime expressions"],
   ["match (1) { case _ => 2 }", "match expressions"],
   ["class {}", "class expressions"],
-  ["a[0]", "indexed access expressions"],
+  ["true[0]", "indexed access expressions"],
   ["f<i64>", "instantiation expressions"],
   ["import.meta", "meta properties"],
   ["import('m')", "dynamic imports"],

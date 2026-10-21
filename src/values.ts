@@ -565,6 +565,19 @@ export function expressions(ctx: Context) {
       // Its literal type, which a string takes it as.
       case "string":
         return literalType(e.value);
+      // A string's one-unit string at a `usize` index.
+      case "index": {
+        // An enum's reverse mapping, `Color[0]`, has no meaning yet.
+        if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
+        const through = value(e.object);
+        const object = isRefType(through) ? through.to : through;
+        if (!isText(object)) throw unsupported(EXPRESSION_FORMS.index, e);
+        if (e.optional) throw unsupported("optional index expressions", e);
+        text(e.object, object, false);
+        const index = value(e.index);
+        coerce(e.index, index, "usize", `a string's index is a 'usize', not '${show(index)}'`);
+        return "string";
+      }
       // Text alone is a literal; with substitutions, a new string.
       case "template":
         if (e.exprs.length === 0) return literalType(e.quasis[0]!);
@@ -1101,6 +1114,9 @@ export function expressions(ctx: Context) {
   function assignable(target: Expr, reads: boolean): Type {
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(target, types);
+    if (target.kind === "index" && isText(read(target.object))) {
+      throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
+    }
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);

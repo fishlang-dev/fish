@@ -525,6 +525,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "arrow":
       case "template":
       case "conditional":
+      case "index":
         return true;
       case "binary":
         return e.op === "+" || e.op === "??";
@@ -1050,6 +1051,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         raised(e, owned(e.value));
         startBlock(label());
         return "undef";
+      case "index": {
+        const s = operand(e.object, [e.index]);
+        const index = value(e.index);
+        inBounds(s, index, e);
+        const result = temp();
+        emit(`${result} = call ptr @fsh_rt_str_at(ptr ${s}, i64 ${index})`);
+        return result;
+      }
       case "template": {
         // Text alone is a literal, which takes no space.
         if (e.exprs.length === 0) return "zeroinitializer";

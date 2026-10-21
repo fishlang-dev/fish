@@ -191,6 +191,26 @@ uint16_t fsh_rt_str_unit(fsh_str *s, int64_t i) {
   return fsh_next((const unsigned char *)s->bytes, &at, &half);
 }
 
+// The one-unit string at UTF-16 unit i: a character's own bytes, or for half of a pair, that
+// lone surrogate, as JavaScript gives.
+fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
+  uint32_t u = fsh_rt_str_unit(s, i);
+  char bytes[3];
+  int n = 0;
+  if (u < 0x80) bytes[n++] = u;
+  else if (u < 0x800) {
+    bytes[n++] = 0xC0 | u >> 6;
+    bytes[n++] = 0x80 | (u & 0x3F);
+  } else {
+    bytes[n++] = 0xE0 | u >> 12;
+    bytes[n++] = 0x80 | (u >> 6 & 0x3F);
+    bytes[n++] = 0x80 | (u & 0x3F);
+  }
+  fsh_str *one = fsh_str_of(bytes, n);
+  one->units = 1;
+  return one;
+}
+
 // An index past the end panics as Rust's does; at is the "panicked at" line.
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   fflush(NULL);
