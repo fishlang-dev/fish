@@ -146,12 +146,13 @@ export function expressions(ctx: Context) {
   function cloned(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError("'clone' takes no arguments", e.start, e.end);
     const stored = lower(receiver);
+    // A copy of a value holding references borrows what it does.
+    if (holdsRef(receiver)) borrowsFrom.set(e, [callee.object]);
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
-    // A copy of a value holding references borrows what it does, but two mutable ones can't be.
+    // Two mutable references to one thing can't be.
     if (holdsMut(receiver)) throw new CompileError("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing", e.start, e.end);
-    if (holdsRef(receiver)) borrowsFrom.set(e, [callee.object]);
     return { type: receiver, what: "'clone'" };
   }
 

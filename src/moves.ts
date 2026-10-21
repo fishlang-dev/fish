@@ -315,6 +315,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       for (const v of values) stored(v);
       return;
     }
+    // Keeping references in what a reference points to would need its owner to hold them.
+    for (let p: Expr = target; ; p = (p as Extract<Expr, { kind: "member" }>).object) {
+      if (isRef(types.get(p)!)) {
+        throw new CompileError(`keeping references through the reference '${text(p)}' is not supported yet; do it on what '${text(p)}' points to, directly`, target.start, target.end);
+      }
+      if (p.kind !== "member") break;
+    }
     const owner = locals.get(root as never);
     if (owner && holdsRef(owner.type) && !isRef(owner.type)) for (const v of values) hold(owner, v);
   }
