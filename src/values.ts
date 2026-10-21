@@ -99,6 +99,10 @@ export function expressions(ctx: Context) {
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
+  // Literals found to fit the type they were given, `-9223372036854775808` among them.
+  const fitted = new Set<Expr>();
+  // Powers of literals whose exponent no u32 holds, unless they became floats.
+  const powers: [Expr, Expr][] = [];
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -108,7 +112,12 @@ export function expressions(ctx: Context) {
 
   // Literals too large for an i64 that nothing gave a wider type.
   function finish() {
-    const unfit = oversized.find((e) => types.get(e) === "i64");
+    const integral = powers.find(([power]) => isInteger(types.get(power)!));
+    if (integral) {
+      const [, exponent] = integral;
+      throw new CompileError("the exponent of '**' on an integer is a 'u32', which can't hold this; write the power as a float, like '2.0 ** -1'", exponent.start, exponent.end);
+    }
+    const unfit = oversized.find((e) => types.get(e) === "i64" && !fitted.has(e));
     if (unfit) throw new CompileError("integer literal does not fit in i64", unfit.start, unfit.end);
   }
 
@@ -146,6 +155,7 @@ export function expressions(ctx: Context) {
     if (value < min || value > max) {
       throw new CompileError(`'${negated ? "-" : ""}${e.value}' doesn't fit in '${show(to)}', which holds ${min} to ${max}`, e.start, e.end);
     }
+    fitted.add(e);
   }
 
   function expect(e: Expr, t: FunctionType) {
@@ -512,6 +522,8 @@ export function expressions(ctx: Context) {
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);
+        // The smallest i64 is written as the negation of a literal one past the largest.
+        if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) fitted.add(e.operand);
         if (e.op === "!" ? type !== "boolean" : e.op === "~" ? !isInteger(type) : !isNumeric(type)) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
         }
@@ -617,6 +629,16 @@ export function expressions(ctx: Context) {
   // is a float.
   function power(base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
     if (isFloat(right) && left !== right && adapt(base, right)) left = right;
+    // A power of literals alone may still become a float where it is written, so an exponent
+    // a u32 can't hold waits to see.
+    if (isInteger(left) && right !== "u32" && literalOnly(base, false) && literalOnly(exponent, false)) {
+      try {
+        if (adapt(exponent, "u32")) right = "u32";
+      } catch {
+        powers.push([at, exponent]);
+        return left;
+      }
+    }
     if (isInteger(left) && right !== "u32" && adapt(exponent, "u32")) right = "u32";
     if (isFloat(left) && left !== right && adapt(exponent, left)) right = left;
     if (isInteger(left) && right !== "u32") {

@@ -321,7 +321,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // Returns the call's result, or undefined for a call that returns nothing.
   function compare(type: string, a: string, b: string): string {
     const result = temp();
-    emit(`${result} = icmp eq ${type} ${a}, ${b}`);
+    emit(`${result} = ${type === "float" || type === "double" ? "fcmp oeq" : "icmp eq"} ${type} ${a}, ${b}`);
     return result;
   }
 

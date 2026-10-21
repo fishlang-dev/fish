@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, holdsRef, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
+import { closureType, holdsRef, isNumeric, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -341,7 +341,10 @@ export function check(program: Stmt[]): Checked {
     const f = instance.body;
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
-    let declared = f.closure ? f.returnType && resolveType(f.returnType) : returnTypeOf(f, scopeOf(instance));
+    // A closure returns the number type the function type it meets returns, so its literals
+    // take that type.
+    const given = f.closure?.expected?.returns;
+    let declared = f.closure ? (f.returnType ? resolveType(f.returnType) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
     if (typeof declared !== "string" && declared?.kind === "function") throw unsupported("functions returned from functions", f.returnType!);
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
@@ -632,7 +635,9 @@ export function check(program: Stmt[]): Checked {
             for (const c of s.cases) {
               const before = new Set(shared.values());
               let test = c.test && value(c.test);
-              if (test && test !== type && adapt(c.test!, type)) test = type;
+              // A literal case takes the discriminant's type, or its union's one number type.
+              const numbers = union ? union.members.filter(isNumeric) : [type];
+              if (test && test !== type && numbers.length === 1 && adapt(c.test!, numbers[0]!)) test = numbers[0]!;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
