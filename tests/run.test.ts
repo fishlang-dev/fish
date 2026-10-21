@@ -45,7 +45,8 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     const run = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
     expect(run.stdout.toString()).toBe(expected);
     for (const text of [...panics, ...failures]) expect(run.stderr.toString()).toContain(text);
-    if (panics.length === 0) expect(run.stderr.toString()).not.toContain("fish: leaked");
+    // A panic that unwinds drops everything on the way out, so it leaks nothing either.
+    if (!src.includes("// mode: abort")) expect(run.stderr.toString()).not.toContain("fish: leaked");
     if (panics.length > 0 && src.includes("// mode: abort")) expect(run.signalCode).toBe("SIGABRT");
     else expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
   });

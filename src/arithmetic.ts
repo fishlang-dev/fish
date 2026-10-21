@@ -13,6 +13,8 @@ export type Builder = {
   startBlock(name: string): void;
   cString(s: string): string;
   alloca(type: string): string;
+  // Emits a call that may panic, so a panic unwinding through it drops what is live here.
+  mayPanic(call: string): void;
 };
 
 // The wrapping instruction, the checked intrinsic without its signedness, and the verb for
@@ -40,7 +42,7 @@ const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^":
 // Each overflow-checking intrinsic the lowered code calls, which the module declares.
 export type Intrinsics = Set<string>;
 
-export function lowering({ emit, temp, label, startBlock, cString, alloca }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
+export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPanic }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
   return { operate, arithmetic, panicIf };
 
   function operate(op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
@@ -163,7 +165,7 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca }: Bui
     const { line, col } = locate(src, at.start);
     emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    emit(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
+    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
     emit("unreachable");
     startBlock(ok);
   }

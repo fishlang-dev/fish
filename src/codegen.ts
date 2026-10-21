@@ -80,7 +80,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
-  const builder = { emit, temp, label, startBlock, cString, alloca, text };
+  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
@@ -440,6 +440,25 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     }
   }
 
+  // Emits a call that may panic, assigning its result to `result` when given. Unwinding, with
+  // anything live here, it is an invoke whose landing pad drops the statement's values and every
+  // scope's variables, runs `cleanup` for what the call itself held, and lets the unwind go on.
+  // Variables not yet set, or already dropped, are empty, so dropping every scope is safe.
+  function unwinding(call: string, result?: string, cleanup?: () => void) {
+    const assign = result ? `${result} = ` : "";
+    const live = pending.some((p) => needsDrop(p.type)) || scopes.some((s) => s.length > 0);
+    if (panic === "abort" || (!live && !cleanup)) return emit(assign + call);
+    const [ok, pad, caught] = [label(), label(), temp()];
+    emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
+    startBlock(pad);
+    emit(`${caught} = landingpad { ptr, i32 } cleanup`);
+    cleanup?.();
+    for (const { v, type } of [...pending].reverse()) dispose(v, type);
+    drop(0);
+    emit(`resume { ptr, i32 } ${caught}`);
+    startBlock(ok);
+  }
+
   // An expression run for its effect, dropping any value it makes.
   function effect(e: Expr) {
     if (e.kind !== "call") return void value(e);
@@ -678,7 +697,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     // The call takes the copy; what it leaves, the parts of a derived instance its base's
     // method doesn't drop, is dropped once it returns or raises.
     pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
-    const leftovers = () => {
+    const leftovers = mine.length === 0 ? undefined : () => {
       for (const { slot, type } of mine) dispose(unstash(slot, type), type);
     };
     const result = invoke(target, pointer, values, e, leftovers);
@@ -737,7 +756,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
     startBlock(fail);
     const { line, col } = locate(src, at.start);
-    emit(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${file}:${line}:${col}:\n`)}, i64 ${length}, i64 ${index})`);
+    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${file}:${line}:${col}:\n`)}, i64 ${length}, i64 ${index})`);
     emit("unreachable");
     startBlock(ok);
   }
@@ -802,19 +821,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
 
   // Calls a function with its arguments' values, after the instance when it is a method.
   // `after` runs once the call returns, and before an error it raises goes on.
-  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after = () => {}): string | undefined {
+  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     const call = `call ${resultType(target)} ${symbol(target)}(${values.join(", ")})`;
     if (type === "void" && !target.throws) {
-      emit(call);
-      after();
+      unwinding(call, undefined, after);
+      after?.();
       return undefined;
     }
     const result = temp();
-    emit(`${result} = ${call}`);
+    unwinding(call, result, after);
     if (!target.throws) {
-      after();
+      after?.();
       return result;
     }
     // A call that failed raises its error where this function sends it.
@@ -824,10 +843,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     startBlock(bad);
     const error = temp();
     emit(`${error} = extractvalue ${resultType(target)} ${result}, 2`);
-    after();
+    after?.();
     raised(at!, error);
     startBlock(ok);
-    after();
+    after?.();
     if (type === "void") return undefined;
     const got = temp();
     emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
@@ -1159,7 +1178,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         const instance = alloca(llvm(type));
         emit(`store ${llvm(type)} zeroinitializer, ptr ${instance}`);
         const values = argValues(e.args ?? [], calls.get(e)!).map((v) => `, ${v}`);
-        emit(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`);
+        // A panic in the constructor drops the fields it has set.
+        unwinding(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`, undefined, () => dispose(unstash(instance, type), type));
         const result = temp();
         emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
         return result;
