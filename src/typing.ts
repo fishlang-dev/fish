@@ -86,7 +86,9 @@ export function range(t: Integer): [bigint, bigint] {
 
 // `null` is the empty Option: `T | null`, `T | undefined` and `x?: T` are all a union holding
 // it, which flattening keeps from nesting.
-export type Type = Numeric | "boolean" | "void" | "null" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
+// `never` is the type of an expression that never finishes, like a throw expression; it fits
+// anywhere, and a union drops it.
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -134,7 +136,7 @@ export function literalType(value: string | bigint | boolean, owner?: LiteralTyp
 // and a literal whose base type is also a member adds nothing. A single member is itself.
 // An enum's union carries the enum's name, for messages.
 export function unionType(parts: Type[], name?: string): Type {
-  const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p]));
+  const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
     .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
@@ -313,7 +315,7 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
   // In an instance, a type parameter and the concrete type it stands for are one value.
-  if (from === to || lower(from) === lower(to)) return true;
+  if (from === to || lower(from) === lower(to) || from === "never") return true;
   // A reference reads the value where it lives, so it fits only a reference to the same type;
   // a mutable one also lends itself as shared. Lifetimes are checked on their own.
   if (typeof to !== "string" && to.kind === "ref") {

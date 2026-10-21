@@ -419,6 +419,7 @@ export function check(program: Stmt[]): Checked {
       captured: (l) => captures?.has(l) ?? false,
       raise,
       errorOf,
+      thrown,
       noteThis,
       closing: f.closure !== undefined,
       changesCapture,
@@ -702,15 +703,9 @@ export function check(program: Stmt[]): Checked {
           (s.kind === "break" ? broken : continued).add(target);
           return;
         }
-        case "throw": {
-          // `throw` returns an error of the type the function declares, or goes to a catch.
-          const type = value(s.value);
-          // A value the error type takes is converted to it; another may be wrapped.
-          const into = errorType && handlers.length === 0 && (fits(type, errorType) || adapt(s.value, errorType));
-          if (into) coerce(s.value, type, errorType!, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
-          raise(s, into ? errorType! : types.get(s.value)!, "'throw'");
+        case "throw":
+          thrown(s, s.value);
           return;
-        }
         case "try": {
           // Without a catch, what the block raises goes on out, after the `finally`.
           if (!s.handler) {
@@ -847,6 +842,15 @@ export function check(program: Stmt[]): Checked {
       const from = captures?.get(l);
       if (from && from !== "this") return outer!.constant(from);
       return !l.mutable || l.param;
+    }
+
+    // `throw` returns an error of the type the function declares, or goes to a catch. A value
+    // the error type takes is converted to it; another may be wrapped.
+    function thrown(at: Expr | Stmt, thrownValue: Expr) {
+      const type = value(thrownValue);
+      const into = errorType && handlers.length === 0 && (fits(type, errorType) || adapt(thrownValue, errorType));
+      if (into) coerce(thrownValue, type, errorType!, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+      raise(at, into ? errorType! : types.get(thrownValue)!, "'throw'");
     }
 
     // An error raised by a call or a `throw` goes to the function's caller, which needs a

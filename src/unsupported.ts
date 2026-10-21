@@ -4,7 +4,7 @@ import type { Expr, Span, Stmt, TypeNode } from "./parser.ts";
 // The forms that parse but have no meaning yet, and the errors that reject them.
 
 // What each expression form is called when the checker rejects it.
-export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull">, string> = {
+export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull" | "throw">, string> = {
   bigint: "bigint literals",
   super: "'super' expressions",
   regex: "regular expressions",

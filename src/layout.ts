@@ -8,7 +8,7 @@ import { baseOf, field, fieldPath, INTEGERS, isInteger, membersFor, type ClassTy
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
   i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
-  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}",
+  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}",
 };
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
@@ -33,7 +33,7 @@ function size(t: Type): [number, number] {
   if (t === "f32") return [4, 4];
   if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
-  if (t === "null") return [0, 1];
+  if (t === "null" || t === "never") return [0, 1];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.

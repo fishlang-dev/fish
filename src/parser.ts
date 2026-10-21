@@ -67,6 +67,8 @@ export type Expr = Span & (
   // `import(specifier, options?)`
   | { kind: "import"; args: Expr[] }
   | { kind: "nonNull"; expr: Expr }
+  // `throw` as an expression, which never gives a value.
+  | { kind: "throw"; value: Expr }
   | (ClassNode & { kind: "class" })
   // `#x` on its own, which is only valid as the left side of `in`.
   | { kind: "privateName"; name: string }

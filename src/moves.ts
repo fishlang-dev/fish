@@ -396,6 +396,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "nonNull":
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
+      // A throw expression hands its value on, and nothing after it runs.
+      case "throw":
+        expr(e.value, (p) => `'${p}' moved here: throwing it hands it on`);
+        raising();
+        state = null;
+        return;
     }
   }
 
@@ -981,6 +987,8 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "arrow":
         for (const from of calls.get(e)!.captures!.values()) if (from !== "this") used(from, call ?? e.end);
         return;
+      case "throw":
+        return expr(e.value);
       case "nonNull":
         return expr(e.expr, call);
       case "binary":

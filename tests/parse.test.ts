@@ -218,6 +218,8 @@ function showExpr(e: Expr): string {
       return `import${args(e.args)}`;
     case "nonNull":
       return `${showExpr(e.expr)}!`;
+    case "throw":
+      return `(throw ${showExpr(e.value)})`;
     case "unary":
       return `(${e.op}${/\w/.test(e.op) ? " " : ""}${showExpr(e.operand)})`;
     case "update":

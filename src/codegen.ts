@@ -707,6 +707,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return "zeroinitializer";
       case "null":
         return "zeroinitializer";
+      // Nothing after a throw expression runs, so the value it stands for is never read.
+      case "throw":
+        raised(e, value(e.value));
+        startBlock(label());
+        return "undef";
       case "nonNull": {
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;

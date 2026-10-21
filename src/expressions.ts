@@ -207,6 +207,11 @@ function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
 
 export function unary(c: Cursor): Expr {
   const t = c.peek();
+  // A throw expression, as the TC39 proposal has it, as in `x ?? throw err`.
+  if (c.eat("throw")) {
+    const value = unary(c);
+    return { kind: "throw", value, start: t.start, end: value.end };
+  }
   if (atComptime(c)) {
     c.next();
     const expr = unary(c);
