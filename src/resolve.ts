@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { holdsRef, interfaceType, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { functionType, holdsRef, interfaceType, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -22,11 +22,13 @@ export function typeName(name: string, at: Span, ...namespaces: Map<string, unkn
   if (namespaces.some((n) => n.has(name))) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
 }
 
-// A field holds a value, and an interface type describes values without being one.
+// A field holds a value, and an interface type describes values without being one. A
+// function type in a field would be a boxed callable, which needs the heap.
 export function storable(type: Type, at: Span): Type {
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
+  if (typeof type !== "string" && (type.kind === "function" || type.kind === "closure")) throw unsupported("functions stored in fields", at);
   return type;
 }
 
@@ -78,7 +80,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
 
   function resolveType(t: TypeNode): Type {
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
-    if (t.kind === "function") throw unsupported(t.construct ? "constructor types" : "function types", t);
+    if (t.kind === "function") {
+      if (t.construct) throw unsupported("constructor types", t);
+      if (t.typeParams.length > 0) throw unsupported("generic function types", t);
+      return functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
+    }
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind === "literal") return literal(t.value);
     if (t.kind === "union") return unionType(t.types.map(unionMember));
@@ -119,6 +125,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     const to = resolveType(t.args[0]!);
     if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
+    if (typeof to !== "string" && to.kind === "function") throw unsupported("references to functions", t);
     // A type parameter standing for a reference makes one too.
     const real = lower(to);
     if (typeof real !== "string" && real.kind === "ref") throw unsupported("references to references", t);
@@ -134,6 +141,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
     if (typeof t !== "string" && t.kind === "param") throw unsupported("unions holding a type parameter", node);
+    if (typeof t !== "string" && t.kind === "function") throw unsupported("unions holding functions", node);
     if (holdsRef(t)) throw unsupported("unions holding references", node);
     return t;
   }
@@ -258,7 +266,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

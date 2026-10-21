@@ -26,7 +26,7 @@ export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; 
 // fields. At the definition it stands for nothing in particular. In an instance it also holds
 // the concrete type it stands for, so the instance checks exactly as the definition did while
 // codegen lays the value out as its concrete type; `lower` removes it before codegen.
-export type ParamType = { kind: "param"; name: string; bound: ObjectType | InterfaceType | undefined; fields: Field[]; concrete?: Type };
+export type ParamType = { kind: "param"; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type };
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
@@ -51,7 +51,14 @@ export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]
 // as its fields, which are never read by name.
 export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[] };
 
-export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType;
+// A function type: the signature a closure must have to be passed where it is declared. Like an
+// interface, it describes values without being one, so it never reaches codegen.
+export type FunctionType = { kind: "function"; name: string; params: Type[]; returns: Type; fields: Field[] };
+
+// What a type parameter may be bounded by.
+export type Bound = ObjectType | InterfaceType | FunctionType;
+
+export type Type = "i64" | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -69,6 +76,12 @@ export function classType(name: string, generic?: ClassType["generic"]): ClassTy
 export function interfaceType(name: string): InterfaceType {
   const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
   keys.set(t, `interface ${declared++}`);
+  return t;
+}
+
+export function functionType(names: string[], params: Type[], returns: Type): FunctionType {
+  const t: FunctionType = { kind: "function", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields: [] };
+  keys.set(t, `function ${declared++}`);
   return t;
 }
 
@@ -125,7 +138,7 @@ export function baseOf(t: LiteralType): "i64" | "boolean" | undefined {
   return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : undefined;
 }
 
-export function typeParameter(name: string, bound: ObjectType | InterfaceType | undefined): ParamType {
+export function typeParameter(name: string, bound: Bound | undefined): ParamType {
   const t: ParamType = { kind: "param", name, bound, fields: bound?.fields ?? [] };
   keys.set(t, `param ${declared++}`);
   return t;
@@ -175,7 +188,7 @@ export function holdsRef(t: Type): boolean {
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
 // parameter in it.
-export function wrapped(name: string, bound: ObjectType | InterfaceType | undefined, concrete: Type): ParamType {
+export function wrapped(name: string, bound: Bound | undefined, concrete: Type): ParamType {
   const key = `param ${name} ${bound ? keyOf(bound) : ""} as ${keyOf(concrete)}`;
   let t = wrappers.get(key);
   if (!t) {
@@ -191,7 +204,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function") return t;
   if (t.kind === "param") return t.concrete ?? t;
   let found = lowered.get(t);
   if (!found) {
@@ -283,6 +296,12 @@ export function fits(from: Type, to: Type): boolean {
   // A union fits where every member it may hold does, as an enum fits an i64.
   if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
+  // A closure fits a function type taking the same parameters, or the first of them, and
+  // returning what it returns, or anything when it returns nothing.
+  if (typeof to !== "string" && to.kind === "function") {
+    return typeof from !== "string" && from.kind === "closure" && from.params.length <= to.params.length
+      && from.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(from.returns, to.returns));
+  }
   if (typeof from !== "string" && from.kind === "ref") return false;
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;

@@ -288,7 +288,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
     const values = e.args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
-    const result = invoke(target, pointer, values);
+    // A closure may take fewer parameters than the function type it was given as.
+    const result = invoke(target, pointer, target.body.closure ? values.slice(0, target.body.params.length) : values);
     // A call through a type parameter returns what its bound's method declares.
     return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
   }

@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { classType, type Access, type ClassType, type Type } from "./typing.ts";
+import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
 
@@ -25,7 +25,8 @@ export type Body = Span & {
   access?: Access;
   // An arrow function's body, checked inside the instance it is written in. An expression body
   // is a `return` of it, `value`.
-  closure?: { value?: Expr; parent: Instance };
+  // `expected`, the function type it is given to, types parameters it leaves unwritten.
+  closure?: { value?: Expr; parent: Instance; expected?: FunctionType };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather

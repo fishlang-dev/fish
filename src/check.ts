@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, holdsRef, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type RefType, type Type } from "./typing.ts";
+import { closureType, holdsRef, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -332,6 +332,7 @@ export function check(program: Stmt[]): Checked {
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     let declared = f.closure ? f.returnType && resolveType(f.returnType) : returnTypeOf(f, scopeOf(instance));
+    if (typeof declared !== "string" && declared?.kind === "function") throw unsupported("functions returned from functions", f.returnType!);
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
@@ -371,7 +372,7 @@ export function check(program: Stmt[]): Checked {
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result } = expressions({
+    const { value, read, condition, effect, coerce, result, expect } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? (f.closure.parent.body.owner && f.closure.parent.body.owner === enclosing?.type ? self!.type : f.closure.parent.body.owner) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -388,9 +389,10 @@ export function check(program: Stmt[]): Checked {
       depthOf: (l) => depths.get(l)!,
       closure,
       closureBody: (t) => closureBodies.get(t)!,
+      implicitOf,
     });
 
-    const params = f.closure ? f.params.map(closureParam) : paramTypes(instance, scopeOf(instance));
+    const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
@@ -474,12 +476,12 @@ export function check(program: Stmt[]): Checked {
     }
 
     // An arrow function: its own type, and its body checked here, where it is written.
-    function closure(e: Arrow): ClosureType {
+    function closure(e: Arrow, expected?: FunctionType): ClosureType {
       if (e.async) throw unsupported("async arrow functions", e);
       if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -501,8 +503,15 @@ export function check(program: Stmt[]): Checked {
       return type;
     }
 
-    function closureParam(p: Param): Type {
-      const type = paramType(p);
+    // A parameter's type is written, or else the one the function type the closure meets gives.
+    function closureParam(p: Param, i: number, expected: FunctionType | undefined): Type {
+      const given = expected?.params[i];
+      if (expected && !given && !p.type) {
+        const n = expected.params.length;
+        throw new CompileError(`'${show(expected)}' passes ${n} argument${n === 1 ? "" : "s"}, so this closure can't take '${paramName(p)}'`, p.start, p.end);
+      }
+      const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && !p.comptime && paramName(p) !== "this";
+      const type = !p.type && given && plain ? given : paramType(p);
       const to = isRef(type) ? type.to : type;
       if (typeof to !== "string" && to.kind === "interface") throw unsupported("closure parameters of interface types", p);
       return type;
@@ -523,13 +532,16 @@ export function check(program: Stmt[]): Checked {
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           const annotated = d.type && resolveType(d.type);
+          if (typeof annotated !== "string" && annotated?.kind === "function") expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
           // An interface describes the value, which keeps its own concrete type.
           // A `let` may later hold another member of an enum, so it holds the enum.
           const widened = s.keyword === "let" && !annotated ? widenEnum(type) : type;
           if (widened !== type) coerce(d.init, type, widened, "");
-          declare(d.target.name, annotated && !isInterface(annotated) ? annotated : widened, s.keyword === "let", false, s);
+          // So does a function type, which the closure given fits.
+          const describes = annotated && (isInterface(annotated) || (typeof annotated !== "string" && annotated.kind === "function"));
+          declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
           return;
         }
         case "if": {
@@ -634,6 +646,7 @@ export function check(program: Stmt[]): Checked {
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           // An arrow's expression body may be a call returning nothing.
           const type = !s.value ? "void" : s.value === f.closure?.value && s.value.kind === "call" ? result(s.value) : value(s.value);
+          if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions returned from functions", s.value!);
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);

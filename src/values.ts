@@ -5,7 +5,7 @@ import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
 import { allFields, baseOf, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
-import type { Access, ClassType, ClosureType, Field, ObjectType, RefType, Type } from "./typing.ts";
+import type { Access, Bound, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -79,18 +79,26 @@ export type Context = {
   // How deeply nested the scope declaring a binding is.
   depthOf(l: Local): number;
   // An arrow function's type, its body checked; and the instance a closure type runs.
-  closure(e: Extract<Expr, { kind: "arrow" }>): ClosureType;
+  closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType): ClosureType;
   closureBody(t: ClosureType): Instance;
+  // The bounds of a body's implicit type parameters, by parameter index.
+  implicitOf(f: Body): Map<number, Bound>;
 };
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, noteThis, rewritten, depthOf, closure, closureBody } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, noteThis, rewritten, depthOf, closure, closureBody, implicitOf } = ctx;
+  // The function type each arrow is given to, which types the parameters it leaves unwritten.
+  const expecting = new Map<Expr, FunctionType>();
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
   };
-  return { value, read, condition, effect, coerce, result };
+  return { value, read, condition, effect, coerce, result, expect };
+
+  function expect(e: Expr, t: FunctionType) {
+    if (e.kind === "arrow") expecting.set(e, t);
+  }
 
   // A call's type, `void` included, or any other expression's.
   function result(e: Expr): Type {
@@ -138,6 +146,7 @@ export function expressions(ctx: Context) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
+    expectFrom(target, e.args);
     const argTypes = e.args.map(value);
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
@@ -150,10 +159,23 @@ export function expressions(ctx: Context) {
     return { type, what: `'${target.name}'` };
   }
 
+  // An arrow passed where a function type is declared takes its parameter types from it.
+  function expectFrom(target: Body, list: Expr[]) {
+    if (!list.some((a) => a.kind === "arrow")) return;
+    const bounds = implicitOf(target);
+    list.forEach((a, i) => {
+      const t = bounds.get(i);
+      if (t?.kind === "function") expect(a, t);
+    });
+  }
+
   // A call of a closure held by a variable runs the closure's body.
   function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
-    const type = value(callee);
-    if (typeof type === "string" || type.kind !== "closure") {
+    const held = value(callee);
+    // A parameter of a function type calls it through its signature; its instance, the
+    // closure it was given.
+    const type = typeof held !== "string" && held.kind === "param" && held.bound?.kind === "function" ? held.bound : held;
+    if (typeof type === "string" || (type.kind !== "closure" && type.kind !== "function")) {
       throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
     }
     if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
@@ -161,7 +183,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     }
     e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
-    calls.set(e, closureBody(type));
+    const given = lower(held);
+    if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
     return { type: type.returns, what: `'${callee.name}'` };
   }
 
@@ -398,7 +421,7 @@ export function expressions(ctx: Context) {
       case "object":
         return objectType(fields(e.props.map(property), e.props));
       case "arrow":
-        return closure(e);
+        return closure(e, expecting.get(e));
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);
@@ -527,6 +550,10 @@ export function expressions(ctx: Context) {
     if (shape) {
       shape.apply(coercions);
       type = shape.type;
+    }
+    if (typeof to !== "string" && to.kind === "function") {
+      if (!fits(type, to)) throw new CompileError(message, e.start, e.end);
+      return;
     }
     if (typeof to !== "string" && to.kind === "interface") {
       const reason = unsatisfied(type, to, members, e);
@@ -691,6 +718,12 @@ export function expressions(ctx: Context) {
 
   // Properties are checked in source order, which is the order they run in.
   function property(p: ObjectProp): Field {
+    const field = propertyField(p);
+    if (typeof field.type !== "string" && field.type.kind === "closure") throw unsupported("functions stored in objects", p);
+    return field;
+  }
+
+  function propertyField(p: ObjectProp): Field {
     if (p.kind === "property") {
       if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
       const type = value(p.value);

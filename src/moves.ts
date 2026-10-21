@@ -378,6 +378,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    // A closure made for a call lends what it captures for the call.
+    if (e.kind === "arrow") return captured(e).map(([place, use]) => [place, use as Expr, false]);
     // A call's returned reference lends again what it borrows from, a receiver included.
     const from = borrowsFrom.get(e);
     if (from) return from.flatMap((s) => source(s, (coercions.get(e) ?? types.get(e)!) as RefType));
@@ -786,10 +788,11 @@ function overlaps(a: string, b: string): boolean {
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
 function lastUses(body: Stmt[], { locals, types, coercions }: Instance): Map<Local, number> {
-  // An argument lent to the call, as a reference, is in use until the call ends.
+  // An argument lent to the call, as a reference or a value holding references, is in use
+  // until the call ends.
   const lentTo = (a: Expr) => {
     const t = coercions.get(a) ?? types.get(a);
-    return t !== undefined && isRef(t);
+    return t !== undefined && holdsRef(t);
   };
   const last = new Map<Local, number>();
   const loops: Stmt[] = [];

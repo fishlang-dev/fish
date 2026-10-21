@@ -1,4 +1,5 @@
 import { extend, type Body, type ClassInfo } from "./classes.ts";
+import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -68,6 +69,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     c.type.fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) return { name: f.name, type: storable(withScope(c.scope, () => resolveType(f.type!)), f), access: f.access, ...readonly };
+      if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = {
         name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,

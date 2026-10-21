@@ -165,7 +165,7 @@ export function conversions(b: Slots) {
       return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => convert(part, member, to));
     }
     if (typeof from === "string" || typeof to === "string" || from.kind === "closure" || to.kind === "closure") return v;
-    if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param") {
+    if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param" || from.kind === "function" || to.kind === "function") {
       throw new Error("internal error: an interface or a type parameter reached codegen");
     }
     // A class built from a literal starts with its embedded base, built the same way.

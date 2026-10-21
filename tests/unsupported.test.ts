@@ -12,7 +12,7 @@ const TYPES: [string, string][] = [
   ["A[K]", "indexed access types"],
   ["typeof x", "'typeof' types"],
   ["[i64, i64]", "tuple types"],
-  ["(x: i64) => i64", "function types"],
+  ["<T>(x: T) => T", "generic function types"],
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],
   ["A extends B ? i64 : boolean", "conditional types"],

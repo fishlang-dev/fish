@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { field, fits, holdsRef, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
+import { field, fits, holdsRef, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -90,7 +90,7 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
 export function concrete(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal") return true;
   // An interface describes values without being one, so only a definition check holds one.
-  if (t.kind === "param" || t.kind === "interface") return false;
+  if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
   if (t.kind === "union") return t.members.every(concrete);
   if (t.kind === "ref") return concrete(t.to);
@@ -118,7 +118,7 @@ type Checker = {
 // definition check plus one per set of type arguments its calls need.
 export function instancing({ resolveType, paramType, withScope, members, checking, classParams }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
-  const implicits = new Map<Body, Map<number, ObjectType | InterfaceType>>();
+  const implicits = new Map<Body, Map<number, Bound>>();
   // Which implicit parameters are references to their type, and how.
   const lent = new Map<Body, Map<number, RefType>>();
   const definitions = new Map<Body, Instance>();
@@ -221,6 +221,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       if (typeof type !== "string" && type.kind === "interface") {
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
+      if (typeof type !== "string" && type.kind === "function") throw unsupported("function types as type arguments", at);
     }
     withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
     // An argument from inside another instance may be one of its type parameters; the instance
@@ -272,7 +273,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // A parameter typed with an interface or an object type is an implicit type parameter, so
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's.
-  function implicitOf(f: Body): Map<number, ObjectType | InterfaceType> {
+  function implicitOf(f: Body): Map<number, Bound> {
     let found = implicits.get(f);
     if (found) return found;
     found = new Map();
@@ -291,7 +292,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       if (f.accessor && type.kind === "interface") {
         throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
       }
-      if (!f.accessor && (type.kind === "interface" || (type.kind === "object" && concrete(type)))) {
+      if (!f.accessor && (type.kind === "interface" || type.kind === "function" || (type.kind === "object" && concrete(type)))) {
         found!.set(i, type);
         if (written !== type) borrows.set(i, written as RefType);
       }
@@ -302,13 +303,17 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // What an implicit type parameter stands for in a call: the argument's own type, which must
   // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
   // it gets TypeScript's excess property check.
-  function implicitArgument(arg: Expr, type: Type, bound: ObjectType | InterfaceType, borrowed: boolean): Type {
+  function implicitArgument(arg: Expr, type: Type, bound: Bound, borrowed: boolean): Type {
     // A borrowed argument stands for what it is, or what it refers to.
     if (borrowed && typeof type !== "string" && type.kind === "ref") type = type.to;
     else if (typeof type !== "string" && type.kind === "ref") {
       throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
     }
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
+    if (bound.kind === "function") {
+      if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
+      return type;
+    }
     if (bound.kind === "interface") {
       const reason = unsatisfied(type, bound, members, arg);
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
@@ -376,6 +381,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
     if (found) return found;
     if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    if (args.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure"))) throw unsupported("functions as type arguments of classes", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);
