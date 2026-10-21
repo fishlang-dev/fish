@@ -95,7 +95,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
   if (t.kind === "union") return t.members.every(concrete);
   if (t.kind === "ref") return concrete(t.to);
-  if (t.kind === "closure") return [...t.params, t.returns, ...t.fields.map((f) => f.type)].every(concrete);
+  if (t.kind === "closure") return t.concrete;
   let known = concreteObjects.get(t);
   if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
   return known;

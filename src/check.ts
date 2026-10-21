@@ -378,14 +378,14 @@ export function check(program: Stmt[]): Checked {
     const generic = f.self?.type.generic;
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
-    const enclosing = f.closure?.parent.body.self;
+    const enclosing = f.closure && selfOf(f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
-      owner: f.closure ? (f.closure.parent.body.owner && f.closure.parent.body.owner === enclosing?.type ? self!.type : f.closure.parent.body.owner) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
+      owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
       thisReady: (e) => (outer ? outer.thisReady(e) : unset.size === 0 || e === exempt),
       proves,
@@ -513,11 +513,13 @@ export function check(program: Stmt[]): Checked {
       if (sup) throw unsupported("'super' in closures", sup);
       // A closure holds what it moves, or everything under `move`, and borrows the rest; `this`
       // is a reference either way.
+      // In an instance, what a type parameter stands for is laid out.
+      const laid = (t: Type) => (inner.concrete ? lower(t) : t);
       const fields = [...inner.captures].map(([alias, from]) => ({
         name: alias.name,
-        type: from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias)),
+        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, [...inner.moved!][0]?.name);
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
       inner.closure = type;
       calls.set(e, inner);
       closureBodies.set(type, inner);
@@ -748,8 +750,9 @@ export function check(program: Stmt[]): Checked {
       const from = captures!.get(alias)!;
       instance.changed!.add(alias);
       if (from === "this") outer!.changesThis(path, action, target);
-      // What a `move` closure holds is its own to change.
-      else if (f.closure!.move) return;
+      // What a `move` closure holds is its own to change, unless the change goes through a
+      // mutable reference it holds a copy of.
+      else if (f.closure!.move && !(isRef(from.type) && (path || throughMut))) return;
       else {
         if (!path && action === "assign to" && isRef(from.type) && !from.type.mutable) throw unsupported("closures that point captured references elsewhere", target);
         outer!.changesLocal(from, path, action, target, throughMut);
@@ -764,11 +767,18 @@ export function check(program: Stmt[]): Checked {
       outer!.noteThis(e);
     }
 
+    // Who a closure's body counts as for access to private members: its function's class.
+    function closureOwner(b: Body): Body["owner"] {
+      let outerBody = b;
+      while (outerBody.closure) outerBody = outerBody.closure.parent.body;
+      return outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner;
+    }
+
     // A variable's type where something narrowed it: a captured one as it was where the closure
     // was made.
     function narrowed(l: Local): Type | undefined {
       const outside = captures?.get(l);
-      return outside && outside !== "this" ? outer!.narrowed(outside) : facts.findLast((f) => f.has(l))?.get(l);
+      return facts.findLast((f) => f.has(l))?.get(l) ?? (outside && outside !== "this" ? outer!.narrowed(outside) : undefined);
     }
 
     // A closure's body reads a variable it captures through a binding of its own, standing
@@ -785,6 +795,11 @@ export function check(program: Stmt[]): Checked {
     }
   }
 
+}
+
+// The `this` a body sees: a closure's is that of the function it is written in.
+export function selfOf(f: Body): Body["self"] {
+  return f.closure ? selfOf(f.closure.parent.body) : f.self;
 }
 
 // Stands for the base in a derived constructor's unset fields until `super(...)` runs.

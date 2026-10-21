@@ -81,6 +81,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
 export function bothSides(e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
   const both = [then, otherwise];
+  if (both.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
   if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
     throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
   }

@@ -49,8 +49,9 @@ export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
 // as its fields, which are never read by name.
-// A closure that moves a captured value out of itself can run only once; `once` names one.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string };
+// A closure that moves a captured value out of itself can run only once; `once` names one. A
+// closure made in a generic body's definition check is never compiled, so it isn't concrete.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string; concrete: boolean };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -86,8 +87,8 @@ export function functionType(names: string[], params: Type[], returns: Type): Fu
   return t;
 }
 
-export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined): ClosureType {
-  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once };
+export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean): ClosureType {
+  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once, concrete };
   keys.set(t, `closure ${declared++}`);
   return t;
 }

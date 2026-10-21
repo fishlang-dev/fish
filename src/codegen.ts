@@ -1,4 +1,4 @@
-import type { Checked, Instance, Local, Type } from "./check.ts";
+import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -80,7 +80,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       emit(`${pointer} = load ptr, ptr ${at}`);
       captured.set(alias, pointer);
     });
-    if (instance.captures && [...instance.captures.values()].includes("this")) self = f.closure!.parent.body.self?.type;
+    if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
