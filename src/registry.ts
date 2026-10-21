@@ -28,7 +28,8 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   const unsettled: ClassInfo[] = [];
   const linked = new Set<ClassInfo>();
   const laidOut = new Set<ClassInfo>();
-  return { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled };
+  const wrapped = new Set<ClassInfo>();
+  return { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
     infoOf.set(c.type, c);
@@ -84,11 +85,37 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.
   function implemented(c: ClassInfo) {
     for (const node of c.node.implements) {
+      if (node.kind === "ref" && node.name === "From") {
+        wrapsOf(c);
+        continue;
+      }
       const trait = withScope(c.scope, () => resolveType(node));
       const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
         : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
       if (reason) throw new CompileError(`class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
     }
+  }
+
+  // `implements From<X>` makes the class's static `from` wrap an X as one, wherever an X is
+  // raised where the class is thrown. Worked out when first asked, since a function raising
+  // one may be checked before the class is settled.
+  function wrapsOf(c: ClassInfo): ClassInfo["wraps"] {
+    if (wrapped.has(c)) return c.wraps;
+    wrapped.add(c);
+    for (const node of c.node.implements) {
+      if (node.kind !== "ref" || node.name !== "From") continue;
+      if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
+      const x = withScope(c.scope, () => resolveType(node.args[0]!));
+      const from = c.statics.get("from");
+      const name = c.type.name;
+      const wanted = `class '${name}' implements 'From<${show(x)}>', so it needs 'static from(e: ${show(x)}): ${name}'`;
+      if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError(wanted, node.start, node.end);
+      const [param, returns] = withScope(c.scope, () => [resolveType(from.params[0]!.type!), resolveType(from.returnType!)]);
+      if (!fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
+      if (from.throws) throw new CompileError(`'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
+      c.wraps.push([x, from, param]);
+    }
+    return c.wraps;
   }
 
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {

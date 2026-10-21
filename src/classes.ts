@@ -59,6 +59,8 @@ export type ClassInfo = {
   base?: ClassInfo;
   // The initializers and parameter properties a derived constructor runs after `super(...)`.
   prelude: Stmt[];
+  // For each `From<X>` it implements, X, the static `from` that wraps one, and its parameter's type.
+  wraps: [Type, Body, Type][];
   node: ClassNode;
   // For an instance of a generic class: what its type parameters stand for.
   scope: Map<string, Type>;
@@ -143,7 +145,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   };
   const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
-  return { type, fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node };
+  return { type, fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node, wraps: [] };
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);

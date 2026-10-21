@@ -568,8 +568,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // An error raised by a `throw` or a failed call, which goes to the innermost catch, or else
   // leaves the function with it.
   function raised(at: Expr | Stmt, error: string) {
-    const { from, to } = current.raises.get(at)!;
-    route(convert(error, from, to), to);
+    const { from, to, wrapper, param, via } = current.raises.get(at)!;
+    if (!via) return route(convert(error, from, to), to);
+    // Wrapped by the error class's static `from` first.
+    const wrapped = invoke(via, undefined, [`${llvm(param!)} ${convert(error, from, param!)}`])!;
+    route(convert(wrapped, wrapper!, to), to);
   }
 
   // Sends an error of type `to` to the innermost catch, through any `finally` in between, or

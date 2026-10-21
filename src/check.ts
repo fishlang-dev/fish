@@ -61,7 +61,8 @@ export type Instance = {
   throws?: Type;
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
-  raises: Map<Expr | Stmt, { from: Type; to: Type }>;
+  // An error the function's type doesn't take is first wrapped by a class's static `from`.
+  raises: Map<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
   // The type of what each `try` catches.
   caught: Map<Stmt, Type>;
   // For a closure: the binding standing in its body for each variable it captures, and that
@@ -157,7 +158,7 @@ export function check(program: Stmt[]): Checked {
     returnOf: (b, at) => returnOf(definition(b), at),
     paramTypesOf: (b) => declaredParams(b),
   };
-  const { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled } = registry({
+  const { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
   });
@@ -292,7 +293,7 @@ export function check(program: Stmt[]): Checked {
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
-    instance.raises.forEach((r, at) => instance.raises.set(at, { from: lower(r.from), to: lower(r.to) }));
+    instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
@@ -704,8 +705,10 @@ export function check(program: Stmt[]): Checked {
         case "throw": {
           // `throw` returns an error of the type the function declares, or goes to a catch.
           const type = value(s.value);
-          if (errorType && handlers.length === 0) coerce(s.value, type, errorType, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
-          raise(s, errorType && handlers.length === 0 ? errorType : type, "'throw'");
+          // A value the error type takes is converted to it; another may be wrapped.
+          const into = errorType && handlers.length === 0 && (fits(type, errorType) || adapt(s.value, errorType));
+          if (into) coerce(s.value, type, errorType!, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+          raise(s, into ? errorType! : types.get(s.value)!, "'throw'");
           return;
         }
         case "try": {
@@ -856,10 +859,21 @@ export function check(program: Stmt[]): Checked {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
         throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
       }
-      if (!fits(type, errorType)) {
-        throw new CompileError(`${what} can throw '${show(type)}', which isn't the '${show(errorType)}' that '${f.name}' throws`, at.start, at.end);
+      if (fits(type, errorType)) return void instance.raises.set(at, { from: type, to: errorType });
+      // An error the declared type doesn't take may be wrapped by a class of it that
+      // implements `From` for it.
+      const classes = (typeof errorType !== "string" && errorType.kind === "union" ? errorType.members : [errorType])
+        .filter((m): m is ClassType => typeof m !== "string" && m.kind === "class");
+      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(body) })));
+      const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
+      if (wrappers.length === 0) {
+        const hint = classes.length > 0 ? `convert it, or have '${classes[0]!.name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
+        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that '${f.name}' throws; ${hint}`, at.start, at.end);
       }
-      instance.raises.set(at, { from: type, to: errorType });
+      if (wrappers.length > 1) {
+        throw new CompileError(`${does}, which ${wrappers.map((w) => `'${w.wrapper.name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
+      }
+      instance.raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
     }
 
     function noteThis(e: Expr) {

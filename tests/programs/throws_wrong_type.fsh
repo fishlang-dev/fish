@@ -3,4 +3,4 @@ function g(): i64 throws u8 {
   throw true
 }
 function main() {}
-// error: type 'boolean' can't be thrown here: 'g' throws 'u8'
+// error: this 'throw' throws 'boolean', which isn't the 'u8' that 'g' throws; convert it to 'u8'
