@@ -48,6 +48,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const exits = new Map<Stmt, State>();
   // For each enclosing `try`, what the places it could raise from had in common.
   const catches: State[] = [];
+  // For each enclosing `finally`, what the ways out through it had in common.
+  const leaving: State[] = [];
   const nexts = new Map<Stmt, State>();
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
@@ -120,15 +122,27 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // The catch runs from wherever the block raised, so from what all those points had in
       // common; after the try, either path may have run.
       case "try": {
-        catches.push(null);
-        statements(s.block);
-        const raised = catches.pop()!;
-        const after = state;
-        state = raised;
-        const caught = s.param && locals.get(s);
-        if (caught) revive(String(caught.id));
-        statements(s.handler!);
-        state = join(after, state);
+        // A `finally` runs on every way out: checked once from all of them for its own uses,
+        // and again from the normal way out, where the code after it carries on.
+        if (s.finalizer) leaving.push(null);
+        if (s.handler) {
+          catches.push(null);
+          statements(s.block);
+          const raised = catches.pop()!;
+          const after = state;
+          state = raised;
+          const caught = s.param && locals.get(s);
+          if (caught) revive(String(caught.id));
+          statements(s.handler);
+          state = join(after, state);
+        } else statements(s.block);
+        if (!s.finalizer) return;
+        const left = leaving.pop()!;
+        const normal = state;
+        state = join(left, normal);
+        statements(s.finalizer);
+        state = normal;
+        statements(s.finalizer);
         return;
       }
       case "while":
@@ -163,6 +177,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const target = jumps.get(s)!;
         const table = s.kind === "break" ? exits : nexts;
         table.set(target, join(table.get(target) ?? null, state));
+        leaves();
         state = null;
         return;
       }
@@ -178,6 +193,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // An arrow's expression body may be a call returning nothing.
           if (types.has(s.value)) returned(s.value);
         }
+        leaves();
         state = null;
         return;
     }
@@ -784,9 +800,16 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     revive(place);
   }
 
-  // An error raised here goes to the innermost catch, which runs from this state too.
+  // An error raised here goes to the innermost catch, which runs from this state too, and any
+  // `finally` it leaves through.
   function raising() {
     if (catches.length > 0) catches[catches.length - 1] = join(catches.at(-1)!, state);
+    leaves();
+  }
+
+  // Control leaving here may pass through each enclosing `finally`.
+  function leaves() {
+    for (let i = 0; i < leaving.length; i++) leaving[i] = join(leaving[i]!, state);
   }
 
   function revive(place: string) {

@@ -709,7 +709,12 @@ export function check(program: Stmt[]): Checked {
           return;
         }
         case "try": {
-          if (s.finalizer) throw unsupported("'finally' blocks", s);
+          // Without a catch, what the block raises goes on out, after the `finally`.
+          if (!s.handler) {
+            scoped(s.block);
+            scoped(s.finalizer!);
+            return;
+          }
           if (s.paramType) throw new CompileError("a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
           // What the block raises goes to the catch, which takes the union of it.
           handlers.push([]);
@@ -726,6 +731,7 @@ export function check(program: Stmt[]): Checked {
           }
           statements(s.handler!);
           scopes.pop();
+          if (s.finalizer) scoped(s.finalizer);
           return;
         }
         case "return": {

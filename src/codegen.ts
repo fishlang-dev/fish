@@ -62,6 +62,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
   // the slot its error goes in.
   const handlers: { label: string; slot: string }[] = [];
+  // The `finally` regions enclosing the code being emitted, innermost last.
+  const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
@@ -297,7 +299,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "break":
       case "continue": {
         const target = exits.get(jumps.get(s)!)!;
-        emit(`br label %${s.kind === "break" ? target.exit : target.next}`);
+        jump(s.kind === "break" ? target.exit : target.next!);
         startBlock(label());
         return;
       }
@@ -315,24 +317,45 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         startBlock(label());
         return;
       // An error raised in the block is stored where the catch reads it, and the catch runs.
+      // A `finally` runs however the two are left, then carries on the way they were left.
       case "try": {
-        const local = s.param ? resolved(s) : undefined;
-        const type = current.caught.get(s)!;
-        const handler = { label: label(), slot: alloca(llvm(type)) };
+        const region = s.finalizer ? enter() : undefined;
         const after = label();
-        handlers.push(handler);
-        s.block.forEach(statement);
-        handlers.pop();
-        emit(`br label %${after}`);
-        startBlock(handler.label);
-        if (local) {
-          allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
-          const caught = temp();
-          emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
-          emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
+        const done = () => (region ? exit(region, "normal", () => emit(`br label %${after}`)) : emit(`br label %${after}`));
+        if (!s.handler) {
+          s.block.forEach(statement);
+          done();
+        } else {
+          const local = s.param ? resolved(s) : undefined;
+          const type = current.caught.get(s)!;
+          const handler = { label: label(), slot: alloca(llvm(type)) };
+          handlers.push(handler);
+          s.block.forEach(statement);
+          handlers.pop();
+          done();
+          startBlock(handler.label);
+          if (local) {
+            allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+            const caught = temp();
+            emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
+            emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
+          }
+          s.handler.forEach(statement);
+          done();
         }
-        s.handler!.forEach(statement);
-        emit(`br label %${after}`);
+        if (region) {
+          finallies.pop();
+          startBlock(region.label);
+          s.finalizer!.forEach(statement);
+          const chosen = temp();
+          emit(`${chosen} = load i32, ptr ${region.chosen}`);
+          const targets = region.exits.map(() => label());
+          emit(`switch i32 ${chosen}, label %${targets[0]} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
+          region.exits.forEach((e, i) => {
+            startBlock(targets[i]!);
+            e.resume();
+          });
+        }
         startBlock(after);
         return;
       }
@@ -482,8 +505,54 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
   }
 
-  // Leaves the function being emitted with a value, or with none.
+  // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
+  // control left, each way out with how to resume it, the labels made before the region, and
+  // how many catches enclosed it.
+  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; slots: Map<string, string> };
+
+  function enter(): Region {
+    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, slots: new Map() };
+    finallies.push(region);
+    return region;
+  }
+
+  // Leaves a region the way `key` names, through its `finally`, which then resumes it.
+  function exit(region: Region, key: string, resume: () => void) {
+    let i = region.exits.findIndex((e) => e.key === key);
+    if (i < 0) i = region.exits.push({ key, resume }) - 1;
+    emit(`store i32 ${i}, ptr ${region.chosen}`);
+    emit(`br label %${region.label}`);
+  }
+
+  // A slot a region keeps a value in while its `finally` runs.
+  function stash(region: Region, key: string, type: string, v: string): string {
+    let slot = region.slots.get(key);
+    if (!slot) region.slots.set(key, (slot = alloca(type)));
+    emit(`store ${type} ${v}, ptr ${slot}`);
+    return slot;
+  }
+
+  // Jumps to a label, through each `finally` whose region it leaves.
+  function jump(to: string) {
+    const region = finallies.at(-1);
+    if (region && Number(to.slice(1)) < region.start) return exit(region, `jump ${to}`, () => jump(to));
+    emit(`br label %${to}`);
+  }
+
+  // Leaves the function being emitted with a value, or with none, through any `finally`.
   function leave(v: string | undefined) {
+    const region = finallies.at(-1);
+    if (region) {
+      const kept = v === undefined ? undefined : stash(region, "return", llvm(current.returns), v);
+      return exit(region, "return", () => {
+        let back: string | undefined;
+        if (kept) {
+          back = temp();
+          emit(`${back} = load ${llvm(current.returns)}, ptr ${kept}`);
+        }
+        leave(back);
+      });
+    }
     if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
     const type = resultType(current);
     let result = temp();
@@ -500,16 +569,31 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // leaves the function with it.
   function raised(at: Expr | Stmt, error: string) {
     const { from, to } = current.raises.get(at)!;
+    route(convert(error, from, to), to);
+  }
+
+  // Sends an error of type `to` to the innermost catch, through any `finally` in between, or
+  // else leaves the function with it.
+  function route(error: string, to: Type) {
+    const region = finallies.at(-1);
+    if (region && handlers.length <= region.handlers) {
+      const kept = stash(region, "error", llvm(to), error);
+      return exit(region, "error", () => {
+        const back = temp();
+        emit(`${back} = load ${llvm(to)}, ptr ${kept}`);
+        route(back, to);
+      });
+    }
     const handler = handlers.at(-1);
     if (handler) {
-      emit(`store ${llvm(to)} ${convert(error, from, to)}, ptr ${handler.slot}`);
+      emit(`store ${llvm(to)} ${error}, ptr ${handler.slot}`);
       emit(`br label %${handler.label}`);
       return;
     }
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
-    emit(`${b} = insertvalue ${type} ${a}, ${llvm(to)} ${convert(error, from, to)}, 2`);
+    emit(`${b} = insertvalue ${type} ${a}, ${llvm(to)} ${error}, 2`);
     emit(`ret ${type} ${b}`);
   }
 

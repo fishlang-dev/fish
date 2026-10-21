@@ -199,7 +199,6 @@ const STATEMENTS: [string, string][] = [
   ["for (const k in o) {}", "'for...in' loops"],
   ["for (const x of xs) {}", "'for...of' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
-  ["try {} finally {}", "'finally' blocks"],
   ["class A {}", "local classes"],
   ["@sealed class A {}", "decorators"],
   ["enum E { A }", "local enums"],
