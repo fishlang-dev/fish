@@ -343,13 +343,18 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
       case "binary": {
-        expr(e.left);
-        // The right side of `&&` and `||` may not run.
+        // `a ?? b` hands over whichever it gives.
+        const given = e.op === "??" ? consume : undefined;
+        expr(e.left, given);
+        // The right side of `&&`, `||` and `??` may not run.
         const before = join(state, null);
-        expr(e.right);
-        if (e.op === "&&" || e.op === "||") state = join(before, state);
+        expr(e.right, given);
+        if (e.op === "&&" || e.op === "||" || e.op === "??") state = join(before, state);
         return;
       }
+      // `x!` is x's value, handed over or read as x is.
+      case "nonNull":
+        return expr(e.expr, consume);
     }
   }
 
@@ -909,6 +914,8 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "arrow":
         for (const from of calls.get(e)!.captures!.values()) if (from !== "this") used(from, call ?? e.end);
         return;
+      case "nonNull":
+        return expr(e.expr, call);
       case "binary":
         expr(e.left);
         return expr(e.right);

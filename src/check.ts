@@ -408,6 +408,9 @@ export function check(program: Stmt[]): Checked {
       implicitOf,
     });
 
+    // A call leaves out only the last parameters, so none may be required after an optional one.
+    const late = f.params.find((p, i) => !p.optional && f.params.slice(0, i).some((q) => q.optional));
+    if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
     const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.

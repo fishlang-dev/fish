@@ -177,7 +177,7 @@ export function expressions(ctx: Context) {
   // an optional chain gives an Option.
   function call(e: Call): { type: Type; what: string } {
     const result = callee(e);
-    return e.callee.kind === "member" && linked(e.callee) && result.type !== "void" ? { ...result, type: unionType([result.type, "null"]) } : result;
+    return e.callee.kind === "member" && linked(e.callee) && result.type !== "void" ? { ...result, type: optional(result.type, e) } : result;
   }
 
   function callee(e: Call): { type: Type; what: string } {
@@ -312,6 +312,12 @@ export function expressions(ctx: Context) {
     return false;
   }
 
+  // What a link of an optional chain gives: an Option of what it reads.
+  function optional(t: Type, at: Expr): Type {
+    if (holdsRef(t)) throw unsupported("Options holding references", at);
+    return unionType([t, "null"]);
+  }
+
   // The object a link reads, as what its Option holds.
   function unwrapped(object: Expr, written: boolean): Type {
     const option = value(object);
@@ -377,6 +383,12 @@ export function expressions(ctx: Context) {
     }
     if (object.kind === "conditional") {
       throw new CompileError(`can't call '${name}' on a '?:', which would change a copy; call it in each branch`, object.start, object.end);
+    }
+    // `x!` gives a copy of what x holds, which a change wouldn't reach.
+    let x: Expr = object;
+    while (x.kind === "member") x = x.object;
+    if (x.kind === "nonNull") {
+      throw new CompileError(`can't call '${name}' through '!', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
     }
     intoMember(object, types, `call '${name}' on`);
     if (place(object)) changeable(object, `call '${name}' on`);
@@ -502,7 +514,7 @@ export function expressions(ctx: Context) {
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
           load();
-          return linked(e) ? unionType([shared, "null"]) : shared;
+          return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         const found = typeof object === "string" || object.kind === "closure" ? undefined : field(object, e.name);
@@ -514,7 +526,7 @@ export function expressions(ctx: Context) {
           const returns = returnOf(instanceOf(getter), e);
           // A getter's reference borrows from its object.
           if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
-          return linked(e) ? unionType([returns, "null"]) : returns;
+          return linked(e) ? optional(returns, e) : returns;
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
@@ -529,7 +541,7 @@ export function expressions(ctx: Context) {
           calls.set(e, instance);
         }
         if (!calls.has(e)) load();
-        return linked(e) ? unionType([found.type, "null"]) : found.type;
+        return linked(e) ? optional(found.type, e) : found.type;
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));

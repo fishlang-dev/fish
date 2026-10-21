@@ -452,20 +452,29 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // In an optional chain, what the Option holds: in place when it is one member of it.
     if (unwraps(object)) {
       const option = types.get(object) as UnionType;
-      if (lendable(object) && option.members.includes(coercions.get(object)!)) {
+      const held = coercions.get(object)!;
+      if (lendable(object) && option.members.includes(held)) {
         const at = temp();
         emit(`${at} = getelementptr ${llvm(option)}, ptr ${address(object)}, i32 0, i32 1`);
         return at;
       }
-      const slot = alloca(llvm(coercions.get(object)!));
-      emit(`store ${llvm(coercions.get(object)!)} ${value(object)}, ptr ${slot}`);
-      return slot;
+      // A variable narrowed to fewer members still holds its value in its own union's payload.
+      const local = object.kind === "ident" ? locals.get(object) : undefined;
+      const whole = local?.type;
+      if (local && typeof whole !== "string" && whole?.kind === "union" && whole.members.includes(held)) {
+        const at = temp();
+        emit(`${at} = getelementptr ${llvm(whole)}, ptr ${slot(local)}, i32 0, i32 1`);
+        return at;
+      }
+      const copy = alloca(llvm(held));
+      emit(`store ${llvm(held)} ${value(object)}, ptr ${copy}`);
+      return copy;
     }
     if (lendable(object)) return address(object);
     const type = llvm(types.get(object)!);
-    const slot = alloca(type);
-    emit(`store ${type} ${value(object)}, ptr ${slot}`);
-    return slot;
+    const spilled = alloca(type);
+    emit(`store ${type} ${value(object)}, ptr ${spilled}`);
+    return spilled;
   }
 
   // An expression's value, copied down to the declared type it meets when that is narrower.
@@ -509,7 +518,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "null":
         return "zeroinitializer";
       case "nonNull": {
-        const option = types.get(e.expr) as UnionType;
+        // Through a reference, the Option it points to.
+        const option = valueType(e.expr) as UnionType;
         const v = value(e.expr);
         panicIf(holds(v, option, ["null"]), "called `Option::unwrap()` on a `None` value", e);
         return convert(v, option, types.get(e)!);
@@ -641,6 +651,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
         if (!condition) return numeric(e.op, a, b, e, type);
+        // Empty values are always equal.
+        if (type === "null") return String(e.op === "===");
         if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
         if (isFloat(type)) {
@@ -735,7 +747,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // The right side runs only when the left side does not already decide the result.
   // What the left Option holds, or the right side, run only when the left is empty.
   function orElse(e: Extract<Expr, { kind: "binary" }>): string {
-    const option = types.get(e.left) as UnionType;
+    const option = valueType(e.left) as UnionType;
     const type = types.get(e)!;
     const v = value(e.left);
     const [some, none, end] = [label(), label(), label()];

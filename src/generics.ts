@@ -295,7 +295,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       const written = p.type && resolveType(p.type);
       // A reference to an interface or object type is one over what it borrows.
       const type = written && typeof written !== "string" && written.kind === "ref" ? written.to : written;
-      if (!type || typeof type === "string" || p.modifiers.length > 0) return;
+      // An optional parameter is an Option of its type, not a type parameter.
+      if (!type || typeof type === "string" || p.modifiers.length > 0 || p.optional) return;
       if (f.accessor && type.kind === "interface") {
         throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
       }
@@ -329,7 +330,11 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     // A fresh object literal is checked against the parameter's type when lent into it.
     if (arg.kind === "object" && holdsRef(bound)) return bound;
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
-    return arg.kind === "object" ? bound : type;
+    // A value leaving out an optional field is copied into the parameter's type, which fills
+    // it in empty; a reference can't be.
+    const missing = bound.fields.find((f) => !field(type as Exclude<Type, string>, f.name));
+    if (missing && borrowed) throw new CompileError(`${message}: it has no '${missing.name}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
+    return arg.kind === "object" || missing ? bound : type;
   }
 
 }
