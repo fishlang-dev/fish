@@ -517,10 +517,16 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "as":
         return expr(e.expr, consume, discarded);
       // A pipe over a value hands it to the topic, new each time the pipe runs.
+      // Like a `let`, the topic holds what its value borrows, until the pipe ends.
       case "pipe": {
+        const local = locals.get(e)!;
+        release(local);
         expr(e.value, (place) => `'${place}' moved here into the pipe's '%'; use '${place}.clone()' to keep a copy`);
-        revive(String(locals.get(e)!.id));
-        return expr(e.body, consume, discarded);
+        revive(String(local.id));
+        if (holdsRef(local.type)) rehold(local, e.value);
+        expr(e.body, consume, discarded);
+        release(local);
+        return;
       }
       case "array":
         for (const x of e.elements) if (x) expr(x, (place) => `'${place}' moved here into the new array; use '${place}.clone()' to keep a copy`);

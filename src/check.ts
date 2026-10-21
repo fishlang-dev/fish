@@ -12,10 +12,10 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, fits, holdsRef, isCopy, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, holdsRef, isCopy, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
-import { expressions } from "./values.ts";
+import { expressions, substituted } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -309,6 +309,13 @@ export function check(program: Stmt[]): Checked {
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
+    // A pipe's topic written in as a field read would run a getter once for each `%`.
+    for (const e of instance.types.keys()) {
+      if (e.kind !== "member" || !substituted.has(e)) continue;
+      const held = instance.types.get(e.object);
+      const object = typeof held !== "string" && held?.kind === "ref" ? held.to : held;
+      if (typeof object !== "string" && object?.kind === "class" && !field(object, e.name)) throw unsupported("pipes over a field a getter provides", e);
+    }
     instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(info)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));

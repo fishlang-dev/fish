@@ -115,6 +115,10 @@ export type Context = {
   infer(e: Expr, to: Type): boolean;
 };
 
+// The member reads a pipe wrote in for its topic. A generic body is checked once, so whether one
+// is a stored field or a getter's is only known for each instance.
+export const substituted = new WeakSet<Expr>();
+
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
@@ -255,23 +259,29 @@ export function expressions(ctx: Context) {
     return type;
   }
 
-  // `x |> f(%)`. Over a place, the pipe means its right side with the place written for each
-  // `%`, so it reads, borrows and moves as that would: the node becomes that expression, and
-  // later stages never see a pipe. Over anything else, the value is made once and kept in a
-  // hidden read-only binding each `%` names, dropped when the pipe ends unless moved out.
+  // `x |> f(%)`. Over a place that doesn't copy, the pipe means its right side with the place
+  // written for each `%`, so it reads, borrows and moves as that would: the node becomes that
+  // expression, and later stages never see a pipe. Over anything else, the value is made once
+  // and kept in a hidden read-only binding each `%` names, dropped when the pipe ends unless
+  // moved out; a copy read once is what JavaScript reads, whatever the right side changes.
   function pipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
     const type = value(e.value);
-    if (!steady(e.value)) {
+    if (!steady(e.value) || isCopy(type)) {
       return ctx.arm(() => {
         ctx.bind("%", type, e);
         e.body = topics(e.body, (at) => ({ kind: "ident", name: "%", start: at.start, end: at.end }));
-        const given = wanted ? value(e.body) : result(e.body);
-        if (wanted && holdsRef(given)) throw new CompileError("a pipe over a value can't give a reference yet, since the value is dropped once the pipe ends; give a copy with '.clone()'", e.start, e.end);
+        if (!wanted) return effect(e.body), "void";
+        const given = value(e.body);
+        if (holdsRef(given)) throw new CompileError("a pipe over a value can't give a reference yet, since the value is dropped once the pipe ends; give a copy with '.clone()'", e.start, e.end);
         return given;
       });
     }
     const place = e.value;
-    const body = topics(e.body, (at) => spanned(structuredClone(place), at));
+    const body = topics(e.body, (at) => {
+      const copy = spanned(structuredClone(place), at);
+      for (let m: Expr = copy; m.kind === "member" || m.kind === "index"; m = m.object) if (m.kind === "member") substituted.add(m);
+      return copy;
+    });
     for (const key of Object.keys(e)) delete (e as Record<string, unknown>)[key];
     Object.assign(e, body);
     if (wanted) return value(e);
@@ -289,13 +299,23 @@ export function expressions(ctx: Context) {
   }
 
   // Calls a pipe's every `%` what `replace` makes of it: in its right side, and in the left
-  // side of a pipe inside it, whose own right side has a topic of its own.
+  // side of a pipe inside it, whose own right side has a topic of its own. As in TC39, the
+  // topic itself is never assigned.
   function topics(body: Expr, replace: (topic: Expr) => Expr): Expr {
     if (body.kind === "topic") return replace(body);
+    if (body.kind === "pipe") {
+      body.value = topics(body.value, replace);
+      return body;
+    }
     const visit = (node: Record<string, unknown>) => {
       for (const [key, child] of Object.entries(node)) {
         if (!child || typeof child !== "object") continue;
         const kind = (child as { kind?: unknown }).kind;
+        const written = (key === "target" && (node.kind === "assign" || node.kind === "destructure")) || (key === "operand" && node.kind === "update");
+        if (kind === "topic" && written) {
+          const at = child as Expr;
+          throw new CompileError("'%' can't be assigned; it stands for the pipe's value, so assign to what you piped instead", at.start, at.end);
+        }
         if (kind === "topic") node[key] = replace(child as Expr);
         else if (kind === "pipe") {
           const inner = child as Extract<Expr, { kind: "pipe" }>;
