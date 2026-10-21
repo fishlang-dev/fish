@@ -53,7 +53,10 @@ export type Context = {
   instanceOf(f: Body): Instance;
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
   paramTypes(instance: Instance): Type[];
-  lookup(name: string): Local | undefined;
+  // The binding a name refers to; `at`, the use, is where a closure first captures it.
+  lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
+  // Notes a closure's use of `this`, which it captures.
+  noteThis(e: Expr): void;
   self: Body["self"];
   // The class whose constructor or method this is, which may reach its non-public members.
   owner: ClassType | undefined;
@@ -68,6 +71,9 @@ export type Context = {
   narrowed(l: Local): Type | undefined;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
+  // Whether a binding stands for a variable a closure captures, and whether this is a closure.
+  captured(l: Local): boolean;
+  closing: boolean;
   // Records a whole write through a narrowed mutable reference that may change its member.
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
@@ -79,7 +85,7 @@ export type Context = {
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, rewritten, depthOf, closure, closureBody } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, noteThis, rewritten, depthOf, closure, closureBody } = ctx;
   const unions: Union = {
     types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
@@ -327,7 +333,7 @@ export function expressions(ctx: Context) {
       case "bool":
         return "boolean";
       case "ident": {
-        const local = lookup(e.name);
+        const local = lookup(e.name, e);
         if (!local) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
@@ -396,6 +402,7 @@ export function expressions(ctx: Context) {
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);
+        noteThis(e);
         return self.type;
       case "new": {
         const list = e.args ?? [];
@@ -697,7 +704,7 @@ export function expressions(ctx: Context) {
     if (p.default) throw new CompileError("'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
-    const local = lookup(p.name);
+    const local = lookup(p.name, p);
     if (!local) throw new CompileError(`cannot find name '${p.name}'`, p.start, p.end);
     if (!reachable(local)) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
@@ -809,10 +816,12 @@ export function expressions(ctx: Context) {
       root = root.object;
     }
     if (root.kind === "this" || root.kind === "super") {
+      if (closing) throw unsupported("closures that change what they capture", target);
       if (self?.mutable) return;
       throw new CompileError(`cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
     }
     const local = locals.get(root)!;
+    if (captured(local)) throw unsupported("closures that change what they capture", target);
     if (throughMut) return;
     // A shared reference never changes what it points to; a mutable one may, whatever holds
     // it, and a method may change through it.

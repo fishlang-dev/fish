@@ -229,6 +229,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (!types.has(e.object)) return;
         if (key(e) !== undefined) return use(e, consume);
         return expr(e.object);
+      case "arrow":
+        for (const [place, use] of captured(e)) {
+          usable(use, place);
+          free(place, use, "read");
+        }
+        return;
       case "object":
         for (const p of e.props) {
           const into = (place: string) => `'${place}' moved here into the new object; use '${place}.clone()' to keep a copy`;
@@ -409,6 +415,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
+    if (root && instance.captures?.has(root)) {
+      throw new CompileError(`'${text(e)}' can't be moved here: this closure only borrows ${e.kind === "member" ? `'${root.name}'` : "it"}; use '${text(e)}.clone()'`, e.start, e.end);
+    }
     if (root && isRef(root.type)) {
       throw new CompileError(`'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
     }
@@ -493,6 +502,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
+    // A closure holds what it captures.
+    if (e.kind === "arrow") {
+      for (const [place, use, from] of captured(e)) {
+        lend(place, false, use, holder);
+        if (from && holdsRef(from.type)) inheritFrom(holder, from);
+      }
+      return;
+    }
     if (!isRef(to)) {
       // A value holding references holds what its parts do, or what the value it copies does.
       if (!holdsRef(to)) return;
@@ -732,6 +749,16 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return object === undefined ? undefined : `${object}.${e.name}`;
   }
 
+  // The places a closure captures, where it first uses each, and the variable, if not `this`.
+  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined][] {
+    const inner = calls.get(e)!;
+    return [...inner.captures!].flatMap(([alias, from]): [string, Named, Local | undefined][] => {
+      const use = inner.captureUses!.get(alias) as Named | undefined;
+      if (!use) return [];
+      return [from === "this" ? ["this", use, undefined] : [String(from.id), use, from]];
+    });
+  }
+
   function rootOf(e: Named): Named {
     return e.kind === "member" ? rootOf(e.object) : e;
   }
@@ -833,6 +860,8 @@ function lastUses(body: Stmt[], { locals, types, coercions }: Instance): Map<Loc
         return;
       case "call":
         if (e.callee.kind === "member") expr(e.callee.object, e.end);
+        // A closure called through a variable is in use until the call ends.
+        if (e.callee.kind === "ident") expr(e.callee, e.end);
         for (const a of e.args) expr(a, lentTo(a) ? e.end : undefined);
         return;
       case "unary":

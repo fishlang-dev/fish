@@ -40,6 +40,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   let { types, locals, calls, setters, coercions, jumps } = current;
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
+  // In a closure, where each variable it captures lives, loaded from its environment.
+  let captured = new Map<Local, string>();
   // Where a `break` and a `continue` go for each statement they can name.
   const exits = new Map<Stmt, { exit: string; next?: string }>();
   const builder = { emit, temp, label, startBlock, cString, alloca };
@@ -68,6 +70,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // it captured.
     if (f.self) params.unshift("ptr %this");
     if (f.closure) params.unshift("ptr %env");
+    captured = new Map();
+    [...(instance.captures ?? [])].forEach(([alias, from], i) => {
+      const at = temp();
+      emit(`${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`);
+      const pointer = from === "this" ? "%this" : temp();
+      emit(`${pointer} = load ptr, ptr ${at}`);
+      captured.set(alias, pointer);
+    });
+    if (instance.captures && [...instance.captures.values()].includes("this")) self = f.closure!.parent.body.self?.type;
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     const end = type === "void" ? "ret void" : "unreachable";
@@ -111,7 +122,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   function slot(local: Local): string {
-    return `%${local.name}.${local.id}`;
+    return captured.get(local) ?? `%${local.name}.${local.id}`;
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
@@ -379,8 +390,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         // A field read through an interface or object parameter takes the type its bound declares.
         return convert(result, field(object, e.name)!.type, types.get(e)!);
       }
-      case "arrow":
-        return "zeroinitializer";
+      // A closure's value is a pointer to each variable it captures, or to `this`.
+      case "arrow": {
+        const inner = calls.get(e)!;
+        let result = "undef";
+        [...inner.captures!.values()].forEach((from, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ptr ${from === "this" ? "%this" : slot(from)}, ${i}`);
+          result = next;
+        });
+        return inner.captures!.size === 0 ? "zeroinitializer" : result;
+      }
       case "object": {
         const type = types.get(e) as ObjectType;
         // Properties run in source order, then fill the fields in their sorted order.

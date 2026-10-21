@@ -72,8 +72,8 @@ export function interfaceType(name: string): InterfaceType {
   return t;
 }
 
-export function closureType(names: string[], params: Type[], returns: Type): ClosureType {
-  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields: [] };
+export function closureType(names: string[], params: Type[], returns: Type, fields: Field[]): ClosureType {
+  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields };
   keys.set(t, `closure ${declared++}`);
   return t;
 }
@@ -159,7 +159,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
-  return t.kind === "object" && t.fields.some((f) => holdsMut(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
 
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
@@ -170,7 +170,7 @@ export function holdsRef(t: Type): boolean {
   if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
   if (t.kind === "union") return t.members.some(holdsRef);
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
-  return t.kind === "object" && t.fields.some((f) => holdsRef(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type

@@ -11,7 +11,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, holdsRef, lower, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type RefType, type Type } from "./typing.ts";
+import { closureType, holdsRef, lower, refType, lowersClasses, replaced, show, widenEnum, type ClassType, type ClosureType, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions } from "./values.ts";
@@ -57,7 +57,17 @@ export type Instance = {
   jumps: Map<Stmt, Stmt>;
   // The arguments, or the receiver, each call returning a reference borrows from.
   borrowsFrom: Map<Expr, Expr[]>;
+  // For a closure: the binding standing in its body for each variable it captures, and that
+  // variable, or `this`, in the body it is written in, in the order its environment holds them;
+  // and where it, or a closure inside it, first uses each.
+  captures?: Map<Local, Local | "this">;
+  captureUses?: Map<Local, Expr | ObjectProp>;
+  // A closure's own type.
+  closure?: ClosureType;
 };
+
+// What a closure's body sees of the body it is written in, as it is where the closure is made.
+type Outer = { lookup(name: string, at?: Expr | ObjectProp): Local | undefined; narrowed(l: Local): Type | undefined; thisReady(e: Expr): boolean; noteThis(e: Expr): void };
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
@@ -317,7 +327,7 @@ export function check(program: Stmt[]): Checked {
     }
   }
 
-  function checkInstance(instance: Instance) {
+  function checkInstance(instance: Instance, outer?: Outer) {
     const f = instance.body;
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
@@ -356,17 +366,23 @@ export function check(program: Stmt[]): Checked {
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = f.self?.type.generic;
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
-    const self = f.self && { ...f.self, type: viewed ?? f.self.type };
+    // A closure sees the `this` of the body it is written in, which it only reads.
+    const enclosing = f.closure?.parent.body.self;
+    const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
+    const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
-      owner: f.owner && f.owner === f.self?.type ? self!.type : f.owner,
+      owner: f.closure ? (f.closure.parent.body.owner && f.closure.parent.body.owner === enclosing?.type ? self!.type : f.closure.parent.body.owner) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
-      thisReady: (e) => unset.size === 0 || e === exempt,
+      thisReady: (e) => (outer ? outer.thisReady(e) : unset.size === 0 || e === exempt),
       proves,
       assume,
-      narrowed: (l) => facts.findLast((f) => f.has(l))?.get(l),
+      narrowed,
+      captured: (l) => captures?.has(l) ?? false,
+      noteThis,
+      closing: f.closure !== undefined,
       reachable: (l) => !caseOnly.has(l),
       rewritten,
       depthOf: (l) => depths.get(l)!,
@@ -471,9 +487,16 @@ export function check(program: Stmt[]): Checked {
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(),
       };
+      inner.captures = new Map();
+      inner.captureUses = new Map();
       closures.push(inner);
-      checkInstance(inner);
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns);
+      checkInstance(inner, { lookup, narrowed, thisReady: (t) => unset.size === 0 || t === exempt, noteThis });
+      const sup = [...inner.types.keys()].find((u) => u.kind === "super");
+      if (sup) throw unsupported("'super' in closures", sup);
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns,
+        [...inner.captures].map(([alias, from]) => ({ name: alias.name, type: refType(from === "this" ? self!.type : from.type, false) })));
+      inner.closure = type;
+      calls.set(e, inner);
       closureBodies.set(type, inner);
       return type;
     }
@@ -675,12 +698,41 @@ export function check(program: Stmt[]): Checked {
       locals.set(node, local);
     }
 
-    function lookup(name: string): Local | undefined {
+    function lookup(name: string, at?: Expr | ObjectProp): Local | undefined {
       for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
         if (local) return local;
       }
-      return undefined;
+      const outside = outer?.lookup(name, at);
+      return outside && capture(outside, at);
+    }
+
+    function noteThis(e: Expr) {
+      if (!captures || [...captures.values()].includes("this")) return;
+      const alias: Local = { name: "this", type: self!.type, mutable: false, param: false, id: nextId++ };
+      captures.set(alias, "this");
+      instance.captureUses!.set(alias, e);
+      outer!.noteThis(e);
+    }
+
+    // A variable's type where something narrowed it: a captured one as it was where the closure
+    // was made.
+    function narrowed(l: Local): Type | undefined {
+      const outside = captures?.get(l);
+      return outside && outside !== "this" ? outer!.narrowed(outside) : facts.findLast((f) => f.has(l))?.get(l);
+    }
+
+    // A closure's body reads a variable it captures through a binding of its own, standing
+    // for it.
+    function capture(from: Local, at?: Expr | ObjectProp): Local {
+      let alias = [...captures!].find(([, l]) => l === from)?.[0];
+      if (!alias) {
+        alias = { name: from.name, type: from.type, mutable: false, param: false, id: nextId++ };
+        depths.set(alias, 0);
+        captures!.set(alias, from);
+      }
+      if (at && !instance.captureUses!.has(alias)) instance.captureUses!.set(alias, at);
+      return alias;
     }
   }
 
