@@ -6,7 +6,7 @@ import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
-import { made } from "./match.ts";
+import { made, type PatternInfo } from "./match.ts";
 import { arrayType, field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -625,6 +625,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         });
         return;
       }
+      case "object": {
+        if (union) pass(holds(v, union, info.shapes));
+        const holder = shapeOf(info);
+        const held = union ? convert(v, info.type, holder) : v;
+        for (const [key, sub, type] of info.fields) tested(sub, fieldOf(held, holder, key, type), no);
+        return;
+      }
+      case "array": {
+        const [length, data, same] = [temp(), temp(), temp()];
+        emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+        emit(`${same} = icmp eq i64 ${length}, ${info.items.length}`);
+        pass(same);
+        emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+        info.items.forEach((item, i) => tested(item, loadElement(data, info.element, i).v, no));
+        return;
+      }
       case "or": {
         const yes = label();
         info.alternatives.forEach((alt, i) => {
@@ -673,12 +689,60 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       });
       return;
     }
+    if (info.kind === "object") {
+      // One shape has its fields in place; several have no one place to point into.
+      const holder = shapeOf(info);
+      const union = info.type !== holder;
+      const held = union ? convert(v, info.type, holder) : v;
+      const single = typeof holder !== "string" && (holder.kind === "object" || holder.kind === "class") ? holder : undefined;
+      const holderAt = at && single ? (union ? partAt(llvm(info.type), at, 1) : at) : undefined;
+      for (const [key, sub, type] of info.fields) {
+        let fieldAt: string | undefined;
+        if (holderAt && single) {
+          fieldAt = temp();
+          emit(`${fieldAt} = getelementptr ${llvm(single)}, ptr ${holderAt}, i32 0, ${fieldPath(single, key).map((i) => `i32 ${i}`).join(", ")}`);
+        }
+        bindAll(sub, fieldOf(held, holder, key, type), fieldAt, move && fieldAt !== undefined);
+      }
+      return;
+    }
+    if (info.kind === "array") {
+      const data = temp();
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+      info.items.forEach((item, i) => {
+        const { v: element, at: elementAt } = loadElement(data, info.element, i);
+        bindAll(item, element, elementAt, move);
+      });
+      return;
+    }
     if (info.kind === "some") {
       // Only an Option of one member keeps that member in place as its payload.
       const alone = (info.type as UnionType).members.length === 2;
       const innerAt = at && alone ? partAt(llvm(info.type), at, 1) : undefined;
       bindAll(info.arg, convert(v, info.type, info.inner), innerAt, move && innerAt !== undefined);
     }
+  }
+
+  // What an object pattern meets once its member is known: its one shape, or the union of them.
+  function shapeOf(info: Extract<PatternInfo, { kind: "object" }>): Type {
+    return info.shapes.length === 1 ? info.shapes[0]! : unionType(info.shapes);
+  }
+
+  // A field of a value, read as `type`: from an object or instance, or a union's members.
+  function fieldOf(v: string, holder: Type, key: string, type: Type): string {
+    if (typeof holder !== "string" && holder.kind === "union") return unionField(v, holder, key, type);
+    const shape = holder as ObjectType | ClassType;
+    const read = temp();
+    emit(`${read} = extractvalue ${llvm(shape)} ${v}, ${fieldPath(shape, key).join(", ")}`);
+    return convert(read, field(shape, key)!.type, type);
+  }
+
+  // An array's element `i`, and where it lives.
+  function loadElement(data: string, element: Type, i: number): { v: string; at: string } {
+    const [at, v] = [temp(), temp()];
+    emit(`${at} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
+    emit(`${v} = load ${llvm(element)}, ptr ${at}`);
+    return { v, at };
   }
 
   // A pointer to part `i` of an aggregate in memory.

@@ -1,5 +1,5 @@
 import type { Expr, Pattern } from "./parser.ts";
-import { literalType, lower, show, unionType, type LiteralType, type Type, type VariantType } from "./typing.ts";
+import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type VariantType } from "./typing.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -17,7 +17,12 @@ export type PatternTest =
   | { kind: "variant"; variant: VariantType; args: Pattern[] }
   | { kind: "some"; inner: Type; arg: Pattern }
   | { kind: "none" }
-  | { kind: "or"; alternatives: Pattern[] };
+  | { kind: "or"; alternatives: Pattern[] }
+  // An object pattern: the members of a union it can match, each holding every field it names,
+  // and for each field its name, its pattern and the field's type across those members.
+  | { kind: "object"; shapes: Type[]; fields: [string, Pattern, Type][] }
+  // An array of exactly this many elements, each tested by its pattern.
+  | { kind: "array"; element: Type; items: Pattern[] };
 export type PatternInfo = { type: Type } & PatternTest;
 
 export type LiteralValue = string | bigint | boolean | number | null;
@@ -27,6 +32,8 @@ export function lowerPattern(info: PatternInfo): PatternInfo {
   const type = lower(info.type);
   if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
   if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
+  if (info.kind === "object") return { ...info, type, shapes: info.shapes.map(lower), fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
+  if (info.kind === "array") return { ...info, type, element: lower(info.element) };
   return { ...info, type };
 }
 
@@ -67,7 +74,13 @@ export function bindings(p: Pattern): Extract<Pattern, { kind: "ident" }>[] {
 // The kinds of value a type has, for coverage: each literal, the empty value, each variant, or
 // a whole open type, which only a catch-all covers. An Option is its empty value and `Some` of
 // the rest.
-type Case = { kind: "literal"; type: LiteralType } | { kind: "none" } | { kind: "some"; inner: Type } | { kind: "variant"; variant: VariantType } | { kind: "open"; type: Type };
+type Case =
+  | { kind: "literal"; type: LiteralType }
+  | { kind: "none" }
+  | { kind: "some"; inner: Type }
+  | { kind: "variant"; variant: VariantType }
+  | { kind: "object"; type: ObjectType | ClassType }
+  | { kind: "open"; type: Type };
 
 function cases(t: Type): Case[] {
   if (t === "boolean") return [literalType(true), literalType(false)].map((type) => ({ kind: "literal", type }));
@@ -78,6 +91,7 @@ function cases(t: Type): Case[] {
     if (m === "null") return [{ kind: "none" }];
     if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
     if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
+    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class")) return [{ kind: "object", type: m }];
     return [{ kind: "open", type: m }];
   });
 }
@@ -114,6 +128,7 @@ function alternatives(p: Pattern, info: (p: Pattern) => PatternInfo): Pattern[] 
 
 function fieldTypes(c: Case): Type[] {
   if (c.kind === "variant") return c.variant.fields.map((f) => f.type);
+  if (c.kind === "object") return objectFields(c.type).map((f) => f.type);
   if (c.kind === "some") return [c.inner];
   return [];
 }
@@ -135,9 +150,21 @@ function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => Pa
       return c.kind === "some" ? [found.arg] : undefined;
     case "variant":
       return c.kind === "variant" && c.variant === found.variant ? found.args : undefined;
+    case "object": {
+      // A field the pattern leaves out matches anything.
+      if (c.kind !== "object" || !found.shapes.includes(c.type)) return undefined;
+      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { kind: "wildcard", start: p.start, end: p.end });
+    }
     default:
       return undefined;
   }
+}
+
+// The fields an object pattern can test: an object's, or an instance's public ones, its bases'
+// included.
+export function objectFields(t: ObjectType | ClassType): Field[] {
+  if (t.kind === "object") return t.fields;
+  return [...(t.base ? objectFields(t.base) : []), ...t.fields].filter((f) => (f.access ?? "public") === "public");
 }
 
 function render(c: Case, fields: string[]): string {
@@ -150,6 +177,11 @@ function render(c: Case, fields: string[]): string {
       return fields[0]!;
     case "variant":
       return fields.length > 0 ? `${c.variant.name}(${fields.join(", ")})` : c.variant.name;
+    case "object": {
+      // A field left out of an object pattern matches anything, so only the telling ones show.
+      const shown = objectFields(c.type).flatMap((f, i) => (fields[i] === "_" ? [] : [`${f.name}: ${fields[i]}`]));
+      return shown.length > 0 ? `{ ${shown.join(", ")} }` : "_";
+    }
     case "open":
       return "_";
   }

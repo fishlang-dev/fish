@@ -3,7 +3,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
-import { bindings, literalOf, made, missing, uncovered, type PatternInfo, type PatternTest } from "./match.ts";
+import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
@@ -294,6 +294,35 @@ export function expressions(ctx: Context) {
         }
         args.forEach((a, i) => pattern(a, v.fields[i]!.type, borrowing));
         return record({ kind: "variant", variant: v, args });
+      }
+      // An object pattern tests the members that hold every field it names; each field's pattern
+      // meets that field's type across them.
+      case "object": {
+        if (p.rest) throw unsupported("rest patterns", p.rest);
+        const keys = p.props.map((prop) => {
+          if (typeof prop.key !== "string") throw unsupported("computed keys in patterns", prop);
+          return prop.key;
+        });
+        const shapes = members.filter((m): m is ObjectType | ClassType => {
+          if (typeof m === "string" || (m.kind !== "object" && m.kind !== "class")) return false;
+          return keys.every((k) => objectFields(m).some((f) => f.name === k));
+        });
+        if (shapes.length === 0) throw never();
+        const fields = p.props.map((prop, i): [string, Pattern, Type] => {
+          const ft = unionType(shapes.map((m) => objectFields(m).find((f) => f.name === keys[i])!.type));
+          pattern(prop.value, ft, borrowing);
+          return [keys[i]!, prop.value, ft];
+        });
+        return record({ kind: "object", shapes, fields });
+      }
+      case "array": {
+        if (p.rest) throw unsupported("rest patterns", p.rest);
+        if (p.elements.some((x) => x === undefined)) throw unsupported("holes in array patterns", p);
+        const array = members.find(isArray);
+        if (!array || members.length > 1) throw never();
+        const items = p.elements as Pattern[];
+        for (const item of items) pattern(item, array.element, borrowing);
+        return record({ kind: "array", element: array.element, items });
       }
       case "or":
         for (const alt of p.patterns) pattern(alt, type, borrowing);
