@@ -84,6 +84,8 @@ export type Context = {
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
   depthOf(l: Local): number;
+  // A written type, as this body sees it.
+  resolveType(t: TypeNode): Type;
   // An arrow function's type, its body checked; and the instance a closure type runs.
   closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType): ClosureType;
   closureBody(t: ClosureType): Instance;
@@ -93,7 +95,7 @@ export type Context = {
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
-  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf } = ctx;
+  const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, rewritten, depthOf, closure, closureBody, implicitOf, resolveType } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new Map<Expr, FunctionType>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -474,6 +476,16 @@ export function expressions(ctx: Context) {
         return objectType(fields(e.props.map(property), e.props));
       case "arrow":
         return closure(e, expecting.get(e));
+      // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
+      // an integer.
+      case "as": {
+        const to = resolveType(e.type);
+        const from = operand(e.expr);
+        if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
+          throw unsupported("'as' conversions other than between numbers", e);
+        }
+        return to;
+      }
       case "this":
         if (!self) throw new CompileError("'this' can only be used inside a class", e.start, e.end);
         if (!thisReady(e)) throw new CompileError("'this' can't be used until every field is assigned", e.start, e.end);

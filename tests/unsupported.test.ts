@@ -139,7 +139,7 @@ const EXPRESSIONS: [string, string][] = [
   ["f?.()", "optional calls"],
   ["a?.b", "optional chains"],
   ["console?.log(1)", "optional calls"],
-  ["1 as i64", "'as' expressions"],
+  ["true as boolean", "'as' conversions other than between numbers"],
   ["1 satisfies i64", "'satisfies' expressions"],
   ["<i64>1", "type assertions"],
   ["tag`a`", "tagged templates"],

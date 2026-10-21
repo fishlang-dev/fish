@@ -401,6 +401,7 @@ export function check(program: Stmt[]): Checked {
       depthOf: (l) => depths.get(l)!,
       closure,
       closureBody: (t) => closureBodies.get(t)!,
+      resolveType,
       implicitOf,
     });
 

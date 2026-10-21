@@ -5,7 +5,7 @@ import { lowering } from "./arithmetic.ts";
 import { print, RUNTIME } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
 import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type ObjectType } from "./typing.ts";
+import { field, fieldPath, INTEGERS, isFloat, isInteger, type ClassType, type Integer, type Numeric, type ObjectType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -116,6 +116,25 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     "}",
     "",
   ].join("\n");
+
+  // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
+  // zero into integers, saturating with NaN as 0, and widen or narrow between themselves.
+  function cast(v: string, from: Type, to: Numeric): string {
+    if (from === to || llvm(from) === llvm(to) && isInteger(from) && isInteger(to)) return v;
+    const result = temp();
+    const [a, b] = [llvm(from), llvm(to)];
+    if (from === "boolean") emit(`${result} = zext i1 ${v} to ${b}`);
+    else if (isInteger(from) && isInteger(to)) {
+      const [wide, narrow] = [INTEGERS[from].bits, INTEGERS[to].bits];
+      emit(`${result} = ${narrow < wide ? "trunc" : INTEGERS[from].signed ? "sext" : "zext"} ${a} ${v} to ${b}`);
+    } else if (isInteger(from)) emit(`${result} = ${INTEGERS[from].signed ? "sitofp" : "uitofp"} ${a} ${v} to ${b}`);
+    else if (isInteger(to)) {
+      const intrinsic = `@llvm.fpto${INTEGERS[to].signed ? "s" : "u"}i.sat.${b}.${a === "double" ? "f64" : "f32"}`;
+      intrinsics.add(`declare ${b} ${intrinsic}(${a})`);
+      emit(`${result} = call ${b} ${intrinsic}(${a} ${v})`);
+    } else emit(`${result} = ${to === "f64" ? "fpext" : "fptrunc"} ${a} ${v} to ${b}`);
+    return result;
+  }
 
   // A binary operator on numbers: floats never overflow, and integers are checked as Rust's are.
   function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
@@ -396,6 +415,8 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       }
       case "float":
         return floatConstant(e.value, types.get(e) as "f32" | "f64");
+      case "as":
+        return cast(value(e.expr), coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)! as Numeric);
       case "bool":
         return String(e.value);
       // A string literal on its own has only its literal type, which takes no space.
