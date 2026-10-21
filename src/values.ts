@@ -536,6 +536,11 @@ export function expressions(ctx: Context) {
       // Its literal type, which a string takes it as.
       case "string":
         return literalType(e.value);
+      // Text alone is a literal; with substitutions, a new string.
+      case "template":
+        if (e.exprs.length === 0) return literalType(e.quasis[0]!);
+        for (const x of e.exprs) joined(x, operand(x), "a template");
+        return "string";
       case "member": {
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
@@ -636,6 +641,7 @@ export function expressions(ctx: Context) {
         const target = assignable(e.target, op !== "=");
         const assigned = op === "=" ? value(e.value) : read(e.value);
         const type = op === "=" ? assigned
+          : op === "+" && target === "string" ? join(e.target, target, e.value, widen(e.value, assigned))
           : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
           : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
@@ -692,6 +698,10 @@ export function expressions(ctx: Context) {
         if (e.op === "**") return power(e.left, operand(e.left), e.right, operand(e.right), e);
         if (e.op === "??") return orElse(e);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
+        if (e.op === "+") {
+          const [left, right] = [operand(e.left), operand(e.right)];
+          if (isText(left) || isText(right)) return join(e.left, left, e.right, right);
+        }
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
@@ -769,6 +779,23 @@ export function expressions(ctx: Context) {
   // Whether an expression of only literals could take this number type.
   function adaptable(e: Expr, to: Type): boolean {
     return isNumeric(to) && literalOnly(e, isFloat(to));
+  }
+
+  // `+` with a string on either side joins the two into a new string.
+  function join(a: Expr, left: Type, b: Expr, right: Type): Type {
+    joined(a, left, "'+'");
+    joined(b, right, "'+'");
+    return "string";
+  }
+
+  // A value written into a string: text, or a number or boolean written as JavaScript would.
+  function joined(e: Expr, type: Type, into: string) {
+    if (isText(type)) {
+      if (type !== "string") coerce(e, type, "string", "");
+      return;
+    }
+    if (isNumeric(type) || type === "boolean") return;
+    throw new CompileError(`${into} works with strings, numbers and booleans, not '${show(type)}'`, e.start, e.end);
   }
 
   // Two operands of different number types meet as one when either is only literals. String

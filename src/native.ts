@@ -70,6 +70,18 @@ fsh_str *fsh_rt_str_concat(fsh_str *a, fsh_str *b) {
   return s;
 }
 
+fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
+  int64_t length = 0;
+  for (int64_t i = 0; i < n; i++) length += parts[i]->length;
+  fsh_str *s = fsh_str_new(length);
+  char *at = s->bytes;
+  for (int64_t i = 0; i < n; i++) {
+    memcpy(at, parts[i]->bytes, parts[i]->length);
+    at += parts[i]->length;
+  }
+  return s;
+}
+
 // a < b, a === b and a > b as -1, 0 and 1: byte order, which for UTF-8 is code point order.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
   int64_t n = a->length < b->length ? a->length : b->length;

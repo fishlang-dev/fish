@@ -356,6 +356,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       case "unary":
         return expr(e.operand);
+      case "template":
+        for (const x of e.exprs) expr(x);
+        return;
       case "update":
         expr(e.operand);
         return change(e.operand);
@@ -1021,6 +1024,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
       case "unary":
       case "update":
         return expr(e.operand);
+      case "template":
+        for (const x of e.exprs) expr(x);
+        return;
       case "assign":
         expr(e.target);
         return expr(e.value);

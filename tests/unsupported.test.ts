@@ -119,7 +119,6 @@ const EXPRESSIONS: [string, string][] = [
   ["1n", "bigint literals"],
   ["super", "'super' expressions"],
   ["/a+/g", "regular expressions"],
-  ["`a${1}b`", "template literals"],
   ["[1, 2]", "array literals"],
   ["function () {}", "function expressions"],
   ["async (x: i64) => x", "async arrow functions"],

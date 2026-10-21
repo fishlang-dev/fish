@@ -61,11 +61,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   const known = new Map<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
   // the slot its error goes in.
-  const handlers: { label: string; slot: string }[] = [];
+  const handlers: { label: string; slot: string; depth: number }[] = [];
   // The `finally` regions enclosing the code being emitted, innermost last.
   const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
-  const exits = new Map<Stmt, { exit: string; next?: string }>();
+  const exits = new Map<Stmt, { exit: string; next?: string; depth: number }>();
+  // Values the statement being emitted made and nothing took over, released when it ends.
+  let pending: { v: string; type: Type }[] = [];
+  // What each enclosing scope owns, outermost first, dropped as it ends or is left.
+  let scopes: { slot: string; type: Type }[][] = [];
+  // Each literal's string block, made once.
+  const texts = new Map<string, string>();
   const builder = { emit, temp, label, startBlock, cString, alloca, text };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
@@ -81,11 +87,14 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     temps = 0;
     labels = 0;
     block = "entry";
+    pending = [];
+    scopes = [[]];
     const type = instance.returns;
     // Parameters are copied into slots like any other binding.
     const params = f.params.map((p) => {
       const local = resolved(p);
       allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+      own(slot(local), local.type);
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
       return `${llvm(local.type)} %${local.name}.arg`;
     });
@@ -195,22 +204,24 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     switch (s.kind) {
       case "expr":
         effect(s.expr);
+        settle();
         return;
       case "block":
-        s.body.forEach(statement);
+        scoped(s.body);
         return;
       case "if": {
         const cond = value(s.cond);
+        settle();
         const then = label();
         const otherwise = s.else ? label() : undefined;
         const end = label();
         emit(`br i1 ${cond}, label %${then}, label %${otherwise ?? end}`);
         startBlock(then);
-        s.then.forEach(statement);
+        scoped(s.then);
         emit(`br label %${end}`);
         if (s.else && otherwise) {
           startBlock(otherwise);
-          s.else.forEach(statement);
+          scoped(s.else);
           emit(`br label %${end}`);
         }
         startBlock(end);
@@ -222,49 +233,71 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const end = label();
         emit(`br label %${test}`);
         startBlock(test);
-        emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
+        const cond = value(s.cond);
+        settle();
+        emit(`br i1 ${cond}, label %${loop}, label %${end}`);
         startBlock(loop);
-        exits.set(s, { exit: end, next: test });
-        s.body.forEach(statement);
+        exits.set(s, { exit: end, next: test, depth: scopes.length });
+        scoped(s.body);
         emit(`br label %${test}`);
         startBlock(end);
         return;
       }
       case "for": {
+        // The initializer's variables last for the whole loop.
+        scopes.push([]);
         if (s.init) statement(s.init);
         const [test, loop, next, end] = [label(), label(), label(), label()];
         emit(`br label %${test}`);
         startBlock(test);
-        emit(s.test ? `br i1 ${value(s.test)}, label %${loop}, label %${end}` : `br label %${loop}`);
+        const cond = s.test ? value(s.test) : undefined;
+        settle();
+        emit(cond ? `br i1 ${cond}, label %${loop}, label %${end}` : `br label %${loop}`);
         startBlock(loop);
-        exits.set(s, { exit: end, next });
-        s.body.forEach(statement);
+        exits.set(s, { exit: end, next, depth: scopes.length });
+        scoped(s.body);
         emit(`br label %${next}`);
         startBlock(next);
         if (s.update) effect(s.update);
+        settle();
         emit(`br label %${test}`);
         startBlock(end);
+        drop(scopes.length - 1);
+        scopes.pop();
         return;
       }
       case "doWhile": {
         const [loop, test, end] = [label(), label(), label()];
         emit(`br label %${loop}`);
         startBlock(loop);
-        exits.set(s, { exit: end, next: test });
-        s.body.forEach(statement);
+        exits.set(s, { exit: end, next: test, depth: scopes.length });
+        scoped(s.body);
         emit(`br label %${test}`);
         startBlock(test);
-        emit(`br i1 ${value(s.cond)}, label %${loop}, label %${end}`);
+        const cond = value(s.cond);
+        settle();
+        emit(`br i1 ${cond}, label %${loop}, label %${end}`);
         startBlock(end);
         return;
       }
       case "switch": {
         const subject = value(s.discriminant);
+        // A subject the switch made is released on the way into the body that runs.
+        const held = pending.splice(0);
+        const enter = (body: string) => {
+          if (held.length === 0) return body;
+          const via = label();
+          entries.push([via, body]);
+          return via;
+        };
+        const entries: [string, string][] = [];
         const subjectType = valueType(s.discriminant);
         const type = llvm(subjectType);
         const bodies = s.cases.map(() => label());
         const end = label();
-        exits.set(s, { exit: end });
+        exits.set(s, { exit: end, depth: scopes.length });
+        // The cases share one scope.
+        scopes.push([]);
         // The tests run in order; when none matches, control goes to `default`, wherever it sits.
         s.cases.forEach((c, i) => {
           if (!c.test) return;
@@ -274,23 +307,31 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           const testType = valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string";
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
+          settle();
           const next = label();
-          emit(`br i1 ${equal}, label %${bodies[i]}, label %${next}`);
+          emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
           startBlock(next);
         });
         const fallback = s.cases.findIndex((c) => !c.test);
-        emit(`br label %${fallback < 0 ? end : bodies[fallback]}`);
+        emit(`br label %${enter(fallback < 0 ? end : bodies[fallback]!)}`);
+        for (const [via, body] of entries) {
+          startBlock(via);
+          for (const { v, type } of held) dispose(v, type);
+          emit(`br label %${body}`);
+        }
         s.cases.forEach((c, i) => {
           startBlock(bodies[i]!);
           c.body.forEach(statement);
           emit(`br label %${bodies[i + 1] ?? end}`);
         });
         startBlock(end);
+        drop(scopes.length - 1);
+        scopes.pop();
         return;
       }
       case "labeled": {
         const end = label();
-        exits.set(s, { exit: end });
+        exits.set(s, { exit: end, depth: scopes.length });
         statement(s.body);
         emit(`br label %${end}`);
         startBlock(end);
@@ -299,22 +340,27 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "break":
       case "continue": {
         const target = exits.get(jumps.get(s)!)!;
-        jump(s.kind === "break" ? target.exit : target.next!);
+        jump(s.kind === "break" ? target.exit : target.next!, target.depth);
         startBlock(label());
         return;
       }
       case "return":
         // An arrow's expression body may be a call returning nothing.
         if (s.value && current.returns === "void") {
-          if (s.value.kind === "call") call(s.value);
-          else value(s.value);
+          effect(s.value);
+          settle();
           leave(undefined);
-        } else leave(s.value ? value(s.value) : undefined);
+        } else {
+          const v = s.value ? owned(s.value) : undefined;
+          settle();
+          leave(v);
+        }
         // Anything after a return goes in a fresh block that nothing branches to.
         startBlock(label());
         return;
       case "throw":
-        raised(s, value(s.value));
+        raised(s, owned(s.value));
+        pending = [];
         startBlock(label());
         return;
       // An error raised in the block is stored where the catch reads it, and the catch runs.
@@ -324,30 +370,35 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const after = label();
         const done = () => (region ? exit(region, "normal", () => emit(`br label %${after}`)) : emit(`br label %${after}`));
         if (!s.handler) {
-          s.block.forEach(statement);
+          scoped(s.block);
           done();
         } else {
           const local = s.param ? resolved(s) : undefined;
           const type = current.caught.get(s)!;
-          const handler = { label: label(), slot: alloca(llvm(type)) };
+          const handler = { label: label(), slot: alloca(llvm(type)), depth: scopes.length };
           handlers.push(handler);
-          s.block.forEach(statement);
+          scoped(s.block);
           handlers.pop();
           done();
           startBlock(handler.label);
+          scopes.push([]);
+          const caught = temp();
+          emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
+          // The catch's variable owns the error; with none, the error is dropped here.
           if (local) {
             allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
-            const caught = temp();
-            emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
+            own(slot(local), local.type);
             emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
-          }
+          } else dispose(caught, type);
           s.handler.forEach(statement);
+          drop(scopes.length - 1);
+          scopes.pop();
           done();
         }
         if (region) {
           finallies.pop();
           startBlock(region.label);
-          s.finalizer!.forEach(statement);
+          scoped(s.finalizer!);
           const chosen = temp();
           emit(`${chosen} = load i32, ptr ${region.chosen}`);
           const targets = region.exits.map(() => label());
@@ -363,15 +414,95 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "let": {
         const local = resolved(s);
         allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
-        emit(`store ${llvm(local.type)} ${value(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
+        own(slot(local), local.type);
+        emit(`store ${llvm(local.type)} ${owned(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
+        settle();
         return;
       }
     }
   }
 
+  // An expression run for its effect, dropping any value it makes.
   function effect(e: Expr) {
-    if (e.kind === "call") call(e);
-    else value(e);
+    if (e.kind !== "call") return void value(e);
+    const result = call(e);
+    // A call whose value goes unused has no type of its own recorded.
+    const type = types.get(e) ?? calls.get(e)?.returns;
+    if (result !== undefined && type) dispose(result, type);
+  }
+
+  // Whether a value of the type owns memory it gives back when dropped.
+  function needsDrop(type: Type | undefined): boolean {
+    return type === "string";
+  }
+
+  // Adds a reference to what a value owns, for a copy.
+  function retain(v: string, type: Type) {
+    if (needsDrop(type)) emit(`call void @fsh_rt_str_retain(ptr ${v})`);
+  }
+
+  // Gives up a value: releases a reference to what it owns.
+  function dispose(v: string, type: Type) {
+    if (needsDrop(type)) emit(`call void @fsh_rt_str_release(ptr ${v})`);
+  }
+
+  // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
+  // A conditional or `??` makes one from whichever side it gives.
+  function fresh(e: Expr): boolean {
+    if (!needsDrop(types.get(e))) return false;
+    switch (e.kind) {
+      case "call":
+      case "new":
+      case "object":
+      case "template":
+      case "conditional":
+        return true;
+      case "binary":
+        return e.op === "+" || e.op === "??";
+      case "member":
+        return calls.has(e);
+      default:
+        return false;
+    }
+  }
+
+  // An expression's value for a place to own: one it made, or another reference to what it reads.
+  function owned(e: Expr): string {
+    const v = value(e, true);
+    if (!fresh(e) && e.kind !== "string") retain(v, valueType(e));
+    return v;
+  }
+
+  // Releases the values made since `mark` that nothing took over, newest first.
+  function settle(mark = 0) {
+    for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
+  }
+
+  // A variable the innermost scope owns. Its slot starts empty, so dropping it before it is set,
+  // or again after, does nothing.
+  function own(at: string, type: Type) {
+    if (!needsDrop(type)) return;
+    allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
+    scopes.at(-1)!.push({ slot: at, type });
+  }
+
+  // Drops what the scopes from `depth` inward own, innermost and newest first, emptying each.
+  function drop(depth: number) {
+    for (const scope of scopes.slice(depth).reverse()) {
+      for (const { slot, type } of [...scope].reverse()) {
+        const v = temp();
+        emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
+        emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
+        dispose(v, type);
+      }
+    }
+  }
+
+  function scoped(body: Stmt[]) {
+    scopes.push([]);
+    body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
   }
 
   // Returns the call's result, or undefined for a call that returns nothing.
@@ -395,9 +526,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         print(e.args, builder, value, valueType, convert);
         return undefined;
       }
-      // The compiler's `clone()`: no value owns heap memory yet, so a copy of its bits is deep.
+      // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
-      return convert(value(object), types.get(object)!, types.get(e)!);
+      const copy = convert(value(object), types.get(object)!, types.get(e)!);
+      retain(copy, types.get(e)!);
+      return copy;
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
@@ -410,7 +543,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
   function argValues(args: Expr[], target: Instance): string[] {
-    const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${value(a)}`);
+    const values = args.map((a) => `${llvm(coercions.get(a) ?? types.get(a)!)} ${owned(a)}`);
     for (const p of target.body.params.slice(args.length)) {
       const type = target.locals.get(p)!.type;
       values.push(`${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
@@ -508,11 +641,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
   // control left, each way out with how to resume it, the labels made before the region, and
-  // how many catches enclosed it.
-  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; slots: Map<string, string> };
+  // how many catches and scopes enclosed it.
+  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; slots: Map<string, string> };
 
   function enter(): Region {
-    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, slots: new Map() };
+    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, slots: new Map() };
     finallies.push(region);
     return region;
   }
@@ -533,16 +666,22 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return slot;
   }
 
-  // Jumps to a label, through each `finally` whose region it leaves.
-  function jump(to: string) {
+  // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
+  // each `finally` whose region it leaves.
+  function jump(to: string, depth: number) {
     const region = finallies.at(-1);
-    if (region && Number(to.slice(1)) < region.start) return exit(region, `jump ${to}`, () => jump(to));
+    if (region && Number(to.slice(1)) < region.start) {
+      drop(region.depth);
+      return exit(region, `jump ${to}`, () => jump(to, depth));
+    }
+    drop(depth);
     emit(`br label %${to}`);
   }
 
   // Leaves the function being emitted with a value, or with none, through any `finally`.
   function leave(v: string | undefined) {
     const region = finallies.at(-1);
+    drop(region?.depth ?? 0);
     if (region) {
       const kept = v === undefined ? undefined : stash(region, "return", llvm(current.returns), v);
       return exit(region, "return", () => {
@@ -578,9 +717,12 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
 
   // Sends an error of type `to` to the innermost catch, through any `finally` in between, or
   // else leaves the function with it.
+  // What the statement made so far, and what the scopes left own, are dropped on the way.
   function route(error: string, to: Type) {
+    for (const { v, type } of [...pending].reverse()) dispose(v, type);
     const region = finallies.at(-1);
     if (region && handlers.length <= region.handlers) {
+      drop(region.depth);
       const kept = stash(region, "error", llvm(to), error);
       return exit(region, "error", () => {
         const back = temp();
@@ -589,6 +731,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       });
     }
     const handler = handlers.at(-1);
+    drop(handler?.depth ?? 0);
     if (handler) {
       emit(`store ${llvm(to)} ${error}, ptr ${handler.slot}`);
       emit(`br label %${handler.label}`);
@@ -619,6 +762,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     // Output printed before the error stays ahead of it, as a panic's does.
     emit("call i32 @fflush(ptr null)");
     write(2, ["Error:", [error, main.throws]], builder, convert);
+    dispose(error, main.throws);
     emit("ret i32 1");
     return ["define i32 @main() {", "entry:", ...allocas, ...body, "}"];
   }
@@ -669,13 +813,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   }
 
   // An expression's value, copied down to the declared type it meets when that is narrower.
-  function value(e: Expr): string {
+  // A value the expression made is released when the statement ends, unless `consume` takes it.
+  function value(e: Expr, consume = false): string {
     const to = coercions.get(e);
     const type = types.get(e)!;
     if (to && typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) return borrowed(e, to.to);
     const result = known.get(e) ?? evaluate(e);
     // Nothing runs after a value of `never`, so it stands for any value at all.
     if (type === "never") return "undef";
+    if (!consume && fresh(e) && !known.has(e)) pending.push({ v: result, type });
     return to ? convert(result, type, to) : result;
   }
 
@@ -689,7 +835,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   function borrowed(e: Expr, to: Type): string {
     if (lendable(e) && stored(e) === to) return address(e);
     const slot = alloca(llvm(to));
-    emit(`store ${llvm(to)} ${convert(evaluate(e), types.get(e)!, to)}, ptr ${slot}`);
+    const made = evaluate(e);
+    if (fresh(e)) pending.push({ v: made, type: types.get(e)! });
+    emit(`store ${llvm(to)} ${convert(made, types.get(e)!, to)}, ptr ${slot}`);
     return slot;
   }
 
@@ -712,9 +860,28 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return "zeroinitializer";
       // Nothing after a throw expression runs, so the value it stands for is never read.
       case "throw":
-        raised(e, value(e.value));
+        raised(e, owned(e.value));
         startBlock(label());
         return "undef";
+      case "template": {
+        // Text alone is a literal, which takes no space.
+        if (e.exprs.length === 0) return "zeroinitializer";
+        const parts: string[] = [];
+        e.quasis.forEach((q, i) => {
+          if (q !== "") parts.push(text(q));
+          const x = e.exprs[i];
+          if (x) parts.push(written(value(x), valueType(x)));
+        });
+        const array = alloca(`[${parts.length} x ptr]`);
+        parts.forEach((part, i) => {
+          const at = temp();
+          emit(`${at} = getelementptr [${parts.length} x ptr], ptr ${array}, i32 0, i32 ${i}`);
+          emit(`store ptr ${part}, ptr ${at}`);
+        });
+        const result = temp();
+        emit(`${result} = call ptr @fsh_rt_str_join(ptr ${array}, i64 ${parts.length})`);
+        return result;
+      }
       case "nonNull": {
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;
@@ -768,9 +935,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         return result;
       }
       case "new": {
-        // The constructor fills in a slot, which then holds the new instance.
+        // The constructor fills in a slot, which then holds the new instance. The slot starts
+        // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;
         const instance = alloca(llvm(type));
+        emit(`store ${llvm(type)} zeroinitializer, ptr ${instance}`);
         const values = argValues(e.args ?? [], calls.get(e)!).map((v) => `, ${v}`);
         emit(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`);
         const result = temp();
@@ -811,7 +980,13 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
           });
         }
         // The target is read before the right-hand side runs, as in JavaScript.
-        const result = op === "=" ? value(e.value) : numeric(op, value(e.target), value(e.value), e, types.get(e)!);
+        const type = types.get(e)!;
+        if (op === "+" && type === "string") {
+          const joined = concat(value(e.target), written(value(e.value), valueType(e.value)));
+          store(e.target, joined);
+          return joined;
+        }
+        const result = op === "=" ? owned(e.value) : numeric(op, value(e.target), value(e.value), e, type);
         store(e.target, result);
         return result;
       }
@@ -826,12 +1001,19 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
         const cond = value(e.cond);
         const [then, otherwise, end] = [label(), label(), label()];
         emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
+        // Each side gives a value of its own when the result owns memory.
+        const side = (x: Expr) => {
+          const mark = pending.length;
+          const v = needsDrop(types.get(e)) ? owned(x) : value(x);
+          settle(mark);
+          return v;
+        };
         startBlock(then);
-        const a = value(e.then);
+        const a = side(e.then);
         const thenEnd = block;
         emit(`br label %${end}`);
         startBlock(otherwise);
-        const b = value(e.else);
+        const b = side(e.else);
         const otherwiseEnd = block;
         emit(`br label %${end}`);
         startBlock(end);
@@ -842,6 +1024,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
         if (e.op === "??") return orElse(e);
+        if (e.op === "+" && types.get(e) === "string") return concat(written(value(e.left), valueType(e.left)), written(value(e.right), valueType(e.right)));
         const tested = test(e, value, valueType);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
@@ -878,7 +1061,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
   // A shorthand's variable may be narrowed, or an enum member the field widens, so its value
   // is converted to the field's type.
   function property(p: ObjectProp, object: ObjectType): [string, string] {
-    if (p.kind === "property") return [p.key as string, value(p.value)];
+    if (p.kind === "property") return [p.key as string, owned(p.value)];
     if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");
     const local = resolved(p);
     const to = field(object, p.name)!.type;
@@ -886,7 +1069,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     if (isRef(to) && !isRef(local.type)) return [p.name, slot(local)];
     const result = temp();
     emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    return [p.name, convert(result, local.type, to)];
+    const copy = convert(result, local.type, to);
+    retain(copy, to);
+    return [p.name, copy];
   }
 
   function store(target: Expr, result: string) {
@@ -902,10 +1087,17 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       const whole = target.kind === "ident" && type === resolved(target).type;
       const pointer = whole ? temp() : evaluate(target);
       if (whole) emit(`${pointer} = load ptr, ptr ${slot(resolved(target))}`);
-      emit(`store ${llvm(type.to)} ${result}, ptr ${pointer}`);
-      return;
+      return replace(pointer, type.to, result);
     }
-    emit(`store ${llvm(type)} ${result}, ptr ${address(target)}`);
+    replace(address(target), type, result);
+  }
+
+  // Writes a value into a place, dropping the one it held.
+  function replace(at: string, type: Type, v: string) {
+    const old = temp();
+    if (needsDrop(type)) emit(`${old} = load ${llvm(type)}, ptr ${at}`);
+    emit(`store ${llvm(type)} ${v}, ptr ${at}`);
+    if (needsDrop(type)) dispose(old, type);
   }
 
   // Where an assignment target lives: a variable's slot, or a field inside one.
@@ -958,11 +1150,15 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const [some, none, end] = [label(), label(), label()];
     emit(`br i1 ${holds(v, option, ["null"])}, label %${none}, label %${some}`);
     startBlock(some);
+    // The result is a value of its own, like a conditional's.
     const kept = convert(v, option, type);
+    retain(kept, type);
     const someEnd = block;
     emit(`br label %${end}`);
     startBlock(none);
-    const fallback = value(e.right);
+    const mark = pending.length;
+    const fallback = needsDrop(type) ? owned(e.right) : value(e.right);
+    settle(mark);
     const noneEnd = block;
     emit(`br label %${end}`);
     startBlock(end);
@@ -977,7 +1173,9 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     const end = label();
     emit(op === "&&" ? `br i1 ${a}, label %${rhs}, label %${end}` : `br i1 ${a}, label %${end}, label %${rhs}`);
     startBlock(rhs);
+    const mark = pending.length;
     const b = right();
+    settle(mark);
     const rhsEnd = block;
     emit(`br label %${end}`);
     startBlock(end);
@@ -986,8 +1184,41 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
     return result;
   }
 
+  function concat(a: string, b: string): string {
+    const result = temp();
+    emit(`${result} = call ptr @fsh_rt_str_concat(ptr ${a}, ptr ${b})`);
+    return result;
+  }
+
+  // A value as a string, written as JavaScript's `String(x)` would; a number's is a new string,
+  // released when the statement ends.
+  function written(v: string, type: Type): string {
+    if (type === "string") return v;
+    if (type === "boolean") {
+      const result = temp();
+      emit(`${result} = select i1 ${v}, ptr ${text("true")}, ptr ${text("false")}`);
+      return result;
+    }
+    let from = isFloat(type) ? type : "i64";
+    let wide = v;
+    if (isInteger(type)) {
+      const { bits, signed } = INTEGERS[type];
+      if (!signed) from = "u64";
+      if (bits < 64) {
+        wide = temp();
+        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      }
+    }
+    const result = temp();
+    emit(`${result} = call ptr @fsh_rt_str_from_${from}(${from === "f32" ? "float" : from === "f64" ? "double" : "i64"} ${wide})`);
+    pending.push({ v: result, type: "string" });
+    return result;
+  }
+
   // A literal's string block: a count below zero, so it is never freed, its length, its bytes.
   function text(value: string): string {
+    const made = texts.get(value);
+    if (made) return made;
     const bytes = new TextEncoder().encode(value);
     let lit = "";
     for (const b of bytes) {
@@ -995,6 +1226,7 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
     }
     const name = `@.text.${globals.length}`;
+    texts.set(value, name);
     globals.push(`${name} = private unnamed_addr constant { i64, i64, [${bytes.length} x i8] } { i64 -1, i64 ${bytes.length}, [${bytes.length} x i8] c"${lit}" }`);
     return name;
   }
