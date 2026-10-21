@@ -4,12 +4,11 @@ import type { Expr, Span, Stmt, TypeNode } from "./parser.ts";
 // The forms that parse but have no meaning yet, and the errors that reject them.
 
 // What each expression form is called when the checker rejects it.
-export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull" | "throw" | "template">, string> = {
+export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull" | "throw" | "template" | "array">, string> = {
   bigint: "bigint literals",
   super: "'super' expressions",
   regex: "regular expressions",
   spread: "spread elements",
-  array: "array literals",
   function: "function expressions",
   class: "class expressions",
   privateName: "private names",
@@ -30,8 +29,7 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
 };
 
 // What each type form is called when the checker rejects it.
-export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal" | "union">, string> = {
-  array: "array types",
+export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal" | "union" | "array">, string> = {
   tuple: "tuple types",
   intersection: "intersection types",
   indexed: "indexed access types",

@@ -655,6 +655,9 @@ export function check(program: Stmt[]): Checked {
           // A `let` may later hold another member of an enum, so it holds the enum.
           const widened = s.keyword === "let" && !annotated ? widenLet(type) : type;
           if (widened !== type) coerce(d.init, type, widened, "");
+          if (!annotated && typeof widened !== "string" && widened.kind === "array" && widened.element === "never") {
+            throw new CompileError(`an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
+          }
           // So does a function type, which the closure given fits.
           const describes = annotated && (isInterface(annotated) || (typeof annotated !== "string" && annotated.kind === "function"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);

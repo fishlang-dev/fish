@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { EnumInfo } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { functionType, holdsRef, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { arrayType, functionType, holdsRef, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -89,6 +89,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "literal") return literal(t.value);
     if (t.kind === "union") return unionType(t.types.map(unionMember));
     if (t.kind === "intersection") return intersection(t.types);
+    if (t.kind === "array") return arrayType(resolveType(t.element));
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
@@ -97,7 +98,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
     }
-    if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
+    if (t.name === "Array" && t.args.length === 1) return arrayType(resolveType(t.args[0]!));
+    if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "null" || t.name === "undefined") {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
@@ -274,7 +276,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

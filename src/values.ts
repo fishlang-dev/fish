@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
-import type { Access, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import type { Access, ArrayType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -213,6 +213,7 @@ export function expressions(ctx: Context) {
         const type = a.kind === "string" ? "void" : read(a);
         if (printable(type)) continue;
         throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
+          : isArray(type) ? "printing an array is not supported yet; print its elements"
           : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
       return { type: "void", what: "printing" };
@@ -572,12 +573,14 @@ export function expressions(ctx: Context) {
         if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
         const through = value(e.object);
         const object = isRefType(through) ? through.to : through;
-        if (!stringLike(object)) throw unsupported(EXPRESSION_FORMS.index, e);
+        const array = isArray(object);
+        if (!stringLike(object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
-        text(e.object, object, false);
+        if (array && object !== through) coercions.set(e.object, object);
+        if (!array) text(e.object, object, false);
         const index = value(e.index);
-        coerce(e.index, index, "usize", `a string's index is a 'usize', not '${show(index)}'`);
-        return "string";
+        coerce(e.index, index, "usize", `${array ? "an array" : "a string"}'s index is a 'usize', not '${show(index)}'`);
+        return array ? object.element : "string";
       }
       // Text alone is a literal; with substitutions, a new string.
       case "template":
@@ -602,6 +605,13 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
+        // An array's one property is its length.
+        if (isArray(object)) {
+          if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          load();
+          return linked(e) ? optional("usize", e) : "usize";
+        }
         // A string's one property is its length in UTF-16 code units.
         if (stringLike(object)) {
           if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
@@ -637,6 +647,24 @@ export function expressions(ctx: Context) {
       }
       case "object":
         return objectType(fields(e.props.map(property), e.props));
+      // An array literal holds its elements' types, each widened as a `let` widens; with none, a
+      // declared type has to say what it holds.
+      case "array": {
+        if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
+        const elements = e.elements as Expr[];
+        const spread = elements.find((x) => x.kind === "spread");
+        if (spread) throw unsupported("spread elements", spread);
+        const given = elements.map((x) => {
+          const t = value(x);
+          if (typeof t !== "string" && t.kind === "closure") throw unsupported("functions stored in arrays", x);
+          const widened = widenLet(t);
+          if (widened !== t) coerce(x, t, widened, "");
+          return widened;
+        });
+        const element = given.length === 0 ? "never" : unionType(given);
+        elements.forEach((x, i) => given[i] !== element && coerce(x, given[i]!, element, ""));
+        return arrayType(element);
+      }
       case "arrow":
         return closure(e, expecting.get(e));
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
@@ -879,6 +907,12 @@ export function expressions(ctx: Context) {
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
     if (type === to) return;
+    // An array literal takes a declared element type, each element meeting it.
+    if (e.kind === "array" && isArray(type) && isArray(to)) {
+      for (const x of e.elements as Expr[]) coerce(x, types.get(x)!, to.element, `type '${show(types.get(x)!)}' is not assignable to type '${show(to.element)}'`);
+      types.set(e, to);
+      return;
+    }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError(`${message}; convert it with 'as ${show(to)}'`, e.start, e.end);
     if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, to, message);
@@ -1350,3 +1384,8 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
 };
+
+const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
+
+// The methods an array has.
+const ARRAY_METHODS = new Set(["push", "pop"]);

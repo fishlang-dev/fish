@@ -4,8 +4,7 @@ import { parse } from "../src/parser.ts";
 
 // Each type form that parses but has no meaning yet, and the rejection it gets.
 const TYPES: [string, string][] = [
-  ["Array<i64>", "array types"],
-  ["i64[]", "array types"],
+  ["ReadonlyArray<i64>", "'ReadonlyArray' types"],
   ["keyof A", "'keyof' types"],
   ["readonly i64[]", "'readonly' types"],
   ["unique symbol", "'unique' types"],
@@ -119,7 +118,7 @@ const EXPRESSIONS: [string, string][] = [
   ["1n", "bigint literals"],
   ["super", "'super' expressions"],
   ["/a+/g", "regular expressions"],
-  ["[1, 2]", "array literals"],
+  ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
   ["async (x: i64) => x", "async arrow functions"],
   ["<T>(x: T) => x", "generic arrow functions"],

@@ -17,6 +17,7 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
   if (t.kind === "ref") return "ptr";
+  if (t.kind === "array") return ARRAY;
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
   const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...t.fields.map((f) => llvm(f.type))];
   return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
@@ -28,7 +29,11 @@ function words(t: UnionType): number {
 
 // A type's size and alignment in bytes, as LLVM lays out its IR type on the 64-bit targets
 // Fish supports.
+// An array is its elements' buffer, its length and its capacity, in elements.
+export const ARRAY = "{ ptr, i64, i64 }";
+
 function size(t: Type): [number, number] {
+  if (typeof t !== "string" && t.kind === "array") return [24, 8];
   if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
   if (t === "f32") return [4, 4];
   if (t === "f64") return [8, 8];
@@ -202,7 +207,7 @@ export function conversions(b: Slots) {
       // An optional field the value leaves out is empty.
       if (!field(from, f.name)) return insert(convert("zeroinitializer", "null", f.type), f.type, i + (embeds ? 1 : 0));
       const part = temp();
-      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from as Exclude<typeof from, { kind: "literal" | "union" }>, f.name).join(", ")}`);
+      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from as ObjectType | ClassType, f.name).join(", ")}`);
       insert(convert(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
     });
     return result;

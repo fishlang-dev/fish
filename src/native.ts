@@ -312,6 +312,11 @@ void fsh_rt_panic(const char *message) {
   exit(101);
 }
 
+// An array's buffer for this many bytes, or none for no elements.
+void *fsh_rt_array_alloc(int64_t bytes) {
+  return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
+}
+
 // An index past the end panics as Rust's does; at is the "panicked at" line.
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   char reason[96];

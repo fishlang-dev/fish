@@ -5,10 +5,12 @@ import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Stmt } from "./parser.ts";
-import { conversions, llvm } from "./layout.ts";
-import { field, fieldPath, INTEGERS, isCopy, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { ARRAY, conversions, llvm } from "./layout.ts";
+import { field, fieldPath, INTEGERS, isCopy, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
+
+const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
 
 // What a reference points to, or the type itself.
 const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
@@ -489,6 +491,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     if (type === "string") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
+    if (type.kind === "array") return true;
     return parts(type).some(([t]) => needsDrop(t));
   }
 
@@ -532,7 +535,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const t = llvm(type);
     const each = (v: string, part: Type) => (kind === "drop" ? (dispose(v, part), v) : copied(v, part));
     let result = "%v";
-    if (type.kind === "union") {
+    if (type.kind === "array") {
+      result = kind === "drop" ? dropArray(type) : copyArray(type);
+    } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
       const copy = kind === "copy" ? alloca(t) : "";
       if (copy) emit(`store ${t} %v, ptr ${copy}`);
@@ -571,6 +576,89 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     return name;
   }
 
+  // In an array's drop function: drops each element, then frees the buffer.
+  function dropArray(type: ArrayType): string {
+    const [data, length] = [temp(), temp()];
+    emit(`${data} = extractvalue ${ARRAY} %v, 0`);
+    emit(`${length} = extractvalue ${ARRAY} %v, 1`);
+    if (needsDrop(type.element)) {
+      elements(type.element, data, length, (at) => {
+        const v = temp();
+        emit(`${v} = load ${llvm(type.element)}, ptr ${at}`);
+        dispose(v, type.element);
+      });
+    }
+    emit(`call void @fsh_rt_free(ptr ${data})`);
+    return "%v";
+  }
+
+  // In an array's copy function: a new buffer just long enough, holding a copy of each element.
+  function copyArray(type: ArrayType): string {
+    const [data, length, copy] = [temp(), temp(), temp()];
+    emit(`${data} = extractvalue ${ARRAY} %v, 0`);
+    emit(`${length} = extractvalue ${ARRAY} %v, 1`);
+    emit(`${copy} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, length)})`);
+    const t = llvm(type.element);
+    elements(type.element, data, length, (at, i) => {
+      const [v, to] = [temp(), temp()];
+      emit(`${v} = load ${t}, ptr ${at}`);
+      emit(`${to} = getelementptr ${t}, ptr ${copy}, i64 ${i}`);
+      emit(`store ${t} ${copied(v, type.element)}, ptr ${to}`);
+    });
+    return built(copy, length, length);
+  }
+
+  // The size in bytes of `count` elements, as LLVM lays them out.
+  function bytes(element: Type, count: string): string {
+    const [end, size] = [temp(), temp()];
+    emit(`${end} = getelementptr ${llvm(element)}, ptr null, i64 ${count}`);
+    emit(`${size} = ptrtoint ptr ${end} to i64`);
+    return size;
+  }
+
+  // An array value from its buffer, length and capacity.
+  function built(data: string, length: string, capacity: string): string {
+    const [a, b, c] = [temp(), temp(), temp()];
+    emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
+    emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${length}, 1`);
+    emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${capacity}, 2`);
+    return c;
+  }
+
+  // Runs `each` with a pointer to each of the first `length` elements of a buffer, and its index.
+  function elements(element: Type, data: string, length: string, each: (at: string, i: string) => void) {
+    const counter = alloca("i64");
+    emit(`store i64 0, ptr ${counter}`);
+    const [test, loop, end] = [label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${counter}`);
+    emit(`${more} = icmp ult i64 ${i}, ${length}`);
+    emit(`br i1 ${more}, label %${loop}, label %${end}`);
+    startBlock(loop);
+    const at = temp();
+    emit(`${at} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
+    each(at, i);
+    const next = temp();
+    emit(`${next} = add i64 ${i}, 1`);
+    emit(`store i64 ${next}, ptr ${counter}`);
+    emit(`br label %${test}`);
+    startBlock(end);
+  }
+
+  // A pointer to an array's element, after the bounds check.
+  function element(e: Extract<Expr, { kind: "index" }>, array: string): string {
+    const type = valueType(e.object) as ArrayType;
+    const index = value(e.index);
+    const [data, length, at] = [temp(), temp(), temp()];
+    emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+    bounds(length, index, e);
+    emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+    emit(`${at} = getelementptr ${llvm(type.element)}, ptr ${data}, i64 ${index}`);
+    return at;
+  }
+
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
   // A conditional or `??` makes one from whichever side it gives.
   function fresh(e: Expr): boolean {
@@ -582,12 +670,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       case "arrow":
       case "template":
       case "conditional":
-      case "index":
+      case "array":
         return true;
       case "binary":
         return e.op === "+" || e.op === "??";
       case "member":
         return calls.has(e);
+      // A string's index makes a string; an array's reads an element.
+      case "index":
+        return !isArray(valueType(e.object));
       default:
         return false;
     }
@@ -780,7 +871,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
 
   // Panics, as Rust's indexing does, unless a `usize` index is below the string's UTF-16 length.
   function inBounds(s: string, index: string, at: Expr) {
-    const length = units(s);
+    bounds(units(s), index, at);
+  }
+
+  // Panics, as Rust's indexing does, unless a `usize` index is below a length.
+  function bounds(length: string, index: string, at: Expr) {
     const [outside, fail, ok] = [temp(), label(), label()];
     emit(`${outside} = icmp uge i64 ${index}, ${length}`);
     emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
@@ -800,6 +895,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     // Through a reference, the value it points to.
     const shared = coercions.get(e.object) ?? types.get(e.object)!;
     if (shared === "string") return convert(units(value(e.object)), "usize", types.get(e)!);
+    if (typeof shared !== "string" && shared.kind === "array") {
+      const length = temp();
+      emit(`${length} = extractvalue ${ARRAY} ${value(e.object)}, 1`);
+      return convert(length, "usize", types.get(e)!);
+    }
     if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
     const object = shared as ObjectType | ClassType;
     const result = temp();
@@ -1117,12 +1217,33 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         startBlock(label());
         return "undef";
       case "index": {
+        const object = valueType(e.object);
+        if (typeof object !== "string" && object.kind === "array") {
+          const v = temp();
+          emit(`${v} = load ${llvm(object.element)}, ptr ${element(e, operand(e.object, [e.index]))}`);
+          return v;
+        }
         const s = operand(e.object, [e.index]);
         const index = value(e.index);
         inBounds(s, index, e);
         const result = temp();
         emit(`${result} = call ptr @fsh_rt_str_at(ptr ${s}, i64 ${index})`);
         return result;
+      }
+      // The elements run first, then fill a buffer just long enough.
+      case "array": {
+        const type = types.get(e) as ArrayType;
+        const t = llvm(type.element);
+        const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), type.element)));
+        const n = String(values.length);
+        const data = temp();
+        emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, n)})`);
+        values.forEach((v, i) => {
+          const at = temp();
+          emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+          emit(`store ${t} ${v}, ptr ${at}`);
+        });
+        return built(data, n, n);
       }
       case "template": {
         // Text alone is a literal, which takes no space.
@@ -1371,6 +1492,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
     if (target.kind === "this") return "%this";
+    if (target.kind === "index") return element(target, value(target.object));
     if (target.kind !== "member") {
       // A union narrowed to one member keeps it in place as its payload.
       const local = resolved(target);
@@ -1397,6 +1519,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       if (!object || (typeof object !== "string" && object.kind === "union")) return false;
     }
     if (e.kind === "this") return true;
+    // An array's element lives in its buffer, wherever the array itself is.
+    if (e.kind === "index") return isArray(valueType(e.object));
     const local = e.kind === "ident" ? locals.get(e) : undefined;
     const type = types.get(e);
     return local !== undefined && (type === local.type || typeof type === "string" || type?.kind !== "union");

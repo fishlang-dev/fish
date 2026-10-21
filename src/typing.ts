@@ -46,6 +46,10 @@ export type UnionType = { kind: "union"; members: Type[]; fields: Field[]; name?
 // function's lifetime parameter it lives for; it is checked, then erased.
 export type RefType = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
 
+// An owned array of elements of one type, growable like Rust's Vec. One per element type, so
+// `===` is identity. It has no fields; its length and elements are reached by name and index.
+export type ArrayType = { kind: "array"; element: Type; fields: Field[] };
+
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
 // as its fields, which are never read by name.
@@ -88,7 +92,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -193,6 +197,19 @@ export function refType(to: Type, mutable: boolean, life?: string): RefType {
 
 const refs = new Map<string, RefType>();
 
+export function arrayType(element: Type): ArrayType {
+  const key = `[${keyOf(element)}]`;
+  let t = arrays.get(key);
+  if (!t) {
+    t = { kind: "array", element, fields: [] };
+    arrays.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+const arrays = new Map<string, ArrayType>();
+
 // Primitives, literals, references, and unions of nothing else are copied; objects,
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
@@ -209,6 +226,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "ref") return t.mutable;
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
+  if (t.kind === "array") return holdsMut(t.element);
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
@@ -220,6 +238,7 @@ export function holdsRef(t: Type): boolean {
   // A type parameter holds references when what it stands for, or its bound, does.
   if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
   if (t.kind === "union") return t.members.some(holdsRef);
+  if (t.kind === "array") return holdsRef(t.element);
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
@@ -248,13 +267,14 @@ export function lower(t: Type): Type {
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
     else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
+    else if (t.kind === "array") found = arrayType(lower(t.element));
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
   return found;
 }
 
-const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType, Type>();
+const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType, Type>();
 
 // A type with some of its parts swapped for others, looking inside objects and unions.
 export function replaced(t: Type, swap: Map<Type, Type>): Type {
@@ -265,6 +285,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
+  if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
@@ -377,6 +398,11 @@ export function show(t: Type): string {
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
+  if (t.kind === "array") {
+    const e = t.element;
+    const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure");
+    return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
+  }
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
