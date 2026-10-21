@@ -428,7 +428,11 @@ export function codegen({ instances }: Checked, { src, file, release }: Options)
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
         return "zeroinitializer";
+      case "null":
+        return "zeroinitializer";
       case "ident": {
+        // `undefined` is the empty value, unless a variable takes the name.
+        if (!locals.has(e)) return "zeroinitializer";
         const local = resolved(e);
         const t = temp();
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);

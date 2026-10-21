@@ -8,7 +8,7 @@ import { baseOf, field, fieldPath, INTEGERS, isInteger, membersFor, type ClassTy
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
   i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
-  f32: "float", f64: "double", boolean: "i1", void: "void",
+  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}",
 };
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
@@ -33,6 +33,7 @@ function size(t: Type): [number, number] {
   if (t === "f32") return [4, 4];
   if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
+  if (t === "null") return [0, 1];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
@@ -96,6 +97,7 @@ export function conversions(b: Slots) {
       return String(aType.value === bType.value);
     }
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
+    if (base(aType) === "null") return "true";
     const result = temp();
     const float = base(aType) === "f32" || base(aType) === "f64";
     emit(`${result} = ${float ? "fcmp oeq" : "icmp eq"} ${llvm(base(aType))} ${value(aType, a)}, ${value(bType, b)}`);

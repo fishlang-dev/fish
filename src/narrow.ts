@@ -13,13 +13,14 @@ export type Guard = { yes: Facts; no: Facts };
 // TypeScript, and every object and instance "object".
 export function category(t: Type): string {
   if (isNumeric(t)) return "number";
+  if (t === "null") return "undefined";
   if (typeof t === "string") return t;
   if (t.kind === "literal") return typeof t.value === "bigint" ? "number" : typeof t.value;
   return "object";
 }
 
 // The names a `typeof` comparison can check for.
-export const TYPEOF = new Set(["number", "boolean", "string", "object"]);
+export const TYPEOF = new Set(["number", "boolean", "string", "object", "undefined"]);
 
 // The operand of `typeof x === "name"` or `"name" !== typeof x`, and the name, if `e` is one.
 export function typeofTest(e: Expr): { operand: Expr; name: Expr } | undefined {
@@ -63,6 +64,8 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     return name ? split(test.operand, (m) => (category(m) === name ? "yes" : "no"), e.op === "===") : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
+    // `x === null` leaves x's empty member, and `x !== null` the rest.
+    if (isEmpty(other, locals) && subject.kind === "ident") return split(subject, (m) => (m === "null" ? "yes" : "no"), e.op === "===");
     const value = literalValue(other);
     if (value === undefined) continue;
     // `x === "up"` leaves x's member for that literal. `x.kind === "up"` leaves the members
@@ -99,6 +102,9 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     return positive ? { yes, no } : { yes: no, no: yes };
   }
 }
+
+// `null`, or `undefined` where no variable takes the name.
+export const isEmpty = (e: Expr, locals: Map<Expr, Local>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
 
 const is = (t: Type, value: unknown) => typeof t !== "string" && t.kind === "literal" && t.value === value;
 

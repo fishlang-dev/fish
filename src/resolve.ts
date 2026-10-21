@@ -99,7 +99,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported("array types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
-    if (t.name === "null" || t.name === "undefined") throw new CompileError(`'${t.name}' is Option in Fish, which is not supported yet`, t.start, t.end);
+    if (t.name === "null" || t.name === "undefined") {
+      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      return "null";
+    }
+    if (t.name === "Option") {
+      if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
+      return unionType([unionMember(t.args[0]!), "null"]);
+    }
     // A class's lifetimes, written or left out, are no type arguments.
     const lifetime = slots.get(t.name);
     const args = (lifetime && t.args.length === lifetime.length ? t.args.filter((_, i) => !lifetime[i]) : t.args).map(resolveType);
@@ -270,7 +277,7 @@ const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions"
 
 const I64_MAX = (1n << 63n) - 1n;
 
-const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "Ref", "Mut", "Lifetime"]);
+const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "Ref", "Mut", "Lifetime", "Option", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

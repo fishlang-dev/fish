@@ -46,6 +46,8 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
   function piece(v: string, type: Type) {
     if (typeof type !== "string" && type.kind === "literal") {
       format += escape(String(type.value));
+    } else if (type === "null") {
+      format += "null";
     } else if (type === "boolean") {
       const text = temp();
       emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);

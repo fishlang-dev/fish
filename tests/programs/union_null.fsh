@@ -1,4 +1,6 @@
+// 'null' is the empty Option.
 function main() {
   const x: i64 | null = 1
+  print(x)
 }
-// error: 'null' is Option in Fish, which is not supported yet
+// expect: 1

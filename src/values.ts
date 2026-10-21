@@ -4,7 +4,7 @@ import { CompileError } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { fields } from "./resolve.ts";
-import { allFields, baseOf, INTEGERS, isFloat, isInteger, isNumeric, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
+import { allFields, baseOf, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, wrapped } from "./typing.ts";
 import type { Access, Bound, Integer, Numeric, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -418,10 +418,13 @@ export function expressions(ctx: Context) {
         return "i64";
       case "float":
         return "f64";
+      case "null":
+        return "null";
       case "bool":
         return "boolean";
       case "ident": {
         const local = lookup(e.name, e);
+        if (!local && e.name === "undefined") return "null";
         if (!local) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
@@ -1075,6 +1078,7 @@ export function expressions(ctx: Context) {
   // Fish has no truthiness: a condition is a boolean, never a number tested against zero.
   function condition(e: Expr) {
     const type = operand(e);
+    if (isOption(type)) throw new CompileError(`condition must be a boolean, not the Option '${show(type)}'; check it with '!== null'`, e.start, e.end);
     if (type !== "boolean") {
       throw new CompileError(`condition must be a boolean, not '${show(type)}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
     }

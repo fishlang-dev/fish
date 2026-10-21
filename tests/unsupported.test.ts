@@ -119,7 +119,6 @@ for (const [signature, what, part] of SIGNATURES) {
 // Each expression form that parses but has no meaning yet, as a `let` initializer.
 const EXPRESSIONS: [string, string][] = [
   ["1n", "bigint literals"],
-  ["null", "'null' values"],
   ["super", "'super' expressions"],
   ["/a+/g", "regular expressions"],
   ["`a${1}b`", "template literals"],

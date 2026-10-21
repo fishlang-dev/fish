@@ -75,13 +75,18 @@ export const isInteger = (t: Type): t is Integer => typeof t === "string" && t i
 export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
 export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
 
+// Whether a type is an Option: a union one of whose members is the empty value.
+export const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
+
 // The values an integer type holds.
 export function range(t: Integer): [bigint, bigint] {
   const { bits, signed } = INTEGERS[t];
   return signed ? [-(1n << BigInt(bits - 1)), (1n << BigInt(bits - 1)) - 1n] : [0n, (1n << BigInt(bits)) - 1n];
 }
 
-export type Type = Numeric | "boolean" | "void" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
+// `null` is the empty Option: `T | null`, `T | undefined` and `x?: T` are all a union holding
+// it, which flattening keeps from nesting.
+export type Type = Numeric | "boolean" | "void" | "null" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType;
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
