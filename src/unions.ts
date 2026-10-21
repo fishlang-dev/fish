@@ -55,7 +55,9 @@ export function intoMember(target: Expr, types: Map<Expr, Type>, action = "assig
   for (let e = target; e.kind === "member"; e = e.object) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
-    if (typeof object !== "string" && object?.kind === "union") {
+    // A union of string literals is a string, which the string rules reject writing to.
+    const text = typeof object !== "string" && object?.kind === "union" && object.members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string");
+    if (typeof object !== "string" && object?.kind === "union" && !text) {
       const what = action === "assign to" ? `assign to '${e.name}'` : `${action} '${e.name}'`;
       throw new CompileError(`can't ${what} through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }

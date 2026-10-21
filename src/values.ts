@@ -304,6 +304,7 @@ export function expressions(ctx: Context) {
   // A string read where a string's property or method is used: a literal becomes its string,
   // and a reference is read through. In an optional chain, the chain reads the Option.
   function text(object: Expr, type: Type, chained: boolean) {
+    if (chained && type !== "string") throw unsupported("optional chains on string literal types", object);
     const held = types.get(object);
     if (held && isRefType(held)) coercions.set(object, "string");
     else if (type !== "string" && !chained) coerce(object, type, "string", "");
@@ -1118,6 +1119,10 @@ export function expressions(ctx: Context) {
     if (target.kind === "index" && stringLike(read(target.object))) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
     }
+    const holder = target.kind === "member" ? types.get(target.object) : undefined;
+    if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
+      throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
+    }
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);
@@ -1161,6 +1166,7 @@ export function expressions(ctx: Context) {
     // Through a reference, what it points to stores the field.
     const holder = lower(stored(target.object));
     const object = typeof holder !== "string" && holder.kind === "ref" ? lower(holder.to) : holder;
+    if (stringLike(object)) throw new CompileError(`a string's '${target.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     if (typeof object !== "string" && object.kind === "union") {
       throw new CompileError(`can't assign to '${target.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
