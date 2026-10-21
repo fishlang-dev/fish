@@ -220,7 +220,7 @@ export function expressions(ctx: Context) {
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
-    if (callee.kind === "member" && receiver !== undefined && isText(receiver)) return stringCall(e, callee, receiver);
+    if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -571,7 +571,7 @@ export function expressions(ctx: Context) {
         if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
         const through = value(e.object);
         const object = isRefType(through) ? through.to : through;
-        if (!isText(object)) throw unsupported(EXPRESSION_FORMS.index, e);
+        if (!stringLike(object)) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
         text(e.object, object, false);
         const index = value(e.index);
@@ -602,7 +602,8 @@ export function expressions(ctx: Context) {
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
         // A string's one property is its length in UTF-16 code units.
-        if (isText(object)) {
+        if (stringLike(object)) {
+          if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
           if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
@@ -1114,7 +1115,7 @@ export function expressions(ctx: Context) {
   function assignable(target: Expr, reads: boolean): Type {
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(target, types);
-    if (target.kind === "index" && isText(read(target.object))) {
+    if (target.kind === "index" && stringLike(read(target.object))) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
     }
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
@@ -1250,6 +1251,7 @@ export function expressions(ctx: Context) {
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
+    if (object && stringLike(object)) throw new CompileError(`a string's '${e.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     // Through a mutable reference, the value written is someone else's: in an instance, its
     // field is as read-only as the field of the type it really is. A copy is the body's own.
     const locked = field(object as Exclude<Type, string>, e.name)?.readonly || (throughMutable(e.object) && concreteField(e)?.readonly);
@@ -1332,6 +1334,9 @@ export function expressions(ctx: Context) {
 
 // A string, or a string literal that isn't an enum's member.
 const isText = (t: Type) => t === "string" || (typeof t !== "string" && t.kind === "literal" && typeof t.value === "string" && !t.owner);
+
+// What a string's length, index and methods work on: text, or a union of string literals.
+const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {

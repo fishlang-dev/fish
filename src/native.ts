@@ -232,6 +232,8 @@ static int fsh_put(char *out, uint32_t u) {
 // UTF-16 units [from, to) of s, with 0 <= from <= to <= its length. The slice shares the bytes
 // of the block they live in; an end that cuts a pair makes it a copy holding that half as a
 // lone surrogate.
+// ponytail: a slice keeps its whole base alive, as a Swift substring does; copy small slices
+// if pinned memory shows up.
 static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
   if (from == to) {
     fsh_str *empty = fsh_str_new(0);
