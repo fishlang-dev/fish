@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, type ArrayType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, YIELD_NOW, type ArrayType, type FutureType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -97,7 +97,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const reserved = new Map<Expr, string>();
   // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
   // resumes at in order, where it starts, and where it gives that it has finished.
-  let resuming: { type: GeneratorType; frame: string; resumes: string[]; start: string; done: string } | undefined;
+  let resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
   // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
   let framed = new Set<string>();
   // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
@@ -117,8 +117,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
 
-  // The instance each generator type resumes.
+  // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
+  const futureOf = new Map(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
 
   for (const instance of instances) {
     // A C function is declared under its own name, unless the runtime already declares it.
@@ -142,7 +143,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     scopes = [[]];
     const type = instance.returns;
     framed = new Set();
-    resuming = instance.generator && { type: instance.generator, frame: llvm(instance.generator), resumes: [], start: label(), done: label() };
+    const machine = instance.generator ?? instance.future;
+    resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
     // given, which already holds its parameters.
     if (resuming) {
@@ -153,6 +155,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       field("%state", 0);
       for (const [local, i] of instance.frame!.locals) field(slot(local), i);
       for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop.${j}`, j));
+      for (const i of instance.frame!.awaits.values()) field(`%await.${i}`, i);
       startBlock(resuming.start);
     }
     // Parameters are copied into slots like any other binding.
@@ -186,12 +189,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (type === "void" || resuming) leave(undefined);
     else emit("unreachable");
     if (resuming) {
-      // Each `next()` goes on from where the last stopped: the start, a `yield`, or the end.
+      // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
+      // `await`, or the end. A finished future is never polled again.
       startBlock(resuming.done);
-      emit(`ret ${resultType(instance)} ${answer(undefined, resuming.type.yields)}`);
+      if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${answer(undefined, resuming.type.yields)}`);
+      else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
       allocas.push("  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
-      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+      const takes = resuming.type.kind === "future" ? "ptr %frame, ptr %cx" : "ptr %frame";
+      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
       continue;
     }
     // Fish's own functions stay inside this module, so two libraries never clash over them.
@@ -417,7 +423,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const g = resuming!;
     const v = owned(e.value!);
     settle();
-    const result = answer(v, g.type.yields);
+    const result = answer(v, (g.type as GeneratorType).yields);
     const at = label();
     g.resumes.push(at);
     emit(`store i32 ${g.resumes.length}, ptr %state`);
@@ -1032,6 +1038,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function effect(e: Expr) {
     if (e.kind === "match") return void lowerMatch(e, false);
     if (e.kind === "pipe") return void lowerPipe(e, false);
+    if (e.kind === "unary" && e.op === "await") {
+      const v = awaitFuture(e);
+      const gives = (valueType(e.operand) as FutureType).gives;
+      if (v !== undefined && needsDrop(gives)) dispose(v, gives);
+      return;
+    }
     if (e.kind !== "call") return void value(e);
     const result = call(e);
     // A call whose value goes unused has no type of its own recorded.
@@ -1052,9 +1064,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, number][] {
-    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator") return [];
+    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
-    return [...base, ...(type.kind === "generator" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
+    return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
   }
 
   // A copy of a value, holding its own reference to each string in it.
@@ -1291,6 +1303,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "match":
       case "pipe":
         return true;
+      // An awaited future gives its value over.
+      case "unary":
+        return e.op === "await";
       case "binary":
         return e.op === "+" || e.op === "??";
       case "member":
@@ -1440,6 +1455,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      // `yieldNow()`'s future is its one state, not yet polled.
+      if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
       if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
         const made = temp();
@@ -1475,15 +1492,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
-    // Calling a generator function makes its frame, holding the arguments, ready to start.
-    if (target.generator) {
+    // Calling a generator or async function makes its frame, holding the arguments, ready to start.
+    const machine = target.generator ?? target.future;
+    if (machine) {
       let frame = "zeroinitializer";
       values.forEach((v, i) => {
         const next = temp();
-        emit(`${next} = insertvalue ${llvm(target.generator!)} ${frame}, ${v}, ${i + 1}`);
+        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${v}, ${i + 1}`);
         frame = next;
       });
-      if (!types.has(e)) pending.push({ v: frame, type: target.generator });
+      if (!types.has(e)) pending.push({ v: frame, type: machine });
       return frame;
     }
     // The call takes the copy; what it leaves, the parts of a derived instance its base's
@@ -1735,6 +1753,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
     if (i.generator) return llvm(nextResult(i.generator.yields));
+    if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
     return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
   }
@@ -1790,13 +1809,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function leave(v: string | undefined) {
     const region = finallies.at(-1);
     drop(region?.depth ?? 0);
+    const gives = current.future ? current.future.gives : current.returns;
     if (region) {
-      const kept = v === undefined ? undefined : stash(region, "return", current.returns, v);
-      return exit(region, "return", () => leave(kept && unstash(kept, current.returns)));
+      const kept = v === undefined ? undefined : stash(region, "return", gives, v);
+      return exit(region, "return", () => leave(kept && unstash(kept, gives)));
     }
-    // A generator that finishes stays finished.
+    // A generator or a future that finishes stays finished; a future gives its value as it does.
     if (resuming) {
       emit("store i32 -1, ptr %state");
+      if (current.future) return emit(`ret ${resultType(current)} ${polled(current.future, 1, v)}`);
       return emit(`br label %${resuming.done}`);
     }
     if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
@@ -1842,11 +1863,92 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`br label %${handler.label}`);
       return;
     }
+    if (current.future) {
+      emit("store i32 -1, ptr %state");
+      emit(`ret ${resultType(current)} ${polled(current.future, 2, undefined, error)}`);
+      return;
+    }
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
     emit(`${b} = insertvalue ${type} ${a}, ${llvm(to)} ${error}, 2`);
     emit(`ret ${type} ${b}`);
+  }
+
+  // What polling a future gives: a tag, pending (0), ready (1) or failed (2), then the value it
+  // gives and the error it throws, each `{}` when there is none.
+  function pollType(f: FutureType): string {
+    return `{ i8, ${f.gives === "void" ? "{}" : llvm(f.gives)}, ${f.throws ? llvm(f.throws) : "{}"} }`;
+  }
+
+  // A poll result with `tag`, and the value or the error it carries.
+  function polled(f: FutureType, tag: number, v?: string, error?: string): string {
+    let made = temp();
+    emit(`${made} = insertvalue ${pollType(f)} zeroinitializer, i8 ${tag}, 0`);
+    for (const [part, at, type] of [[v, 1, f.gives], [error, 2, f.throws]] as const) {
+      if (part === undefined || type === undefined || type === "void") continue;
+      const next = temp();
+      emit(`${next} = insertvalue ${pollType(f)} ${made}, ${llvm(type)} ${part}, ${at}`);
+      made = next;
+    }
+    return made;
+  }
+
+  // `await p`: the future moves into its slot in the frame, and is polled there, here and at
+  // each later poll of this one until it is done. While it is pending, so is this future. Its
+  // value comes out, or its error is raised; either way it is finished, and dropped.
+  function awaitFuture(e: Extract<Expr, { kind: "unary" }>): string | undefined {
+    const inner = valueType(e.operand) as FutureType;
+    const g = resuming!;
+    const at = `%await.${current.frame!.awaits.get(e)!}`;
+    emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
+    settle();
+    scopes.at(-1)!.push({ slot: at, type: inner });
+    const poll = label();
+    g.resumes.push(poll);
+    const resumed = g.resumes.length;
+    emit(`br label %${poll}`);
+    startBlock(poll);
+    const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
+    if (inner === YIELD_NOW) {
+      // Pending the first time it is polled, done the next.
+      const [state, fresh] = [temp(), temp()];
+      emit(`${state} = load i32, ptr ${at}`);
+      emit(`store i32 1, ptr ${at}`);
+      emit(`${fresh} = icmp eq i32 ${state}, 0`);
+      emit(`br i1 ${fresh}, label %${waiting}, label %${ready}`);
+    } else {
+      unwinding(`call ${pollType(inner)} ${symbol(futureOf.get(inner)!)}(ptr ${at}, ptr %cx)`, result);
+      emit(`${tag} = extractvalue ${pollType(inner)} ${result}, 0`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+    }
+    startBlock(waiting);
+    emit(`store i32 ${resumed}, ptr %state`);
+    emit(`ret ${resultType(current)} ${polled(current.future!, 0)}`);
+    const finish = () => {
+      const old = temp();
+      emit(`${old} = load ${llvm(inner)}, ptr ${at}`);
+      emit(`store ${llvm(inner)} zeroinitializer, ptr ${at}`);
+      dispose(old, inner);
+    };
+    if (inner.throws) {
+      startBlock(failed);
+      const error = temp();
+      emit(`${error} = extractvalue ${pollType(inner)} ${result}, 2`);
+      finish();
+      raised(e, error);
+    } else if (inner !== YIELD_NOW) {
+      startBlock(failed);
+      emit("unreachable");
+    }
+    startBlock(ready);
+    let v: string | undefined;
+    if (inner.gives !== "void") {
+      v = temp();
+      emit(`${v} = extractvalue ${pollType(inner)} ${result}, 1`);
+    }
+    finish();
+    return v;
   }
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
@@ -1863,6 +1965,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function entry(): string[] {
+    if (main.future) return driver(main.future);
     if (!main.throws) return [`define i32 @main() ${unwinds} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
     current = main;
     ({ types, locals, calls, setters, coercions, jumps } = main);
@@ -1881,6 +1984,34 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     write(2, ["Error:", [error, main.throws]], builder, convert);
     dispose(error, main.throws);
     emit("ret i32 1");
+    return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+  }
+
+  // An async `main`, polled until it is done; an error it gives is reported as a throwing
+  // `main`'s is. Nothing wakes it yet, so it is polled again at once while pending.
+  function driver(future: FutureType): string[] {
+    current = main;
+    ({ types, locals, calls, setters, coercions, jumps } = main);
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    const type = pollType(future);
+    const [frame, result, tag, poll, ok, bad] = [temp(), temp(), temp(), label(), label(), label()];
+    allocas.push(`  ${frame} = alloca ${llvm(future)}`, `  store ${llvm(future)} zeroinitializer, ptr ${frame}`);
+    emit(`br label %${poll}`);
+    startBlock(poll);
+    emit(`${result} = call ${type} @"fsh.main"(ptr ${frame}, ptr null)`);
+    emit(`${tag} = extractvalue ${type} ${result}, 0`);
+    emit(`switch i8 ${tag}, label %${poll} [ i8 1, label %${ok} i8 2, label %${bad} ]`);
+    startBlock(ok);
+    emit("ret i32 0");
+    startBlock(bad);
+    if (future.throws) {
+      const error = temp();
+      emit(`${error} = extractvalue ${type} ${result}, 2`);
+      emit("call i32 @fflush(ptr null)");
+      write(2, ["Error:", [error, future.throws]], builder, convert);
+      dispose(error, future.throws);
+      emit("ret i32 1");
+    } else emit("unreachable");
     return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
   }
 
@@ -2121,6 +2252,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return result;
       }
       case "unary": {
+        if (e.op === "await") return awaitFuture(e)!;
         const type = types.get(e)!;
         // A negative literal is a constant, which may be the type's minimum.
         if (e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) {
