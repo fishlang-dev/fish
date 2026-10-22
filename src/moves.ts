@@ -1065,6 +1065,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // The place an expression names: a variable or `this`, then fields, but not through a getter.
   function key(e: Named): string | undefined {
+    // `x!` is what `x` holds, so it is borrowed and changed as `x` is.
+    if (e.kind === "nonNull") return key(e.expr);
     if (e.kind === "shorthand" || e.kind === "ident") {
       const local = locals.get(e);
       return local && String(local.id);
