@@ -380,11 +380,12 @@ export function interior(which: InteriorType["which"], of: Type, at: Span): Inte
   return interiorType(which, of);
 }
 
-// What only describes values, an interface, a function type or a Promise, can't be held where its
-// value is laid out once for every use, as a channel, a shared value and a lock hold theirs.
+// What only describes values, an interface (a written `Promise<T>` or `Generator<T>` is one) or a
+// function type, can't be held where its value is laid out once for every use, as a channel, a
+// shared value and a lock hold theirs.
 function abstractless(of: Type, holder: string, at: Span) {
   let found: Type | undefined;
-  holdsPart(lower(of), (u) => typeof u !== "string" && ["interface", "function", "future", "generator", "closure"].includes(u.kind) && (found = u) !== undefined);
+  holdsPart(lower(of), (u) => typeof u !== "string" && (u.kind === "interface" || u.kind === "function") && (found = u) !== undefined);
   if (found) throw new CompileError(`${holder} can't hold a '${show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
@@ -412,7 +413,7 @@ export function shareable(of: Type, at: Span): SharedType {
 export function channel(of: Type, at: Span): BlockType {
   const held = lower(of);
   if (typeof held !== "string" && held.kind === "union" && held.members.includes("null") || held === "null") {
-    throw new CompileError(`a 'Channel' can't carry '${show(of)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(of)} }>'`, at.start, at.end);
+    throw new CompileError(`a 'Channel' can't carry '${show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(held)} }>'`, at.start, at.end);
   }
   abstractless(of, "a 'Channel'", at);
   let blocker: Type | undefined;
