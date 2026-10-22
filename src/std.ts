@@ -189,16 +189,21 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
     while (true) {
       let end = Http1.headEnd(buffer);
       while (end < 0) {
+        // A head may take 16 KiB, and a body 1 MiB.
+        if ((buffer.length as i64) > 16384) { await Http1.refuse(conn, 431); return; }
         const got = await conn.read(16384);
         if (got.length === 0) return;
         for (const b of got) buffer.push(b);
         end = Http1.headEnd(buffer);
       }
+      if (end > 16384) { await Http1.refuse(conn, 431); return; }
       const head = Http1.parseHead(new TextDecoder().decode(Http1.take(buffer, 0, end)));
-      if (head === null) return;
+      if (head === null) { await Http1.refuse(conn, 400); return; }
       buffer = Http1.take(buffer, end + 4, buffer.length as i64);
+      if (head.headers.has("transfer-encoding")) { await Http1.refuse(conn, 501); return; }
       const length = Http1.contentLength(head.headers);
-      if (length < 0) return;
+      if (length < 0) { await Http1.refuse(conn, 400); return; }
+      if (length > 1048576) { await Http1.refuse(conn, 413); return; }
       if (length > 0 && head.headers.get("expect") === "100-continue") {
         await conn.write(new TextEncoder().encode("HTTP/1.1 100 Continue\\r\\n\\r\\n"));
       }
@@ -227,6 +232,12 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 
 // The wire format of HTTP/1.x.
 class Http1 {
+  // Answers a request the server won't serve, and ends the connection.
+  static async refuse(conn: Ref<TcpStream>, status: i64): Promise<void> throws IoError {
+    const res = new Response(Http1.reasonPhrase(status) + "\\n", { status: status });
+    await conn.write(new TextEncoder().encode(Http1.responseText(res, false, true)));
+  }
+
   // A URL's path: after the scheme and host, up to its query or fragment.
   static pathOf(url: string): string {
     let start = 0;
@@ -265,15 +276,18 @@ class Http1 {
   static parseHead(text: string): HttpHead | null {
     const lines = text.split("\\r\\n");
     const parts = lines[0].split(" ");
-    if (parts.length !== 3) return null;
+    if (parts.length !== 3 || parts[0].length === 0 || !parts[1].startsWith("/")) return null;
     const version = parts[2];
     if (version !== "HTTP/1.1" && version !== "HTTP/1.0") return null;
     let headers = new Headers();
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       const colon = line.indexOf(":");
-      if (colon <= 0) return null;
-      headers.append(line.slice(0, colon), line.slice(colon + 1).trim());
+      // A name is one token: nothing before it, and no space before its colon.
+      if (colon <= 0 || line.startsWith(" ") || line.startsWith("\\t")) return null;
+      const name = line.slice(0, colon);
+      if (name.includes(" ") || name.includes("\\t")) return null;
+      headers.append(name, line.slice(colon + 1).trim());
     }
     return new HttpHead(parts[0], parts[1], version, headers);
   }
