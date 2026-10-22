@@ -258,9 +258,10 @@ export function expressions(ctx: Context) {
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
   function expect(e: Expr, t: Type) {
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
-    // An arrow for a union holding one callable, like an optional callback, takes its signature.
+    // An arrow for a union holding one callable, like an optional callback, is stored as that
+    // callable.
     const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
-    if (e.kind === "arrow" && callables.length === 1) expecting.set(e, callableOf.get((callables[0] as DynType).of)!);
+    if (callables.length === 1) t = callables[0]!;
     // An arrow written where a callable is stored captures by move: the callable owns it all.
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
       expecting.set(e, callableOf.get(t.of)!);
@@ -746,7 +747,9 @@ export function expressions(ctx: Context) {
       return { type: pointerType(t, mutable), what: `'${callee.name}'` };
     }
     // `spawn(p)`: the future runs as a task of its own, on any thread, and its handle awaits it.
-    if (callee.kind === "ident" && callee.name === "spawn" && !byName.has("spawn")) {
+    // The std library's code calls the built-ins, whatever a program names its own functions.
+    const inStd = e.start >= STD_BASE;
+    if (callee.kind === "ident" && callee.name === "spawn" && (!byName.has("spawn") || inStd)) {
       if (!ctx.async) throw new CompileError("'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
@@ -763,7 +766,7 @@ export function expressions(ctx: Context) {
       return { type: handleType(t.gives, t.throws), what: "'spawn'" };
     }
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
-    if (callee.kind === "ident" && callee.name === "sleep" && !byName.has("sleep")) {
+    if (callee.kind === "ident" && callee.name === "sleep" && (!byName.has("sleep") || inStd)) {
       if (e.args.length !== 1 && e.args.length !== 2) throw new CompileError("'sleep' takes how many milliseconds to wait, like 'sleep(250)', and may take an AbortSignal", e.start, e.end);
       expect(e.args[0]!, "i64");
       const t = value(e.args[0]!);
@@ -773,7 +776,7 @@ export function expressions(ctx: Context) {
       return { type: leafFuture("sleep", "void", abortError(), true), what: "'sleep'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
-    if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
+    if (callee.kind === "ident" && callee.name === "yieldNow" && (!byName.has("yieldNow") || inStd)) {
       if (e.args.length > 0) throw new CompileError("'yieldNow' takes no arguments", e.start, e.end);
       return { type: YIELD_NOW, what: "'yieldNow'" };
     }
@@ -812,7 +815,7 @@ export function expressions(ctx: Context) {
       return { type: pointerType(resolveType(e.typeArgs[0]!), true), what: "'nullPtr'" };
     }
     // `String(x)`: a string, number or boolean written as JavaScript writes it.
-    if (callee.kind === "ident" && callee.name === "String" && !byName.has("String")) {
+    if (callee.kind === "ident" && callee.name === "String" && (!byName.has("String") || inStd)) {
       if (e.args.length !== 1) throw new CompileError("'String' takes 1 argument", e.start, e.end);
       joined(e.args[0]!, operand(e.args[0]!), "'String'");
       return { type: "string", what: "'String'" };
@@ -2217,11 +2220,9 @@ export function expressions(ctx: Context) {
     const field = propertyField(p);
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
-    // An optional callback's field is a union; the arrow boxes into its callable member.
-    const callable = want && (isCallable(want) ? want : typeof want !== "string" && want.kind === "union" ? want.members.find(isCallable) : undefined);
-    if (typeof field.type !== "string" && field.type.kind === "closure" && callable) {
-      coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, callable, `type '${show(field.type)}' is not assignable to type '${show(callable)}'`);
-      return { ...field, type: callable };
+    if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {
+      coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, want, `type '${show(field.type)}' is not assignable to type '${show(want)}'`);
+      return { ...field, type: want };
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
     if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
