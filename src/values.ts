@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, functionType, holdsInterior, interiorType, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, functionType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -82,6 +82,7 @@ export type Context = {
   block(arm: Extract<Stmt, { kind: "block" }>, wanted: boolean): [Expr, Type][];
   // What each match pattern tests, for codegen.
   patterns: Map<Pattern, PatternInfo>;
+  copiesOut: Set<Expr>;
   // Declares a name a pattern binds, read-only, in the arm's scope.
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
@@ -98,8 +99,9 @@ export type Context = {
   closing: boolean;
   // Whether the body is a generator's.
   generator: boolean;
-  // Whether the body is a callback a lock is held for.
+  // Whether the body is a callback a lock is held for, and whether that lock is a shared value's.
   locked: boolean;
+  sharing: boolean;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean;
   awaitable: Set<Expr>;
@@ -922,13 +924,26 @@ export function expressions(ctx: Context) {
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
   function sharedCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
     if (callee.name !== "update") throw new CompileError(`'shared' has no method '${callee.name}'; read its fields, change it with 'update', or share it again with 'clone'`, callee.start, callee.end);
-    return lockCall(e, callee, interiorType("Lock", t.of));
+    return lockCall(e, callee, interiorType("Lock", t.of), true);
+  }
+
+  // `s.f` on a shared value: an interior-mutable field is borrowed where it lives, unlocked,
+  // since it changes only through its own methods; any other is copied out under the lock.
+  function sharedField(e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
+    if (linked(e)) throw unsupported("optional chains through shared values", e);
+    const inner = lower(t.of);
+    if (typeof inner !== "string" && inner.kind === "class") classOf(inner);
+    const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
+    if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
+    if (!interiorMutable(found.type)) ctx.copiesOut.add(e);
+    return found.type;
   }
 
   // `lock.update(v => ...)`: the callback changes what the lock holds while it is locked, and
   // gives what the callback gives. A closure can't return a reference, so nothing it gives
   // borrows from the value once the lock is released.
-  function lockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
+  function lockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, sharing = false): { type: Type; what: string } {
     if (callee.name !== "update") throw new CompileError(`'Lock' has no method '${callee.name}'; 'update' runs a callback with what it holds`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'Lock' methods", callee);
     if (e.args.length !== 1) throw new CompileError("'update' takes 1 argument, a callback like 'v => ...'", e.start, e.end);
@@ -937,6 +952,7 @@ export function expressions(ctx: Context) {
     const held = refType(lower(t.of), true);
     const signature = functionType(["value"], [held], "void");
     lockCallbacks.add(signature);
+    if (sharing) sharedCallbacks.add(signature);
     expect(callback, signature);
     const c = value(callback);
     if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1 || (c.params[0] !== undefined && !fits(held, c.params[0]))) {
@@ -1342,6 +1358,7 @@ export function expressions(ctx: Context) {
         const through = linked(e) ? unwrapped(e.object, e.optional) : value(e.object);
         const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
         // A field read through a reference loads what it points to; a getter gets the pointer.
+        if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
@@ -2048,6 +2065,13 @@ export function expressions(ctx: Context) {
     while (root.kind === "member" || element(root)) {
       if (root.kind === "member") readonly(root, target, action);
       const holder = types.get(root.object);
+      const referred = typeof holder !== "string" && holder?.kind === "ref" ? holder.to : holder;
+      if (typeof referred !== "string" && referred?.kind === "shared") {
+        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is shared between threads; change it inside '${placeText(root.object)}.update(...)'`, target.start, target.end);
+      }
+      if (ctx.sharing && interiorMutable(types.get(root)!) && isParamPath(root)) {
+        throw new CompileError(`cannot ${action} '${placeText(target)}' inside 'update': other tasks borrow '${placeText(root)}' without the lock, so it changes only through its own methods`, target.start, target.end);
+      }
       if (typeof holder !== "string" && holder?.kind === "ref" && holder.mutable) throughMut = true;
       else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
@@ -2055,8 +2079,20 @@ export function expressions(ctx: Context) {
       path = `${root.kind === "member" ? `.${root.name}` : "[...]"}${path}`;
       root = root.object;
     }
+    if (ctx.sharing && path === "" && isParamPath(root)) {
+      const whole = types.get(root)!;
+      if (interiorMutable(typeof whole !== "string" && whole.kind === "ref" ? whole.to : whole)) {
+        throw new CompileError(`cannot ${action} '${placeText(target)}' as a whole inside 'update': other tasks borrow its interior-mutable fields without the lock; change its other fields one by one`, target.start, target.end);
+      }
+    }
     if (root.kind === "this" || root.kind === "super") return changesThis(path, action, target);
     changesLocal(locals.get(root)!, path, action, target, throughMut);
+  }
+
+  // Whether a place is inside the value a callback is passed: its parameter, or a field of it.
+  function isParamPath(e: Expr): boolean {
+    while (e.kind === "member" || e.kind === "index") e = e.object;
+    return e.kind === "ident" && locals.get(e)?.param === true;
   }
 
   // Whether `this` may change here. A closure changing it changes it where it was made.

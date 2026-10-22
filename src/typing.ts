@@ -446,8 +446,14 @@ export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) =>
 
 export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
 
-// The signatures of callbacks that run while a lock is held, so their bodies can't await.
+// The signatures of callbacks that run while a lock is held, so their bodies can't await; and
+// of those changing a shared value, whose interior-mutable parts others borrow unlocked.
 export const lockCallbacks = new WeakSet<FunctionType>();
+export const sharedCallbacks = new WeakSet<FunctionType>();
+
+// Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock or a
+// shared value. Readers of a shared value borrow such fields without its lock.
+export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || (u.kind === "interior" && u.which !== "Cell")));
 
 // The first Atomic, Lock or Cell a value holds, if any.
 export function holdsInterior(t: Type): InteriorType | undefined {

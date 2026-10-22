@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, lockCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -72,6 +72,8 @@ export type Instance = {
   consumes: Set<Expr | ObjectProp>;
   // What each match pattern tests, and the type of the value it meets.
   patterns: Map<Pattern, PatternInfo>;
+  // Each read of a shared value's plain field: a copy made under its lock, not a place.
+  copiesOut: Set<Expr>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -541,7 +543,7 @@ export function check(program: Stmt[], library = false): Checked {
   // Clears what checking an instance recorded, for another pass: its tables and its closures.
   // A callee checked during the pass stays checked, closures and all.
   function forget(instance: Instance) {
-    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes, instance.patterns]) table.clear();
+    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes, instance.patterns, instance.copiesOut]) table.clear();
     instance.returns = "void";
     delete instance.throws;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
@@ -626,7 +628,7 @@ export function check(program: Stmt[], library = false): Checked {
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
+      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -662,6 +664,7 @@ export function check(program: Stmt[], library = false): Checked {
       closing: f.closure !== undefined,
       generator: f.generator === true,
       locked: f.closure?.expected !== undefined && lockCallbacks.has(f.closure.expected),
+      sharing: f.closure?.expected !== undefined && sharedCallbacks.has(f.closure.expected),
       async: f.async === true,
       awaitable,
       unsafe: f.closure?.unsafe === true,
@@ -816,7 +819,7 @@ export function check(program: Stmt[], library = false): Checked {
       const inner: Instance = {
         body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(),
+        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(), copiesOut: new Set(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();

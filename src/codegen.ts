@@ -1443,7 +1443,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "binary":
         return e.op === "+" || e.op === "??";
       case "member":
-        return calls.has(e);
+        return calls.has(e) || current.copiesOut.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
         return !isArray(valueType(e.object));
@@ -1816,6 +1816,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A field read, or a getter's result.
   function member(e: Extract<Expr, { kind: "member" }>): string {
+    if (current.copiesOut.has(e)) return copyOut(e);
     const getter = calls.get(e);
     if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.
@@ -1834,6 +1835,32 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares.
     return convert(result, field(object, e.name)!.type, types.get(e)!);
+  }
+
+  // A shared value's block, and a pointer to one of its value's fields.
+  function sharedField(e: Extract<Expr, { kind: "member" }>): [string, SharedType, string] {
+    const holder = types.get(e.object)!;
+    const t = referent(holder) as SharedType;
+    const block = isRef(holder) ? temp() : value(e.object);
+    if (isRef(holder)) emit(`${block} = load ptr, ptr ${value(e.object)}`);
+    const at = temp();
+    const path = fieldPath(t.of as ObjectType | ClassType, e.name).map((i) => `i32 ${i}`).join(", ");
+    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1, ${path}`);
+    return [block, t, at];
+  }
+
+  // A shared value's plain field, copied out while its lock is held.
+  function copyOut(e: Extract<Expr, { kind: "member" }>): string {
+    const [block, t, at] = sharedField(e);
+    const lock = temp();
+    emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
+    emit(`call void @fsh_rt_lock(ptr ${lock})`);
+    const read = temp();
+    const type = types.get(e)!;
+    emit(`${read} = load ${llvm(type)}, ptr ${at}`);
+    const copy = copied(read, type);
+    emit(`call void @fsh_rt_unlock(ptr ${lock})`);
+    return copy;
   }
 
   // Whether an expression is an Option a link of an optional chain reads through.
@@ -2656,6 +2683,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${payload} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
       return payload;
     }
+    if (typeof referent(types.get(target.object)!) !== "string" && (referent(types.get(target.object)!) as Exclude<Type, string>).kind === "shared") return sharedField(target)[2];
     const holder = stored(target.object);
     const object = referent(holder) as ObjectType | ClassType;
     // Through a reference, the field is inside what it points to.
@@ -2672,6 +2700,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     for (; e.kind === "member" && !calls.has(e); e = e.object) {
       // A string's or an array's `length` is computed, not a field.
       const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
+      // A shared value's interior-mutable field lives in its block, wherever the handle is.
+      if (typeof object !== "string" && object?.kind === "shared") return !current.copiesOut.has(e);
       if (!object || typeof object === "string" || (object.kind !== "object" && object.kind !== "class")) return false;
     }
     if (e.kind === "this") return true;
@@ -2686,7 +2716,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // wider type than the one it is stored with.
   function stored(e: Expr): Type {
     if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
-    return field(referent(stored(e.object)) as ObjectType | ClassType, e.name)!.type;
+    const holder = referent(stored(e.object));
+    // A shared value's field is stored in its block's value.
+    const object = typeof holder !== "string" && holder.kind === "shared" ? holder.of : holder;
+    return field(object as ObjectType | ClassType, e.name)!.type;
   }
 
   // The right side runs only when the left side does not already decide the result.

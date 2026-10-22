@@ -677,8 +677,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (root && isRef(root.type)) {
       throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
-    // Nor out of a reference a field holds.
+    // Nor out of a reference a field holds, or a shared value every clone of it uses.
     for (let p: Named = e; p.kind === "member"; p = p.object) {
+      const holder = types.get(p.object);
+      if (typeof holder !== "string" && (holder?.kind === "shared" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "shared"))) {
+        throw new CompileError(`'${text(e)}' can't be moved out of '${text(p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
+      }
       if (p !== e && isRef(types.get(p)!)) {
         throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
       }
@@ -1082,7 +1086,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const object = element(e) ? key(e.object) : undefined;
       return object === undefined ? undefined : `${object}.[]`;
     }
-    if (e.kind !== "member" || calls.has(e) || !types.has(e.object)) return undefined;
+    if (e.kind !== "member" || calls.has(e) || instance.copiesOut.has(e) || !types.has(e.object)) return undefined;
     const object = key(e.object);
     return object === undefined ? undefined : `${object}.${e.name}`;
   }
