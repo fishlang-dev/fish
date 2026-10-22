@@ -316,6 +316,13 @@ export function lentPromise(t: Type): DynType {
   return dynType(found);
 }
 
+// Whether copies of a Dyn share its one value, as Rust's `Arc<dyn Trait>` does: so they may when
+// nothing through its interface changes or takes over the value. A boxed future never does,
+// since polling changes it.
+export function sharesDyn(t: DynType): boolean {
+  return !promised.has(t.of) && t.of.methods.every((m) => !m.mutable && !m.owned);
+}
+
 // What a `Promise<T>` gives, when the interface is one.
 export function promiseElement(t: Type): Type | undefined {
   return typeof t !== "string" && t.kind === "interface" ? promised.get(t) : undefined;

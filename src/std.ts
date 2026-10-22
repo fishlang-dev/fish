@@ -106,12 +106,14 @@ class Request {
     return this.body;
   }
 
-  // The path segment a Router's ':name' matched, or "" when its route has no such parameter.
+  // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
+  // route has no such parameter.
   param(name: string): string {
+    let found = "";
     for (let i: usize = 0; i + 1 < this.params.length; i += 2) {
-      if (this.params[i] === name) return this.params[i + 1];
+      if (this.params[i] === name) found = this.params[i + 1];
     }
-    return "";
+    return found;
   }
 }
 
@@ -288,7 +290,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
   methods: string[] = [];
-  paths: string[] = [];
+  routes: string[][] = [];
   handlers: ServeHandler[] = [];
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
@@ -299,23 +301,28 @@ class Router {
   // A route for every method.
   all(this: Mut<this>, path: string, handler: ServeHandler) { this.route("", path, handler); }
 
+  // A route for a method, in any case; a path without a leading '/' gets one.
   route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
-    this.methods.push(method);
-    this.paths.push(path);
+    this.methods.push(method.toUpperCase());
+    this.routes.push((path.startsWith("/") ? path : "/" + path).split("/"));
     this.handlers.push(handler);
   }
 
-  // The matching route's response; a HEAD request runs a GET route.
+  // The matching route's response; a HEAD request runs a GET route unless one is for HEAD.
   async handle(req: Request): Promise<Response> {
-    const method = req.method === "HEAD" ? "GET" : req.method;
-    for (let i = 0; i < this.paths.length; i++) {
-      if (this.methods[i] !== "" && this.methods[i] !== method) continue;
-      const found = Router.match(this.paths[i], req.path);
-      if (found === null) continue;
-      let routed = req;
-      routed.params = found;
-      const res = await this.handlers[i](routed);
-      return res;
+    const have = req.path.split("/");
+    for (let pass = 0; pass < 2; pass++) {
+      const method = pass === 1 && req.method === "HEAD" ? "GET" : req.method;
+      if (pass === 1 && method === req.method) break;
+      for (let i = 0; i < this.routes.length; i++) {
+        if (this.methods[i] !== "" && this.methods[i] !== method) continue;
+        const found = Router.match(this.routes[i], have);
+        if (found === null) continue;
+        let routed = req;
+        routed.params = found;
+        const res = await this.handlers[i](routed);
+        return res;
+      }
     }
     return new Response("Not Found\\n", { status: 404 });
   }
@@ -329,10 +336,8 @@ class Router {
     };
   }
 
-  // The :params a route's path takes from a request's, or null when they don't match.
-  static match(pattern: string, path: string): string[] | null {
-    const want = pattern.split("/");
-    const have = path.split("/");
+  // The :params a route's segments take from a path's, or null when they don't match.
+  static match(want: Ref<string[]>, have: Ref<string[]>): string[] | null {
     if (want.length !== have.length) return null;
     let params: string[] = [];
     for (let i = 0; i < want.length; i++) {

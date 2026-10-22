@@ -1,4 +1,6 @@
-// panic: this Dyn's value can't be cloned
+// expect: 0 1 2 3 4
+// expect: 0 1
+// Interfaces that change nothing share their Dyn's value between clones, inner Dyns too.
 interface Counter { bump(): i64; }
 interface Outerish { total(): i64; }
 class Hits {

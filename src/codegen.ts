@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -112,7 +112,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
-  const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>(), clone: new Map<Type, string>() };
+  const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
+  // Whether the one thunk copying a Dyn that can't be copied is made.
+  let uncopyable = false;
   const elementDrops = new Map<Type, string>();
   const vtables = new Map<string, string>();
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
@@ -547,20 +549,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A new block for a Dyn's value. At least a byte, so an empty class has an address of its own.
-  function dynBlock(type: Type): string {
+  // A shared Dyn's block is counted: the runtime keeps its count in 16 bytes before the value.
+  function dynBlock(type: Type, counted = false): string {
     const [end, size, empty, some, block] = [temp(), temp(), temp(), temp(), temp()];
     emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
     emit(`${size} = ptrtoint ptr ${end} to i64`);
     emit(`${empty} = icmp eq i64 ${size}, 0`);
     emit(`${some} = select i1 ${empty}, i64 1, i64 ${size}`);
-    emit(`${block} = call ptr @fsh_rt_alloc(i64 ${some})`);
+    emit(`${block} = call ptr @${counted ? "fsh_rt_dyn_alloc" : "fsh_rt_alloc"}(i64 ${some})`);
     return block;
   }
 
   // A value moved into a new Dyn's block, with the vtable of its type for the Dyn's interface.
   function box(v: string, type: Type, to: DynType): string {
     const [made, dyn] = [temp(), temp()];
-    const block = dynBlock(type);
+    const block = dynBlock(type, sharesDyn(to));
     emit(`store ${llvm(type)} ${v}, ptr ${block}`);
     emit(`${made} = insertvalue ${DYN} undef, ptr ${block}, 0`);
     emit(`${dyn} = insertvalue ${DYN} ${made}, ptr ${vtable(type, to)}, 1`);
@@ -568,7 +571,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // The vtable of a type for an interface: drop the block, copy it (the compiler's copies),
-  // clone it as '.clone()' would (null when the type can't be), then a slot per member.
+  // clone it as '.clone()' would (null when the type can't be), then a slot per member. A
+  // shared Dyn's copy and clone count the block again and its drop gives a count up. Any other
+  // Dyn's copy is its clone, so state it holds in an Atomic or a Lock is never split in two.
   function vtable(type: Type, to: DynType): string {
     const key = `${keyOf(type)} ${keyOf(to)}`;
     const made = vtables.get(key);
@@ -576,8 +581,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const name = `@"fsh.vtable.${vtables.size}"`;
     vtables.set(key, name);
     const table = dynMembers.get(key)!;
-    const copy = dynCopy(type);
-    const slots = [dynDrop(type), copy, table.clone === "copy" ? copy : dynClone(type, table), ...dynSlots(type, to, table)];
+    let slots: string[];
+    if (sharesDyn(to)) {
+      // A shared Dyn's '.clone()' runs its class's own clone when it has one, and otherwise shares.
+      const own = table.clone && table.clone !== "copy";
+      slots = [dynRelease(type), "@fsh_rt_dyn_retain", own ? dynClone(type, table, true) : "@fsh_rt_dyn_retain"];
+    } else {
+      const copied = dynCopy(type);
+      const cloned = table.clone === "copy" ? copied : dynClone(type, table);
+      const copy = table.clone === "copy" || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
+      slots = [dynDrop(type), copy, cloned];
+    }
+    slots.push(...dynSlots(type, to, table));
     globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
     return name;
   }
@@ -590,6 +605,37 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     fill();
     out.push(`define internal ${returns} ${name}(${["ptr %p", ...params].join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+  }
+
+  // A shared Dyn's drop: the last count drops the value and frees its block.
+  function dynRelease(type: Type): string {
+    const name = `@"fsh.dyn.release.${vtables.size}"`;
+    thunk(name, "void", () => {
+      const [last, gone, kept, v] = [temp(), label(), label(), temp()];
+      emit(`${last} = call i1 @fsh_rt_dyn_release(ptr %p)`);
+      emit(`br i1 ${last}, label %${gone}, label %${kept}`);
+      startBlock(gone);
+      emit(`${v} = load ${llvm(type)}, ptr %p`);
+      dispose(v, type);
+      emit("call void @fsh_rt_dyn_free(ptr %p)");
+      emit(`br label %${kept}`);
+      startBlock(kept);
+      emit("ret void");
+    });
+    return name;
+  }
+
+  // The copy of a Dyn whose value can't be cloned: it panics rather than split state in two.
+  function dynUncopyable(): string {
+    const name = `@"fsh.dyn.uncopyable"`;
+    if (!uncopyable) {
+      uncopyable = true;
+      thunk(name, "ptr", () => {
+        unwinding(`call void @fsh_rt_panic(ptr ${cString("panicked while copying a Dyn:\nits value holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it\n")})`);
+        emit("unreachable");
+      });
+    }
+    return name;
   }
 
   function dynDrop(type: Type): string {
@@ -619,18 +665,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // What a Dyn's '.clone()' runs when the class has its own `clone`: a new block holding what
   // it gives. Null when the type can't be cloned, which the call panics on.
-  function dynClone(type: Type, table: DynTable): string {
+  function dynClone(type: Type, table: DynTable, counted = false): string {
     if (!table.clone || table.clone === "copy") return "null";
     const own = table.clone;
     const name = `@"fsh.dyn.clone.${vtables.size}"`;
     thunk(name, "ptr", () => {
-      let made: string;
-      if (own === "deep") {
-        const v = temp();
-        emit(`${v} = load ${llvm(type)}, ptr %p`);
-        made = cloneOf(v, type);
-      } else made = invoke(own, "%p", [])!;
-      const block = dynBlock(type);
+      const made = invoke(own, "%p", [])!;
+      const block = dynBlock(type, counted);
       emit(`store ${llvm(type)} ${made}, ptr ${block}`);
       emit(`ret ptr ${block}`);
     });
@@ -766,7 +807,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${fn} = load ptr, ptr ${at}`);
     emit(`${none} = icmp eq ptr ${fn}, null`);
     panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
-    // A deep clone may panic part way, on a Dyn inside that can't be cloned.
+    // A class's own clone may panic.
     unwinding(`call ptr ${fn}(ptr ${data})`, made);
     emit(`${copy} = insertvalue ${DYN} ${dyn}, ptr ${made}, 0`);
     emit(`${result} = insertvalue ${DYN} ${copy}, ptr ${table}, 1`);
@@ -1634,15 +1675,6 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
-  // A clone of a value: a copy, except that each Dyn in it is cloned through its vtable, which
-  // panics for a value that can't be.
-  function cloneOf(v: string, type: Type): string {
-    if (typeof type === "string" || !needsDrop(type) || type.kind === "handle") return copied(v, type);
-    const result = temp();
-    emit(`${result} = call ${llvm(type)} ${helper("clone", type)}(${llvm(type)} ${v})`);
-    return result;
-  }
-
   // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
     if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return dispose(v, type.of);
@@ -1655,7 +1687,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
-  function helper(kind: "drop" | "copy" | "clone", type: Exclude<Type, string>): string {
+  function helper(kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const made = glue[kind].get(type);
     if (made) return made;
     const name = `@"fsh.${kind}.${glue[kind].size}"`;
@@ -1663,38 +1695,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const saved = { allocas, body, temps, labels, block };
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
     const t = llvm(type);
-    const each = (v: string, part: Type) => (kind === "drop" ? (dispose(v, part), v) : kind === "clone" ? cloneOf(v, part) : copied(v, part));
+    const each = (v: string, part: Type) => (kind === "drop" ? (dispose(v, part), v) : copied(v, part));
     let result = "%v";
     if (type.kind === "array") {
-      result = kind === "drop" ? dropArray(type) : copyArray(type, (v) => each(v, type.element));
+      result = kind === "drop" ? dropArray(type) : copyArray(type);
     } else if (type.kind === "shared") {
-      if (kind !== "drop") emit("call void @fsh_rt_shared_retain(ptr %v)");
+      if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
     } else if (type.kind === "dyn") {
       // Through the vtable: its drop frees the block; its copy gives a new block. A Dyn moved
       // out of its place left it empty, with nothing to drop or copy.
-      const [data, table, empty, at, fn, done] = [temp(), temp(), temp(), temp(), temp(), label()];
-      let full = label();
+      const [data, table, empty, at, fn, full, done] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
       emit(`${data} = extractvalue ${DYN} %v, 0`);
       emit(`${table} = extractvalue ${DYN} %v, 1`);
       emit(`${empty} = icmp eq ptr ${data}, null`);
       emit(`br i1 ${empty}, label %${done}, label %${full}`);
       startBlock(full);
-      emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${kind === "drop" ? 0 : kind === "copy" ? 1 : 2}`);
+      emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${kind === "drop" ? 0 : 1}`);
       emit(`${fn} = load ptr, ptr ${at}`);
       let copy: string | undefined;
       if (kind === "drop") emit(`call void ${fn}(ptr ${data})`);
       else {
-        if (kind === "clone") {
-          const [none, stop, go] = [temp(), label(), label()];
-          emit(`${none} = icmp eq ptr ${fn}, null`);
-          emit(`br i1 ${none}, label %${stop}, label %${go}`);
-          startBlock(stop);
-          emit(`call void @fsh_rt_panic(ptr ${cString("panicked while cloning:\nthis Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place\n")})`);
-          emit("unreachable");
-          startBlock(go);
-          full = go;
-        }
         const made = temp();
         copy = temp();
         emit(`${made} = call ptr ${fn}(ptr ${data})`);
@@ -1708,10 +1729,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
     } else if (type.kind === "block") {
       const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release" }[type.which];
-      emit(kind !== "drop" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
+      emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
-      const copy = kind !== "drop" ? alloca(t) : "";
+      const copy = kind === "copy" ? alloca(t) : "";
       if (copy) emit(`store ${t} %v, ptr ${copy}`);
       const tag = temp();
       emit(`${tag} = extractvalue ${t} %v, 0`);
@@ -1765,7 +1786,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // In an array's copy function: a new buffer just long enough, holding a copy of each element.
-  function copyArray(type: ArrayType, each: (v: string) => string): string {
+  function copyArray(type: ArrayType): string {
     const [data, length, copy] = [temp(), temp(), temp()];
     emit(`${data} = extractvalue ${ARRAY} %v, 0`);
     emit(`${length} = extractvalue ${ARRAY} %v, 1`);
@@ -1775,7 +1796,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const [v, to] = [temp(), temp()];
       emit(`${v} = load ${t}, ptr ${at}`);
       emit(`${to} = getelementptr ${t}, ptr ${copy}, i64 ${i}`);
-      emit(`store ${t} ${each(v)}, ptr ${to}`);
+      emit(`store ${t} ${copied(v, type.element)}, ptr ${to}`);
     });
     return built(copy, length, length);
   }

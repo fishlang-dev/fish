@@ -727,6 +727,27 @@ fsh_str *fsh_rt_utf8_decode(fsh_array *bytes) {
   return fsh_from_utf8(p + (bom ? 3 : 0), bytes->length - (bom ? 3 : 0));
 }
 
+// A shared Dyn's block: its count sits 16 bytes before the value, which keeps its alignment.
+void *fsh_rt_dyn_alloc(int64_t size) {
+  char *raw = fsh_rt_alloc(size + 16);
+  *(int64_t *)raw = 1;
+  return raw + 16;
+}
+
+void *fsh_rt_dyn_retain(char *p) {
+  __atomic_add_fetch((int64_t *)(p - 16), 1, __ATOMIC_RELAXED);
+  return p;
+}
+
+// Whether this was the last count, so the value is dropped and the block freed.
+_Bool fsh_rt_dyn_release(char *p) {
+  return __atomic_sub_fetch((int64_t *)(p - 16), 1, __ATOMIC_ACQ_REL) == 0;
+}
+
+void fsh_rt_dyn_free(char *p) {
+  fsh_rt_free(p - 16);
+}
+
 // Milliseconds on the monotonic clock.
 int64_t fsh_rt_now_ms(void) {
   struct timespec now;

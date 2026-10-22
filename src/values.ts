@@ -148,8 +148,7 @@ export const dynMembers = new Map<string, DynTable>();
 // What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
-// A closure holding a Dyn clones "deep": each Dyn in it through its own vtable.
-export type DynTable = { methods: Instance[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | "deep" | undefined };
+export type DynTable = { methods: Instance[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -2450,6 +2449,11 @@ export function expressions(ctx: Context) {
     if (type.once) throw new CompileError(`this closure moves ${capture(type.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(type.once)} inside it instead`, e.start, e.end);
     const changed = [...(body.changed ?? [])][0];
     if (changed) throw new CompileError(`this closure changes ${capture(changed.name)}, which it captures, but a stored callable can't change what it captures; keep that state in an 'Atomic' or a 'Lock'`, e.start, e.end);
+    // Each call of an async callable runs on its own copy of what it captures, which would split
+    // an Atomic's or a Lock's state in two.
+    const pinned = (u: Type) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle");
+    const held = body.body.async ? type.fields.find((f) => holdsPart(f.type, pinned)) : undefined;
+    if (held) throw new CompileError(`this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
   }
 
   // What a Dyn of this type runs for each interface member. A method may not need more of its
@@ -2457,13 +2461,11 @@ export function expressions(ctx: Context) {
   // and one taking an interface or function has a version per argument type, so no one slot.
   function dynTable(e: Expr, type: Type, to: DynType): DynTable {
     const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
-    const pinned = (u: Type) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle");
-    const fixed = holdsPart(type, (u) => pinned(u) || (typeof u !== "string" && u.kind === "dyn"));
+    const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
     if (typeof type !== "string" && type.kind === "closure") {
       const body = closureBody(type);
       futureTable(body, to.of.methods[0]!.returns, false, e);
-      const deep = !holdsPart(type, pinned) && fixed;
-      return { methods: [body], fields: [], clone: deep ? "deep" : fixed ? undefined : "copy" };
+      return { methods: [body], fields: [], clone: fixed ? undefined : "copy" };
     }
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;

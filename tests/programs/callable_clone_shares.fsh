@@ -1,6 +1,6 @@
 // expect: 0
-// panic: this Dyn's value can't be cloned
-// A callable capturing a Dyn whose value holds an Atomic can't be cloned: the clone panics.
+// expect: 1
+// A callable's clone shares it, and so the state its captured Dyn keeps in an Atomic.
 interface Counter { next(): i64; }
 class Ticks { n: Atomic<i64> = new Atomic(0); next(): i64 { return this.n.add(1); } }
 type Fn = () => i64;
