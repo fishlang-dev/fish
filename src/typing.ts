@@ -101,7 +101,25 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType;
+
+// `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
+// `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
+// they hold, a Lock as its lock word, then what it holds.
+export type InteriorType = { kind: "interior"; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
+
+const interiors = new Map<string, InteriorType>();
+
+export function interiorType(which: InteriorType["which"], of: Type): InteriorType {
+  const key = `${which} ${keyOf(of)}`;
+  let t = interiors.get(key);
+  if (!t) {
+    t = { kind: "interior", which, of, fields: [] };
+    interiors.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
@@ -389,19 +407,33 @@ export function holdsRef(t: Type): boolean {
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
-// Whether a value owns a JoinHandle anywhere in it, or with `throughRefs` borrows one: only one
-// place may await a task's result.
-export function holdsHandle(t: Type, throughRefs = false): boolean {
-  const holds = (u: Type) => holdsHandle(u, throughRefs);
+// Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
+// reference it holds.
+export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
+  const holds = (u: Type) => holdsPart(u, found, throughRefs);
+  if (found(t)) return true;
   if (typeof t === "string") return false;
-  if (t.kind === "handle") return true;
   if (t.kind === "ref") return throughRefs && holds(t.to);
   if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
   if (t.kind === "union") return t.members.some(holds);
   if (t.kind === "array") return holds(t.element);
+  if (t.kind === "interior") return holds(t.of);
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
   return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holds(f.type));
+}
+
+// Whether a value owns a JoinHandle, or with `throughRefs` borrows one: only one place may
+// await a task's result.
+export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "handle", throughRefs);
+
+export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
+
+// The first Atomic, Lock or Cell a value holds, if any.
+export function holdsInterior(t: Type): InteriorType | undefined {
+  let found: InteriorType | undefined;
+  holdsPart(t, (u) => typeof u !== "string" && u.kind === "interior" && (found = u) !== undefined);
+  return found;
 }
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
@@ -426,6 +458,7 @@ export function lower(t: Type): Type {
   if (t.kind === "param") return t.concrete ?? t;
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
+  if (t.kind === "interior") return interiorType(t.which, lower(t.of));
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -585,6 +618,7 @@ export function show(t: Type): string {
   }
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+  if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

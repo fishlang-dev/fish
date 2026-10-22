@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -346,6 +346,56 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${result} = icmp eq ptr ${at}, null`);
         return result;
     }
+  }
+
+  // A new Atomic, Cell or Lock: what it holds, a boolean widened to a byte in an Atomic, and a
+  // Lock's word unlocked.
+  function interiorNew(e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
+    const v = value(e.args![0]!);
+    const result = temp();
+    if (t.which === "Lock") emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(t.of)} poison }, ${llvm(t.of)} ${v}, 1`);
+    else if (llvm(t) !== llvm(t.of)) emit(`${result} = zext i1 ${v} to i8`);
+    else return v;
+    return result;
+  }
+
+  // An Atomic's method, as one sequentially consistent atomic instruction on where it lives.
+  function atomicCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = referent(valueType(callee.object)) as InteriorType;
+    const at = receiver(callee.object);
+    const ty = llvm(t);
+    const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
+    const byte = ty !== llvm(t.of);
+    const args = e.args.map((a) => {
+      const v = value(a);
+      if (!byte) return v;
+      const wide = temp();
+      emit(`${wide} = zext i1 ${v} to i8`);
+      return wide;
+    });
+    const result = temp();
+    switch (callee.name) {
+      case "load":
+        emit(`${result} = load atomic ${ty}, ptr ${at} seq_cst, ${align}`);
+        break;
+      case "store":
+        emit(`store atomic ${ty} ${args[0]}, ptr ${at} seq_cst, ${align}`);
+        return undefined;
+      case "compareExchange": {
+        const pair = temp();
+        emit(`${pair} = cmpxchg ptr ${at}, ${ty} ${args[0]}, ${ty} ${args[1]} seq_cst seq_cst`);
+        emit(`${result} = extractvalue { ${ty}, i1 } ${pair}, 0`);
+        break;
+      }
+      default: {
+        const op = { add: "add", sub: "sub", exchange: "xchg" }[callee.name]!;
+        emit(`${result} = atomicrmw ${op} ptr ${at}, ${ty} ${args[0]} seq_cst`);
+      }
+    }
+    if (!byte) return result;
+    const narrow = temp();
+    emit(`${narrow} = trunc i8 ${result} to i1`);
+    return narrow;
   }
 
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
@@ -1489,6 +1539,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return made;
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
+      if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
       if (e.callee.kind === "ident" && e.callee.name === "String") {
@@ -2337,6 +2388,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return result;
       }
       case "new": {
+        if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;

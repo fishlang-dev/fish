@@ -4,9 +4,9 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { fields } from "./resolve.ts";
+import { fields, interior } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsInterior, holdsMut, INTERIORS, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -243,6 +243,7 @@ export function expressions(ctx: Context) {
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
+    if (e.kind === "new" && typeof t !== "string" && t.kind === "interior") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
   }
@@ -629,6 +630,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -848,6 +850,37 @@ export function expressions(ctx: Context) {
     return { type: callee.name === "write" ? "void" : p, what: `'${callee.name}'` };
   }
 
+  // `new Atomic(v)`, `new Lock(v)`, `new Cell(v)`: one holding v, of its type argument, the type
+  // expected of it, or else v's own type.
+  function interiorNew(e: Extract<Expr, { kind: "new" }>, which: InteriorType["which"], list: Expr[]): Type {
+    if (list.length !== 1 || e.typeArgs.length > 1) throw new CompileError(`'${which}' takes the value it starts with, as in 'new ${which}(0)'`, e.start, e.end);
+    const expected = wanted.get(e);
+    const given = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "interior" && expected.which === which ? expected.of : undefined;
+    if (given) expect(list[0]!, given);
+    const t = value(list[0]!);
+    const of = given ?? widenLet(t);
+    coerce(list[0]!, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
+    return interior(which, of, e);
+  }
+
+  // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
+  // the same by every thread, and gives what it held before, except `store`.
+  function interiorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
+    if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
+    const takes: Record<string, number> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
+    if (!(callee.name in takes)) throw new CompileError(`'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling 'Atomic' methods", callee);
+    if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : `${takes[callee.name]} arguments`}`, e.start, e.end);
+    const of = lower(t.of);
+    if ((callee.name === "add" || callee.name === "sub") && !isInteger(of)) throw new CompileError(`'${callee.name}' needs an integer 'Atomic', not '${show(t)}'`, callee.start, callee.end);
+    for (const a of e.args) {
+      expect(a, of);
+      const given = value(a);
+      coerce(a, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
+    }
+    return { type: callee.name === "store" ? "void" : of, what: `'${callee.name}'` };
+  }
+
   // `await p`: the future runs to completion, the async function stopping while it is pending,
   // and gives its value, or raises its error as a call would. It moves into the await.
   function awaited(e: Extract<Expr, { kind: "unary" }>): Type {
@@ -971,6 +1004,8 @@ export function expressions(ctx: Context) {
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
+    const inner = holdsInterior(stored);
+    if (inner) throw new CompileError(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`, e.start, e.end);
     if (holdsHandle(stored)) throw new CompileError("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself", e.start, e.end);
     // Two mutable references to one thing can't be.
     if (holdsMut(receiver)) throw new CompileError("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing", e.start, e.end);
@@ -1338,6 +1373,9 @@ export function expressions(ctx: Context) {
         return self.type;
       case "new": {
         const list = e.args ?? [];
+        if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
+          return interiorNew(e, e.callee.name as InteriorType["which"], list);
+        }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
         if (named) expectFrom(named.constructor, list);
         const argTypes = list.map(value);
