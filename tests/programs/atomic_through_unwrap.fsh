@@ -1,4 +1,4 @@
-// error: 'add' changes the 'Atomic' where it lives, so call it on a variable or a field; narrow the Option
+// error: 'add' works on the 'Atomic' where it lives, so call it on a variable or a field; narrow the Option
 function main() {
   const a: Option<Atomic<i64>> = new Atomic(1);
   a!.add(2);

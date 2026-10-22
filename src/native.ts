@@ -415,8 +415,14 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
 
 // Every panic: the message, after what was already printed, then an abort, or an unwind that
 // runs each frame's drops and exits with 101 once it reaches the end of the stack.
+// Each thread's token, which marks the locks it holds. A panic leaves its locks held, and the
+// thread takes a new token, so a task it runs next waits for them rather than seeing its own.
+static int32_t fsh_tokens = 0;
+static _Thread_local int32_t fsh_token = 0;
+
 void fsh_rt_panic(const char *message) {
   static _Thread_local struct _Unwind_Exception exception;
+  fsh_token = 0;
   fflush(NULL);
   fputs(message, stderr);
   if (fsh_panic_abort) abort();
@@ -1194,30 +1200,27 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   return 0;
 }
 
-// A Lock's word: 0 unlocked, 1 locked. A lock is held only for a synchronous callback, so a
-// waiter spins briefly, then gives its thread up between tries. Taking a lock this thread
-// already holds would wait forever, so it is refused: 1, and the caller panics.
+// A Lock's word: 0 unlocked, or the token of the thread holding it. A lock is held only for a
+// synchronous callback, so a waiter spins briefly, then gives its thread up between tries.
+// Taking a lock this thread already holds would wait forever, so it is refused: 1, and the
+// caller panics.
 // ponytail: spin-then-yield, a parking queue if contended locks show up in profiles
-#define FSH_HELD 16
-static _Thread_local int32_t *fsh_held[FSH_HELD];
-static _Thread_local int32_t fsh_holding = 0;
+static int32_t fsh_me(void) {
+  if (!fsh_token) fsh_token = __atomic_add_fetch(&fsh_tokens, 1, __ATOMIC_RELAXED);
+  return fsh_token;
+}
 
 int32_t fsh_rt_lock(int32_t *word) {
-  for (int32_t i = 0; i < fsh_holding && i < FSH_HELD; i++) {
-    if (fsh_held[i] == word) return 1;
-  }
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == me) return 1;
   for (int spins = 0;; spins++) {
     int32_t open = 0;
-    if (__atomic_compare_exchange_n(word, &open, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
+    if (__atomic_compare_exchange_n(word, &open, me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
     if (spins >= 64) sched_yield();
   }
-  if (fsh_holding < FSH_HELD) fsh_held[fsh_holding] = word;
-  fsh_holding++;
-  return 0;
 }
 
 void fsh_rt_unlock(int32_t *word) {
-  fsh_holding--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
 

@@ -900,12 +900,18 @@ export function expressions(ctx: Context) {
       const type = types.get(e);
       if (typeof type !== "string" && type?.kind === "ref") return true;
       if (e.kind === "ident" || e.kind === "this" || e.kind === "call" || e.kind === "new") return true;
-      if (e.kind === "member") return !calls.has(e) && !ctx.copiesOut.has(e) && inPlace(e.object);
+      if (e.kind === "member") {
+        // A field shared by a union's members is read from a copy of the union.
+        const holder = types.get(e.object);
+        const held = typeof holder !== "string" && holder?.kind === "ref" ? holder.to : holder;
+        const inside = typeof held !== "string" && (held?.kind === "object" || held?.kind === "class" || held?.kind === "shared");
+        return inside && !calls.has(e) && !ctx.copiesOut.has(e) && inPlace(e.object);
+      }
       return element(e) && inPlace(e.object);
     };
     if (inPlace(callee.object)) return;
-    const hint = callee.object.kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "";
-    throw new CompileError(`'${callee.name}' changes the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
+    const hint = callee.object.kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
+    throw new CompileError(`'${callee.name}' works on the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
   }
 
   // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
