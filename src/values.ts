@@ -1505,6 +1505,12 @@ export function expressions(ctx: Context) {
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
+    // `unsafe { expr }` is `expr`, which meets the type itself.
+    if (e.kind === "unsafe") {
+      coerce(e.expr, type, to, message);
+      if (type !== to) types.set(e, coercions.has(e.expr) ? coercions.get(e.expr)! : types.get(e.expr)!);
+      return;
+    }
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || lower(type) === lower(to)) return;
