@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, interiorType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -422,6 +422,66 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${taken} = call i32 @fsh_rt_lock(ptr ${word})`);
     emit(`${held} = icmp ne i32 ${taken}, 0`);
     panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
+  }
+
+  // `new Semaphore(n)` and `new Channel<T>(capacity)`: a block in the runtime with one count.
+  function blockNew(e: Extract<Expr, { kind: "new" }>, t: BlockType): string {
+    const n = value(e.args![0]!);
+    const made = temp();
+    if (t.which === "Semaphore") {
+      emit(`${made} = call ptr @fsh_rt_semaphore_new(i64 ${n})`);
+      return made;
+    }
+    const small = temp();
+    emit(`${small} = icmp slt i64 ${n}, 1`);
+    panicIf(small, "a channel's capacity must be at least 1", e);
+    const [end, size] = [temp(), temp()];
+    emit(`${end} = getelementptr ${llvm(t.of)}, ptr null, i64 1`);
+    emit(`${size} = ptrtoint ptr ${end} to i64`);
+    emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${elementDrop(t.of)})`);
+    return made;
+  }
+
+  // A Semaphore's or Channel's method. Those that wait give a future holding a count on the
+  // block, and for `send` the value going in.
+  function blockCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = referent(valueType(callee.object)) as BlockType;
+    const handle = temp();
+    emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
+    if (callee.name === "available" || callee.name === "close") {
+      const result = temp();
+      if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
+      emit(`${result} = call i64 @fsh_rt_semaphore_available(ptr ${handle})`);
+      return result;
+    }
+    const future = types.get(e) as FutureType;
+    const given = callee.name === "send" ? owned(e.args[0]!) : undefined;
+    let frame = temp();
+    emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${copied(handle, t)}, 1`);
+    if (given !== undefined) {
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(t.of)} ${given}, 2`);
+      frame = next;
+    }
+    return frame;
+  }
+
+  // A function dropping one value where it lives, for a channel to drop what it still holds.
+  const elementDrops = new Map<Type, string>();
+  function elementDrop(type: Type): string {
+    const made = elementDrops.get(type);
+    if (made) return made;
+    const name = `@"fsh.element.drop.${elementDrops.size}"`;
+    elementDrops.set(type, name);
+    const saved = { allocas, body, temps, labels, block };
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    const v = temp();
+    emit(`${v} = load ${llvm(type)}, ptr %p`);
+    dispose(v, type);
+    emit("ret void");
+    out.push(`define internal void ${name}(ptr %p) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block } = saved);
+    return name;
   }
 
   // A shared value's block: its count, then what a Lock of its value would be.
@@ -1188,7 +1248,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
-    if (type.kind === "array" || type.kind === "shared") return true;
+    if (type.kind === "array" || type.kind === "shared" || type.kind === "block") return true;
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
@@ -1247,6 +1307,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     } else if (type.kind === "shared") {
       if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
+    } else if (type.kind === "block") {
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release" }[type.which];
+      emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
       const copy = kind === "copy" ? alloca(t) : "";
@@ -1631,6 +1694,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
+      if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "block") return blockCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name === "update" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();
@@ -2134,7 +2198,36 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`br label %${poll}`);
     startBlock(poll);
     const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
-    if (inner === YIELD_NOW) {
+    const leaf = inner.kind === "future" ? leafOf.get(inner) : undefined;
+    let given: string | undefined;
+    if (leaf) {
+      // A semaphore's or channel's wait, polled by the runtime, which wakes the task when it
+      // may go on. A send moves its value in, leaving its slot in the frame empty.
+      const [slot, handle, outcome] = [temp(), temp(), temp()];
+      emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
+      emit(`${handle} = load ptr, ptr ${slot}`);
+      if (leaf.method === "acquire") {
+        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx)`);
+        given = handle;
+      } else if (leaf.method === "send") {
+        const [moving, closed] = [temp(), temp()];
+        emit(`${moving} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+        emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx)`);
+        emit(`${closed} = icmp eq i32 ${outcome}, 3`);
+        panicIf(closed, "send on a closed channel", e);
+      } else {
+        const buffer = alloca(llvm(leaf.of));
+        emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx)`);
+        // What it gives is an Option: the value, or empty once the channel is closed and drained.
+        const [got, read, option] = [temp(), temp(), temp()];
+        emit(`${got} = icmp eq i32 ${outcome}, 1`);
+        emit(`${read} = load ${llvm(leaf.of)}, ptr ${buffer}`);
+        emit(`${option} = select i1 ${got}, ${llvm(inner.gives)} ${convert(read, leaf.of, inner.gives)}, ${llvm(inner.gives)} ${convert("zeroinitializer", "null", inner.gives)}`);
+        given = option;
+      }
+      emit(`${tag} = trunc i32 ${outcome} to i8`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} ]`);
+    } else if (inner === YIELD_NOW) {
       // Pending the first time it is polled, done the next.
       const [state, fresh] = [temp(), temp()];
       emit(`${state} = load i32, ptr ${at}`);
@@ -2181,8 +2274,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit("unreachable");
     }
     startBlock(ready);
-    let v: string | undefined;
-    if (inner.gives !== "void") {
+    let v: string | undefined = given;
+    if (inner.gives !== "void" && !leaf) {
       v = temp();
       emit(`${v} = extractvalue ${pollType(inner)} ${result}, 1`);
     }
@@ -2538,6 +2631,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "new": {
         if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
+        if ((types.get(e) as Exclude<Type, string>).kind === "block") return blockNew(e, types.get(e) as BlockType);
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;

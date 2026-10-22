@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { arrayType, holdsHandle, holdsPart, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { arrayType, blockType, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -161,6 +161,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.name === "Atomic" || t.name === "Lock" || t.name === "Cell") {
       if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
       return interior(t.name, resolveType(t.args[0]!), t);
+    }
+    if (t.name === "Semaphore" || t.name === "Permit") {
+      if (t.args.length !== 0) throw new CompileError(`'${t.name}' takes no type arguments`, t.start, t.end);
+      return blockType(t.name);
+    }
+    if (t.name === "Channel") {
+      if (t.args.length !== 1) throw new CompileError("'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
+      return channel(resolveType(t.args[0]!), t);
     }
     if (t.name === "shared") {
       if (t.args.length !== 1) throw new CompileError("'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
@@ -356,7 +364,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -389,7 +397,20 @@ export function shareable(of: Type, at: Span): SharedType {
   return sharedType(of);
 }
 
-const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "null", "undefined"]);
+// A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
+// unchecked, or changes without a lock.
+export function channel(of: Type, at: Span): BlockType {
+  let blocker: Type | undefined;
+  holdsPart(lower(of), (u) => {
+    if (typeof u === "string" || !(u.kind === "ref" || u.kind === "pointer" || (u.kind === "interior" && u.which === "Cell"))) return false;
+    blocker = u;
+    return true;
+  });
+  if (blocker) throw new CompileError(`a 'Channel' carries values to other tasks, so it can't carry a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
+  return blockType("Channel", of);
+}
+
+const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

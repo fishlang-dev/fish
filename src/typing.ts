@@ -101,7 +101,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -134,6 +134,43 @@ export function sharedType(of: Type): SharedType {
     t = { kind: "shared", of, fields: [] };
     shareds.set(key, t);
     keys.set(t, key);
+  }
+  return t;
+}
+
+// `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
+// which tasks wait on without holding a thread. A Permit holds a count on its Semaphore.
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel"; of: Type; fields: Field[] };
+
+const blocks = new Map<string, BlockType>();
+
+export function blockType(which: BlockType["which"], of: Type = "void"): BlockType {
+  const key = `${which} ${keyOf(of)}`;
+  let t = blocks.get(key);
+  if (!t) {
+    t = { kind: "block", which, of, fields: [] };
+    blocks.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// The futures a Semaphore's and a Channel's methods give, polled by the runtime: each frame holds
+// its state, a count on the block, and for `send` the value going in. `leafOf` names each one's
+// method and what it carries.
+const leaves = new Map<string, FutureType>();
+export const leafOf = new WeakMap<FutureType, { method: "acquire" | "send" | "receive"; of: Type }>();
+
+export function leafFuture(method: "acquire" | "send" | "receive", of: Type): FutureType {
+  const key = `${method} ${keyOf(of)}`;
+  let t = leaves.get(key);
+  if (!t) {
+    const block = blockType(method === "acquire" ? "Semaphore" : "Channel", method === "acquire" ? "void" : of);
+    const frame = [{ name: "state", type: "i32" as Type }, { name: "block", type: block as Type }, ...(method === "send" ? [{ name: "value", type: of }] : [])];
+    const gives = method === "acquire" ? blockType("Permit") : method === "send" ? "void" : unionType([of, "null"]);
+    t = { kind: "future", name: method, gives, fields: [], params: [], frame, concrete: true };
+    leaves.set(key, t);
+    leafOf.set(t, { method, of });
   }
   return t;
 }
@@ -453,7 +490,7 @@ export const sharedCallbacks = new WeakSet<FunctionType>();
 
 // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock or a
 // shared value. Readers of a shared value borrow such fields without its lock.
-export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || (u.kind === "interior" && u.which !== "Cell")));
+export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || (u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && u.which !== "Permit")));
 
 // The first Atomic, Lock or Cell a value holds, if any.
 export function holdsInterior(t: Type): InteriorType | undefined {
@@ -486,6 +523,7 @@ export function lower(t: Type): Type {
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
   if (t.kind === "shared") return sharedType(lower(t.of));
+  if (t.kind === "block") return blockType(t.which, lower(t.of));
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -647,6 +685,7 @@ export function show(t: Type): string {
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
+  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

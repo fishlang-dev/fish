@@ -4,9 +4,9 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { fields, interior, shareable } from "./resolve.ts";
+import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, functionType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -249,7 +249,7 @@ export function expressions(ctx: Context) {
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
-    if (e.kind === "new" && typeof t !== "string" && t.kind === "interior") wanted.set(e, t);
+    if (e.kind === "new" && typeof t !== "string" && (t.kind === "interior" || t.kind === "block")) wanted.set(e, t);
     if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
@@ -639,6 +639,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name)) return sharedNew(e);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
@@ -685,7 +686,7 @@ export function expressions(ctx: Context) {
       if (!ctx.async) throw new CompileError("'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       const t = value(e.args[0]!);
-      if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
+      if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
       if (blocker) {
         throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
@@ -931,6 +932,42 @@ export function expressions(ctx: Context) {
     return { type: callee.name === "set" ? "void" : of, what: `'${callee.name}'` };
   }
 
+  // `new Semaphore(n)` with n slots, and `new Channel<T>(capacity)`, of its type argument or the
+  // type expected of it.
+  function blockNew(e: Extract<Expr, { kind: "new" }>, which: "Semaphore" | "Channel", list: Expr[]): Type {
+    const what = which === "Semaphore" ? "the number of slots it hands out, as in 'new Semaphore(4)'" : "how many values it holds before 'send' waits, as in 'new Channel<string>(8)'";
+    if (list.length !== 1 || e.typeArgs.length > (which === "Channel" ? 1 : 0)) throw new CompileError(`'${which}' takes ${what}`, e.start, e.end);
+    expect(list[0]!, "i64");
+    const t = value(list[0]!);
+    coerce(list[0]!, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
+    if (which === "Semaphore") return blockType("Semaphore");
+    const expected = wanted.get(e);
+    const of = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "block" && expected.which === "Channel" ? expected.of : undefined;
+    if (!of) throw new CompileError("'Channel' needs the type it carries, as in 'new Channel<string>(8)'", e.start, e.end);
+    return channel(of, e);
+  }
+
+  // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
+  // `close()`. A Permit has no methods: dropping it gives its slot back.
+  function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
+    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 } : {};
+    if (!(callee.name in methods)) {
+      const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'" : "dropping it gives its slot back";
+      throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
+    }
+    if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
+    if (e.args.length !== methods[callee.name]) throw new CompileError(`'${callee.name}' takes ${methods[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
+    if (callee.name === "send") {
+      const of = lower(t.of);
+      expect(e.args[0]!, of);
+      const given = value(e.args[0]!);
+      coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
+    }
+    if (callee.name === "available") return { type: "i64", what: "'available'" };
+    if (callee.name === "close") return { type: "void", what: "'close'" };
+    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of)), what: `'${callee.name}'` };
+  }
+
   // `shared(v)`: v moved into a new counted block, of its type argument, the type expected of
   // it, or else v's own type.
   function sharedNew(e: Call): { type: Type; what: string } {
@@ -1109,6 +1146,8 @@ export function expressions(ctx: Context) {
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
+    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && u.which !== "Channel");
+    if (permit) throw new CompileError("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead", e.start, e.end);
     const inner = holdsInterior(stored);
     if (inner) throw new CompileError(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`, e.start, e.end);
     if (holdsHandle(stored)) throw new CompileError("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself", e.start, e.end);
@@ -1488,6 +1527,9 @@ export function expressions(ctx: Context) {
         const list = e.args ?? [];
         if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           return interiorNew(e, e.callee.name as InteriorType["which"], list);
+        }
+        if (e.callee.kind === "ident" && (e.callee.name === "Semaphore" || e.callee.name === "Channel") && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
+          return blockNew(e, e.callee.name, list);
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
         if (named) expectFrom(named.constructor, list);

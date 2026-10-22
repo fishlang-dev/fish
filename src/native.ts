@@ -1243,6 +1243,95 @@ int32_t fsh_rt_shared_release(int64_t *block) {
   return block && __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
+// Tasks waiting on a semaphore or a channel, oldest first, each holding a count on its task.
+typedef struct { fsh_task **tasks; int64_t count, capacity; } fsh_waiters;
+
+static void fsh_wait_on(fsh_waiters *w, fsh_task *t) {
+  if (w->count == w->capacity) {
+    int64_t capacity = w->capacity ? w->capacity * 2 : 4;
+    fsh_task **tasks = fsh_rt_alloc(capacity * sizeof(fsh_task *));
+    if (w->count) memcpy(tasks, w->tasks, w->count * sizeof(fsh_task *));
+    fsh_rt_free(w->tasks);
+    w->tasks = tasks;
+    w->capacity = capacity;
+  }
+  __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
+  w->tasks[w->count++] = t;
+}
+
+// The oldest waiter, taken off the list, for the caller to wake once its lock is released.
+// ponytail: O(n) removal from the front, a ring if waiter lists grow long
+static fsh_task *fsh_next_waiter(fsh_waiters *w) {
+  if (w->count == 0) return NULL;
+  fsh_task *t = w->tasks[0];
+  memmove(w->tasks, w->tasks + 1, --w->count * sizeof(fsh_task *));
+  return t;
+}
+
+static void fsh_wake_waiter(fsh_task *t) {
+  if (!t) return;
+  fsh_rt_wake(t);
+  fsh_task_release(t);
+}
+
+static void fsh_waiters_free(fsh_waiters *w) {
+  for (int64_t i = 0; i < w->count; i++) fsh_task_release(w->tasks[i]);
+  fsh_rt_free(w->tasks);
+}
+
+// A semaphore's block: its count, its lock, the slots free, and the tasks waiting for one.
+typedef struct { int64_t count; pthread_mutex_t lock; int64_t permits; fsh_waiters waiting; } fsh_semaphore;
+
+fsh_semaphore *fsh_rt_semaphore_new(int64_t permits) {
+  fsh_semaphore *s = fsh_rt_alloc(sizeof(fsh_semaphore));
+  s->count = 1;
+  pthread_mutex_init(&s->lock, NULL);
+  s->permits = permits > 0 ? permits : 0;
+  s->waiting = (fsh_waiters){ NULL, 0, 0 };
+  return s;
+}
+
+// Another count on a semaphore's or a channel's block, both of which start with theirs.
+void fsh_rt_block_retain(int64_t *block) {
+  if (block) __atomic_fetch_add(block, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_semaphore_release(fsh_semaphore *s) {
+  if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  fsh_waiters_free(&s->waiting);
+  pthread_mutex_destroy(&s->lock);
+  fsh_rt_free(s);
+}
+
+int64_t fsh_rt_semaphore_available(fsh_semaphore *s) {
+  pthread_mutex_lock(&s->lock);
+  int64_t free = s->permits;
+  pthread_mutex_unlock(&s->lock);
+  return free;
+}
+
+// Polls 'acquire()': takes a slot, the Permit then holding a count on the block, or waits.
+int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task) {
+  pthread_mutex_lock(&s->lock);
+  int32_t taken = s->permits > 0;
+  if (taken) s->permits--;
+  else fsh_wait_on(&s->waiting, task);
+  pthread_mutex_unlock(&s->lock);
+  if (taken) fsh_rt_block_retain(&s->count);
+  return taken;
+}
+
+// Drops a Permit: its slot goes back, waking the oldest waiter, then its count on the block.
+void fsh_rt_permit_drop(fsh_semaphore *s) {
+  if (!s) return;
+  pthread_mutex_lock(&s->lock);
+  s->permits++;
+  fsh_task *next = fsh_next_waiter(&s->waiting);
+  pthread_mutex_unlock(&s->lock);
+  fsh_wake_waiter(next);
+  fsh_rt_semaphore_release(s);
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
