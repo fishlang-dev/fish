@@ -261,6 +261,7 @@ export function expressions(ctx: Context) {
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
       expecting.set(e, callableOf.get(t.of)!);
       owning.add(e);
+      wanted.set(e, t);
     }
     // An array literal's elements are expected to be its element type, and an object literal's
     // properties their fields'.
@@ -686,10 +687,12 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
       const stored = field(receiver, callee.name);
       const method = receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name);
-      if (stored && !method && isCallable(lower(stored.type))) return callableCall(e, callee, lower(stored.type) as DynType);
+      const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
+      if (held && !method && isCallable(held)) return callableCall(e, callee, held as DynType);
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
-      const held = lower(value(callee));
+      const given = value(callee);
+      const held = lower(isRefType(given) ? given.to : given);
       if (isCallable(held)) return callableCall(e, callee, held as DynType);
     }
     // `Shape.Circle(1.5)` builds a variant from its payload.
@@ -832,7 +835,8 @@ export function expressions(ctx: Context) {
   // A call of a closure held by a variable runs the closure's body.
   function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
     const held = value(callee);
-    if (isCallable(lower(held))) return callableCall(e, callee, lower(held) as DynType);
+    const through = lower(isRefType(held) ? held.to : held);
+    if (isCallable(through)) return callableCall(e, callee, through as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
     // closure it was given.
     const type = typeof held !== "string" && held.kind === "param" && held.bound?.kind === "function" ? held.bound : held;
@@ -1078,6 +1082,9 @@ export function expressions(ctx: Context) {
 
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
   function sharedCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
+    const inner = lower(t.of);
+    const stored = typeof inner !== "string" && (inner.kind === "object" || inner.kind === "class") ? field(inner, callee.name) : undefined;
+    if (stored && isCallable(lower(stored.type))) return callableCall(e, callee, lower(stored.type) as DynType);
     if (callee.name !== "update") throw new CompileError(`'shared' has no method '${callee.name}'; read its fields, change it with 'update', or share it again with 'clone'`, callee.start, callee.end);
     return lockCall(e, callee, interiorType("Lock", t.of), true);
   }
@@ -2113,6 +2120,12 @@ export function expressions(ctx: Context) {
   // Properties are checked in source order, which is the order they run in.
   function property(p: ObjectProp): Field {
     const field = propertyField(p);
+    // An arrow written for a field the object's type stores a callable in is boxed into it.
+    const want = p.kind === "property" ? wanted.get(p.value) : undefined;
+    if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {
+      coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, want, `type '${show(field.type)}' is not assignable to type '${show(want)}'`);
+      return { ...field, type: want };
+    }
     if (typeof field.type !== "string" && field.type.kind === "closure") throw unsupported("functions stored in objects", p);
     return field;
   }
