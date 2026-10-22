@@ -397,6 +397,8 @@ export function check(program: Stmt[]): Checked {
   function foreignSignature(instance: Instance) {
     const f = instance.body;
     if (f.typeParams?.length) throw unsupported("generic C functions", f);
+    if (f.generator) throw new CompileError("a C function can't be a generator; drop the '*'", f.start, f.end);
+    if (f.name === "main") throw new CompileError("'main' can't be a C function; it is where the program starts", f.start, f.end);
     if (f.throws) throw new CompileError("a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
     if (!f.returnType) throw new CompileError("a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || (typeof t !== "string" && t.kind === "pointer");

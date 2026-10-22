@@ -640,8 +640,10 @@ void fsh_rt_str_print(int32_t stream, fsh_str *s) {
   fwrite(from, 1, end - from, out);
 }
 
-// A NUL-terminated copy of a string's bytes for C, freed with fsh_rt_free.
+// A NUL-terminated copy of a string's bytes for C, freed with fsh_rt_free; NULL when the string
+// holds a NUL, which C would take for its end.
 char *fsh_rt_str_cstring(fsh_str *s) {
+  if (memchr(s->bytes, 0, s->length)) return NULL;
   char *c = fsh_rt_alloc(s->length + 1);
   memcpy(c, s->bytes, s->length);
   c[s->length] = 0;

@@ -29,7 +29,7 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     const failures = [...src.matchAll(/\/\/ fails: (.*)/g)].map((m) => m[1]!);
     const out = join(tmp, name.replace(/\.fsh$/, ""));
     const parseOnly = src.includes("// mode: parse");
-    const links = [...src.matchAll(/\/\/ link: (.*)/g)].map((m) => m[1]!);
+    const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
 
     try {
       if (parseOnly) parse(src);

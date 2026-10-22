@@ -41,13 +41,16 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 
 // An instance's name in the IR. A generic class's instance is named by its type arguments,
 // which may hold quotes, so those are escaped as LLVM spells them.
-const symbol = (i: Instance) => (i.body.foreign ? `@${i.body.name}` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
+const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
 
-// How a value of `type` crosses to C: a boolean is a byte holding 0 or 1, passed zero-extended.
-const crossing = (type: Type) => (type === "boolean" ? "i1 zeroext" : llvm(type));
+// How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
+// holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
+const extension = (type: Type) => (type === "boolean" || type === "u8" || type === "u16" ? "zeroext" : type === "i8" || type === "i16" ? "signext" : "");
+const crossing = (type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
+const crossed = (type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
 
 export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort" };
 
@@ -87,6 +90,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Where the statement being lowered starts in `pending`: a statement in a match arm's block
   // runs inside an expression whose own values are pending below it.
   let floor = 0;
+  // The scopes matches and pipes open for themselves.
+  const transient = new WeakSet<object>();
   // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
   // resumes at in order, where it starts, and where it gives that it has finished.
   let resuming: { type: GeneratorType; frame: string; resumes: string[]; start: string; done: string } | undefined;
@@ -115,7 +120,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   for (const instance of instances) {
     // A C function is declared under its own name, unless the runtime already declares it.
     if (instance.body.foreign) {
-      const returns = instance.returns === "boolean" ? "zeroext i1" : llvm(instance.returns);
+      const returns = crossed(instance.returns);
       if (!DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
       continue;
     }
@@ -261,12 +266,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
-  // A C string's buffer, owned by the enclosing block as an array of bytes it frees at its end.
-  // A loop's condition makes one each time round, so the slot drops what it holds first.
-  function forC(s: string): string {
-    const [made, held, old] = [temp(), alloca(ARRAY), temp()];
+  // A scope a match or a pipe opens for itself, which ends with the expression.
+  function passing(scope: { slot: string; type: Type }[]) {
+    transient.add(scope);
+    return scope;
+  }
+
+  // A C string's buffer, owned by the enclosing block as an array of bytes it frees at its end;
+  // a scope a match or a pipe opens isn't a block. A loop's condition makes one each time round,
+  // so the slot drops what it holds first. C would read only up to a NUL inside, so a string
+  // holding one can't cross, as Rust's `CString` refuses it.
+  function forC(s: string, at: Expr): string {
+    const [made, held, old, refused] = [temp(), alloca(ARRAY), temp(), temp()];
     unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
-    own(held, arrayType("u8"));
+    emit(`${refused} = icmp eq ptr ${made}, null`);
+    panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
+    allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
+    scopes.findLast((scope) => !transient.has(scope))!.push({ slot: held, type: arrayType("u8") });
     emit(`${old} = load ${ARRAY}, ptr ${held}`);
     dispose(old, arrayType("u8"));
     const array = temp();
@@ -726,7 +742,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // left once the match ends; a place is read where it lives, and bindings point into it.
   function lowerMatch(e: Extract<Expr, { kind: "match" }>, wanted: boolean): string | undefined {
     const type = valueType(e.subject);
-    scopes.push([]);
+    scopes.push(passing([]));
     let subject: string;
     let at: string | undefined;
     const owning = made(e.subject) && fresh(e.subject);
@@ -745,7 +761,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     for (const arm of e.arms) {
       const next = label();
       tested(arm.pattern, subject, next);
-      scopes.push([]);
+      scopes.push(passing([]));
       // A guarded arm copies what it binds, since a failing guard moves on to arms that may bind
       // the same parts.
       bindAll(arm.pattern, subject, at, owning && !arm.guard);
@@ -795,7 +811,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // dropped after it unless the right side moved it out.
   function lowerPipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
     const local = locals.get(e)!;
-    scopes.push([]);
+    scopes.push(passing([]));
     reserve(local);
     own(slot(local), local.type);
     emit(`store ${llvm(local.type)} ${owned(e.value)}, ptr ${slot(local)}`);
@@ -1393,7 +1409,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
-      if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!));
+      if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
         const made = temp();
         unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
@@ -1653,9 +1669,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    // A boolean crosses to C zero-extended, both ways.
-    const passed = target.body.foreign ? values.map((v) => v.replace(/^i1 /, "i1 zeroext ")) : values;
-    const call = `call ${target.body.foreign && type === "boolean" ? "zeroext i1" : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
+    // A narrow value crosses to C widened, both ways.
+    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
+    const call = `call ${target.body.foreign ? crossed(type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, after);
       after?.();

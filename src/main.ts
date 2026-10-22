@@ -46,7 +46,7 @@ if (import.meta.main) {
   });
   const [command, file] = positionals;
   const panic = values.panic as Panic;
-  if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort")) {
+  if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "")) {
     console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--emit-llvm]");
     process.exit(2);
   }
