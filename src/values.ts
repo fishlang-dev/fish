@@ -834,7 +834,7 @@ export function expressions(ctx: Context) {
     if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     const t = value(e.operand);
-    if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaiting a 'Promise<T>' parameter", e.operand);
+    if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
     if (typeof t === "string" || t.kind !== "future") throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
     if (t.throws) raise(e, t.throws, "this Promise");
     return t.gives;
@@ -1555,6 +1555,11 @@ export function expressions(ctx: Context) {
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
+    // A reference that changes its value's form points at a copy in a slot of the function,
+    // which an async function loses each time it stops.
+    if (ctx.async && isRefType(to) && !isRefType(type) && lower(type) !== lower(to.to) && fits(type, to.to)) {
+      throw unsupported("references that convert their value inside async functions", e);
+    }
     // `unsafe { expr }` is `expr`, which meets the type itself.
     if (e.kind === "unsafe") {
       coerce(e.expr, type, to, message);

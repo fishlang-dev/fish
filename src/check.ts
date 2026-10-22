@@ -877,7 +877,9 @@ export function check(program: Stmt[], library = false): Checked {
           if (isAwait(s.expr)) awaiting(s.expr);
           if (s.expr.kind === "assign" && isAwait(s.expr.value)) {
             // The target is found after the await resumes, so it must be one that can be.
-            if (s.expr.op !== "=" || (s.expr.target.kind !== "ident" && s.expr.target.kind !== "member")) {
+            let root: Expr = s.expr.target;
+            while (root.kind === "member") root = root.object;
+            if (s.expr.op !== "=" || (root.kind !== "ident" && root.kind !== "this")) {
               throw new CompileError("'await' can only be assigned with '=' to a variable or a field for now; await into a 'const' first, then use it", s.expr.start, s.expr.end);
             }
             awaiting(s.expr.value);

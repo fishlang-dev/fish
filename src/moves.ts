@@ -432,7 +432,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "unary":
         if (e.op === "await") {
           // The future runs across suspensions, after this statement's temporaries are gone.
-          for (const s of borrowsFrom.get(e.operand) ?? []) if (lentTemporary(s)) throw outlived(s, "the awaited Promise");
+          for (const s of borrowsFrom.get(e.operand) ?? []) if (lentTemporary(s, true)) throw outlived(s, "the awaited Promise");
           return expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
         }
         return expr(e.operand);
@@ -816,9 +816,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Whether an argument lends a value made for the statement, rather than a place or a
   // reference it already is.
-  function lentTemporary(s: Expr): boolean {
+  // `x!` is lent where `x` holds it. A string literal lives for the whole program, so only a
+  // body that can stop, losing the slot its pointer is kept in, can't hold one.
+  function lentTemporary(s: Expr, across = false): boolean {
     const lent = coercions.get(s);
-    return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && key(s) === undefined;
+    let at = s;
+    while (at.kind === "nonNull") at = at.expr;
+    if (s.kind === "string" && !across && !f.generator && !f.async) return false;
+    return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && key(at) === undefined;
   }
 
   // A borrow kept past its statement can't point at a temporary, which is gone once the
