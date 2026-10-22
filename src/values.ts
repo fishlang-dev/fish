@@ -131,6 +131,9 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
+// Member reads the runtime computes, like `c.signal` and `signal.aborted`: values, not places.
+export const computed = new WeakSet<Expr>();
+
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
@@ -954,9 +957,11 @@ export function expressions(ctx: Context) {
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
-    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 } : {};
+    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
+      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : {};
     if (!(callee.name in methods)) {
-      const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'" : "dropping it gives its slot back";
+      const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
+        : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'" : "dropping it gives its slot back";
       throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
@@ -968,8 +973,28 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
+    if (callee.name === "abort") return { type: "void", what: "'abort'" };
+    if (callee.name === "throwIfAborted") {
+      raise(e, abortError(e), "'throwIfAborted'");
+      return { type: "void", what: "'throwIfAborted'" };
+    }
     if (callee.name === "close") return { type: "void", what: "'close'" };
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of)), what: `'${callee.name}'` };
+  }
+
+  // The std `AbortError` class, which aborted work throws.
+  function abortError(at: Span): Type {
+    return resolveType({ kind: "ref", name: "AbortError", args: [], start: at.start, end: at.end });
+  }
+
+  // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
+  // its controller has aborted: values computed by the runtime, not fields.
+  function blockProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
+    if (linked(e)) throw unsupported(`optional chains through '${t.which}' values`, e);
+    computed.add(e);
+    if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
+    if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
+    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
   // `shared(v)`: v moved into a new counted block, of its type argument, the type expected of
@@ -1150,7 +1175,7 @@ export function expressions(ctx: Context) {
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
-    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && u.which !== "Channel");
+    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
     if (permit) throw new CompileError("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead", e.start, e.end);
     const inner = holdsInterior(stored);
     if (inner) throw new CompileError(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`, e.start, e.end);
@@ -1433,6 +1458,7 @@ export function expressions(ctx: Context) {
         const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
         // A field read through a reference loads what it points to; a getter gets the pointer.
         if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
+        if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
@@ -1534,6 +1560,10 @@ export function expressions(ctx: Context) {
         }
         if (e.callee.kind === "ident" && (e.callee.name === "Semaphore" || e.callee.name === "Channel") && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           return blockNew(e, e.callee.name, list);
+        }
+        if (e.callee.kind === "ident" && e.callee.name === "AbortController" && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
+          if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("'AbortController' takes no arguments", e.start, e.end);
+          return blockType("AbortController");
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
         if (named) expectFrom(named.constructor, list);

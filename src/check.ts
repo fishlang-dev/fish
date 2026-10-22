@@ -1,5 +1,6 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
+import { parse } from "./parser.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
@@ -186,7 +187,11 @@ const RUNTIME_NAMES = new Set([
 ]);
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
-export function check(program: Stmt[], library = false): Checked {
+// The std classes every program can use, declared before its own code.
+const PRELUDE = `class AbortError { message: string = "This operation was aborted"; }`;
+
+export function check(written: Stmt[], library = false): Checked {
+  const program = [...parse(PRELUDE), ...written];
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();
   const classes = new Map<string, ClassInfo>();

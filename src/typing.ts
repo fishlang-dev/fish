@@ -139,8 +139,9 @@ export function sharedType(of: Type): SharedType {
 }
 
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
-// which tasks wait on without holding a thread. A Permit holds a count on its Semaphore.
-export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel"; of: Type; fields: Field[] };
+// which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
+// `AbortController` and its `AbortSignal`s are handles to one block.
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal"; of: Type; fields: Field[] };
 
 const blocks = new Map<string, BlockType>();
 

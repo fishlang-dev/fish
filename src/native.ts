@@ -1436,6 +1436,41 @@ void fsh_rt_channel_close(fsh_channel *c) {
   fsh_rt_free(receivers.tasks);
 }
 
+// An abort signal's block, shared by its controller and every signal handle: its count, its lock,
+// whether it has aborted, and the tasks waiting on it to.
+typedef struct { int64_t count; pthread_mutex_t lock; int32_t aborted; fsh_waiters waiting; } fsh_signal;
+
+fsh_signal *fsh_rt_signal_new(void) {
+  fsh_signal *s = fsh_rt_alloc(sizeof(fsh_signal));
+  s->count = 1;
+  pthread_mutex_init(&s->lock, NULL);
+  s->aborted = 0;
+  s->waiting = (fsh_waiters){ NULL, 0, 0 };
+  return s;
+}
+
+void fsh_rt_signal_release(fsh_signal *s) {
+  if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  fsh_waiters_free(&s->waiting);
+  pthread_mutex_destroy(&s->lock);
+  fsh_rt_free(s);
+}
+
+int32_t fsh_rt_signal_aborted(fsh_signal *s) {
+  return __atomic_load_n(&s->aborted, __ATOMIC_ACQUIRE);
+}
+
+// Aborts once, waking every task waiting on the signal to see it.
+void fsh_rt_signal_abort(fsh_signal *s) {
+  pthread_mutex_lock(&s->lock);
+  __atomic_store_n(&s->aborted, 1, __ATOMIC_RELEASE);
+  fsh_waiters waiting = s->waiting;
+  s->waiting = (fsh_waiters){ NULL, 0, 0 };
+  pthread_mutex_unlock(&s->lock);
+  for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i]);
+  fsh_rt_free(waiting.tasks);
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);

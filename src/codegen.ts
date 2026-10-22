@@ -1,5 +1,5 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { isPrint } from "./values.ts";
+import { computed, isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
@@ -425,10 +425,33 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
   }
 
+  // A new `AbortError`, its message a literal.
+  function abortError(type: Type): string {
+    const made = temp();
+    emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ptr ${text("This operation was aborted")}, 0`);
+    return made;
+  }
+
+  // `c.signal`, another handle to a controller's signal, and `signal.aborted`.
+  function blockProperty(e: Extract<Expr, { kind: "member" }>): string {
+    const holder = types.get(e.object)!;
+    const handle = isRef(holder) ? temp() : value(e.object);
+    if (isRef(holder)) emit(`${handle} = load ptr, ptr ${value(e.object)}`);
+    if (e.name === "signal") return copied(handle, types.get(e)!);
+    const [aborted, yes] = [temp(), temp()];
+    emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
+    emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+    return yes;
+  }
+
   // `new Semaphore(n)` and `new Channel<T>(capacity)`: a block in the runtime with one count.
   function blockNew(e: Extract<Expr, { kind: "new" }>, t: BlockType): string {
-    const n = value(e.args![0]!);
     const made = temp();
+    if (t.which === "AbortController") {
+      emit(`${made} = call ptr @fsh_rt_signal_new()`);
+      return made;
+    }
+    const n = value(e.args![0]!);
     if (t.which === "Semaphore") {
       const negative = temp();
       emit(`${negative} = icmp slt i64 ${n}, 0`);
@@ -460,6 +483,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = referent(valueType(callee.object)) as BlockType;
     const handle = temp();
     emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
+    if (callee.name === "abort") return void emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
+    if (callee.name === "throwIfAborted") {
+      const [aborted, yes, stop, fine] = [temp(), temp(), label(), label()];
+      emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
+      emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+      emit(`br i1 ${yes}, label %${stop}, label %${fine}`);
+      startBlock(stop);
+      raised(e, abortError(current.raises.get(e)!.from));
+      startBlock(fine);
+      return undefined;
+    }
     if (callee.name === "available" || callee.name === "close") {
       const result = temp();
       if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
@@ -1319,7 +1353,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
     } else if (type.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release" }[type.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release" }[type.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -1527,7 +1561,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "binary":
         return e.op === "+" || e.op === "??";
       case "member":
-        return calls.has(e) || current.copiesOut.has(e);
+        return calls.has(e) || current.copiesOut.has(e) || computed.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
         return !isArray(valueType(e.object));
@@ -1902,6 +1936,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A field read, or a getter's result.
   function member(e: Extract<Expr, { kind: "member" }>): string {
     if (current.copiesOut.has(e)) return copyOut(e);
+    if (computed.has(e)) return blockProperty(e);
     const getter = calls.get(e);
     if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.
