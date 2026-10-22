@@ -396,10 +396,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // A method's receiver is lent to it for the call, mutably when the method changes it.
           // A mutable receiver is lent shared while the arguments run, so they may read it, and
           // mutably for the call itself.
-          const object = e.callee.kind === "member" ? e.callee.object : undefined;
-          const place = object && key(object);
-          // Through a Dyn, the receiver its interface declares.
+          // Through a Dyn, the receiver its interface declares; a stored callable called as a name,
+          // an element or any other value is itself what is lent to the call.
           const dyn = dynCalls.get(e);
+          const object = e.callee.kind === "member" ? e.callee.object : dyn?.callable;
+          const place = object && key(object);
           const self: { mutable: boolean; owned?: boolean } | undefined = calls.get(e)?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
           if (object && self?.owned) {

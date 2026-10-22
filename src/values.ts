@@ -679,6 +679,12 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name)) return sharedNew(e);
+    // A field holding a stored callable, through an object-typed parameter's bound too.
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param" && receiver.bound?.kind === "object") {
+      const stored = field(receiver.bound, callee.name);
+      const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
+      if (held && isCallable(held)) return callableCall(e, callee, held as DynType);
+    }
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -2350,6 +2356,7 @@ export function expressions(ctx: Context) {
 
   // A method call through a Dyn: the interface's method, run through its slot.
   function dynCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: DynType): { type: Type; what: string } {
+    if (callableOf.has(t.of)) throw new CompileError(`a stored function is called directly, as '${placeText(callee.object)}(...)'`, callee.start, callee.end);
     const index = t.of.methods.findIndex((m) => m.name === callee.name);
     const m = t.of.methods[index];
     if (!m) {

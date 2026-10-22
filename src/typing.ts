@@ -164,13 +164,15 @@ const callables = new Map<string, InterfaceType>();
 export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 
 export function callableType(fn: FunctionType): DynType {
-  const key = fn.name;
+  // In an instance, what its type parameters stand for decides the layout.
+  const [params, returns] = [fn.params.map(lower), lower(fn.returns)];
+  const key = `${fn.name} ${params.map(keyOf).join(", ")} => ${keyOf(returns)}`;
   let i = callables.get(key);
   if (!i) {
     i = interfaceType(fn.name);
-    i.methods.push({ name: "call", params: fn.params, returns: fn.returns });
+    i.methods.push({ name: "call", params, returns });
     callables.set(key, i);
-    callableOf.set(i, fn);
+    callableOf.set(i, { ...fn, params, returns });
   }
   return dynType(i);
 }
@@ -695,7 +697,10 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof to !== "string" && to.kind === "function") {
     const given = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
     // A stored callable fits by the function type it was written as.
-    const sig = typeof given !== "string" && given.kind === "dyn" && callableOf.has(given.of) ? callableOf.get(given.of)! : given;
+    const callable = typeof given !== "string" && given.kind === "dyn" && callableOf.has(given.of);
+    const sig = callable ? callableOf.get(given.of)! : given;
+    // A stored callable's call passes all its parameters, so it takes exactly as many.
+    if (callable && typeof sig !== "string" && sig.kind === "function" && sig.params.length !== to.params.length) return false;
     return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
       && sig.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
   }
@@ -737,7 +742,7 @@ export function show(t: Type): string {
   if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;
   if (t.kind === "array") {
     const e = t.element;
-    const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure");
+    const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure" || (e.kind === "dyn" && callableOf.has(e.of)));
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;

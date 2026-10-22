@@ -648,8 +648,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         }
         emit("call void @fsh_rt_free(ptr %p)");
       };
-      const result = invoke(target, self, m.params.map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
-      emit(result === undefined || m.returns === "void" ? "ret void" : `ret ${returns} ${convert(result, target.returns, m.returns)}`);
+      // A closure may take fewer parameters than its callable passes: the rest are dropped here.
+      const taken = target.body.closure ? target.body.params.length : m.params.length;
+      const result = invoke(target, self, m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
+      m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
+      if (result === undefined || m.returns === "void") {
+        if (result !== undefined) dispose(result, target.returns);
+        return emit("ret void");
+      }
+      // A result narrowed to what the interface gives drops the parts it leaves out.
+      if (needsDrop(target.returns) && !keepsAll(target.returns, m.returns)) {
+        const kept = copied(convert(result, target.returns, m.returns), m.returns);
+        dispose(result, target.returns);
+        return emit(`ret ${returns} ${kept}`);
+      }
+      emit(`ret ${returns} ${convert(result, target.returns, m.returns)}`);
     }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
     return name;
   }
