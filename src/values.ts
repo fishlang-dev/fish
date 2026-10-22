@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -58,7 +58,7 @@ export type Context = {
   sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[];
   borrowsFrom: Map<Expr, Expr[]>;
   classOf(t: ClassType): ClassInfo;
-  instanceOf(f: Body): Instance;
+  instanceOf(f: Body, bindings?: Map<string, Type>): Instance;
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
   paramTypes(instance: Instance): Type[];
   // The binding a name refers to; `at`, the use, is where a closure first captures it.
@@ -1160,7 +1160,7 @@ export function expressions(ctx: Context) {
   // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
   function unsent(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell")) return t;
+    if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
     const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
       : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
@@ -2371,18 +2371,39 @@ export function expressions(ctx: Context) {
   function dynTable(e: Expr, type: Type, to: DynType): DynTable {
     const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
     const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
-    if (typeof type !== "string" && type.kind === "closure") return { methods: [closureBody(type)], fields: [], clone: fixed ? undefined : "copy" };
+    if (typeof type !== "string" && type.kind === "closure") {
+      const body = closureBody(type);
+      futureTable(body, to.of.methods[0]!.returns, false, e);
+      return { methods: [body], fields: [], clone: fixed ? undefined : "copy" };
+    }
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
       const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
       if (body.self?.owned && !m.owned) throw refuse("takes its object over", "this: Own<this>");
       if (body.self?.mutable && !body.self.owned && !m.mutable && !m.owned) throw refuse("changes its object", "this: Mut<this>");
-      if (implicitOf(body).size > 0) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface, a function or an object type, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
-      return instanceOf(body);
+      // An object-typed parameter takes exactly its own type through a Dyn; an interface or a
+      // function has a version per argument type, and no one to call.
+      const implicit = implicitOf(body);
+      if ([...implicit.values()].some((b) => b.kind !== "object")) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface or a function, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
+      const instance = instanceOf(body, new Map([...(body.scope ?? []), ...[...implicit].map(([i, b]): [string, Type] => [`#${i}`, b])]));
+      futureTable(instance, m.returns, true, e);
+      return instance;
     });
     const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
     const own = c?.methods.get("clone");
     return { methods, fields, clone: own ? instanceOf(own) : fixed ? undefined : "copy" };
+  }
+
+  // A slot giving a `Promise<T>` boxes the future its method or closure makes: borrowing the
+  // Dyn's value for a method, owning its captures for a closure. Its vtable is made here.
+  function futureTable(target: Instance, returns: Type, lent: boolean, at: Expr) {
+    const gives = promiseElement(returns);
+    if (gives === undefined) return;
+    const made = lower(target.future ?? returnOf(target, at));
+    if (typeof made === "string" || made.kind !== "future") throw unsupported("Dyn methods giving a Promise that isn't an async function's future", at);
+    if (made.throws) throw new CompileError(`'${target.body.name}' can throw '${show(made.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
+    const boxed = lent ? lentPromise(gives) : storedType(returns);
+    dynMembers.set(`${keyOf(made)} ${keyOf(boxed)}`, { methods: [], fields: [], clone: undefined });
   }
 
   // A method call through a Dyn: the interface's method, run through its slot.
@@ -2395,7 +2416,9 @@ export function expressions(ctx: Context) {
       throw new CompileError(`property '${callee.name}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
-    if (typeof m.returns !== "string" && m.returns.kind === "interface") {
+    const async = promiseElement(m.returns);
+    if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);
+    if (typeof m.returns !== "string" && m.returns.kind === "interface" && async === undefined) {
       throw new CompileError(`'${m.name}' returns the interface type '${m.returns.name}', which each type implementing '${t.of.name}' gives its own way, so a Dyn can't call it; have it return 'Dyn<${m.returns.name}>'`, callee.start, callee.end);
     }
     if (e.typeArgs.length > 0) throw new CompileError(`'${m.name}' takes no type arguments`, e.start, e.end);
@@ -2414,6 +2437,11 @@ export function expressions(ctx: Context) {
       coerce(a, given, want, `argument of type '${show(given)}' is not assignable to parameter of type '${show(want)}'`);
     });
     dynCalls.set(e, { index, mutable: m.mutable === true, owned: m.owned === true });
+    // An async method's future, boxed, borrows the Dyn until it is done.
+    if (async !== undefined) {
+      borrowsFrom.set(e, [callee.object]);
+      return { type: lentPromise(async), what: `'${m.name}'` };
+    }
     return { type: m.returns, what: `'${m.name}'` };
   }
 
@@ -2432,7 +2460,8 @@ export function expressions(ctx: Context) {
     });
     if (holdsRef(fn.returns)) borrowsFrom.set(e, [callee]);
     dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
-    return { type: fn.returns, what: "this function" };
+    // One returning a Promise gives its future boxed, owning what it holds.
+    return { type: storedType(fn.returns), what: "this function" };
   }
 
   // A field read through a Dyn, through its slot: a copy of the value.

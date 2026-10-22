@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -625,7 +625,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A boxed future's one slot is its poll, which takes its frame as the block.
     if (promiseElement(to.of) !== undefined) return [symbol(futureOf.get(type as FutureType)!)];
     const n = vtables.size;
-    const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface";
+    const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
   }
@@ -634,6 +634,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Through a method declaring `this: Own<this>` the Dyn is given up: its block is freed after,
   // and its value dropped first unless the type's method took it over.
   function methodThunk(name: string, type: Type, m: Method, target: Instance): string {
+    if (promiseElement(m.returns) !== undefined) return futureThunk(name, type, m, target);
     const returns = m.returns === "void" ? "void" : llvm(m.returns);
     thunk(name, returns, () => {
       const owner = target.body.owner;
@@ -676,6 +677,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       emit(`ret ${returns} ${convert(result, target.returns, m.returns)}`);
     }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+    return name;
+  }
+
+  // A slot giving a `Promise<T>`: the future the method or async arrow makes, its frame holding
+  // the block (a method's object, borrowed) or a copy of the closure, then the arguments, boxed.
+  function futureThunk(name: string, type: Type, m: Method, target: Instance): string {
+    const closure = target.body.closure !== undefined;
+    const to = closure ? storedType(m.returns) as DynType : lentPromise(promiseElement(m.returns)!);
+    const params = m.params.map((p, i) => `${llvm(p)} %a${i}`);
+    thunk(name, DYN, () => {
+      const taken = closure ? target.body.params.length : m.params.length;
+      m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
+      let made: string;
+      let future: FutureType;
+      if (target.future) {
+        future = target.future;
+        let frame = temp();
+        if (closure) {
+          const env = temp();
+          emit(`${env} = load ${llvm(target.closure!)}, ptr %p`);
+          emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
+        } else {
+          const owner = target.body.owner;
+          const self = typeof type !== "string" && type.kind === "class" && owner && owner !== type ? upcast("%p", type, owner) : "%p";
+          emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${self}, 1`);
+        }
+        params.slice(0, taken).forEach((p, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${p}, ${i + 2}`);
+          frame = next;
+        });
+        made = frame;
+      } else {
+        future = target.returns as FutureType;
+        made = invoke(target, "%p", params.slice(0, taken))!;
+      }
+      emit(`ret ${DYN} ${box(made, future, to)}`);
+    }, params);
     return name;
   }
 
@@ -743,10 +782,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [data, table] = opened(object, info.owned);
     const fn = vslot(table, info.index);
     const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
-    const returns = m.returns === "void" ? "void" : llvm(m.returns);
-    const result = m.returns === "void" ? undefined : temp();
+    // A `Promise<T>` comes back as its boxed future.
+    const gives = promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
+    const returns = gives === "void" ? "void" : llvm(gives);
+    const result = gives === "void" ? undefined : temp();
     unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, result);
-    if (result && !types.has(e) && needsDrop(m.returns)) pending.push({ v: result, type: m.returns });
+    if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
     return result;
   }
 

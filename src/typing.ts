@@ -285,6 +285,22 @@ export function promiseInterface(t: Type): InterfaceType {
   return found;
 }
 
+// The boxed future a Dyn's async method gives: a `Promise<T>` that borrows the Dyn's value, so
+// it holds a reference, which keeps it from outliving the Dyn or crossing threads.
+const lent = new Map<string, InterfaceType>();
+export const borrowing = new WeakSet<InterfaceType>();
+
+export function lentPromise(t: Type): DynType {
+  let found = lent.get(keyOf(t));
+  if (!found) {
+    found = interfaceType(`Promise<${show(t)}>`);
+    lent.set(keyOf(t), found);
+    promised.set(found, t);
+    borrowing.add(found);
+  }
+  return dynType(found);
+}
+
 // What a `Promise<T>` gives, when the interface is one.
 export function promiseElement(t: Type): Type | undefined {
   return typeof t !== "string" && t.kind === "interface" ? promised.get(t) : undefined;
@@ -510,7 +526,7 @@ export function holdsMut(t: Type): boolean {
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
 export function holdsRef(t: Type): boolean {
   if (typeof t === "string") return false;
-  if (t.kind === "ref") return true;
+  if (t.kind === "ref" || (t.kind === "dyn" && borrowing.has(t.of))) return true;
   // A type parameter holds references when what it stands for, or its bound, does.
   if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
   if (t.kind === "union") return t.members.some(holdsRef);
@@ -678,6 +694,8 @@ export function derives(t: ClassType, base: ClassType): boolean {
 export function fits(from: Type, to: Type): boolean {
   // In an instance, a type parameter and the concrete type it stands for are one value.
   if (from === to || lower(from) === lower(to) || from === "never" || sameCallable(from, to)) return true;
+  // A future fits the `Promise<T>` describing it, as an async function's result.
+  if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
   // A reference reads the value where it lives, so it fits only a reference to the same type;
   // a mutable one also lends itself as shared. Lifetimes are checked on their own.
   if (typeof to !== "string" && to.kind === "ref") {

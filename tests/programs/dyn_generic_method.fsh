@@ -1,4 +1,4 @@
-// error: its method 'draw' takes an interface, a function or an object type, so it has a version per argument type and no one to call through a Dyn
+// error: its method 'draw' takes an interface or a function, so it has a version per argument type and no one to call through a Dyn
 interface Pen {
   ink(): i64;
 }
