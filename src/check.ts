@@ -244,8 +244,24 @@ export function check(written: Stmt[], library = false): Checked {
     const declaration = unsupportedDeclaration(s);
     if (declaration) throw declaration;
     if (s.kind === "empty") continue;
+    // A top-level `const` is computed while compiling: comptime runs a function of no parameters
+    // giving its value. A `comptime { }` block is a function giving nothing, run the same way.
+    const made = { kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], start: s.start, end: s.end };
+    if (s.kind === "let" && s.keyword === "const") {
+      for (const d of s.declarations) {
+        if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
+        if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
+        const giving: Stmt = { kind: "return", value: d.init, start: d.init.start, end: d.init.end };
+        funcs.push(Object.assign({ ...made, name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
+      }
+      continue;
+    }
+    if (s.kind === "comptime") {
+      funcs.push(Object.assign({ ...made, name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
+      continue;
+    }
+    if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
-    if (s.kind === "comptime") throw unsupported("comptime blocks", s);
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     if (s.macro) throw unsupported("macros", s);
     if (!hasBody(s)) throw unsupported("functions without a body", s);
@@ -254,7 +270,8 @@ export function check(written: Stmt[], library = false): Checked {
   const byName = new Map<string, Func>();
   for (const f of funcs) {
     if (f.async && f.generator) throw unsupported("async generators", f);
-    if (byName.has(f.name) || classes.has(f.name) || templates.has(f.name) || enums.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
+    const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
+    if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
   const main = byName.get("main");
@@ -606,6 +623,8 @@ export function check(written: Stmt[], library = false): Checked {
     const facts: Facts[] = [];
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
+    // How many comptime blocks the statement being checked is inside.
+    let comptimeDepth = 0;
     // Each narrowed `Mut` given a whole value of another member, in order.
     const changed: Local[] = [];
     // The expression an expression statement being checked consists of.
@@ -976,8 +995,12 @@ export function check(written: Stmt[], library = false): Checked {
           return;
         case "function":
           throw unsupported("nested functions", s);
+        // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":
-          throw unsupported("comptime blocks", s);
+          comptimeDepth++;
+          scoped(s.body);
+          comptimeDepth--;
+          return;
         case "block":
           scoped(s.body);
           return;
@@ -1299,6 +1322,8 @@ export function check(written: Stmt[], library = false): Checked {
       if (holdsRef(type)) throw unsupported("errors holding references", at);
       const handler = handlers.at(-1);
       if (handler) return void handler.push([at, type]);
+      // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
+      if (f.comptime || comptimeDepth > 0) return;
       if (f.closure) throw unsupported("closures that throw", at);
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;

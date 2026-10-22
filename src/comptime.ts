@@ -12,11 +12,14 @@ export type Record = { kind: "record"; type: ObjectType | ClassType; fields: Map
 export type Items = { kind: "array"; items: Value[] };
 // A data-carrying enum's member and its payload.
 export type Variant = { kind: "variant"; type: VariantType; args: Value[] };
+// An Atomic or a Lock a top-level const holds: a global the program changes at run time, made
+// while compiling but never used then.
+export type Interior = { kind: "interior"; value: Value };
 
 // A value while compiling: an integer as a bigint, a float as a number, a boolean, a string,
 // null for an empty Option, or an aggregate. Objects are values in Fish, moved rather than shared,
 // so a JS reference stands for one.
-export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant;
+export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant | Interior;
 
 // The most steps one evaluation may take, and the deepest its calls may nest.
 const STEPS = 10_000_000;
@@ -64,19 +67,72 @@ class Thrown {
 
 type Frame = { instance: Instance; locals: Map<number, Value>; self: Record | undefined };
 
-// The value of `comptime expr`, written in `instance`; a panic or refusal is a compile error at
-// the comptime expression, noting where inside it happened.
+type Interpreter = ReturnType<typeof interpreter>;
+
+// The value of `comptime expr`, written in `instance`.
 export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  let steps = 0;
-  let depth = 0;
+  return guarded(site, (run) => run.expr({ instance, locals: new Map(), self: undefined }, site.expr));
+}
+
+// Runs a `comptime { }` block written in `instance`, for what it checks.
+export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
+  guarded(site, (run) => run.block({ instance, locals: new Map(), self: undefined }, site.body));
+}
+
+// Each top-level const's value, once computed, and those being computed, which a const reading
+// itself would meet.
+const constants = new WeakMap<Instance, Value>();
+const computing = new WeakSet<Instance>();
+
+// A top-level const's value, or a `comptime { }` block run at the top level: its body.
+export function comptimeBody(instance: Instance): Value {
+  if (constants.has(instance)) return constants.get(instance);
+  const v = guarded(instance.body, (run) => run.constant(instance, instance.body));
+  constants.set(instance, v);
+  return v;
+}
+
+// Runs comptime code; a panic, a refusal or an error it didn't catch is a compile error at the
+// comptime site, noting where inside it happened.
+function guarded(site: Span, go: (run: Interpreter) => Value): Value {
   try {
-    return expr({ instance, locals: new Map(), self: undefined }, site.expr);
+    return go(interpreter());
   } catch (e) {
     const stop = e instanceof Thrown ? new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false) : e;
     if (!(stop instanceof Stop)) throw e;
     const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
     const inside = stop.at.start !== site.start || stop.at.end !== site.end;
     throw new CompileError(what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
+  }
+}
+
+function interpreter() {
+  let steps = 0;
+  let depth = 0;
+  return { expr, block, constant };
+
+  // A block's statements; a `return` inside ends it.
+  function block(f: Frame, body: Stmt[]): Value {
+    try {
+      statements(f, body);
+    } catch (e) {
+      if (!(e instanceof Return)) throw e;
+    }
+    return undefined;
+  }
+
+  // A const's value, computed once; one that reads itself never ends, so it is refused.
+  function constant(c: Instance, at: Span): Value {
+    if (constants.has(c)) return constants.get(c);
+    if (computing.has(c)) throw new Stop(`'${c.body.name.slice("const ".length)}' needs its own value to compute its value`, at, false);
+    computing.add(c);
+    try {
+      const v = call(c, [], undefined, at);
+      constants.set(c, v);
+      return v;
+    } finally {
+      computing.delete(c);
+    }
   }
 
   function step(at: Span) {
@@ -250,8 +306,10 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
         return text;
       }
       case "ident": {
-        const literal = constant(type);
+        const literal = literalValue(type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
+        const read = f.instance.calls.get(e);
+        if (read?.body.comptime === "const") return constant(read, e);
         const local = f.instance.locals.get(e);
         if (!local || !f.locals.has(local.id)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
         return f.locals.get(local.id);
@@ -319,6 +377,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   }
 
   function construct(f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
+    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: expr(f, e.args[0]!) };
     if (typeof type === "string" || type.kind !== "class") return refuse(`'new ${show(type)}'`, e);
     const ctor = f.instance.calls.get(e)!;
     const made: Record = { kind: "record", type, fields: new Map() };
@@ -328,7 +387,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
 
   function member(f: Frame, e: Extract<Expr, { kind: "member" }>, type: Type): Value {
     // An enum's member, as `Color.Red`, is known from its type alone.
-    const literal = constant(type);
+    const literal = literalValue(type);
     if (literal !== undefined) return literal;
     if (typeof type !== "string" && type.kind === "variant" && type.fields.length === 0 && enumName(e.object)) return { kind: "variant", type, args: [] };
     const getter = f.instance.calls.get(e);
@@ -355,6 +414,8 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       return call(target, e.args.map((a) => expr(f, a)), self, e);
     }
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(expr(f, e.args[0]!));
+    // A static call on something that isn't a value, like `TcpListener.bind`, is std's own.
+    if (callee.kind === "member" && !f.instance.types.has(callee.object)) return refuse(`'${callee.name}'`, e);
     if (callee.kind === "member") {
       const object = typeOf(f, callee.object);
       if (object === "string") return stringMethod(callee.name, expr(f, callee.object) as string, e.args.map((a) => expr(f, a)), e);
@@ -520,7 +581,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case "any":
         return true;
       case "literal":
-        return info.member ? same(v, constant(info.member) ?? info.member.value) : same(v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
+        return info.member ? same(v, literalValue(info.member) ?? info.member.value) : same(v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
       case "none":
         return v === null;
       case "some":
@@ -622,7 +683,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
-function constant(type: Type): Value {
+function literalValue(type: Type): Value {
   return typeof type !== "string" && type.kind === "literal" && type.owner ? type.value : undefined;
 }
 
@@ -648,7 +709,7 @@ function typeofValue(v: Value): string {
 
 // A copy owning all its parts, as `.clone()` makes.
 function cloned(v: Value): Value {
-  if (!v || typeof v !== "object") return v;
+  if (!v || typeof v !== "object" || v.kind === "interior") return v;
   if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
   return { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
@@ -688,6 +749,7 @@ export function memberOf(v: Value, union: UnionType): Type {
   if (v === null) return "null";
   if (v && typeof v === "object") {
     if (v.kind === "array") return m.find((t) => typeof t !== "string" && t.kind === "array")!;
+    if (v.kind === "interior") return m.find((t) => typeof t !== "string" && t.kind === "interior")!;
     return m.find((t) => t === v.type) ?? m.find((t) => fits(v.type, t))!;
   }
   const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);

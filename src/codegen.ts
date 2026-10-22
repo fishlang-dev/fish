@@ -3,7 +3,7 @@ import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate, sourceOf } from "./diag.ts";
-import { comptimeValue, memberOf, type Value } from "./comptime.ts";
+import { comptimeBlock, comptimeBody, comptimeValue, memberOf, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
@@ -114,6 +114,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
+  // The global each top-level const holding an aggregate lives in.
+  const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
   let uncopyable = false;
   const elementDrops = new Map<Type, string>();
@@ -129,7 +131,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The future types whose task glue is made.
   const glued = new Set<FutureType>();
 
+  // Top-level consts and comptime blocks run while compiling, every one of them, so one that
+  // fails is reported even when nothing reads it; none is compiled.
+  for (const instance of instances) if (instance.body.comptime && instance.concrete) comptimeBody(instance);
+
   for (const instance of instances) {
+    if (instance.body.comptime) continue;
     // A C function is declared under its own name, unless the runtime already declares it.
     if (instance.body.foreign) {
       const returns = crossed(instance.returns);
@@ -230,6 +237,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
   const start = library ? instances.filter((i) => i.body.exported).flatMap(exported) : entry();
+  const filled = fillConstants();
 
   return [
     ...globals,
@@ -242,8 +250,33 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     "",
     ...out,
     ...start,
+    ...filled,
     "",
   ].join("\n");
+
+  // A top-level const holding an aggregate lives in a global, filled once before main runs (or
+  // as a library loads) and only ever read; its arrays and strings are never freed.
+  function constantGlobal(c: Instance): string {
+    const made = constantGlobals.get(c);
+    if (made) return made;
+    const name = `@"fsh.const.${c.body.name.slice("const ".length)}"`;
+    constantGlobals.set(c, name);
+    globals.push(`${name} = internal global ${llvm(c.returns)} zeroinitializer`);
+    return name;
+  }
+
+  function fillConstants(): string[] {
+    if (constantGlobals.size === 0) return [];
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    emit("%before = call i64 @fsh_rt_live()");
+    for (const [c, name] of constantGlobals) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(c), c.returns)}, ptr ${name}`);
+    emit("call void @fsh_rt_keep_since(i64 %before)");
+    emit("ret void");
+    const filler = ['define internal void @"fsh.constants"() {', "entry:", ...allocas, ...body, "}", "", '@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @"fsh.constants", ptr null }]'];
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    return filler;
+  }
 
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
   // zero into integers, saturating with NaN as 0, and widen or narrow between themselves.
@@ -1046,6 +1079,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "block":
       case "unsafe":
         scoped(s.body);
+        return;
+      // A comptime block runs while compiling and leaves nothing to run.
+      case "comptime":
+        comptimeBlock(current, s);
         return;
       case "if": {
         const cond = value(s.cond);
@@ -3222,6 +3259,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return convert(v, option, types.get(e)!);
       }
       case "ident": {
+        // A top-level const: a scalar or string baked where it is read, an aggregate read through
+        // a pointer to its global.
+        const read = calls.get(e);
+        if (read?.body.comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(read), types.get(e)!);
         // `undefined` is the empty value, unless a variable takes the name.
         if (!locals.has(e)) return "zeroinitializer";
         const local = resolved(e);
@@ -3578,6 +3619,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof v === "boolean") return String(v);
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
     if (typeof v === "bigint") return String(v);
+    // An Atomic is its value; an atomic boolean a byte. A Lock is its word, free, then its value.
+    if (v && typeof type !== "string" && v.kind === "interior" && type.kind === "interior") {
+      if (type.which === "Lock") {
+        const made = temp();
+        emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${llvm(type.of)} ${bake(v.value, type.of)}, 1`);
+        return made;
+      }
+      return llvm(type) === "i8" ? (v.value ? "1" : "0") : bake(v.value, type.of);
+    }
     if (v && typeof type !== "string" && v.kind === "array" && type.kind === "array") {
       const n = String(v.items.length);
       const [data, t] = [temp(), llvm(type.element)];

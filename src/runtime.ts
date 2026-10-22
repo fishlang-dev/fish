@@ -80,6 +80,8 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_utf8_decode(ptr)",
   "declare ptr @fsh_rt_http_date()",
   "declare i64 @fsh_rt_now_ms()",
+  "declare i64 @fsh_rt_live()",
+  "declare void @fsh_rt_keep_since(i64)",
   "declare ptr @fsh_rt_dyn_alloc(i64)",
   "declare ptr @fsh_rt_dyn_retain(ptr)",
   "declare i1 @fsh_rt_dyn_release(ptr)",

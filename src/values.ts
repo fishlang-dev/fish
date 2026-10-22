@@ -1571,6 +1571,15 @@ export function expressions(ctx: Context) {
       case "ident": {
         const local = lookup(e.name, e);
         if (!local && e.name === "undefined") return "null";
+        // A top-level const: its value, computed while compiling. An aggregate is read where it
+        // lives, through a reference, as a const can't change.
+        const constant = local ? undefined : byName.get(`const ${e.name}`);
+        if (constant) {
+          const instance = ctx.instanceOf(constant);
+          calls.set(e, instance);
+          const type = ctx.returnOf(instance, e);
+          return isCopy(type) || type === "string" ? type : refType(type, false);
+        }
         if (!local) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"

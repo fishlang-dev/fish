@@ -186,7 +186,6 @@ test("(1, 2)", () => {
 const STATEMENTS: [string, string][] = [
   ["function inner() {}", "nested functions"],
   ["debugger", "'debugger' statements"],
-  ["comptime { print(1) }", "comptime blocks"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
   ["for (const k in o) {}", "'for...in' loops"],

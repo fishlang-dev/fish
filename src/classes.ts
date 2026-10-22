@@ -22,6 +22,9 @@ export type Body = Span & {
   foreign?: boolean;
   // Whether an `export` names it, so a library builds it into a C function too.
   exported?: boolean;
+  // A top-level `const`, as a function giving its value, or a `comptime { }` block, as one giving
+  // nothing: each run while compiling, never compiled.
+  comptime?: "const" | "block";
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.

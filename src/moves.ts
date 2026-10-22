@@ -86,6 +86,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
       case "block":
+      case "comptime":
       case "unsafe":
       case "while":
       case "doWhile":
@@ -137,6 +138,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
       case "block":
+      case "comptime":
       case "unsafe":
         return statements(s.body);
       // The catch runs from wherever the block raised, so from what all those points had in
@@ -1238,6 +1240,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         if (s.finalizer) stmts(s.finalizer);
         return;
       case "block":
+      case "comptime":
       case "unsafe":
         return stmts(s.body);
       case "while":

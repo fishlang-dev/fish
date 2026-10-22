@@ -59,6 +59,16 @@ void fsh_rt_free(void *p) {
   free(p);
 }
 
+// Top-level consts are filled before main, into memory that lives as long as the program: what
+// they take is no leak, so it stops being counted.
+int64_t fsh_rt_live(void) {
+  return __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_keep_since(int64_t before) {
+  __atomic_store_n(&fsh_live, before, __ATOMIC_RELAXED);
+}
+
 __attribute__((destructor)) static void fsh_leaks(void) {
   const char *check = getenv("FISH_LEAKS");
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
