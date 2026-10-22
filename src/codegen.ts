@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, interiorType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -398,6 +398,40 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const narrow = temp();
     emit(`${narrow} = trunc i8 ${result} to i1`);
     return narrow;
+  }
+
+  // Gives up a shared value's count; the last drops the value and frees the block.
+  function dropShared(t: SharedType) {
+    const [last, held, at, value] = [temp(), temp(), temp(), temp()];
+    const [free, done] = [label(), label()];
+    emit(`${last} = call i32 @fsh_rt_shared_release(ptr %v)`);
+    emit(`${held} = icmp ne i32 ${last}, 0`);
+    emit(`br i1 ${held}, label %${free}, label %${done}`);
+    startBlock(free);
+    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr %v, i32 0, i32 1, i32 1`);
+    emit(`${value} = load ${llvm(t.of)}, ptr ${at}`);
+    dispose(value, t.of);
+    emit("call void @fsh_rt_free(ptr %v)");
+    emit(`br label %${done}`);
+    startBlock(done);
+  }
+
+  // A shared value's block: its count, then what a Lock of its value would be.
+  function sharedBlock(t: SharedType): string {
+    return `{ i64, ${llvm(interiorType("Lock", t.of))} }`;
+  }
+
+  // `shared(v)`: a new block with one count, holding v.
+  function sharedNew(e: Extract<Expr, { kind: "call" }>): string {
+    const t = valueType(e) as SharedType;
+    const v = owned(e.args[0]!);
+    const [end, size, block, at] = [temp(), temp(), temp(), temp()];
+    emit(`${end} = getelementptr ${sharedBlock(t)}, ptr null, i64 1`);
+    emit(`${size} = ptrtoint ptr ${end} to i64`);
+    emit(`${block} = call ptr @fsh_rt_shared_new(i64 ${size})`);
+    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1`);
+    emit(`store ${llvm(t.of)} ${v}, ptr ${at}`);
+    return block;
   }
 
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
@@ -1144,7 +1178,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
-    if (type.kind === "array") return true;
+    if (type.kind === "array" || type.kind === "shared") return true;
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
@@ -1200,6 +1234,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     let result = "%v";
     if (type.kind === "array") {
       result = kind === "drop" ? dropArray(type) : copyArray(type);
+    } else if (type.kind === "shared") {
+      if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
+      else dropShared(type);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
       const copy = kind === "copy" ? alloca(t) : "";
@@ -1571,6 +1608,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `yieldNow()`'s future is its one state, not yet polled.
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
       if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
+      if (e.callee.kind === "ident" && e.callee.name === "shared" && !locals.has(e.callee)) {
+        const made = sharedNew(e);
+        if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
         const made = temp();
         unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
@@ -1579,6 +1621,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name === "update" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "shared") {
+        const t = referent(valueType(e.callee.object)) as SharedType;
+        const block = temp();
+        emit(`${block} = load ptr, ptr ${receiver(e.callee.object)}`);
+        const lock = temp();
+        emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
+        return lockUpdate(e, interiorType("Lock", t.of), lock);
+      }
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
       if (e.callee.kind === "ident" && e.callee.name === "String") {

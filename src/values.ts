@@ -4,9 +4,9 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { fields, interior } from "./resolve.ts";
+import { fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, functionType, holdsInterior, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, functionType, holdsInterior, interiorType, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -246,6 +246,7 @@ export function expressions(ctx: Context) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
     if (e.kind === "new" && typeof t !== "string" && t.kind === "interior") wanted.set(e, t);
+    if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
   }
@@ -633,6 +634,8 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
+    if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name)) return sharedNew(e);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -900,6 +903,26 @@ export function expressions(ctx: Context) {
       coerce(a, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     return { type: callee.name === "set" ? "void" : of, what: `'${callee.name}'` };
+  }
+
+  // `shared(v)`: v moved into a new counted block, of its type argument, the type expected of
+  // it, or else v's own type.
+  function sharedNew(e: Call): { type: Type; what: string } {
+    if (e.args.length !== 1 || e.typeArgs.length > 1) throw new CompileError("'shared' takes the value it starts with, as in 'shared({ hits: 0 })'", e.start, e.end);
+    const expected = wanted.get(e);
+    const given = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "shared" ? expected.of : undefined;
+    const a = e.args[0]!;
+    if (given) expect(a, given);
+    const t = value(a);
+    const of = given ?? widenLet(t);
+    coerce(a, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
+    return { type: shareable(of, e), what: "'shared'" };
+  }
+
+  // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
+  function sharedCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
+    if (callee.name !== "update") throw new CompileError(`'shared' has no method '${callee.name}'; read its fields, change it with 'update', or share it again with 'clone'`, callee.start, callee.end);
+    return lockCall(e, callee, interiorType("Lock", t.of));
   }
 
   // `lock.update(v => ...)`: the callback changes what the lock holds while it is locked, and

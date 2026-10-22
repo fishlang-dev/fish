@@ -101,7 +101,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -116,6 +116,23 @@ export function interiorType(which: InteriorType["which"], of: Type): InteriorTy
   if (!t) {
     t = { kind: "interior", which, of, fields: [] };
     interiors.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
+// every clone is the same value, read and changed from any thread.
+export type SharedType = { kind: "shared"; of: Type; fields: Field[] };
+
+const shareds = new Map<string, SharedType>();
+
+export function sharedType(of: Type): SharedType {
+  const key = `shared ${keyOf(of)}`;
+  let t = shareds.get(key);
+  if (!t) {
+    t = { kind: "shared", of, fields: [] };
+    shareds.set(key, t);
     keys.set(t, key);
   }
   return t;
@@ -408,7 +425,7 @@ export function holdsRef(t: Type): boolean {
 }
 
 // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
-// reference it holds.
+// reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
 export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
   const holds = (u: Type) => holdsPart(u, found, throughRefs);
   if (found(t)) return true;
@@ -462,6 +479,7 @@ export function lower(t: Type): Type {
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
+  if (t.kind === "shared") return sharedType(lower(t.of));
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -622,6 +640,7 @@ export function show(t: Type): string {
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
+  if (t.kind === "shared") return `shared<${show(t.of)}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

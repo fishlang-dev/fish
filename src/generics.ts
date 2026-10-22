@@ -72,6 +72,10 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     if (typeof arg !== "string" && arg.kind === "interior" && arg.which === node.name) infer(node.args[0]!, arg.of, names, bindings, at);
     return;
   }
+  if (node.kind === "ref" && node.name === "shared" && node.args.length === 1 && !names.has(node.name)) {
+    if (typeof arg !== "string" && arg.kind === "shared") infer(node.args[0]!, arg.of, names, bindings, at);
+    return;
+  }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
@@ -112,7 +116,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "union") return t.members.every(concrete);
   if (t.kind === "ref" || t.kind === "pointer") return concrete(t.to);
   if (t.kind === "handle") return concrete(t.gives) && (!t.throws || concrete(t.throws));
-  if (t.kind === "interior") return concrete(t.of);
+  if (t.kind === "interior" || t.kind === "shared") return concrete(t.of);
   if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
   if (t.kind === "array") return concrete(t.element);
   if (t.kind === "variant") {

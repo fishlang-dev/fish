@@ -1209,6 +1209,23 @@ void fsh_rt_unlock(int32_t *word) {
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
 
+// A shared value's block: its count, then a Lock's word and the value. Made with one count.
+void *fsh_rt_shared_new(int64_t size) {
+  int64_t *block = fsh_rt_alloc(size);
+  block[0] = 1;
+  *(int32_t *)(block + 1) = 0;
+  return block;
+}
+
+void fsh_rt_shared_retain(int64_t *block) {
+  __atomic_fetch_add(block, 1, __ATOMIC_RELAXED);
+}
+
+// Gives up a count: whether it was the last, so the caller drops the value and frees the block.
+int32_t fsh_rt_shared_release(int64_t *block) {
+  return __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
