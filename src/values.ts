@@ -662,6 +662,24 @@ export function expressions(ctx: Context) {
       coerce(a, t, refType(t, mutable), "");
       return { type: pointerType(t, mutable), what: `'${callee.name}'` };
     }
+    // `cString(s)`: a pointer to a NUL-terminated copy of `s` for C, which the enclosing block
+    // owns and frees when it ends.
+    if (callee.kind === "ident" && callee.name === "cString" && !byName.has("cString")) {
+      if (e.args.length !== 1) throw new CompileError("'cString' takes 1 argument", e.start, e.end);
+      if (ctx.generator) throw unsupported("'cString' inside generators", callee);
+      const t = value(e.args[0]!);
+      coerce(e.args[0]!, t, "string", `'cString' takes a string, not '${show(t)}'`);
+      return { type: pointerType("u8", false), what: "'cString'" };
+    }
+    // `fromCString(p)`: a new string from a C string's bytes, read up to its NUL.
+    if (callee.kind === "ident" && callee.name === "fromCString" && !byName.has("fromCString")) {
+      needsUnsafe("'fromCString'", callee);
+      if (e.args.length !== 1) throw new CompileError("'fromCString' takes 1 argument", e.start, e.end);
+      const want = pointerType("u8", false);
+      const t = value(e.args[0]!);
+      coerce(e.args[0]!, t, want, `'fromCString' takes a 'Ptr<u8>', not '${show(t)}'`);
+      return { type: "string", what: "'fromCString'" };
+    }
     // `nullPtr<T>()`: a pointer to nothing, which may be used as either kind.
     if (callee.kind === "ident" && callee.name === "nullPtr" && !byName.has("nullPtr")) {
       needsUnsafe("'nullPtr'", callee);

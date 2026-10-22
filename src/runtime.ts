@@ -38,6 +38,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_panic_bounds(ptr, i64, i64) noreturn cold",
   "declare i32 @__gcc_personality_v0(...)",
   "declare ptr @fsh_rt_str_from_i64(i64)",
+  "declare ptr @fsh_rt_str_cstring(ptr)",
+  "declare ptr @fsh_rt_str_from_cstring(ptr)",
   "declare ptr @fsh_rt_str_from_u64(i64)",
   "declare ptr @fsh_rt_str_from_f64(double)",
   "declare ptr @fsh_rt_str_from_f32(float)",

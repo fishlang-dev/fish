@@ -261,6 +261,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
+  // A C string's buffer, owned by the enclosing block as an array of bytes it frees at its end.
+  // A loop's condition makes one each time round, so the slot drops what it holds first.
+  function forC(s: string): string {
+    const [made, held, old] = [temp(), alloca(ARRAY), temp()];
+    unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
+    own(held, arrayType("u8"));
+    emit(`${old} = load ${ARRAY}, ptr ${held}`);
+    dispose(old, arrayType("u8"));
+    const array = temp();
+    emit(`${array} = insertvalue ${ARRAY} zeroinitializer, ptr ${made}, 0`);
+    emit(`store ${ARRAY} ${array}, ptr ${held}`);
+    return made;
+  }
+
   // A raw pointer's method: a load or a store of what it points at, the address `n` elements
   // along, or whether it is null.
   function pointerCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
@@ -1379,6 +1393,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!));
+      if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
+        const made = temp();
+        unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
+        if (!types.has(e)) pending.push({ v: made, type: "string" });
+        return made;
+      }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.

@@ -640,6 +640,46 @@ void fsh_rt_str_print(int32_t stream, fsh_str *s) {
   fwrite(from, 1, end - from, out);
 }
 
+// A NUL-terminated copy of a string's bytes for C, freed with fsh_rt_free.
+char *fsh_rt_str_cstring(fsh_str *s) {
+  char *c = fsh_rt_alloc(s->length + 1);
+  memcpy(c, s->bytes, s->length);
+  c[s->length] = 0;
+  return c;
+}
+
+// A string of a C string's bytes up to its NUL. A byte that doesn't start a UTF-8 sequence, or
+// starts one that is cut short, overlong, a surrogate or past U+10FFFF, becomes U+FFFD.
+fsh_str *fsh_rt_str_from_cstring(const char *c) {
+  const unsigned char *p = (const unsigned char *)c;
+  size_t n = strlen(c);
+  fsh_str *s = fsh_str_new(n * 3);
+  unsigned char *at = (unsigned char *)s->own;
+  for (size_t i = 0; i < n;) {
+    unsigned char b = p[i];
+    int need = b < 0x80 ? 0 : (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : -1;
+    uint32_t code = need == 1 ? b & 0x1F : need == 2 ? b & 0x0F : need == 3 ? b & 0x07 : b;
+    int ok = need >= 0 && i + need < n;
+    for (int k = 1; ok && k <= need; k++) {
+      if ((p[i + k] & 0xC0) != 0x80) ok = 0;
+      else code = code << 6 | (p[i + k] & 0x3F);
+    }
+    if (ok && ((need == 1 && code < 0x80) || (need == 2 && (code < 0x800 || (code >= 0xD800 && code <= 0xDFFF))) || (need == 3 && (code < 0x10000 || code > 0x10FFFF)))) ok = 0;
+    if (ok) {
+      memcpy(at, p + i, need + 1);
+      at += need + 1;
+      i += need + 1;
+    } else {
+      *at++ = 0xEF;
+      *at++ = 0xBF;
+      *at++ = 0xBD;
+      i++;
+    }
+  }
+  s->length = at - (unsigned char *)s->own;
+  return s;
+}
+
 fsh_str *fsh_rt_str_from_i64(int64_t v) {
   char text[24];
   int n = snprintf(text, sizeof text, "%lld", (long long)v);
