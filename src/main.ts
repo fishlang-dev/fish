@@ -1,22 +1,22 @@
 #!/usr/bin/env bun
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { check } from "./check.ts";
+import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
 import type { Instance } from "./check.ts";
-import type { Type } from "./typing.ts";
+import { INTEGERS, type Type } from "./typing.ts";
 
 export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
 
-export function compile(src: string, file: string, release = false, panic: Panic = "unwind"): string {
-  return codegen(check(parse(src)), { src, file, release, panic });
+export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
+  return codegen(check(parse(src), library), { src, file, release, panic, library });
 }
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
@@ -25,9 +25,9 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   const src = readFileSync(file, "utf8");
   const checked = check(parse(src), true);
   const ir = codegen(checked, { src, file, release, panic, library: true });
+  if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
   const at = (f: string) => join(dirname(out), f);
-  writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   const [native, fish, runtime] = [join(dir, "native.c"), join(dir, "fish.o"), join(dir, "native.o")];
   writeFileSync(native, NATIVE);
@@ -45,33 +45,43 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
       run(["clang", "-c", "-fPIC", "-funwind-tables", native, "-o", runtime, optimize]);
       run(["ar", "rcs", at(`lib${name}.a`), fish, runtime]);
     }
+    writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-// A C header declaring a library's exports.
+// A C header declaring a library's exports, usable from C and C++. A parameter named like a C
+// keyword is left unnamed, as C allows.
 function header(name: string, exports: Instance[]): string {
-  const guard = `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
+  const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
     const params = i.body.params.map((p) => {
-      const type = cType(i.locals.get(p)!.type);
-      return `${type}${type.endsWith("*") ? "" : " "}${i.locals.get(p)!.name}`;
+      const { type, name } = i.locals.get(p)!;
+      const c = cType(type);
+      const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
+      return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
     return `${cType(i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
-  return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", ...lines, "", `#endif`, ""].join("\n");
+  return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
 
-// How C names a type that crosses to it. A pointer to something C has no name for points to `void`.
+// How C names a type that crosses to it. A raw pointer's target is `const` unless it is a
+// `MutPtr`, after the `*` when the target is itself a pointer; a target C has no name for is
+// `void`.
 function cType(t: Type): string {
   if (typeof t !== "string") {
     if (t.kind !== "pointer") return "void";
     const to = cType(t.to);
-    return `${t.mutable ? "" : "const "}${to === "void" && typeof t.to !== "string" && t.to.kind !== "pointer" ? "void" : to} *`;
+    const pointer = typeof t.to !== "string" && t.to.kind === "pointer";
+    const target = t.mutable ? to : pointer ? `${to}const` : `const ${to}`;
+    return `${target}${target.endsWith("*") ? "" : " "}*`;
   }
-  const names: Record<string, string> = { boolean: "bool", f32: "float", f64: "double", usize: "size_t", isize: "ptrdiff_t", void: "void" };
-  return names[t] ?? (t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`);
+  const names: Record<string, string> = { boolean: "bool", f32: "float", f64: "double", usize: "size_t", isize: "ptrdiff_t" };
+  if (names[t]) return names[t];
+  if (t in INTEGERS) return t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`;
+  return "void";
 }
 
 // Compiles `file` to a native executable at `out`, piping the IR through clang along with the
@@ -114,7 +124,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release, panic));
+    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release, panic, lib !== undefined));
     else if (lib) buildLibrary(file, values.out ?? basename(file, ".fsh"), lib, values.release, panic, values.link ?? []);
     else build(file, values.out ?? basename(file, ".fsh"), values.release, panic, values.link ?? []);
   } catch (e) {

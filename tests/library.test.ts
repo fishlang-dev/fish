@@ -115,7 +115,26 @@ test("the header declares each export in C's types", () => {
   expect(header).toContain("void fill(uint8_t *at, size_t count, uint8_t value);");
   expect(header).toContain("int32_t first(const int32_t *at);");
   expect(header).toContain("void greet(void);");
+  expect(header).toContain('extern "C" {');
   expect(header).not.toContain("square");
+});
+
+test("two Fish libraries link into one C program, from C and C++", () => {
+  const dir = mkdtempSync(join(tmp, "two-"));
+  writeFileSync(join(dir, "la.fsh"), "function helper(n: i64): i64 { return n + 1; }\nexport function fromA(n: i64): i64 { return helper(n); }\n");
+  writeFileSync(join(dir, "lb.fsh"), "function helper(n: i64): i64 { return n * 100; }\nexport function fromB(n: i64): i64 { return helper(n); }\nexport function pp(a: Ptr<Ptr<u8>>, b: Ptr<MutPtr<u8>>, c: MutPtr<MutPtr<u8>>, int: i64): i64 { return int; }\n");
+  buildLibrary(join(dir, "la.fsh"), join(dir, "la"), "static");
+  buildLibrary(join(dir, "lb.fsh"), join(dir, "1lb"), "static");
+  const header = readFileSync(join(dir, "1lb.h"), "utf8");
+  expect(header).toContain("int64_t pp(const uint8_t *const *a, uint8_t *const *b, uint8_t **c, int64_t);");
+  expect(header).toContain("#ifndef FISH_1LB_H");
+  const program = '#include <stdio.h>\n#include "la.h"\n#include "1lb.h"\nint main(void) { uint8_t *rows[1] = {0}; printf("%lld %lld %lld\\n", (long long)fromA(1), (long long)fromB(1), (long long)pp(0, rows, rows, 7)); return 0; }\n';
+  for (const [file, compiler, flags] of [["two.c", "clang", ["-std=c99"]], ["two.cpp", "clang++", []]] as const) {
+    writeFileSync(join(dir, file), program);
+    const built = Bun.spawnSync([compiler, ...flags, "-Wall", "-Werror", join(dir, file), join(dir, "libla.a"), join(dir, "lib1lb.a"), "-lm", "-o", join(dir, "two")]);
+    if (built.exitCode !== 0) throw new Error(built.stderr.toString());
+    expect(Bun.spawnSync([join(dir, "two")]).stdout.toString()).toBe("2 100 7\n");
+  }
 });
 
 // What a library can't export to C, and why.
@@ -126,6 +145,10 @@ for (const [src, message] of [
   ["export function f(): i64 throws string { return 1; }", "a library can't export a function that throws to C"],
   ["export function* f(): Generator<i64> { yield 1; }", "a library can't export a generator to C"],
   ["export function fsh_rt_alloc(): i64 { return 1; }", "a library can't export 'fsh_rt_alloc' to C"],
+  ["export function free(n: i64): i64 { return n; }", "since C's library or the Fish runtime already uses that name"],
+  ["export function exit(n: i64): i64 { return n; }", "since C's library or the Fish runtime already uses that name"],
+  ["export function int(n: i64): i64 { return n; }", "isn't a C or C++ keyword"],
+  ["function helper(): i64 { return 1; }", "a library has nothing for C to call"],
 ]) {
   test(src!, () => {
     expect(() => check(parse(src!), true)).toThrow(message!);

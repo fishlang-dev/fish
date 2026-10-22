@@ -15,6 +15,8 @@ import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
 import { closureType, field, fits, generatorElement, generatorType, yieldsOf, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
+import { NATIVE } from "./native.ts";
+import { RUNTIME } from "./runtime.ts";
 import { expressions, substituted } from "./values.ts";
 
 export type { Type } from "./typing.ts";
@@ -154,6 +156,11 @@ function frameOf(instance: Instance, generator: GeneratorType) {
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
+// Names an export can't take in C: its and C++'s keywords and the standard type names a header
+// uses, and the C functions the runtime and its IR call, which an export would replace.
+export const C_KEYWORDS = new Set(["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "true", "false", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "class", "namespace", "template", "this", "new", "delete", "public", "private", "protected", "virtual", "operator", "friend", "using", "try", "catch", "throw", "typename", "explicit", "mutable", "nullptr", "decltype", "constexpr", "noexcept", "export", "and", "or", "not", "xor"]);
+const RUNTIME_NAMES = new Set([...[...NATIVE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!), ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? [])]);
+
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(program: Stmt[], library = false): Checked {
   const funcs: Func[] = [];
@@ -279,6 +286,7 @@ export function check(program: Stmt[], library = false): Checked {
   if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   if (main && instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
+  if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body)), ...closures.filter((i) => i.concrete)] };
 
@@ -407,7 +415,12 @@ export function check(program: Stmt[], library = false): Checked {
     if (f.typeParams?.length) throw new CompileError("a library can't export a generic function to C, which has no generics; export one for each type", f.start, f.end);
     if (f.generator) throw new CompileError("a library can't export a generator to C, which has no generators", f.start, f.end);
     if (f.throws) throw new CompileError("a library can't export a function that throws to C, which has no exceptions; return a status instead", f.throws.start, f.throws.end);
-    if (f.name === "main" || f.name.startsWith("fsh_")) throw new CompileError(`a library can't export '${f.name}' to C, since the Fish runtime uses that name`, f.start, f.end);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(f.name) || C_KEYWORDS.has(f.name)) {
+      throw new CompileError(`a library can't export '${f.name}' to C, which needs a name of ASCII letters, digits and underscores that isn't a C or C++ keyword`, f.start, f.end);
+    }
+    if (f.name === "main" || f.name.startsWith("fsh_") || RUNTIME_NAMES.has(f.name)) {
+      throw new CompileError(`a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
+    }
     f.params.forEach((p) => {
       const t = instance.locals.get(p)!.type;
       if (!crosses(t)) throw new CompileError(`an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);

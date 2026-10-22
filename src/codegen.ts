@@ -191,10 +191,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`ret ${resultType(instance)} ${answer(undefined, resuming.type.yields)}`);
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
       allocas.push("  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
-      out.push(`define ${resultType(instance)} ${symbol(instance)}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
       continue;
     }
-    out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    // Fish's own functions stay inside this module, so two libraries never clash over them.
+    out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
@@ -202,8 +203,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   return [
     ...globals,
-    // The runtime reads which way a panic goes.
-    `@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`,
+    // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
+    // two libraries in one program don't both define it; its exports abort on a panic anyway.
+    ...(library ? [] : [`@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`]),
     "",
     ...RUNTIME,
     ...intrinsics,
