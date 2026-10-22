@@ -65,6 +65,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_signal_release(ptr)",
   "declare i32 @fsh_rt_signal_aborted(ptr)",
   "declare void @fsh_rt_signal_abort(ptr)",
+  "declare ptr @fsh_rt_signal_timeout(i64)",
   "declare i32 @fsh_rt_signal_enter(ptr, ptr, ptr)",
   "declare void @fsh_rt_signal_leave(ptr, ptr, ptr)",
   "declare void @fsh_rt_semaphore_leave(ptr, ptr)",

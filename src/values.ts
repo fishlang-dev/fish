@@ -637,6 +637,9 @@ export function expressions(ctx: Context) {
       }
       return { type: "void", what: "printing" };
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
+      return signalTimeout(e, callee);
+    }
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
@@ -986,6 +989,16 @@ export function expressions(ctx: Context) {
     }
     if (callee.name === "close") return { type: "void", what: "'close'" };
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError(e) : undefined), what: `'${callee.name}'` };
+  }
+
+  // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
+  function signalTimeout(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout'`, callee.start, callee.end);
+    if (e.args.length !== 1) throw new CompileError("'AbortSignal.timeout' takes how many milliseconds until it aborts, like 'AbortSignal.timeout(5000)'", e.start, e.end);
+    expect(e.args[0]!, "i64");
+    const t = value(e.args[0]!);
+    coerce(e.args[0]!, t, "i64", `'AbortSignal.timeout' takes milliseconds as an 'i64', not '${show(t)}'`);
+    return { type: blockType("AbortSignal"), what: "'AbortSignal.timeout'" };
   }
 
   // A wait's AbortSignal, lent to it: the wait keeps a count on it of its own.

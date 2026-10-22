@@ -1107,7 +1107,10 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {
 
 // Timers: a heap of deadlines, earliest first, and a thread that wakes each task when its
 // deadline passes. Each entry holds a reference to its task.
-typedef struct { int64_t deadline; fsh_task *task; } fsh_timer;
+// A timer wakes a sleeping task, or with a signal, aborts it for 'AbortSignal.timeout'.
+typedef struct { int64_t deadline; fsh_task *task; struct fsh_signal *signal; } fsh_timer;
+void fsh_rt_signal_abort(struct fsh_signal *s);
+void fsh_rt_signal_release(struct fsh_signal *s);
 static pthread_mutex_t fsh_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_timer_changed = PTHREAD_COND_INITIALIZER;
 static fsh_timer *fsh_timers = NULL;
@@ -1127,14 +1130,14 @@ static void fsh_timer_swap(int64_t a, int64_t b) {
   fsh_timers[b] = t;
 }
 
-static void fsh_timer_add(int64_t deadline, fsh_task *task) {
+static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *signal) {
   pthread_mutex_lock(&fsh_timer_lock);
   if (fsh_timer_count == fsh_timer_capacity) {
     fsh_timer_capacity = fsh_timer_capacity ? fsh_timer_capacity * 2 : 64;
     fsh_timers = realloc(fsh_timers, fsh_timer_capacity * sizeof(fsh_timer));
   }
   int64_t at = fsh_timer_count++;
-  fsh_timers[at] = (fsh_timer){ deadline, task };
+  fsh_timers[at] = (fsh_timer){ deadline, task, signal };
   while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
@@ -1143,8 +1146,8 @@ static void fsh_timer_add(int64_t deadline, fsh_task *task) {
   pthread_mutex_unlock(&fsh_timer_lock);
 }
 
-static fsh_task *fsh_timer_take(void) {
-  fsh_task *task = fsh_timers[0].task;
+static fsh_timer fsh_timer_take(void) {
+  fsh_timer taken = fsh_timers[0];
   fsh_timers[0] = fsh_timers[--fsh_timer_count];
   for (int64_t at = 0;;) {
     int64_t least = at, left = at * 2 + 1, right = left + 1;
@@ -1154,17 +1157,28 @@ static fsh_task *fsh_timer_take(void) {
     fsh_timer_swap(at, least);
     at = least;
   }
-  return task;
+  return taken;
+}
+
+// What a timer does when it fires, or is dropped at shutdown: its count on the task or signal
+// is given up either way.
+static void fsh_timer_fire(fsh_timer t, int32_t fire) {
+  if (t.signal) {
+    if (fire) fsh_rt_signal_abort(t.signal);
+    fsh_rt_signal_release(t.signal);
+    return;
+  }
+  if (fire) fsh_rt_wake(t.task);
+  fsh_task_release(t.task);
 }
 
 static void *fsh_timing(void *arg) {
   pthread_mutex_lock(&fsh_timer_lock);
   while (!fsh_timers_stopping) {
     if (fsh_timer_count > 0 && fsh_timers[0].deadline <= fsh_now()) {
-      fsh_task *task = fsh_timer_take();
+      fsh_timer due = fsh_timer_take();
       pthread_mutex_unlock(&fsh_timer_lock);
-      fsh_rt_wake(task);
-      fsh_task_release(task);
+      fsh_timer_fire(due, 1);
       pthread_mutex_lock(&fsh_timer_lock);
       continue;
     }
@@ -1196,7 +1210,7 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
     *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   } else if (fsh_now() >= *deadline) return 1;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
-  fsh_timer_add(*deadline, task);
+  fsh_timer_add(*deadline, task, NULL);
   return 0;
 }
 
@@ -1473,7 +1487,7 @@ void fsh_rt_channel_close(fsh_channel *c) {
 
 // An abort signal's block, shared by its controller and every signal handle: its count, its lock,
 // whether it has aborted, and the tasks waiting on it to.
-typedef struct { int64_t count; pthread_mutex_t lock; int32_t aborted; fsh_waiters waiting; } fsh_signal;
+typedef struct fsh_signal { int64_t count; pthread_mutex_t lock; int32_t aborted; fsh_waiters waiting; } fsh_signal;
 
 fsh_signal *fsh_rt_signal_new(void) {
   fsh_signal *s = fsh_rt_alloc(sizeof(fsh_signal));
@@ -1516,6 +1530,17 @@ void fsh_rt_signal_leave(fsh_signal *s, int32_t *waiting, fsh_task *task) {
   fsh_task *mine = fsh_unwait(&s->waiting, task);
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
+}
+
+// 'AbortSignal.timeout(ms)': a signal the timer thread aborts after ms, holding a count on it
+// until then.
+fsh_signal *fsh_rt_signal_timeout(int64_t ms) {
+  fsh_signal *s = fsh_rt_signal_new();
+  s->count = 2;
+  int64_t now = fsh_now();
+  ms = ms > 0 ? ms : 0;
+  fsh_timer_add(ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000, NULL, s);
+  return s;
 }
 
 // Aborts once, waking every task waiting on the signal to see it.
@@ -1585,7 +1610,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
   pthread_join(fsh_timer_thread, NULL);
-  while (fsh_timer_count > 0) fsh_task_release(fsh_timer_take());
+  while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
   // Every task not done is dropped where it stopped; one dropping may release another.
   for (;;) {

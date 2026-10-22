@@ -1741,6 +1741,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
         return made;
       }
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !types.has(e.callee.object)) {
+        const made = temp();
+        emit(`${made} = call ptr @fsh_rt_signal_timeout(i64 ${value(e.args[0]!)})`);
+        if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
         const made = temp();
         unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
