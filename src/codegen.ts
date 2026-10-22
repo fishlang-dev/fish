@@ -158,6 +158,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         framed.add(at);
       };
       field("%state", 0);
+      // An async arrow's captures are its frame's copy of the closure.
+      if (f.closure) field("%env", 1);
       for (const [local, i] of instance.frame!.locals) field(slot(local), i);
       for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop.${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await.${i}`, i);
@@ -182,7 +184,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A capture the closure holds lives in its environment; a borrowed one, where it points.
     [...(instance.captures ?? [])].forEach(([alias, from], i) => {
       const at = temp();
-      emit(`${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`);
+      // In a future the entry block is the only one every poll passes through.
+      const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
+      if (resuming) allocas.push(`  ${line}`);
+      else emit(line);
       if (!isRef(instance.closure!.fields[i]!.type)) return captured.set(alias, at);
       const pointer = from === "this" ? "%this" : temp();
       emit(`${pointer} = load ptr, ptr ${at}`);
@@ -2060,9 +2065,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const machine = target.generator ?? target.future;
     if (machine) {
       let frame = "zeroinitializer";
+      // An async arrow's frame starts with its own copy of the closure, then the arguments.
+      const first = target.body.closure ? 2 : 1;
+      if (target.body.closure) {
+        const [env, next] = [temp(), temp()];
+        emit(`${env} = load ${llvm(target.closure!)}, ptr ${pointer}`);
+        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
+        frame = next;
+      }
       values.forEach((v, i) => {
         const next = temp();
-        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${v}, ${i + 1}`);
+        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${v}, ${i + first}`);
         frame = next;
       });
       if (!types.has(e)) pending.push({ v: frame, type: machine });

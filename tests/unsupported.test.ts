@@ -120,7 +120,6 @@ const EXPRESSIONS: [string, string][] = [
   ["/a+/g", "regular expressions"],
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
-  ["async (x: i64) => x", "async arrow functions"],
   ["<T>(x: T) => x", "generic arrow functions"],
   ["comptime 1", "comptime expressions"],
   ["class {}", "class expressions"],

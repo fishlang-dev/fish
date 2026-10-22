@@ -396,6 +396,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // A method's receiver is lent to it for the call, mutably when the method changes it.
           // A mutable receiver is lent shared while the arguments run, so they may read it, and
           // mutably for the call itself.
+          // A callee that is itself a value, like an arrow called at once, runs first.
+          if (e.callee.kind !== "ident" && e.callee.kind !== "member" && e.callee.kind !== "super" && !dynCalls.get(e)?.callable) expr(e.callee);
           // Through a Dyn, the receiver its interface declares; a stored callable called as a name,
           // an element or any other value is itself what is lent to the call.
           const dyn = dynCalls.get(e);

@@ -150,6 +150,8 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     locals.set(l, fields.length);
     fields.push({ name: `${l.name}.${l.id}`, type: l.type });
   };
+  // An async arrow's frame holds what it captured, first.
+  if (instance.body.closure) fields.push({ name: "env", type: "void" });
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   [...new Set(instance.locals.values())].sort((a, b) => a.id - b.id).forEach(add);
   const visit = (node: unknown) => {
@@ -814,11 +816,12 @@ export function check(written: Stmt[], library = false): Checked {
 
     // An arrow function: its own type, and its body checked here, where it is written.
     function closure(e: Arrow, expected?: FunctionType, unsafe = false, owning = false): ClosureType {
-      if (e.async) throw unsupported("async arrow functions", e);
       if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
+      // An async arrow's future usually outlives the call making it, so it owns its captures.
+      owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move || owning, unsafe },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -852,7 +855,13 @@ export function check(written: Stmt[], library = false): Checked {
         name: alias.name,
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
+      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      // Its future holds the captures as it holds parameters, for what crosses threads.
+      if (inner.future) {
+        inner.future.frame[1] = { name: "env", type };
+        inner.future.params = [{ name: "env", type }, ...inner.future.params];
+      }
       inner.closure = type;
       calls.set(e, inner);
       closureBodies.set(type, inner);

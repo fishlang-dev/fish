@@ -700,6 +700,7 @@ export function expressions(ctx: Context) {
       const given = value(callee);
       const held = lower(isRefType(given) ? given.to : given);
       if (isCallable(held)) return callableCall(e, callee, held as DynType);
+      if (typeof held !== "string" && held.kind === "closure") return closureCall(e, callee, given);
     }
     // `Shape.Circle(1.5)` builds a variant from its payload.
     const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
@@ -741,6 +742,11 @@ export function expressions(ctx: Context) {
     if (callee.kind === "ident" && callee.name === "spawn" && !byName.has("spawn")) {
       if (!ctx.async) throw new CompileError("'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
+      // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
+      const given = e.args[0]!;
+      if (given.kind === "arrow" && given.async && given.params.length === 0) {
+        e.args[0] = { kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+      }
       const t = value(e.args[0]!);
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
@@ -839,8 +845,9 @@ export function expressions(ctx: Context) {
   }
 
   // A call of a closure held by a variable runs the closure's body.
-  function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
-    const held = value(callee);
+  function closureCall(e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
+    const held = known ?? value(callee);
+    const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";
     const through = lower(isRefType(held) ? held.to : held);
     if (isCallable(through)) return callableCall(e, callee, through as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
@@ -849,7 +856,7 @@ export function expressions(ctx: Context) {
     if (typeof type === "string" || (type.kind !== "closure" && type.kind !== "function")) {
       throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
     }
-    if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError(`${name} takes no type arguments`, e.start, e.end);
     const written = type.kind === "closure" ? closureBody(type).body.params : undefined;
     if (written) arity(e.args.length, written, e);
     else if (e.args.length !== type.params.length) {
@@ -858,7 +865,7 @@ export function expressions(ctx: Context) {
     e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
-    return { type: type.returns, what: `'${callee.name}'` };
+    return { type: type.returns, what: name };
   }
 
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
