@@ -679,7 +679,7 @@ export function expressions(ctx: Context) {
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
       if (blocker) {
-        throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from this function"}; pass an owned value, or a clone`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
       return { type: handleType(t.gives, t.throws), what: "'spawn'" };
     }
@@ -866,6 +866,7 @@ export function expressions(ctx: Context) {
   // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
   // the same by every thread, and gives what it held before, except `store`.
   function interiorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
+    if (t.which === "Cell") return cellCall(e, callee, t);
     if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
     const takes: Record<string, number> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
     if (!(callee.name in takes)) throw new CompileError(`'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
@@ -881,6 +882,23 @@ export function expressions(ctx: Context) {
     return { type: callee.name === "store" ? "void" : of, what: `'${callee.name}'` };
   }
 
+  // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
+  // the old one, and `replace` puts one in and gives the old one back.
+  function cellCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
+    const takes: Record<string, number> = { get: 0, set: 1, replace: 1 };
+    if (!(callee.name in takes)) throw new CompileError(`'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling 'Cell' methods", callee);
+    if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
+    const of = lower(t.of);
+    if (callee.name === "get" && !isCopy(of)) throw new CompileError(`'get' copies what a Cell holds, which a '${show(of)}' can't be; use 'replace' to take it out and put another in`, callee.start, callee.end);
+    for (const a of e.args) {
+      expect(a, of);
+      const given = value(a);
+      coerce(a, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
+    }
+    return { type: callee.name === "set" ? "void" : of, what: `'${callee.name}'` };
+  }
+
   // `await p`: the future runs to completion, the async function stopping while it is pending,
   // and gives its value, or raises its error as a call would. It moves into the await.
   function awaited(e: Extract<Expr, { kind: "unary" }>): Type {
@@ -894,11 +912,11 @@ export function expressions(ctx: Context) {
   }
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
-  // thread that made it, or a raw pointer, which nothing checks.
+  // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
   function unsent(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    if (t.kind === "ref" || t.kind === "pointer") return t;
-    const parts = t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
+    if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell")) return t;
+    const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
       : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
       const found = unsent(part);

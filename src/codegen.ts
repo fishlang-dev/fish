@@ -351,7 +351,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A new Atomic, Cell or Lock: what it holds, a boolean widened to a byte in an Atomic, and a
   // Lock's word unlocked.
   function interiorNew(e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
-    const v = value(e.args![0]!);
+    const v = owned(e.args![0]!);
     const result = temp();
     if (t.which === "Lock") emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(t.of)} poison }, ${llvm(t.of)} ${v}, 1`);
     else if (llvm(t) !== llvm(t.of)) emit(`${result} = zext i1 ${v} to i8`);
@@ -363,6 +363,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function atomicCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
     const t = referent(valueType(callee.object)) as InteriorType;
     const at = receiver(callee.object);
+    if (t.which === "Cell") return cellCall(e, callee, t, at);
     const ty = llvm(t);
     const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
     const byte = ty !== llvm(t.of);
@@ -396,6 +397,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const narrow = temp();
     emit(`${narrow} = trunc i8 ${result} to i1`);
     return narrow;
+  }
+
+  // A Cell's method: a plain load or store where it lives, which only one thread can reach.
+  function cellCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, at: string): string | undefined {
+    const ty = llvm(t.of);
+    const old = temp();
+    emit(`${old} = load ${ty}, ptr ${at}`);
+    if (callee.name === "get") return copied(old, t.of);
+    emit(`store ${ty} ${owned(e.args[0]!)}, ptr ${at}`);
+    if (callee.name === "replace") return old;
+    dispose(old, t.of);
+    return undefined;
   }
 
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
@@ -1111,12 +1124,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
     if (type.kind === "array") return true;
+    if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
 
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, number][] {
+    // A Lock is its word, then what it holds.
+    if (type.kind === "interior") return type.which === "Lock" ? [[type.of, 1]] : [];
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
@@ -1124,6 +1140,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A copy of a value, holding its own reference to each string in it.
   function copied(v: string, type: Type): string {
+    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return copied(v, type.of);
     if (!needsDrop(type)) return v;
     if (type === "string") {
       emit(`call void @fsh_rt_str_retain(ptr ${v})`);
@@ -1140,6 +1157,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
+    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return dispose(v, type.of);
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
     if (typeof type !== "string" && type.kind === "handle") return emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
