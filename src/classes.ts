@@ -16,6 +16,8 @@ export type Body = Span & {
   throws?: TypeNode;
   // Whether it is a `function*`, whose call makes a generator.
   generator?: boolean;
+  // Whether it is a C function a `declare function` names, which has no body here.
+  foreign?: boolean;
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.

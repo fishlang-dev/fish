@@ -156,8 +156,8 @@ export function expressions(ctx: Context) {
   }
 
   // Refuses an operation outside \`unsafe\`.
-  function needsUnsafe(what: string, at: Span) {
-    if (unsafeDepth === 0) throw new CompileError(`${what} can only happen inside 'unsafe { }': the compiler can't check what a raw pointer points to, so you vouch for it there`, at.start, at.end);
+  function needsUnsafe(what: string, at: Span, why = "the compiler can't check what a raw pointer points to") {
+    if (unsafeDepth === 0) throw new CompileError(`${what} can only happen inside 'unsafe { }': ${why}, so you vouch for it there`, at.start, at.end);
   }
 
   // Literals too large for an i64 that nothing gave a wider type.
@@ -679,6 +679,7 @@ export function expressions(ctx: Context) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
+    if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
     expectFrom(target, e.args);
     const argTypes = e.args.map(value);
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);

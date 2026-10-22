@@ -15,6 +15,7 @@ import { parse } from "../src/parser.ts";
 //   // mode: release    build with --release
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
+//   // link: <name>     link the C library <name>, as `--link <name>` does
 const dir = join(import.meta.dir, "programs");
 const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
 
@@ -28,10 +29,11 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     const failures = [...src.matchAll(/\/\/ fails: (.*)/g)].map((m) => m[1]!);
     const out = join(tmp, name.replace(/\.fsh$/, ""));
     const parseOnly = src.includes("// mode: parse");
+    const links = [...src.matchAll(/\/\/ link: (.*)/g)].map((m) => m[1]!);
 
     try {
       if (parseOnly) parse(src);
-      else build(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind");
+      else build(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
     } catch (e) {
       if (!(e instanceof CompileError) || errors.length === 0) throw e;
       const message = formatError(e, name, src);

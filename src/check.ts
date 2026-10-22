@@ -80,6 +80,8 @@ export type Instance = {
   moved?: Set<Local>;
   // A closure's own type.
   closure?: ClosureType;
+  // A C function's parameter types, for its declaration.
+  signature?: Type[];
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
@@ -184,6 +186,11 @@ export function check(program: Stmt[]): Checked {
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
       else classes.set(s.name, declareClass(node));
+      continue;
+    }
+    // `declare function f(...): T;` names a C function, called inside `unsafe`.
+    if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
+      funcs.push(Object.assign({ ...s.body, body: [] }, { foreign: true }));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -385,6 +392,26 @@ export function check(program: Stmt[]): Checked {
     return instanceOf(body, new Map([...body.scope!, ...implicit]));
   }
 
+  // A C function's signature, which must cross to C as it is: numbers, booleans and raw
+  // pointers, with `void` for no result.
+  function foreignSignature(instance: Instance) {
+    const f = instance.body;
+    if (f.typeParams?.length) throw unsupported("generic C functions", f);
+    if (f.throws) throw new CompileError("a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
+    if (!f.returnType) throw new CompileError("a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
+    const crosses = (t: Type) => isNumeric(t) || t === "boolean" || (typeof t !== "string" && t.kind === "pointer");
+    const params = paramTypes(instance, scopeOf(instance));
+    f.params.forEach((p, i) => {
+      if (p.rest || p.optional || p.default) throw unsupported("rest, optional and default parameters on C functions", p);
+      if (!crosses(params[i]!)) throw new CompileError(`a C function's parameter can't be a '${show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
+    });
+    instance.signature = params;
+    const returns = resolveType(f.returnType);
+    if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
+    instance.returns = returns;
+    done.add(instance);
+  }
+
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
   function resultOf(instance: Instance, at: Span): Type {
@@ -460,6 +487,7 @@ export function check(program: Stmt[]): Checked {
 
   function checkInstance(instance: Instance, outer?: Outer) {
     const f = instance.body;
+    if (f.foreign) return foreignSignature(instance);
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     // A closure returns the number type the function type it meets returns, so its literals

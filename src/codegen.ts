@@ -41,7 +41,13 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 
 // An instance's name in the IR. A generic class's instance is named by its type arguments,
 // which may hold quotes, so those are escaped as LLVM spells them.
-const symbol = (i: Instance) => `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`;
+const symbol = (i: Instance) => (i.body.foreign ? `@${i.body.name}` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
+
+// The C functions the runtime prelude already declares, which a `declare function` reuses.
+const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
+
+// How a value of `type` crosses to C: a boolean is a byte holding 0 or 1, passed zero-extended.
+const crossing = (type: Type) => (type === "boolean" ? "i1 zeroext" : llvm(type));
 
 export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort" };
 
@@ -107,6 +113,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
 
   for (const instance of instances) {
+    // A C function is declared under its own name, unless the runtime already declares it.
+    if (instance.body.foreign) {
+      const returns = instance.returns === "boolean" ? "zeroext i1" : llvm(instance.returns);
+      if (!DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
+      continue;
+    }
     current = instance;
     ({ types, locals, calls, setters, coercions, jumps } = instance);
     const f = instance.body;
@@ -1620,7 +1632,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void): string | undefined {
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    const call = `call ${resultType(target)} ${symbol(target)}(${values.join(", ")})`;
+    // A boolean crosses to C zero-extended, both ways.
+    const passed = target.body.foreign ? values.map((v) => v.replace(/^i1 /, "i1 zeroext ")) : values;
+    const call = `call ${target.body.foreign && type === "boolean" ? "zeroext i1" : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, after);
       after?.();
