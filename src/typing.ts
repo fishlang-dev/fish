@@ -103,10 +103,10 @@ export function range(t: Integer): [bigint, bigint] {
 // anywhere, and a union drops it.
 export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType;
 
-// A generator: everything its body keeps between `next()` calls, the type of what it yields,
-// and the frame its state lives in, filled once the body is checked. One per generator
-// instance, so `===` is nominal identity.
-export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; concrete: boolean };
+// A generator: what it yields, its parameters, which say what it borrows, and the frame its
+// state lives in, filled once the body is checked. It has no properties, so `fields` stays
+// empty. One per generator instance, so `===` is nominal identity.
+export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -128,7 +128,7 @@ export function interfaceType(name: string): InterfaceType {
 }
 
 export function generatorType(name: string, concrete: boolean): GeneratorType {
-  const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], concrete };
+  const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete };
   keys.set(t, `generator ${declared++}`);
   return t;
 }
@@ -299,7 +299,8 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "array") return holdsMut(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
-  return (t.kind === "object" || t.kind === "closure" || t.kind === "generator") && t.fields.some((f) => holdsMut(f.type));
+  if (t.kind === "generator") return t.params.some((f) => holdsMut(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
 
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
@@ -312,7 +313,9 @@ export function holdsRef(t: Type): boolean {
   if (t.kind === "array") return holdsRef(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsRef(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
-  return (t.kind === "object" || t.kind === "closure" || t.kind === "generator") && t.fields.some((f) => holdsRef(f.type));
+  // A generator borrows what its parameters do; its frame's own references point into itself.
+  if (t.kind === "generator") return t.params.some((f) => holdsRef(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type

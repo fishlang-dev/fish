@@ -9,4 +9,4 @@ function* g(): Generator<i64> {
 function main() {
   const it = g();
 }
-// error: 'yield' inside 'finally' blocks are not supported yet
+// error: 'yield' statements in a 'try' with a 'finally' are not supported yet

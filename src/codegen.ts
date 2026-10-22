@@ -430,7 +430,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         // `yield` and go on in a later call.
         const [held, counter] = [loopSlot(s, 0, ARRAY), loopSlot(s, 1, "i64")];
         // In a generator, the frame says whether the loop owns its array.
-        const kept = resuming && resuming.type.fields[current.frame!.loops.get(s)!]!.type;
+        const kept = resuming && resuming.type.frame[current.frame!.loops.get(s)!]!.type;
         if (kept ? typeof kept !== "string" && kept.kind === "array" : fresh(s.right)) {
           own(held, type);
           emit(`store ${ARRAY} ${owned(s.right)}, ptr ${held}`);
@@ -958,7 +958,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   function parts(type: Exclude<Type, string>): [Type, number][] {
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
-    return [...base, ...type.fields.map((f, i): [Type, number] => [f.type, i + base.length])];
+    return [...base, ...(type.kind === "generator" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
   }
 
   // A copy of a value, holding its own reference to each string in it.

@@ -146,7 +146,7 @@ function frameOf(instance: Instance, generator: GeneratorType) {
     Object.values(node).forEach(visit);
   };
   visit(instance.body.body);
-  generator.fields = fields;
+  generator.frame = fields;
   instance.frame = { locals, loops };
 }
 
@@ -410,6 +410,7 @@ export function check(program: Stmt[]): Checked {
     const declared = returnTypeOf(f, instance.bindings);
     if (declared && !isInterface(declared)) return declared;
     if (inProgress.has(instance)) {
+      if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     checkBody(instance);
@@ -472,11 +473,13 @@ export function check(program: Stmt[]): Checked {
     if (generator && declared && !yielded) throw new CompileError("a generator function's return type is 'Generator<T>', the type of what it yields", f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
     if (generator && f.throws) throw unsupported("generators that throw", f.throws);
+    if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
     let inferred: Type | undefined;
-    // How many `finally` blocks enclose the code being checked.
+    // How many statements with a `finally` enclose the code being checked: a generator dropped
+    // at a `yield` there would never run the `finally`.
     let finalizing = 0;
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
@@ -611,7 +614,7 @@ export function check(program: Stmt[]): Checked {
       if (!yielded) throw new CompileError("this generator never yields, so what it gives can't be told; declare it as 'Generator<T>'", (f.returnType ?? f).start, (f.returnType ?? f).end);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);
       generator.yields = laid(yielded);
-      generator.fields = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+      generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
     }
     const type = generator ?? declared ?? inferred ?? "void";
     if (f.closure && holdsRef(type)) throw unsupported("closures returning references", f.returnType ?? f.closure.value ?? f);
@@ -910,12 +913,13 @@ export function check(program: Stmt[]): Checked {
         case "try": {
           // Without a catch, what the block raises goes on out, after the `finally`.
           if (!s.handler) {
-            scoped(s.block);
             finalizing++;
+            scoped(s.block);
             scoped(s.finalizer!);
             finalizing--;
             return;
           }
+          if (s.finalizer) finalizing++;
           if (s.paramType) throw new CompileError("a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
           // What the block raises goes to the catch, which takes the union of it.
           handlers.push([]);
@@ -933,7 +937,6 @@ export function check(program: Stmt[]): Checked {
           statements(s.handler!);
           scopes.pop();
           if (s.finalizer) {
-            finalizing++;
             scoped(s.finalizer);
             finalizing--;
           }
@@ -981,12 +984,13 @@ export function check(program: Stmt[]): Checked {
     function yielding(e: Extract<Expr, { kind: "yield" }>) {
       if (!generator) throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
       if (targets.some((t) => t.kind === "arm")) throw unsupported("'yield' inside match arms", e);
-      if (finalizing > 0) throw unsupported("'yield' inside 'finally' blocks", e);
+      if (finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
       if (e.delegate) throw unsupported("'yield*'", e);
       if (!e.value) throw new CompileError("a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
       if (yielded) expect(e.value, yielded);
       const t = value(e.value);
       if (!yielded) yielded = widenLet(t);
+      if (holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
       coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's 'Generator<${show(yielded)}>'`);
     }
 

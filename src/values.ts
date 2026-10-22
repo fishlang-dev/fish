@@ -799,6 +799,8 @@ export function expressions(ctx: Context) {
   // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
   function copies(t: Type): boolean {
     if (typeof t === "string" || t.kind === "literal") return true;
+    // A generator's frame may hold a view into what it iterates, which a copy would share.
+    if (t.kind === "generator") return false;
     if (t.kind === "class") return !classOf(t).methods.has("clone");
     const bound = t.kind === "param" ? t.bound : t.kind === "interface" ? t : undefined;
     return !bound || bound.kind !== "interface" || !bound.methods.some((m) => m.name === "clone");

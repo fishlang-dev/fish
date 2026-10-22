@@ -196,6 +196,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const taken = types.get(s.right);
         if (taken !== undefined && !isRef(taken) && yieldsOf(taken) !== undefined) {
           expr(s.right, (p) => `'${p}' moved here: the 'for...of' loop takes the generator over, as JavaScript closes it when the loop ends; call 'next()' instead to keep it`);
+          // What the generator borrows stays lent until the loop ends.
+          const holder = loopHolders.get(s) ?? { name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 };
+          loopHolders.set(s, holder);
+          last.set(holder, s.end);
+          if (key(s.right) !== undefined) inherit(holder, s.right);
+          else hold(holder, s.right);
           // Each pass gives the variable a new value, which it owns.
           const each = locals.get(s.left as Stmt)!;
           loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => {
@@ -1094,7 +1100,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function stillBorrowed(e: Expr) {
     if (!state) return;
     for (const loan of state.loans.values()) {
-      if (loan.loop || loan.guard || !live(loan, e.start)) continue;
+      if (loan.loop || loan.guard || !live(loan, e.end)) continue;
       const [root, ...path] = loan.place.split(".");
       const local = byId.get(Number(root));
       if (!local || isRef(local.type) || path.includes("[]")) continue;
