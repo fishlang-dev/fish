@@ -4,7 +4,7 @@ import type { Expr, Span, Stmt, TypeNode } from "./parser.ts";
 // The forms that parse but have no meaning yet, and the errors that reject them.
 
 // What each expression form is called when the checker rejects it.
-export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull" | "throw" | "template" | "array" | "match" | "pipe">, string> = {
+export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "string" | "ident" | "member" | "call" | "unary" | "binary" | "assign" | "update" | "conditional" | "object" | "this" | "new" | "arrow" | "float" | "as" | "null" | "nonNull" | "throw" | "template" | "array" | "match" | "pipe" | "yield">, string> = {
   bigint: "bigint literals",
   super: "'super' expressions",
   regex: "regular expressions",
@@ -20,7 +20,6 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
   topic: "topic references",
   comptime: "comptime expressions",
   sequence: "comma expressions",
-  yield: "'yield' expressions",
   satisfies: "'satisfies' expressions",
   assertion: "type assertions",
   tagged: "tagged templates",

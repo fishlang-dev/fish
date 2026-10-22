@@ -528,6 +528,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return expr(e.expr, consume);
       case "as":
         return expr(e.expr, consume, discarded);
+      // A yielded value is handed to whoever called `next()`.
+      case "yield":
+        if (e.value) expr(e.value, (p) => `'${p}' moved here: yielding it hands it on; use '${p}.clone()' to keep a copy`);
+        return;
       // A pipe over a value hands it to the topic, new each time the pipe runs.
       // Like a `let`, the topic holds what its value borrows, until the pipe ends.
       case "pipe": {
@@ -1233,6 +1237,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(e.right);
       case "array":
         for (const x of e.elements) if (x) expr(x);
+        return;
+      case "yield":
+        if (e.value) expr(e.value);
         return;
       // A pipe's topic is declared where the pipe runs, as a `let` is.
       case "pipe":

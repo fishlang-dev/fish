@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, holdsRef, isCopy, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, generatorElement, generatorType, holdsRef, isCopy, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions, substituted } from "./values.ts";
@@ -80,6 +80,8 @@ export type Instance = {
   moved?: Set<Local>;
   // A closure's own type.
   closure?: ClosureType;
+  // A generator's own type, which calling it gives.
+  generator?: GeneratorType;
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -150,7 +152,6 @@ export function check(program: Stmt[]): Checked {
   const byName = new Map<string, Func>();
   for (const f of funcs) {
     if (f.async) throw unsupported("async functions", f);
-    if (f.generator) throw unsupported("generator functions", f);
     if (byName.has(f.name) || classes.has(f.name) || templates.has(f.name) || enums.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
@@ -418,10 +419,18 @@ export function check(program: Stmt[]): Checked {
     const given = f.closure?.expected?.returns;
     let declared = f.closure ? (f.returnType ? resolveType(f.returnType) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
     if (typeof declared !== "string" && declared?.kind === "function") throw unsupported("functions returned from functions", f.returnType!);
+    // A generator's declared `Generator<T>` says what it yields; calling it gives its own type.
+    const generator = f.generator ? (instance.generator ??= generatorType(f.name, instance.concrete)) : undefined;
+    let yielded = generator && declared ? generatorElement(declared) : undefined;
+    if (generator && declared && !yielded) throw new CompileError("a generator function's return type is 'Generator<T>', the type of what it yields", f.returnType!.start, f.returnType!.end);
+    if (generator) declared = undefined;
+    if (generator && f.throws) throw unsupported("generators that throw", f.throws);
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
     let inferred: Type | undefined;
+    // How many `finally` blocks enclose the code being checked.
+    let finalizing = 0;
     const scopes: Map<string, Local>[] = [new Map()];
     const targets: Target[] = [];
     // What the conditions guarding the code being checked prove, innermost last. A `let`
@@ -495,6 +504,7 @@ export function check(program: Stmt[]): Checked {
       thrown,
       noteThis,
       closing: f.closure !== undefined,
+      generator: f.generator === true,
       changesCapture,
       reachable: (l) => !caseOnly.has(l),
       rewritten,
@@ -550,13 +560,19 @@ export function check(program: Stmt[]): Checked {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
-    const type = declared ?? inferred ?? "void";
+    if (generator) {
+      if (!yielded) throw new CompileError("this generator never yields, so what it gives can't be told; declare it as 'Generator<T>'", (f.returnType ?? f).start, (f.returnType ?? f).end);
+      const laid = (t: Type) => (instance.concrete ? lower(t) : t);
+      generator.yields = laid(yielded);
+      generator.fields = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+    }
+    const type = generator ?? declared ?? inferred ?? "void";
     if (f.closure && holdsRef(type)) throw unsupported("closures returning references", f.returnType ?? f.closure.value ?? f);
     if (!f.closure) lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
     const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
     const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
-    if (type !== "void" && !alwaysReturns(f.body, broken, continued)) {
+    if (type !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
@@ -675,6 +691,10 @@ export function check(program: Stmt[]): Checked {
       switch (s.kind) {
         case "expr":
           whole = s.expr;
+          if (s.expr.kind === "yield") {
+            yielding(s.expr);
+            return;
+          }
           effect(s.expr);
           return;
         case "let": {
@@ -748,7 +768,18 @@ export function check(program: Stmt[]): Checked {
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
           if (object === "string" || (typeof object !== "string" && object.kind === "literal" && typeof object.value === "string")) throw unsupported("'for...of' loops over strings", s.right);
-          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, not '${show(object)}'`, s.right.start, s.right.end);
+          // A generator gives each value it yields, owned. Like JavaScript closing it when the
+          // loop ends, the loop takes an owned generator over; one behind a `Mut` is lent.
+          if (typeof object !== "string" && object.kind === "generator") {
+            if (isRef(through) && !through.mutable) throw new CompileError("a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+            if (object !== through) coercions.set(s.right, object);
+            scopes.push(new Map());
+            declare(d.target.name, object.yields, left.keyword === "let", false, left);
+            within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+            scopes.pop();
+            return;
+          }
+          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
           declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);
@@ -822,7 +853,9 @@ export function check(program: Stmt[]): Checked {
           // Without a catch, what the block raises goes on out, after the `finally`.
           if (!s.handler) {
             scoped(s.block);
+            finalizing++;
             scoped(s.finalizer!);
+            finalizing--;
             return;
           }
           if (s.paramType) throw new CompileError("a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
@@ -841,7 +874,11 @@ export function check(program: Stmt[]): Checked {
           }
           statements(s.handler!);
           scopes.pop();
-          if (s.finalizer) scoped(s.finalizer);
+          if (s.finalizer) {
+            finalizing++;
+            scoped(s.finalizer);
+            finalizing--;
+          }
           return;
         }
         case "return": {
@@ -855,6 +892,10 @@ export function check(program: Stmt[]): Checked {
               throw new CompileError("this match's value isn't used, so a 'return' in its arm can't give one, and it never leaves the function; return after the match instead", s.start, s.end);
             }
             if (s.value) arm.gives!.push([s.value, arm.wanted ? value(s.value) : result(s.value)]);
+            return;
+          }
+          if (generator) {
+            if (s.value) throw new CompileError("a generator can't return a value yet; 'return;' ends it", s.value.start, s.value.end);
             return;
           }
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
@@ -877,6 +918,20 @@ export function check(program: Stmt[]): Checked {
 
     // The `this.x` a statement assigns, when it is a plain assignment to one of the class's
     // own fields. A setter is a method, which can't run until every field is set.
+    // `yield v;`: the generator gives `v` and stops until `next()` is called again. It runs as
+    // a statement of its own, so nothing the statement made is pending across it.
+    function yielding(e: Extract<Expr, { kind: "yield" }>) {
+      if (!generator) throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
+      if (targets.some((t) => t.kind === "arm")) throw unsupported("'yield' inside match arms", e);
+      if (finalizing > 0) throw unsupported("'yield' inside 'finally' blocks", e);
+      if (e.delegate) throw unsupported("'yield*'", e);
+      if (!e.value) throw new CompileError("a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
+      if (yielded) expect(e.value, yielded);
+      const t = value(e.value);
+      if (!yielded) yielded = widenLet(t);
+      coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's 'Generator<${show(yielded)}>'`);
+    }
+
     function fieldAssignment(s: Stmt): Extract<Expr, { kind: "member" }> | undefined {
       if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
       const target = s.expr.target;

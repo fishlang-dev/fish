@@ -14,6 +14,8 @@ export type Body = Span & {
   returnType: TypeNode | undefined;
   // The error type a `throws` clause declares.
   throws?: TypeNode;
+  // Whether it is a `function*`, whose call makes a generator.
+  generator?: boolean;
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.

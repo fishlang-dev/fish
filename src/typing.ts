@@ -101,7 +101,12 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType;
+
+// A generator: everything its body keeps between `next()` calls, the type of what it yields,
+// and the frame its state lives in, filled once the body is checked. One per generator
+// instance, so `===` is nominal identity.
+export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; concrete: boolean };
 
 const interned = new Map<string, ObjectType>();
 const literals = new Map<string, LiteralType>();
@@ -120,6 +125,37 @@ export function interfaceType(name: string): InterfaceType {
   const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
   keys.set(t, `interface ${declared++}`);
   return t;
+}
+
+export function generatorType(name: string, concrete: boolean): GeneratorType {
+  const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], concrete };
+  keys.set(t, `generator ${declared++}`);
+  return t;
+}
+
+// What `next()` gives: the next value, or that the generator has finished.
+export function nextResult(t: Type): Type {
+  return unionType([objectType([{ name: "done", type: literalType(false) }, { name: "value", type: t }]), objectType([{ name: "done", type: literalType(true) }])]);
+}
+
+const generators = new Map<string, InterfaceType>();
+const elements = new WeakMap<InterfaceType, Type>();
+
+// `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
+export function generatorInterface(t: Type): InterfaceType {
+  let found = generators.get(keyOf(t));
+  if (!found) {
+    found = interfaceType(`Generator<${show(t)}>`);
+    found.methods.push({ name: "next", params: [], returns: nextResult(t) });
+    generators.set(keyOf(t), found);
+    elements.set(found, t);
+  }
+  return found;
+}
+
+// What a `Generator<T>` yields, when the interface is one.
+export function generatorElement(t: Type): Type | undefined {
+  return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;
 }
 
 export function functionType(names: string[], params: Type[], returns: Type): FunctionType {
@@ -255,7 +291,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "array") return holdsMut(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
+  return (t.kind === "object" || t.kind === "closure" || t.kind === "generator") && t.fields.some((f) => holdsMut(f.type));
 }
 
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
@@ -268,7 +304,7 @@ export function holdsRef(t: Type): boolean {
   if (t.kind === "array") return holdsRef(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsRef(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
+  return (t.kind === "object" || t.kind === "closure" || t.kind === "generator") && t.fields.some((f) => holdsRef(f.type));
 }
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
@@ -289,7 +325,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator") return t;
   if (t.kind === "param") return t.concrete ?? t;
   let found = lowered.get(t);
   if (!found) {
@@ -443,6 +479,7 @@ export function show(t: Type): string {
     const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure");
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
+  if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

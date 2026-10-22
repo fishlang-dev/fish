@@ -220,7 +220,7 @@ for (const [stmt, what] of STATEMENTS) {
 }
 
 // Declarations that parse but have no meaning yet, at the top level.
-for (const [decl, what] of [["async function f() {}", "async functions"], ["function* f() {}", "generator functions"]]) {
+for (const [decl, what] of [["async function f() {}", "async functions"]]) {
   test(decl!, () => {
     const src = `${decl}\nfunction main() {}`;
     expect(() => check(parse(src))).toThrow(expect.objectContaining({

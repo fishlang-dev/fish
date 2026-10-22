@@ -6,8 +6,8 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
-import type { Access, ArrayType, LiteralType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, arrayType, baseOf, nextResult, unionType, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import type { Access, ArrayType, GeneratorType, LiteralType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -96,6 +96,8 @@ export type Context = {
   // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
   closing: boolean;
+  // Whether the body is a generator's.
+  generator: boolean;
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
   // Records a whole write through a narrowed mutable reference that may change its member.
   rewritten(l: Local, at: Expr): void;
@@ -591,6 +593,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "generator") return generatorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -713,6 +716,18 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
     return { type: "void", what: "'push'" };
+  }
+
+  // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
+  function generatorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, generator: GeneratorType): { type: Type; what: string } {
+    if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet; 'next' is the one they have`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
+    if (e.args.length > 0) throw unsupported("values sent into 'next'", e.args[0]!);
+    const held = types.get(callee.object)!;
+    if (isRefType(held)) coercions.set(callee.object, generator);
+    if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
+    changeable(callee.object, "advance");
+    return { type: nextResult(generator.yields), what: "'next'" };
   }
 
   // Whether an expression is an index into an array, a place inside it.
@@ -1177,6 +1192,9 @@ export function expressions(ctx: Context) {
         return match(e, true);
       case "pipe":
         return pipe(e, true);
+      case "yield":
+        if (ctx.generator) throw unsupported("'yield' inside expressions", e);
+        throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
       case "unary": {
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);
