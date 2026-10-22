@@ -3,7 +3,7 @@ import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate, sourceOf } from "./diag.ts";
-import { comptimeValue, type Value } from "./comptime.ts";
+import { comptimeValue, memberOf, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
@@ -1945,6 +1945,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "new":
       case "object":
       case "arrow":
+      case "comptime":
       case "template":
       case "conditional":
       case "array":
@@ -3564,12 +3565,42 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
-  // A value computed while compiling, as a constant of its type.
+  // A value computed while compiling, built as a value of its type: scalars and strings as
+  // constants, aggregates assembled from their baked parts.
   function bake(v: Value, type: Type): string {
+    if (typeof type !== "string" && type.kind === "union") {
+      const member = memberOf(v, type);
+      return convert(bake(v, member), member, type);
+    }
+    // A literal type, or the empty value, takes no space.
+    if ((typeof type !== "string" && type.kind === "literal") || v === null) return "zeroinitializer";
     if (typeof v === "string") return text(v);
     if (typeof v === "boolean") return String(v);
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
     if (typeof v === "bigint") return String(v);
+    if (v && typeof type !== "string" && v.kind === "array" && type.kind === "array") {
+      const n = String(v.items.length);
+      const [data, t] = [temp(), llvm(type.element)];
+      emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, n)})`);
+      v.items.forEach((item, i) => {
+        const at = temp();
+        emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+        emit(`store ${t} ${bake(item, type.element)}, ptr ${at}`);
+      });
+      return built(data, n, n);
+    }
+    if (v && typeof type !== "string" && (type.kind === "object" || type.kind === "class" || type.kind === "variant")) {
+      const parts: [Type, Value][] = [];
+      if (type.kind === "class" && type.base) parts.push([type.base, v]);
+      type.fields.forEach((f, i) => parts.push([f.type, v.kind === "variant" ? v.args[i] : v.kind === "record" ? v.fields.get(f.name) : undefined]));
+      let made = "zeroinitializer";
+      parts.forEach(([part, x], i) => {
+        const next = temp();
+        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(part)} ${bake(x, part)}, ${i}`);
+        made = next;
+      });
+      return made;
+    }
     throw new Error(`internal error: no baked form for a comptime value of type ${keyOf(type)}`);
   }
 

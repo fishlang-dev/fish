@@ -1,14 +1,22 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, Span, Stmt } from "./parser.ts";
-import { INTEGERS, isFloat, isInteger, show, type Integer, type Type } from "./typing.ts";
+import type { Expr, Pattern, Span, Stmt } from "./parser.ts";
+import { fits, INTEGERS, isFloat, isInteger, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
 // program, or wait, is refused at the comptime site.
 
-// A value while compiling: an integer as a bigint, a float as a number, a boolean or a string.
-export type Value = bigint | number | boolean | string | undefined;
+// An object or a class instance, its fields by name (a base's among them).
+export type Record = { kind: "record"; type: ObjectType | ClassType; fields: Map<string, Value> };
+export type Items = { kind: "array"; items: Value[] };
+// A data-carrying enum's member and its payload.
+export type Variant = { kind: "variant"; type: VariantType; args: Value[] };
+
+// A value while compiling: an integer as a bigint, a float as a number, a boolean, a string,
+// null for an empty Option, or an aggregate. Objects are values in Fish, moved rather than shared,
+// so a JS reference stands for one.
+export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant;
 
 // The most steps one evaluation may take, and the deepest its calls may nest.
 const STEPS = 10_000_000;
@@ -26,7 +34,7 @@ class Stop {
   }
 }
 
-// A `return`, unwinding to its function's call.
+// A `return`, unwinding to its function's call or to its match arm.
 class Return {
   value: Value;
   constructor(value: Value) {
@@ -44,7 +52,17 @@ class Jump {
   }
 }
 
-type Frame = { instance: Instance; locals: Map<number, Value> };
+// An error thrown and not yet caught.
+class Thrown {
+  value: Value;
+  at: Span;
+  constructor(value: Value, at: Span) {
+    this.value = value;
+    this.at = at;
+  }
+}
+
+type Frame = { instance: Instance; locals: Map<number, Value>; self: Record | undefined };
 
 // The value of `comptime expr`, written in `instance`; a panic or refusal is a compile error at
 // the comptime expression, noting where inside it happened.
@@ -52,12 +70,13 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   let steps = 0;
   let depth = 0;
   try {
-    return expr({ instance, locals: new Map() }, site.expr);
+    return expr({ instance, locals: new Map(), self: undefined }, site.expr);
   } catch (e) {
-    if (!(e instanceof Stop)) throw e;
-    const what = e.panic ? `this comptime code panicked: ${e.message}` : e.message;
-    const inside = e.at.start !== site.start || e.at.end !== site.end;
-    throw new CompileError(what, site.start, site.end, inside ? { message: e.panic ? "it panicked here" : "here", start: e.at.start, end: e.at.end } : undefined);
+    const stop = e instanceof Thrown ? new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false) : e;
+    if (!(stop instanceof Stop)) throw e;
+    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
+    const inside = stop.at.start !== site.start || stop.at.end !== site.end;
+    throw new CompileError(what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
   }
 
   function step(at: Span) {
@@ -68,15 +87,20 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
     throw new Stop(`${what} can't run while compiling: comptime code only computes values`, at, false);
   }
 
+  function panic(message: string, at: Span): never {
+    throw new Stop(message, at, true);
+  }
+
   function typeOf(f: Frame, e: Expr): Type {
     return f.instance.coercions.get(e) ?? f.instance.types.get(e)!;
   }
 
-  function call(callee: Instance, args: Value[], at: Span): Value {
+  function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     if (callee.body.async) refuse("an async function", at);
-    const frame: Frame = { instance: callee, locals: new Map() };
-    callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!.id, args[i]));
+    if (callee.body.foreign) refuse(`the C function '${callee.body.name}'`, at);
+    const frame: Frame = { instance: callee, locals: new Map(), self };
+    callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!.id, args[i] ?? null));
     try {
       statements(frame, callee.body.body ?? []);
       return undefined;
@@ -98,8 +122,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case "expr":
         expr(f, s.expr);
         return;
-      case "let":
-      {
+      case "let": {
         // The checker gives a declaration one name, its local keyed by the statement.
         const local = f.instance.locals.get(s);
         const d = s.declarations[0]!;
@@ -114,10 +137,10 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
         else if (s.else) statements(f, s.else);
         return;
       case "block":
-      case "unsafe":
-        if (s.kind === "unsafe") refuse("'unsafe' code", s);
         statements(f, s.body);
         return;
+      case "unsafe":
+        return refuse("'unsafe' code", s);
       case "while":
         while (expr(f, s.cond)) if (!loopBody(f, s, s.body)) break;
         return;
@@ -131,6 +154,28 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
           if (s.update) expr(f, s.update);
         }
         return;
+      case "forOf": {
+        const over = expr(f, s.right);
+        const local = f.instance.locals.get(s.left as Stmt)!;
+        const items = typeof over === "string" ? [...over] : over && typeof over === "object" && over.kind === "array" ? over.items : refuse("looping over this", s.right);
+        for (const item of [...items]) {
+          f.locals.set(local.id, item);
+          if (!loopBody(f, s, s.body)) break;
+        }
+        return;
+      }
+      case "switch": {
+        const v = expr(f, s.discriminant);
+        let at = s.cases.findIndex((c) => c.test !== undefined && same(v, expr(f, c.test)));
+        if (at < 0) at = s.cases.findIndex((c) => c.test === undefined);
+        if (at < 0) return;
+        try {
+          for (const c of s.cases.slice(at)) statements(f, c.body);
+        } catch (e) {
+          if (!(e instanceof Jump) || e.target !== s) throw e;
+        }
+        return;
+      }
       case "break":
       case "continue":
         throw new Jump(f.instance.jumps.get(s)!, s.kind === "continue");
@@ -141,10 +186,26 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
           if (!(e instanceof Jump) || e.target !== s) throw e;
         }
         return;
+      case "throw":
+        throw new Thrown(expr(f, s.value), s);
+      case "try":
+        try {
+          try {
+            statements(f, s.block);
+          } catch (e) {
+            if (!(e instanceof Thrown) || !s.handler) throw e;
+            const local = s.param ? f.instance.locals.get(s) : undefined;
+            if (local) f.locals.set(local.id, e.value);
+            statements(f, s.handler);
+          }
+        } finally {
+          if (s.finalizer) statements(f, s.finalizer);
+        }
+        return;
       case "empty":
         return;
       default:
-        refuse(`a '${s.kind}' statement`, s);
+        return refuse(`a '${s.kind}' statement`, s);
     }
   }
 
@@ -162,7 +223,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   function expr(f: Frame, e: Expr): Value {
     step(e);
     const v = raw(f, e);
-    // A literal meeting a float type, or a narrower declared type, is converted as it is at run time.
+    // A literal meeting a float type is converted as it is at run time.
     const to = f.instance.coercions.get(e);
     if (to !== undefined && typeof v === "bigint" && isFloat(to)) return fit(Number(v), to);
     return v;
@@ -179,6 +240,8 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
         return e.value;
       case "string":
         return e.value;
+      case "null":
+        return null;
       case "template": {
         let text = e.quasis[0] ?? "";
         e.exprs.forEach((x, i) => {
@@ -187,10 +250,14 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
         return text;
       }
       case "ident": {
+        const literal = constant(type);
+        if (literal !== undefined && !f.instance.locals.has(e)) return literal;
         const local = f.instance.locals.get(e);
         if (!local || !f.locals.has(local.id)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
         return f.locals.get(local.id);
       }
+      case "this":
+        return f.self ?? refuse("'this'", e);
       case "comptime":
         return expr(f, e.expr);
       case "conditional":
@@ -202,43 +269,102 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case "assign":
         return assign(f, e);
       case "update": {
-        const local = f.instance.locals.get(e.operand);
-        if (e.operand.kind !== "ident" || !local) return refuse("changing this", e);
-        const old = f.locals.get(local.id) as bigint | number;
+        const old = expr(f, e.operand) as bigint | number;
         const one = typeof old === "bigint" ? 1n : 1;
         const next = numeric(e.op === "++" ? "+" : "-", old, one, typeOf(f, e.operand), e);
-        f.locals.set(local.id, next);
+        store(f, e.operand, next);
         return e.prefix ? next : old;
       }
       case "as":
         return convert(expr(f, e.expr), type, e);
+      case "nonNull": {
+        const v = expr(f, e.expr);
+        if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
+        return v;
+      }
+      case "object": {
+        const fields = new Map<string, Value>();
+        for (const p of e.props) {
+          if (p.kind === "property" && typeof p.key === "string") fields.set(p.key, expr(f, p.value));
+          else if (p.kind === "shorthand") {
+            const local = f.instance.locals.get(p)!;
+            if (!f.locals.has(local.id)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
+            fields.set(p.name, f.locals.get(local.id));
+          } else return refuse("this property", p);
+        }
+        return { kind: "record", type: type as ObjectType, fields };
+      }
+      case "array":
+        return { kind: "array", items: e.elements.map((x) => (x ? expr(f, x) : refuse("a hole in an array", e))) };
+      case "new":
+        return construct(f, e, type);
       case "member":
-        if (e.name === "length" && typeof typeOf(f, e.object) === "string" && typeOf(f, e.object) === "string") return BigInt((expr(f, e.object) as string).length);
-        return refuse("reading this member", e);
+        return member(f, e, type);
       case "index": {
-        const s = expr(f, e.object);
+        const v = expr(f, e.object);
         const i = expr(f, e.index) as bigint;
-        if (typeof s !== "string") return refuse("indexing this", e);
-        if (i < 0n || i >= BigInt(s.length)) throw new Stop(`index out of bounds: the len is ${s.length} but the index is ${i}`, e, true);
-        return s[Number(i)];
+        const length = typeof v === "string" ? v.length : v && typeof v === "object" && v.kind === "array" ? v.items.length : refuse("indexing this", e);
+        if (i < 0n || i >= BigInt(length)) panic(`index out of bounds: the len is ${length} but the index is ${i}`, e);
+        return typeof v === "string" ? v[Number(i)] : (v as Items).items[Number(i)];
       }
       case "call":
-        return callExpr(f, e);
+        return callExpr(f, e, type);
+      case "match":
+        return match(f, e);
+      case "throw":
+        throw new Thrown(expr(f, e.value), e);
       default:
         return refuse(`a '${e.kind}' expression`, e);
     }
   }
 
-  function callExpr(f: Frame, e: Extract<Expr, { kind: "call" }>): Value {
+  function construct(f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
+    if (typeof type === "string" || type.kind !== "class") return refuse(`'new ${show(type)}'`, e);
+    const ctor = f.instance.calls.get(e)!;
+    const made: Record = { kind: "record", type, fields: new Map() };
+    call(ctor, (e.args ?? []).map((a) => expr(f, a)), made, e);
+    return made;
+  }
+
+  function member(f: Frame, e: Extract<Expr, { kind: "member" }>, type: Type): Value {
+    // An enum's member, as `Color.Red`, is known from its type alone.
+    const literal = constant(type);
+    if (literal !== undefined) return literal;
+    if (typeof type !== "string" && type.kind === "variant" && type.fields.length === 0 && enumName(e.object)) return { kind: "variant", type, args: [] };
+    const getter = f.instance.calls.get(e);
+    const object = expr(f, e.object);
+    if (getter) return call(getter, [], object as Record, e);
+    if (e.name === "length" && typeof object === "string") return BigInt(object.length);
+    if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
+    if (object && typeof object === "object" && object.kind === "record") return object.fields.get(e.name);
+    if (object === null && e.optional) return null;
+    return refuse(`reading '${e.name}' here`, e);
+  }
+
+  function callExpr(f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value {
     const callee = e.callee;
-    if (callee.kind === "member" && (callee.object.kind === "ident" && callee.object.name === "console")) refuse("printing", e);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") refuse("printing", e);
+    // A data-carrying enum's member, as `Shape.Circle(2)`.
+    if (type !== undefined && typeof type !== "string" && type.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
+      return { kind: "variant", type, args: e.args.map((a) => expr(f, a)) };
+    }
     const target = f.instance.calls.get(e);
     if (target) {
-      if (callee.kind === "member" && target.body.self && !target.body.self.constructor) refuse("calling a method", e);
-      return call(target, e.args.map((a) => expr(f, a)), e);
+      if (callee.kind === "super") return call(target, e.args.map((a) => expr(f, a)), f.self, e);
+      const self = callee.kind === "member" && target.body.self ? (expr(f, callee.object) as Record) : undefined;
+      return call(target, e.args.map((a) => expr(f, a)), self, e);
     }
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(expr(f, e.args[0]!));
-    if (callee.kind === "member" && typeOf(f, callee.object) === "string") return stringMethod(callee.name, expr(f, callee.object) as string, e.args.map((a) => expr(f, a)), e);
+    if (callee.kind === "member") {
+      const object = typeOf(f, callee.object);
+      if (object === "string") return stringMethod(callee.name, expr(f, callee.object) as string, e.args.map((a) => expr(f, a)), e);
+      const held = expr(f, callee.object);
+      if (callee.name === "clone") return cloned(held);
+      if (held && typeof held === "object" && held.kind === "array") {
+        if (callee.name === "push") return void held.items.push(expr(f, e.args[0]!));
+        if (callee.name === "pop") return held.items.length > 0 ? held.items.pop()! : null;
+      }
+    }
     return refuse(`'${callee.kind === "ident" ? callee.name : callee.kind === "member" ? callee.name : "this call"}'`, e);
   }
 
@@ -247,7 +373,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
     switch (name) {
       case "charCodeAt": {
         const i = args[0] as bigint;
-        if (i < 0n || i >= BigInt(s.length)) throw new Stop(`index out of bounds: the len is ${s.length} but the index is ${i}`, at, true);
+        if (i < 0n || i >= BigInt(s.length)) panic(`index out of bounds: the len is ${s.length} but the index is ${i}`, at);
         return BigInt(s.charCodeAt(Number(i)));
       }
       case "indexOf":
@@ -258,6 +384,10 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
         return s.startsWith(args[0] as string, args.length > 1 ? n(1) : undefined);
       case "endsWith":
         return s.endsWith(args[0] as string, args.length > 1 ? n(1) : undefined);
+      case "split": {
+        const parts = args.length === 0 || args[0] === null ? [s] : s.split(args[0] as string, args.length > 1 ? n(1) : undefined);
+        return { kind: "array", items: parts };
+      }
       case "trim":
         return s.trim();
       case "trimStart":
@@ -275,7 +405,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case "padEnd":
         return s.padEnd(n(0), args.length > 1 ? (args[1] as string) : undefined);
       case "repeat":
-        if ((args[0] as bigint) < 0n) throw new Stop("Invalid count value: " + String(args[0]), at, true);
+        if ((args[0] as bigint) < 0n) panic("Invalid count value: " + String(args[0]), at);
         return s.repeat(n(0));
       case "slice":
         return s.slice(n(0), args.length > 1 ? n(1) : undefined);
@@ -291,6 +421,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
     const v = expr(f, e.operand);
     const type = typeOf(f, e);
     if (e.op === "!") return !v;
+    if (e.op === "typeof") return typeofValue(v);
     if (e.op === "-") return typeof v === "number" ? fit(-v, type as "f32" | "f64") : checked(-(v as bigint), type as Integer, "negate", e);
     if (e.op === "~") return wrap(~(v as bigint), type as Integer);
     return refuse(`'${e.op}'`, e);
@@ -299,12 +430,20 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   function binary(f: Frame, e: Extract<Expr, { kind: "binary" }>): Value {
     if (e.op === "&&") return expr(f, e.left) ? expr(f, e.right) : false;
     if (e.op === "||") return expr(f, e.left) ? true : expr(f, e.right);
+    if (e.op === "??") {
+      const v = expr(f, e.left);
+      return v === null ? expr(f, e.right) : v;
+    }
+    if (e.op === "instanceof") {
+      const v = expr(f, e.left);
+      return v !== null && typeof v === "object" && v.kind === "record" && v.type === f.instance.types.get(e.right);
+    }
     const [a, b] = [expr(f, e.left), expr(f, e.right)];
     switch (e.op) {
       case "===":
-        return a === b;
+        return same(a, b);
       case "!==":
-        return a !== b;
+        return !same(a, b);
       case "<":
         return (a as number) < (b as number);
       case "<=":
@@ -319,25 +458,107 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   }
 
   function assign(f: Frame, e: Extract<Expr, { kind: "assign" }>): Value {
-    const local = f.instance.locals.get(e.target);
-    if (e.target.kind !== "ident" || !local) return refuse("assigning to this", e);
     let v = expr(f, e.value);
     if (e.op !== "=") {
       const op = e.op.slice(0, -1);
-      const old = f.locals.get(local.id);
+      const old = expr(f, e.target);
       if (op === "&&" || op === "||" || op === "??") return refuse(`'${e.op}'`, e);
       v = op === "+" && typeof old === "string" ? old + display(v) : numeric(op, old as bigint | number, v as bigint | number, typeOf(f, e.target), e);
     }
-    f.locals.set(local.id, v);
+    store(f, e.target, v);
     return v;
+  }
+
+  // Writes a value to a place: a variable, an object's field, or an array's element.
+  function store(f: Frame, target: Expr, v: Value) {
+    if (target.kind === "ident") {
+      const local = f.instance.locals.get(target);
+      if (!local || !f.locals.has(local.id)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't change it`, target, false);
+      f.locals.set(local.id, v);
+      return;
+    }
+    if (target.kind === "member" && f.instance.setters.has(target)) return void call(f.instance.setters.get(target)!, [v], expr(f, target.object) as Record, target);
+    if (target.kind === "member") {
+      const object = expr(f, target.object);
+      if (object && typeof object === "object" && object.kind === "record") return void object.fields.set(target.name, v);
+    }
+    if (target.kind === "index") {
+      const array = expr(f, target.object);
+      const i = expr(f, target.index) as bigint;
+      if (array && typeof array === "object" && array.kind === "array") {
+        if (i < 0n || i >= BigInt(array.items.length)) panic(`index out of bounds: the len is ${array.items.length} but the index is ${i}`, target);
+        array.items[Number(i)] = v;
+        return;
+      }
+    }
+    refuse("changing this", target);
+  }
+
+  function match(f: Frame, e: Extract<Expr, { kind: "match" }>): Value {
+    const subject = expr(f, e.subject);
+    for (const arm of e.arms) {
+      if (!tests(f, arm.pattern, subject)) continue;
+      bind(f, arm.pattern, subject);
+      if (arm.guard && !expr(f, arm.guard)) continue;
+      if (arm.body.kind !== "block") return expr(f, arm.body);
+      // A block arm gives its value by `return`, which never leaves the function.
+      try {
+        statements(f, arm.body.body);
+        return undefined;
+      } catch (r) {
+        if (r instanceof Return) return r.value;
+        throw r;
+      }
+    }
+    return refuse("this match", e);
+  }
+
+  function tests(f: Frame, p: Pattern, v: Value): boolean {
+    const info = f.instance.patterns.get(p)!;
+    const union = typeof info.type !== "string" && info.type.kind === "union" ? info.type : undefined;
+    switch (info.kind) {
+      case "any":
+        return true;
+      case "literal":
+        return info.member ? same(v, constant(info.member) ?? info.member.value) : same(v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
+      case "none":
+        return v === null;
+      case "some":
+        return v !== null && tests(f, info.arg, v);
+      case "variant": {
+        const held = v as Variant;
+        if (union && held.type !== info.variant) return false;
+        return info.args.every((arg, i) => tests(f, arg, held.args[i]));
+      }
+      case "object": {
+        const held = v as Record;
+        if (union && !info.shapes.includes(held.type)) return false;
+        return info.fields.every(([key, sub]) => tests(f, sub, held.fields.get(key)));
+      }
+      case "array": {
+        const held = v as Items;
+        return held.items.length === info.items.length && info.items.every((item, i) => tests(f, item, held.items[i]));
+      }
+      case "or":
+        return info.alternatives.some((alt) => tests(f, alt, v));
+    }
+  }
+
+  function bind(f: Frame, p: Pattern, v: Value) {
+    const info = f.instance.patterns.get(p)!;
+    if (info.kind === "any" && p.kind === "ident") return void f.locals.set(f.instance.locals.get(p as Expr)!.id, v);
+    if (info.kind === "variant") info.args.forEach((arg, i) => bind(f, arg, (v as Variant).args[i]));
+    if (info.kind === "object") for (const [key, sub] of info.fields) bind(f, sub, (v as Record).fields.get(key));
+    if (info.kind === "array") info.items.forEach((item, i) => bind(f, item, (v as Items).items[i]));
+    if (info.kind === "some") bind(f, info.arg, v);
   }
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
   function numeric(op: string, a: bigint | number, b: bigint | number, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
-      const v = op === "+" ? x + y : op === "-" ? x - y : op === "*" ? x * y : op === "/" ? x / y : op === "%" ? x % y : op === "**" ? x ** y : NaN;
-      if (Number.isNaN(v) && !["+", "-", "*", "/", "%", "**"].includes(op)) return refuse(`'${op}'`, at);
+      const v = op === "+" ? x + y : op === "-" ? x - y : op === "*" ? x * y : op === "/" ? x / y : op === "%" ? x % y : op === "**" ? x ** y : undefined;
+      if (v === undefined) return refuse(`'${op}' on floats`, at);
       return fit(v, type as "f32" | "f64");
     }
     if (!isInteger(type)) return refuse(`'${op}' on '${show(type)}'`, at);
@@ -352,8 +573,8 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case "/":
       case "%": {
         const remainder = op === "%";
-        if (b === 0n) throw new Stop(remainder ? "attempt to calculate the remainder with a divisor of zero" : "attempt to divide by zero", at, true);
-        if (signed && b === -1n && a === -(1n << BigInt(bits - 1))) throw new Stop(`attempt to ${remainder ? "calculate the remainder" : "divide"} with overflow`, at, true);
+        if (b === 0n) panic(remainder ? "attempt to calculate the remainder with a divisor of zero" : "attempt to divide by zero", at);
+        if (signed && b === -1n && a === -(1n << BigInt(bits - 1))) panic(`attempt to ${remainder ? "calculate the remainder" : "divide"} with overflow`, at);
         return remainder ? a % b : a / b;
       }
       case "**": {
@@ -371,7 +592,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
       case ">>":
       case ">>>": {
         const amount = BigInt.asUintN(bits, b);
-        if (amount > BigInt(bits - 1)) throw new Stop(`attempt to shift ${op === "<<" ? "left" : "right"} with overflow`, at, true);
+        if (amount > BigInt(bits - 1)) panic(`attempt to shift ${op === "<<" ? "left" : "right"} with overflow`, at);
         if (op === "<<") return wrap(a << amount, type);
         return op === ">>" && signed ? a >> amount : wrap(BigInt.asUintN(bits, a) >> amount, type);
       }
@@ -380,7 +601,7 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   }
 
   function checked(v: bigint, type: Integer, verb: string, at: Span): bigint {
-    if (wrap(v, type) !== v) throw new Stop(`attempt to ${verb} with overflow`, at, true);
+    if (wrap(v, type) !== v) panic(`attempt to ${verb} with overflow`, at);
     return v;
   }
 
@@ -400,6 +621,49 @@ export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime
   }
 }
 
+// The value an enum member's literal type stands for, or undefined for any other type.
+function constant(type: Type): Value {
+  return typeof type !== "string" && type.kind === "literal" && type.owner ? type.value : undefined;
+}
+
+// Whether an expression names an enum rather than a value.
+function enumName(e: Expr): boolean {
+  return e.kind === "ident" || (e.kind === "member" && enumName(e.object));
+}
+
+// Values compare as `===` compares them: primitives by value, variants by member and payload.
+function same(a: Value, b: Value): boolean {
+  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
+    return a.type === b.type && a.args.every((x, i) => same(x, b.args[i]));
+  }
+  return a === b;
+}
+
+function typeofValue(v: Value): string {
+  if (typeof v === "bigint" || typeof v === "number") return "number";
+  if (v === null) return "undefined";
+  if (typeof v === "object") return "object";
+  return typeof v;
+}
+
+// A copy owning all its parts, as `.clone()` makes.
+function cloned(v: Value): Value {
+  if (!v || typeof v !== "object") return v;
+  if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
+  if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
+  return { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
+}
+
+// What a thrown value is, for the compile error reporting it.
+function described(v: Value): string {
+  if (v && typeof v === "object" && v.kind === "record") {
+    const message = v.fields.get("message");
+    const name = v.type.kind === "class" ? v.type.name : "an object";
+    return typeof message === "string" ? `${name}: ${message}` : name;
+  }
+  return display(v);
+}
+
 // An integer wrapped to its type's bits, as the machine holds it.
 function wrap(v: bigint, type: Integer): bigint {
   const { bits, signed } = INTEGERS[type];
@@ -413,5 +677,23 @@ function fit(v: number, type: Type): number {
 // A value as `String(x)` and templates write it.
 function display(v: Value): string {
   if (typeof v === "number") return Object.is(v, -0) ? "0" : String(v);
+  if (v === null) return "null";
   return String(v);
+}
+
+// The member of a union a value is: its own type for an aggregate, the literal member with its
+// value, or the member of its kind.
+export function memberOf(v: Value, union: UnionType): Type {
+  const m = union.members;
+  if (v === null) return "null";
+  if (v && typeof v === "object") {
+    if (v.kind === "array") return m.find((t) => typeof t !== "string" && t.kind === "array")!;
+    return m.find((t) => t === v.type) ?? m.find((t) => fits(v.type, t))!;
+  }
+  const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);
+  if (literal) return literal;
+  if (typeof v === "bigint") return m.find(isInteger)!;
+  if (typeof v === "number") return m.find(isFloat)!;
+  if (typeof v === "string") return "string";
+  return "boolean";
 }
