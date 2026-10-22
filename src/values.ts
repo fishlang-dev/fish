@@ -702,11 +702,13 @@ export function expressions(ctx: Context) {
     }
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
     if (callee.kind === "ident" && callee.name === "sleep" && !byName.has("sleep")) {
-      if (e.args.length !== 1) throw new CompileError("'sleep' takes how many milliseconds to wait, like 'sleep(250)'", e.start, e.end);
+      if (e.args.length !== 1 && e.args.length !== 2) throw new CompileError("'sleep' takes how many milliseconds to wait, like 'sleep(250)', and may take an AbortSignal", e.start, e.end);
       expect(e.args[0]!, "i64");
       const t = value(e.args[0]!);
       coerce(e.args[0]!, t, "i64", `'sleep' takes milliseconds as an 'i64', not '${show(t)}'`);
-      return { type: SLEEP, what: "'sleep'" };
+      if (e.args.length === 1) return { type: SLEEP, what: "'sleep'" };
+      signalArgument(e.args[1]!, "'sleep'");
+      return { type: leafFuture("sleep", "void", abortError(e)), what: "'sleep'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
@@ -957,6 +959,8 @@ export function expressions(ctx: Context) {
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
+    // A wait may also take an AbortSignal, as its last argument.
+    const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive";
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
       : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : {};
     if (!(callee.name in methods)) {
@@ -965,7 +969,9 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
-    if (e.args.length !== methods[callee.name]) throw new CompileError(`'${callee.name}' takes ${methods[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
+    const signalled = waits && e.args.length === methods[callee.name]! + 1;
+    if (e.args.length !== methods[callee.name] && !signalled) throw new CompileError(`'${callee.name}' takes ${methods[callee.name] === 1 ? "1 argument" : "no arguments"}${waits ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
+    if (signalled) signalArgument(e.args.at(-1)!, `'${callee.name}'`);
     if (callee.name === "send") {
       const of = lower(t.of);
       expect(e.args[0]!, of);
@@ -979,7 +985,14 @@ export function expressions(ctx: Context) {
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close") return { type: "void", what: "'close'" };
-    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of)), what: `'${callee.name}'` };
+    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError(e) : undefined), what: `'${callee.name}'` };
+  }
+
+  // A wait's AbortSignal, lent to it: the wait keeps a count on it of its own.
+  function signalArgument(a: Expr, what: string) {
+    const signal = blockType("AbortSignal");
+    const given = value(a);
+    coerce(a, given, refType(signal, false), `${what} takes an 'AbortSignal' to stop waiting early, not '${show(given)}'`);
   }
 
   // The std `AbortError` class, which aborted work throws.

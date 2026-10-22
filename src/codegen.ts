@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -425,6 +425,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
   }
 
+  // A wait's frame given an AbortSignal, its last argument: a count on it goes in the frame.
+  function signalled(e: Extract<Expr, { kind: "call" }>, future: FutureType, frame: string): string {
+    if (!leafOf.get(future)?.signal) return frame;
+    const [handle, next] = [temp(), temp()];
+    emit(`${handle} = load ptr, ptr ${value(e.args.at(-1)!)}`);
+    emit(`${next} = insertvalue ${llvm(future)} ${frame}, ptr ${copied(handle, blockType("AbortSignal"))}, ${future.frame.length - 2}`);
+    return next;
+  }
+
   // A new `AbortError`, its message a literal.
   function abortError(type: Type): string {
     const made = temp();
@@ -509,7 +518,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(t.of)} ${given}, 2`);
       frame = next;
     }
-    return frame;
+    return signalled(e, future, frame);
   }
 
   // A function dropping one value where it lives, for a channel to drop what it still holds.
@@ -1719,9 +1728,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       // `sleep(ms)`'s future holds the delay until its first poll makes it a deadline.
       if (e.callee.kind === "ident" && e.callee.name === "sleep") {
+        const future = (types.get(e) ?? SLEEP) as FutureType;
         const made = temp();
-        emit(`${made} = insertvalue ${llvm(SLEEP)} zeroinitializer, i64 ${value(e.args[0]!)}, 1`);
-        return made;
+        emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, i64 ${value(e.args[0]!)}, 1`);
+        return signalled(e, future, made);
       }
       // `yieldNow()`'s future is its one state, not yet polled.
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
@@ -2247,12 +2257,34 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const leaf = inner.kind === "future" ? leafOf.get(inner) : undefined;
     let given: string | undefined;
     if (leaf) {
-      // A semaphore's or channel's wait, polled by the runtime, which wakes the task when it
-      // may go on. A send moves its value in, leaving its slot in the frame empty.
+      // A semaphore's or channel's wait, or a sleep given a signal, polled by the runtime, which
+      // wakes the task when it may go on. A send moves its value in, leaving its slot empty.
       const [slot, handle, outcome] = [temp(), temp(), temp()];
       emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
-      emit(`${handle} = load ptr, ptr ${slot}`);
-      if (leaf.method === "acquire") {
+      if (leaf.method !== "sleep") emit(`${handle} = load ptr, ptr ${slot}`);
+      // One given a signal joins its waiters first, and stops if it has aborted, leaving the
+      // waiters it joined; once done any other way, it leaves the signal's.
+      let signal: [string, string] | undefined;
+      if (leaf.signal) {
+        const n = (inner as FutureType).frame.length;
+        const [at1, sig, flag, aborted, yes, cancel, go] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
+        emit(`${at1} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 2}`);
+        emit(`${sig} = load ptr, ptr ${at1}`);
+        emit(`${flag} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 1}`);
+        emit(`${aborted} = call i32 @fsh_rt_signal_enter(ptr ${sig}, ptr ${flag}, ptr %cx)`);
+        emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+        emit(`br i1 ${yes}, label %${cancel}, label %${go}`);
+        startBlock(cancel);
+        if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx)`);
+        if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx)`);
+        emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
+        emit(`br label %${failed}`);
+        startBlock(go);
+        signal = [sig, flag];
+      }
+      if (leaf.method === "sleep") {
+        emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
+      } else if (leaf.method === "acquire") {
         const [permit, made] = [alloca("ptr"), temp()];
         emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit})`);
         emit(`${made} = load ptr, ptr ${permit}`);
@@ -2274,7 +2306,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         given = option;
       }
       emit(`${tag} = trunc i32 ${outcome} to i8`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} ]`);
+      if (!signal) emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} ]`);
+      else {
+        const over = label();
+        emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} ]`);
+        startBlock(over);
+        emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
+        emit(`br label %${ready}`);
+      }
     } else if (inner === YIELD_NOW) {
       // Pending the first time it is polled, done the next.
       const [state, fresh] = [temp(), temp()];
@@ -2313,8 +2352,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     };
     if (inner.throws) {
       startBlock(failed);
-      const error = temp();
-      emit(`${error} = extractvalue ${pollType(inner)} ${result}, 2`);
+      // An aborted wait throws a new AbortError; any other future gives its own error.
+      const error = leaf ? abortError(inner.throws) : temp();
+      if (!leaf) emit(`${error} = extractvalue ${pollType(inner)} ${result}, 2`);
       finish();
       raised(e, error);
     } else if (inner !== YIELD_NOW && inner !== SLEEP) {

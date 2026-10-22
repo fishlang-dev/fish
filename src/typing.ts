@@ -156,22 +156,26 @@ export function blockType(which: BlockType["which"], of: Type = "void"): BlockTy
   return t;
 }
 
-// The futures a Semaphore's and a Channel's methods give, polled by the runtime: each frame holds
-// its state, a count on the block, and for `send` the value going in. `leafOf` names each one's
-// method and what it carries.
+// The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
+// the runtime: each frame holds its state, a count on the block (or a sleep's deadline), and for
+// `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
+// waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
+// what it carries.
+export type Leaf = "acquire" | "send" | "receive" | "sleep";
 const leaves = new Map<string, FutureType>();
-export const leafOf = new WeakMap<FutureType, { method: "acquire" | "send" | "receive"; of: Type }>();
+export const leafOf = new WeakMap<FutureType, { method: Leaf; of: Type; signal: boolean }>();
 
-export function leafFuture(method: "acquire" | "send" | "receive", of: Type): FutureType {
-  const key = `${method} ${keyOf(of)}`;
+export function leafFuture(method: Leaf, of: Type, abort?: Type): FutureType {
+  const key = `${method} ${keyOf(of)} ${abort ? keyOf(abort) : ""}`;
   let t = leaves.get(key);
   if (!t) {
-    const block = blockType(method === "acquire" ? "Semaphore" : "Channel", method === "acquire" ? "void" : of);
-    const frame = [{ name: "state", type: "i32" as Type }, { name: "block", type: block as Type }, ...(method === "send" ? [{ name: "value", type: of }] : [])];
-    const gives = method === "acquire" ? blockType("Permit") : method === "send" ? "void" : unionType([of, "null"]);
-    t = { kind: "future", name: method, gives, fields: [], params: [], frame, concrete: true };
+    const target: Type = method === "sleep" ? "i64" : blockType(method === "acquire" ? "Semaphore" : "Channel", method === "acquire" ? "void" : of);
+    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "block", type: target }, ...(method === "send" ? [{ name: "value", type: of }] : [])];
+    if (abort) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
+    const gives = method === "acquire" ? blockType("Permit") : method === "receive" ? unionType([of, "null"]) : "void";
+    t = { kind: "future", name: method, gives, throws: abort, fields: [], params: [], frame, concrete: true };
     leaves.set(key, t);
-    leafOf.set(t, { method, of });
+    leafOf.set(t, { method, of, signal: abort !== undefined });
   }
   return t;
 }

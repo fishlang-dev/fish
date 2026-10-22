@@ -1274,6 +1274,17 @@ static void fsh_wake_waiter(fsh_task *t) {
   fsh_task_release(t);
 }
 
+// Takes a task off a list it waits on, for the caller to release once its lock is released;
+// NULL when it isn't there, as when a wake already took it off.
+static fsh_task *fsh_unwait(fsh_waiters *w, fsh_task *t) {
+  for (int64_t i = 0; i < w->count; i++) {
+    if (w->tasks[i] != t) continue;
+    memmove(w->tasks + i, w->tasks + i + 1, (--w->count - i) * sizeof(fsh_task *));
+    return t;
+  }
+  return NULL;
+}
+
 static void fsh_waiters_free(fsh_waiters *w) {
   for (int64_t i = 0; i < w->count; i++) fsh_task_release(w->tasks[i]);
   fsh_rt_free(w->tasks);
@@ -1328,6 +1339,17 @@ int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **
   p->semaphore = s;
   *out = p;
   return 1;
+}
+
+// An aborted 'acquire' leaves the waiters. One a release already woke passes that wake on, so
+// the slot it would have taken isn't left with nobody coming for it.
+void fsh_rt_semaphore_leave(fsh_semaphore *s, fsh_task *task) {
+  pthread_mutex_lock(&s->lock);
+  fsh_task *mine = fsh_unwait(&s->waiting, task);
+  fsh_task *next = !mine && s->permits > 0 ? fsh_next_waiter(&s->waiting) : NULL;
+  pthread_mutex_unlock(&s->lock);
+  if (mine) fsh_task_release(mine);
+  fsh_wake_waiter(next);
 }
 
 // Drops a count on a Permit; the last gives its slot back, waking the oldest waiter.
@@ -1422,6 +1444,19 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task) {
   return 1;
 }
 
+// An aborted 'send' or 'receive' leaves the waiters, passing on a wake it already took.
+void fsh_rt_channel_leave(fsh_channel *c, fsh_task *task) {
+  pthread_mutex_lock(&c->lock);
+  fsh_task *mine = fsh_unwait(&c->receivers, task);
+  if (!mine) mine = fsh_unwait(&c->senders, task);
+  fsh_task *receiver = !mine && c->length > 0 ? fsh_next_waiter(&c->receivers) : NULL;
+  fsh_task *sender = !mine && c->length < c->capacity ? fsh_next_waiter(&c->senders) : NULL;
+  pthread_mutex_unlock(&c->lock);
+  if (mine) fsh_task_release(mine);
+  fsh_wake_waiter(receiver);
+  fsh_wake_waiter(sender);
+}
+
 // Closes a channel: what it holds can still be received, and every task waiting is woken to
 // see it closed.
 void fsh_rt_channel_close(fsh_channel *c) {
@@ -1458,6 +1493,29 @@ void fsh_rt_signal_release(fsh_signal *s) {
 
 int32_t fsh_rt_signal_aborted(fsh_signal *s) {
   return __atomic_load_n(&s->aborted, __ATOMIC_ACQUIRE);
+}
+
+// Before a wait given a signal polls: it joins the signal's waiters once, and is told whether
+// the signal has aborted.
+int32_t fsh_rt_signal_enter(fsh_signal *s, int32_t *waiting, fsh_task *task) {
+  pthread_mutex_lock(&s->lock);
+  int32_t aborted = s->aborted;
+  if (!aborted && !*waiting) {
+    fsh_wait_on(&s->waiting, task);
+    *waiting = 1;
+  }
+  pthread_mutex_unlock(&s->lock);
+  return aborted;
+}
+
+// Once a wait given a signal is over, it leaves the signal's waiters if it is still there.
+void fsh_rt_signal_leave(fsh_signal *s, int32_t *waiting, fsh_task *task) {
+  if (!*waiting) return;
+  *waiting = 0;
+  pthread_mutex_lock(&s->lock);
+  fsh_task *mine = fsh_unwait(&s->waiting, task);
+  pthread_mutex_unlock(&s->lock);
+  if (mine) fsh_task_release(mine);
 }
 
 // Aborts once, waking every task waiting on the signal to see it.
