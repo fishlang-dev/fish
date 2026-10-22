@@ -1206,7 +1206,8 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
 // caller panics.
 // ponytail: spin-then-yield, a parking queue if contended locks show up in profiles
 static int32_t fsh_me(void) {
-  if (!fsh_token) fsh_token = __atomic_add_fetch(&fsh_tokens, 1, __ATOMIC_RELAXED);
+  // 0 marks an unlocked word, so a counter wrapping round skips it.
+  while (!fsh_token) fsh_token = __atomic_add_fetch(&fsh_tokens, 1, __ATOMIC_RELAXED);
   return fsh_token;
 }
 
