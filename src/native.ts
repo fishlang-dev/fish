@@ -1286,7 +1286,7 @@ fsh_semaphore *fsh_rt_semaphore_new(int64_t permits) {
   fsh_semaphore *s = fsh_rt_alloc(sizeof(fsh_semaphore));
   s->count = 1;
   pthread_mutex_init(&s->lock, NULL);
-  s->permits = permits > 0 ? permits : 0;
+  s->permits = permits;
   s->waiting = (fsh_waiters){ NULL, 0, 0 };
   return s;
 }
@@ -1310,20 +1310,31 @@ int64_t fsh_rt_semaphore_available(fsh_semaphore *s) {
   return free;
 }
 
-// Polls 'acquire()': takes a slot, the Permit then holding a count on the block, or waits.
-int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task) {
+// A Permit's block: its own count, so copies the compiler makes share one slot, and its
+// semaphore, on which it holds a count.
+typedef struct { int64_t count; fsh_semaphore *semaphore; } fsh_permit;
+
+// Polls 'acquire()': takes a slot, giving a new Permit through out, or waits.
+int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **out) {
   pthread_mutex_lock(&s->lock);
   int32_t taken = s->permits > 0;
   if (taken) s->permits--;
   else fsh_wait_on(&s->waiting, task);
   pthread_mutex_unlock(&s->lock);
-  if (taken) fsh_rt_block_retain(&s->count);
-  return taken;
+  if (!taken) return 0;
+  fsh_rt_block_retain(&s->count);
+  fsh_permit *p = fsh_rt_alloc(sizeof(fsh_permit));
+  p->count = 1;
+  p->semaphore = s;
+  *out = p;
+  return 1;
 }
 
-// Drops a Permit: its slot goes back, waking the oldest waiter, then its count on the block.
-void fsh_rt_permit_drop(fsh_semaphore *s) {
-  if (!s) return;
+// Drops a count on a Permit; the last gives its slot back, waking the oldest waiter.
+void fsh_rt_permit_drop(fsh_permit *p) {
+  if (!p || __atomic_sub_fetch(&p->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  fsh_semaphore *s = p->semaphore;
+  fsh_rt_free(p);
   pthread_mutex_lock(&s->lock);
   s->permits++;
   fsh_task *next = fsh_next_waiter(&s->waiting);

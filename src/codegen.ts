@@ -430,15 +430,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const n = value(e.args![0]!);
     const made = temp();
     if (t.which === "Semaphore") {
+      const negative = temp();
+      emit(`${negative} = icmp slt i64 ${n}, 0`);
+      panicIf(negative, "a semaphore's number of slots can't be negative", e);
       emit(`${made} = call ptr @fsh_rt_semaphore_new(i64 ${n})`);
       return made;
     }
     const small = temp();
     emit(`${small} = icmp slt i64 ${n}, 1`);
     panicIf(small, "a channel's capacity must be at least 1", e);
-    const [end, size] = [temp(), temp()];
+    // The ring is allocated whole, so its size in bytes must fit.
+    // ponytail: the ring is allocated up front, grow it on demand if large capacities matter
+    const [end, size, wide, most, large] = [temp(), temp(), temp(), temp(), temp()];
     emit(`${end} = getelementptr ${llvm(t.of)}, ptr null, i64 1`);
     emit(`${size} = ptrtoint ptr ${end} to i64`);
+    emit(`${wide} = icmp eq i64 ${size}, 0`);
+    emit(`${most} = select i1 ${wide}, i64 1, i64 ${size}`);
+    const limit = temp();
+    emit(`${limit} = udiv i64 ${(1n << 47n).toString()}, ${most}`);
+    emit(`${large} = icmp sgt i64 ${n}, ${limit}`);
+    panicIf(large, "a channel's capacity is too large to allocate", e);
     emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${elementDrop(t.of)})`);
     return made;
   }
@@ -2207,8 +2218,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
       emit(`${handle} = load ptr, ptr ${slot}`);
       if (leaf.method === "acquire") {
-        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx)`);
-        given = handle;
+        const [permit, made] = [alloca("ptr"), temp()];
+        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit})`);
+        emit(`${made} = load ptr, ptr ${permit}`);
+        given = made;
       } else if (leaf.method === "send") {
         const [moving, closed] = [temp(), temp()];
         emit(`${moving} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);

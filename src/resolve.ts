@@ -376,13 +376,23 @@ export function interior(which: InteriorType["which"], of: Type, at: Span): Inte
     throw new CompileError(`'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
   if (holdsRef(of)) throw new CompileError(`'${which}' can't hold a reference yet ('${show(of)}')`, at.start, at.end);
+  abstractless(of, `'${which}'`, at);
   return interiorType(which, of);
+}
+
+// What only describes values, an interface, a function type or a Promise, can't be held where its
+// value is laid out once for every use, as a channel, a shared value and a lock hold theirs.
+function abstractless(of: Type, holder: string, at: Span) {
+  let found: Type | undefined;
+  holdsPart(lower(of), (u) => typeof u !== "string" && ["interface", "function", "future", "generator", "closure"].includes(u.kind) && (found = u) !== undefined);
+  if (found) throw new CompileError(`${holder} can't hold a '${show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
 // unchecked, or changes without a lock.
 export function shareable(of: Type, at: Span): SharedType {
   const held = lower(of);
+  abstractless(of, "a 'shared' value", at);
   let blocker: Type | undefined;
   holdsPart(held, (u) => {
     if (typeof u === "string" || !(u.kind === "ref" || u.kind === "pointer" || (u.kind === "interior" && u.which === "Cell"))) return false;
@@ -400,6 +410,11 @@ export function shareable(of: Type, at: Span): SharedType {
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
 // unchecked, or changes without a lock.
 export function channel(of: Type, at: Span): BlockType {
+  const held = lower(of);
+  if (typeof held !== "string" && held.kind === "union" && held.members.includes("null") || held === "null") {
+    throw new CompileError(`a 'Channel' can't carry '${show(of)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(of)} }>'`, at.start, at.end);
+  }
+  abstractless(of, "a 'Channel'", at);
   let blocker: Type | undefined;
   holdsPart(lower(of), (u) => {
     if (typeof u === "string" || !(u.kind === "ref" || u.kind === "pointer" || (u.kind === "interior" && u.which === "Cell"))) return false;

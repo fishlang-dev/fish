@@ -54,7 +54,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_block_retain(ptr)",
   "declare void @fsh_rt_semaphore_release(ptr)",
   "declare i64 @fsh_rt_semaphore_available(ptr)",
-  "declare i32 @fsh_rt_semaphore_acquire(ptr, ptr)",
+  "declare i32 @fsh_rt_semaphore_acquire(ptr, ptr, ptr)",
   "declare void @fsh_rt_permit_drop(ptr)",
   "declare ptr @fsh_rt_channel_new(i64, i64, ptr)",
   "declare void @fsh_rt_channel_release(ptr)",

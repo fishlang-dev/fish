@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { isPrint } from "./values.ts";
-import { field, holdsHandle, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -698,7 +698,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
   function hinted(type: Type, message: string): string {
-    return holdsHandle(type, true) ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
+    const counted = holdsPart(type, (u) => typeof u !== "string" && u.kind === "block" && u.which !== "Channel", true);
+    return holdsHandle(type, true) || counted ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
   }
 
   // A place can't be used once it, something it is inside, or something inside it moved.

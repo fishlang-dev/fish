@@ -282,8 +282,12 @@ export function expressions(ctx: Context) {
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
-    if (e.kind === "call") call(e);
-    else if (e.kind === "match") match(e, false);
+    if (e.kind === "call") {
+      const { type } = call(e);
+      if (typeof type !== "string" && type.kind === "future" && leafOf.has(type)) {
+        throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", e.start, e.end);
+      }
+    } else if (e.kind === "match") match(e, false);
     else if (e.kind === "pipe") pipe(e, false);
     else if (e.kind === "unary" && e.op === "await") {
       const gives = awaited(e);
