@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, YIELD_NOW, type ArrayType, type FutureType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -1057,6 +1057,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // holding one by value.
   function needsDrop(type: Type | undefined): boolean {
     if (type === "string") return true;
+    if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
     if (type.kind === "array") return true;
@@ -1078,6 +1079,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`call void @fsh_rt_str_retain(ptr ${v})`);
       return v;
     }
+    if (typeof type !== "string" && type.kind === "handle") {
+      emit(`call void @fsh_rt_handle_retain(ptr ${v})`);
+      return v;
+    }
     const result = temp();
     emit(`${result} = call ${llvm(type)} ${helper("copy", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
     return result;
@@ -1087,6 +1092,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function dispose(v: string, type: Type) {
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
+    if (typeof type !== "string" && type.kind === "handle") return emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
     emit(`call void ${helper("drop", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
   }
 
@@ -1457,6 +1463,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
+      if (e.callee.kind === "ident" && e.callee.name === "spawn") {
+        const future = valueType(e.args[0]!) as FutureType;
+        const [poll, drop, dropOutput] = taskGlue(future);
+        const [frame, task] = [alloca(llvm(future)), temp()];
+        emit(`store ${llvm(future)} ${owned(e.args[0]!)}, ptr ${frame}`);
+        unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
+        if (!types.has(e)) pending.push({ v: task, type: handleType(future.gives, future.throws) });
+        return task;
+      }
       // `yieldNow()`'s future is its one state, not yet polled.
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
       if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
@@ -1879,7 +1895,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // What polling a future gives: a tag, pending (0), ready (1) or failed (2), then the value it
   // gives and the error it throws, each `{}` when there is none.
-  function pollType(f: FutureType): string {
+  function pollType(f: FutureType | HandleType): string {
     return `{ i8, ${f.gives === "void" ? "{}" : llvm(f.gives)}, ${f.throws ? llvm(f.throws) : "{}"} }`;
   }
 
@@ -1900,7 +1916,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // each later poll of this one until it is done. While it is pending, so is this future. Its
   // value comes out, or its error is raised; either way it is finished, and dropped.
   function awaitFuture(e: Extract<Expr, { kind: "unary" }>): string | undefined {
-    const inner = valueType(e.operand) as FutureType;
+    const inner = valueType(e.operand) as FutureType | HandleType;
     const g = resuming!;
     const at = `%await.${current.frame!.awaits.get(e)!}`;
     emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
@@ -1919,6 +1935,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store i32 1, ptr ${at}`);
       emit(`${fresh} = icmp eq i32 ${state}, 0`);
       emit(`br i1 ${fresh}, label %${waiting}, label %${ready}`);
+    } else if (inner.kind === "handle") {
+      // A spawned task: the runtime copies its result out once it is done.
+      const [buffer, task, outcome] = [alloca(pollType(inner)), temp(), temp()];
+      emit(`${task} = load ptr, ptr ${at}`);
+      emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer})`);
+      emit(`${result} = load ${pollType(inner)}, ptr ${buffer}`);
+      emit(`${tag} = trunc i32 ${outcome} to i8`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     } else {
       unwinding(`call ${pollType(inner)} ${symbol(futureOf.get(inner)!)}(ptr ${at}, ptr %cx)`, result);
       emit(`${tag} = extractvalue ${pollType(inner)} ${result}, 0`);

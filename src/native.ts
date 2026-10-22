@@ -893,6 +893,7 @@ struct fsh_task {
   fsh_task *joiner;
   fsh_task *prev, *next;
   int64_t frame_size;
+  int64_t output_size;
   char memory[];
 };
 
@@ -1028,7 +1029,8 @@ static fsh_task *fsh_next_task(int64_t me) {
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
-  for (;;) {
+  // A stopping runtime runs nothing more, however much is queued.
+  while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
     fsh_task *t = fsh_next_task(fsh_worker);
     if (t) {
       fsh_run(t);
@@ -1036,10 +1038,9 @@ static void *fsh_work(void *arg) {
     }
     pthread_mutex_lock(&fsh_park);
     while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
-    int32_t stop = fsh_stopping;
     pthread_mutex_unlock(&fsh_park);
-    if (stop) return NULL;
   }
+  return NULL;
 }
 
 // A new task for a future's frame, which it takes over: alive, queued, and with one more
@@ -1048,6 +1049,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
   memcpy(t->memory, frame, frame_size);
   t->frame_size = frame_size;
+  t->output_size = output_size;
   t->poll = poll;
   t->drop = drop;
   t->drop_output = drop_output;
@@ -1065,6 +1067,35 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   return t;
 }
 
+// Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
+// it, and its outcome given; until then the awaiting task is woken when it finishes.
+int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {
+  pthread_mutex_lock(&fsh_alive_lock);
+  if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == FSH_DONE) {
+    pthread_mutex_unlock(&fsh_alive_lock);
+    int32_t outcome = t->outcome;
+    memcpy(out, fsh_output(t), t->output_size);
+    t->outcome = 0;
+    return outcome;
+  }
+  if (t->joiner != waiter) {
+    __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
+    t->joiner = waiter;
+  }
+  pthread_mutex_unlock(&fsh_alive_lock);
+  return 0;
+}
+
+// Another reference to a JoinHandle's task, where the compiler copies one it then drops.
+void fsh_rt_handle_retain(fsh_task *t) {
+  if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
+}
+
+// Drops a JoinHandle: its task runs on, detached, until it is done or the runtime stops.
+void fsh_rt_handle_drop(fsh_task *t) {
+  if (t) fsh_task_release(t);
+}
+
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll
 // result copied to out.
@@ -1080,7 +1111,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
   pthread_mutex_lock(&fsh_park);
-  fsh_stopping = 1;
+  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&fsh_parked);
   pthread_mutex_unlock(&fsh_park);
   for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);

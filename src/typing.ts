@@ -101,7 +101,24 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType;
+
+// A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
+// counted pointer to the task; dropping it detaches the task.
+export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[] };
+
+const handles = new Map<string, HandleType>();
+
+export function handleType(gives: Type, throws: Type | undefined): HandleType {
+  const key = `handle ${keyOf(gives)} ${throws ? keyOf(throws) : ""}`;
+  let t = handles.get(key);
+  if (!t) {
+    t = { kind: "handle", gives, throws, fields: [] };
+    handles.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
 
 // An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
 // its parameters, which say what it borrows, and the frame its state lives in, as a
@@ -390,6 +407,7 @@ export function lower(t: Type): Type {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future") return t;
   if (t.kind === "param") return t.concrete ?? t;
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
+  if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -549,6 +567,7 @@ export function show(t: Type): string {
   }
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind === "future") return `Promise<${show(t.gives)}>`;
+  if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

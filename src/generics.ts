@@ -106,6 +106,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
   if (t.kind === "union") return t.members.every(concrete);
   if (t.kind === "ref" || t.kind === "pointer") return concrete(t.to);
+  if (t.kind === "handle") return concrete(t.gives) && (!t.throws || concrete(t.throws));
   if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
   if (t.kind === "array") return concrete(t.element);
   if (t.kind === "variant") {

@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, nextResult, pointerType, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -669,6 +669,18 @@ export function expressions(ctx: Context) {
       coerce(a, t, refType(t, mutable), "");
       return { type: pointerType(t, mutable), what: `'${callee.name}'` };
     }
+    // `spawn(p)`: the future runs as a task of its own, on any thread, and its handle awaits it.
+    if (callee.kind === "ident" && callee.name === "spawn" && !byName.has("spawn")) {
+      if (!ctx.async) throw new CompileError("'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
+      if (e.args.length !== 1) throw new CompileError("'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
+      const t = value(e.args[0]!);
+      if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
+      const blocker = unsent(t);
+      if (blocker) {
+        throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from this function"}; pass an owned value, or a clone`, e.args[0]!.start, e.args[0]!.end);
+      }
+      return { type: handleType(t.gives, t.throws), what: "'spawn'" };
+    }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
       if (e.args.length > 0) throw new CompileError("'yieldNow' takes no arguments", e.start, e.end);
@@ -835,9 +847,23 @@ export function expressions(ctx: Context) {
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     const t = value(e.operand);
     if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
-    if (typeof t === "string" || t.kind !== "future") throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
+    if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
     if (t.throws) raise(e, t.throws, "this Promise");
     return t.gives;
+  }
+
+  // What keeps a value from moving to another thread: a reference, which borrows from the
+  // thread that made it, or a raw pointer, which nothing checks.
+  function unsent(t: Type): Type | undefined {
+    if (typeof t === "string") return undefined;
+    if (t.kind === "ref" || t.kind === "pointer") return t;
+    const parts = t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
+      : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
+    for (const part of parts) {
+      const found = unsent(part);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
