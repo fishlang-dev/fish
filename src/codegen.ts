@@ -112,6 +112,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
+  const elementDrops = new Map<Type, string>();
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
@@ -467,7 +468,6 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A function dropping one value where it lives, for a channel to drop what it still holds.
-  const elementDrops = new Map<Type, string>();
   function elementDrop(type: Type): string {
     const made = elementDrops.get(type);
     if (made) return made;
@@ -1694,7 +1694,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
-      if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "block") return blockCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "block") return blockCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name === "update" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();

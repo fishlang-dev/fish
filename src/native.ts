@@ -1332,6 +1332,99 @@ void fsh_rt_permit_drop(fsh_semaphore *s) {
   fsh_rt_semaphore_release(s);
 }
 
+// A channel's block: its count, its lock, a ring of up to capacity values of size bytes each,
+// whether it is closed, the function dropping a value it still holds, and the tasks waiting to
+// send and to receive.
+typedef struct {
+  int64_t count;
+  pthread_mutex_t lock;
+  int64_t capacity, size, head, length;
+  int32_t closed;
+  char *ring;
+  void (*drop)(void *);
+  fsh_waiters senders, receivers;
+} fsh_channel;
+
+fsh_channel *fsh_rt_channel_new(int64_t capacity, int64_t size, void (*drop)(void *)) {
+  fsh_channel *c = fsh_rt_alloc(sizeof(fsh_channel));
+  c->count = 1;
+  pthread_mutex_init(&c->lock, NULL);
+  c->capacity = capacity;
+  c->size = size;
+  c->head = c->length = 0;
+  c->closed = 0;
+  c->ring = fsh_rt_alloc(capacity * (size > 0 ? size : 1));
+  c->drop = drop;
+  c->senders = c->receivers = (fsh_waiters){ NULL, 0, 0 };
+  return c;
+}
+
+void fsh_rt_channel_release(fsh_channel *c) {
+  if (!c || __atomic_sub_fetch(&c->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  for (int64_t i = 0; i < c->length; i++) c->drop(c->ring + (c->head + i) % c->capacity * c->size);
+  fsh_rt_free(c->ring);
+  fsh_waiters_free(&c->senders);
+  fsh_waiters_free(&c->receivers);
+  pthread_mutex_destroy(&c->lock);
+  fsh_rt_free(c);
+}
+
+// Polls 'send(v)': moves the value in, leaving its slot empty, and wakes a receiver; or waits
+// while the ring is full. 3 when the channel is closed, for the caller's panic.
+int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task) {
+  pthread_mutex_lock(&c->lock);
+  if (c->closed) {
+    pthread_mutex_unlock(&c->lock);
+    return 3;
+  }
+  if (c->length == c->capacity) {
+    fsh_wait_on(&c->senders, task);
+    pthread_mutex_unlock(&c->lock);
+    return 0;
+  }
+  memcpy(c->ring + (c->head + c->length) % c->capacity * c->size, value, c->size);
+  memset(value, 0, c->size);
+  c->length++;
+  fsh_task *next = fsh_next_waiter(&c->receivers);
+  pthread_mutex_unlock(&c->lock);
+  fsh_wake_waiter(next);
+  return 1;
+}
+
+// Polls 'receive()': moves the oldest value out and wakes a sender, gives 2 with nothing once
+// the channel is closed and empty, or waits.
+int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task) {
+  pthread_mutex_lock(&c->lock);
+  if (c->length == 0) {
+    int32_t closed = c->closed;
+    if (closed) memset(out, 0, c->size);
+    else fsh_wait_on(&c->receivers, task);
+    pthread_mutex_unlock(&c->lock);
+    return closed ? 2 : 0;
+  }
+  memcpy(out, c->ring + c->head * c->size, c->size);
+  c->head = (c->head + 1) % c->capacity;
+  c->length--;
+  fsh_task *next = fsh_next_waiter(&c->senders);
+  pthread_mutex_unlock(&c->lock);
+  fsh_wake_waiter(next);
+  return 1;
+}
+
+// Closes a channel: what it holds can still be received, and every task waiting is woken to
+// see it closed.
+void fsh_rt_channel_close(fsh_channel *c) {
+  pthread_mutex_lock(&c->lock);
+  c->closed = 1;
+  fsh_waiters senders = c->senders, receivers = c->receivers;
+  c->senders = c->receivers = (fsh_waiters){ NULL, 0, 0 };
+  pthread_mutex_unlock(&c->lock);
+  for (int64_t i = 0; i < senders.count; i++) fsh_wake_waiter(senders.tasks[i]);
+  for (int64_t i = 0; i < receivers.count; i++) fsh_wake_waiter(receivers.tasks[i]);
+  fsh_rt_free(senders.tasks);
+  fsh_rt_free(receivers.tasks);
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
