@@ -389,6 +389,18 @@ export function holdsRef(t: Type): boolean {
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
+// Whether a value owns a JoinHandle anywhere in it: only one place may await a task's result.
+export function holdsHandle(t: Type): boolean {
+  if (typeof t === "string") return false;
+  if (t.kind === "handle") return true;
+  if (t.kind === "param") return t.concrete !== undefined && holdsHandle(t.concrete);
+  if (t.kind === "union") return t.members.some(holdsHandle);
+  if (t.kind === "array") return holdsHandle(t.element);
+  if (t.kind === "class") return t.fields.some((f) => holdsHandle(f.type)) || (t.base !== undefined && holdsHandle(t.base));
+  if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holdsHandle(f.type));
+  return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holdsHandle(f.type));
+}
+
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
 // parameter in it.
 export function wrapped(name: string, bound: Bound | undefined, concrete: Type): ParamType {
@@ -569,8 +581,8 @@ export function show(t: Type): string {
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
-  if (t.kind === "future") return `Promise<${show(t.gives)}>`;
-  if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>`;
+  if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+  if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

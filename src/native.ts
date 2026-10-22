@@ -27,6 +27,8 @@ export const NATIVE = String.raw`
 
 // Tasks run on several threads, so everything they share is counted atomically.
 static int64_t fsh_live = 0;
+// Set when the program ends with tasks still running, whose memory is never freed.
+static int32_t fsh_abandoned = 0;
 
 void *fsh_rt_alloc(int64_t size) {
   void *p = malloc(size);
@@ -46,7 +48,7 @@ void fsh_rt_free(void *p) {
 
 __attribute__((destructor)) static void fsh_leaks(void) {
   const char *check = getenv("FISH_LEAKS");
-  if (check && check[0] == '1' && fsh_live != 0) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)fsh_live);
+  if (check && check[0] == '1' && fsh_live != 0 && !fsh_abandoned) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)fsh_live);
 }
 
 typedef struct fsh_str {
@@ -61,11 +63,11 @@ typedef struct fsh_str {
 
 // A string may be shared between tasks on different threads, so its count changes atomically.
 void fsh_rt_str_retain(fsh_str *s) {
-  if (s && s->count >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
+  if (s && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
 }
 
 void fsh_rt_str_release(fsh_str *s) {
-  if (!s || s->count < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (!s || __atomic_load_n(&s->count, __ATOMIC_RELAXED) < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   fsh_rt_str_release(s->base);
   fsh_rt_free(s->crumbs);
   fsh_rt_free(s);
@@ -101,7 +103,8 @@ fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
   int64_t length = 0, units = 0;
   for (int64_t i = 0; i < n; i++) {
     length += parts[i]->length;
-    units = units < 0 || parts[i]->units < 0 ? -1 : units + parts[i]->units;
+    int64_t known = __atomic_load_n(&parts[i]->units, __ATOMIC_ACQUIRE);
+    units = units < 0 || known < 0 ? -1 : units + known;
   }
   fsh_str *s = fsh_str_new(length);
   unsigned char *at = (unsigned char *)s->own;
@@ -166,11 +169,11 @@ int64_t fsh_rt_str_units(fsh_str *s) {
 
 // Two threads may build them at once; the first to finish installs its own, and the other
 // frees what it built.
-static void fsh_crumbs(fsh_str *s) {
-  int64_t *crumbs = fsh_rt_alloc((s->units / FSH_STRIDE + 1) * sizeof(int64_t));
+static void fsh_crumbs(fsh_str *s, int64_t units) {
+  int64_t *crumbs = fsh_rt_alloc((units / FSH_STRIDE + 1) * sizeof(int64_t));
   int64_t at = 0;
   int half = 0;
-  for (int64_t unit = 0; unit < s->units; unit++) {
+  for (int64_t unit = 0; unit < units; unit++) {
     if (unit % FSH_STRIDE == 0) crumbs[unit / FSH_STRIDE] = at * 2 + half;
     fsh_next((const unsigned char *)s->bytes, &at, &half);
   }
@@ -183,12 +186,13 @@ static void fsh_crumbs(fsh_str *s) {
 // or before i, at most 63 units.
 static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
   *half = 0;
-  if (fsh_rt_str_units(s) == s->length) return i;
-  if (i >= s->units) return s->length;
+  int64_t units = fsh_rt_str_units(s);
+  if (units == s->length) return i;
+  if (i >= units) return s->length;
   int64_t at = 0, unit = 0;
   int64_t *crumbs = __atomic_load_n(&s->crumbs, __ATOMIC_ACQUIRE);
-  if (!crumbs && s->count >= 0 && s->units > FSH_STRIDE) {
-    fsh_crumbs(s);
+  if (!crumbs && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0 && units > FSH_STRIDE) {
+    fsh_crumbs(s, units);
     crumbs = __atomic_load_n(&s->crumbs, __ATOMIC_ACQUIRE);
   }
   if (crumbs) {
@@ -577,7 +581,8 @@ fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
   }
   fsh_str *result = fsh_str_new(s->length * count);
   for (int64_t i = 0; i < count; i++) memcpy(result->own + i * s->length, s->bytes, s->length);
-  result->units = s->units >= 0 ? s->units * count : -1;
+  int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
+  result->units = known >= 0 ? known * count : -1;
   return result;
 }
 
@@ -916,6 +921,8 @@ static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
 static int64_t fsh_queued = 0;
 static int32_t fsh_stopping = 0;
+static int64_t fsh_stopped = 0;
+static pthread_cond_t fsh_left = PTHREAD_COND_INITIALIZER;
 // The tasks not yet done, dropped when the runtime stops; and how the program ends.
 static pthread_mutex_t fsh_alive_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_task *fsh_alive = NULL;
@@ -1040,6 +1047,10 @@ static void *fsh_work(void *arg) {
     while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
     pthread_mutex_unlock(&fsh_park);
   }
+  pthread_mutex_lock(&fsh_park);
+  fsh_stopped++;
+  pthread_cond_broadcast(&fsh_left);
+  pthread_mutex_unlock(&fsh_park);
   return NULL;
 }
 
@@ -1173,7 +1184,8 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   int64_t *deadline = frame + 1;
   if (*state == 0) {
     *state = 1;
-    *deadline = fsh_now() + (*deadline > 0 ? *deadline : 0) * 1000000;
+    int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
+    *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   } else if (fsh_now() >= *deadline) return 1;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
   fsh_timer_add(*deadline, task);
@@ -1200,7 +1212,13 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
   for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
-  for (int64_t i = 0; i < fsh_workers; i++) pthread_create(&fsh_threads[i], NULL, fsh_work, (void *)i);
+  // Workers get the main thread's 8 MiB stack, not the smaller default for other threads, since
+  // an async main's calls run on them.
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 8 << 20);
+  for (int64_t i = 0; i < fsh_workers; i++) pthread_create(&fsh_threads[i], &attr, fsh_work, (void *)i);
+  pthread_attr_destroy(&attr);
   pthread_create(&fsh_timer_thread, NULL, fsh_timing, NULL);
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
@@ -1208,7 +1226,22 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_lock(&fsh_park);
   __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&fsh_parked);
+  // A worker stops between polls, so one inside a long poll with no await can't be waited for:
+  // past a grace period, its task and every other is abandoned rather than dropped.
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until);
+  until.tv_nsec += 100000000;
+  until.tv_sec += until.tv_nsec / 1000000000;
+  until.tv_nsec %= 1000000000;
+  while (fsh_stopped < fsh_workers && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
+  int stuck = fsh_stopped < fsh_workers;
   pthread_mutex_unlock(&fsh_park);
+  if (stuck) {
+    fsh_abandoned = 1;
+    if (fsh_panicked) exit(101);
+    memcpy(out, fsh_output(fsh_main_task), output_size);
+    return fsh_main_task->outcome;
+  }
   for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);
   pthread_mutex_lock(&fsh_timer_lock);
   fsh_timers_stopping = 1;
