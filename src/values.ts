@@ -873,9 +873,11 @@ export function expressions(ctx: Context) {
     e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
+    // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
+    const returns = typeof given !== "string" && given.kind === "closure" && promiseElement(type.returns) !== undefined ? given.returns : type.returns;
     // An async arrow's future holds a copy of what it captured, references too.
-    if (typeof type.returns !== "string" && type.returns.kind === "future" && holdsRef(type.returns)) borrowsFrom.set(e, [callee]);
-    return { type: type.returns, what: name };
+    if (typeof returns !== "string" && returns.kind === "future" && holdsRef(returns)) borrowsFrom.set(e, [callee]);
+    return { type: returns, what: name };
   }
 
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
@@ -1035,7 +1037,7 @@ export function expressions(ctx: Context) {
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
         : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
-        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "TcpStream" ? "it has 'read' and 'write'" : "dropping it gives its slot back";
+        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "TcpStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
@@ -1083,7 +1085,7 @@ export function expressions(ctx: Context) {
   function tcpStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream"): { type: Type; what: string } {
     const method = which === "TcpListener" ? "bind" : "connect";
     if (callee.name !== method) throw new CompileError(`'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
-    if (!ctx.runtime) throw new CompileError(`'${which}.${method}' needs the async runtime's reactor, which runs when 'main' is an async function`, e.start, e.end);
+    if (!ctx.runtime) throw new CompileError(`'${which}.${method}' works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
     // Connecting waits, so it may take an AbortSignal; binding doesn't.
     const signalled = method === "connect" && e.args.length === 3;
     if (e.args.length !== 2 && !signalled) throw new CompileError(`'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);

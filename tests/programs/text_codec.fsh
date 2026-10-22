@@ -4,6 +4,7 @@
 // expect: 5 239 191 189
 // expect: �A���������€ 12
 // expect: 0 0
+// expect: 1 A
 // UTF-8 as the web's TextEncoder and TextDecoder convert it, broken bytes included.
 function main() {
   const bytes = new TextEncoder().encode("héllo 🐟");
@@ -19,4 +20,7 @@ function main() {
   console.log(out, out.length);
   const empty = new TextEncoder().encode("");
   console.log(empty.length, new TextDecoder().decode(empty).length);
+  let bom: u8[] = [0xEF, 0xBB, 0xBF, 0x41];
+  const stripped = new TextDecoder().decode(bom);
+  console.log(stripped.length, stripped);
 }

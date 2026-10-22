@@ -18,8 +18,12 @@ export function paramName(p: Param): string {
   return p.pattern.name;
 }
 
+// The classes every program's prelude declares.
+const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
+
 export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
   if (BUILT_IN_TYPES.has(name)) throw new CompileError(`'${name}' is a built-in type`, at.start, at.end);
+  if (STD_CLASSES.has(name) && namespaces.some((n) => n.has(name))) throw new CompileError(`'${name}' is a std class; give yours another name`, at.start, at.end);
   if (namespaces.some((n) => n.has(name))) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
 }
 

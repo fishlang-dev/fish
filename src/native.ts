@@ -720,8 +720,11 @@ fsh_str *fsh_rt_str_from_cstring(const char *c) {
 }
 
 // 'new TextDecoder().decode(bytes)'.
+// A leading byte order mark is dropped, as the web's decoder does by default.
 fsh_str *fsh_rt_utf8_decode(fsh_array *bytes) {
-  return fsh_from_utf8((const unsigned char *)bytes->data, bytes->length);
+  const unsigned char *p = (const unsigned char *)bytes->data;
+  int bom = bytes->length >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF;
+  return fsh_from_utf8(p + (bom ? 3 : 0), bytes->length - (bom ? 3 : 0));
 }
 
 // 'new TextEncoder().encode(s)': its UTF-8 bytes, a lone surrogate becoming U+FFFD, whose
@@ -1632,6 +1635,7 @@ void fsh_rt_signal_abort(fsh_signal *s) {
 // The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
 // on. Each interest is one task waiting for one socket to be readable or writable, once; the
 // list holds a count on each task, so shutdown can give back those never woken.
+// ponytail: one list scanned under one lock; keep interests per socket if many connections wait.
 typedef struct { int fd; int32_t writing; fsh_task *task; } fsh_interest;
 static pthread_mutex_t fsh_io_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_interest *fsh_interests = NULL;
@@ -1762,11 +1766,17 @@ static void fsh_io_stop(void) {
   (void)!write(fsh_io_wake, &one, sizeof one);
 #endif
   pthread_join(fsh_io_thread, NULL);
-  for (int64_t i = 0; i < fsh_interest_count; i++) fsh_task_release(fsh_interests[i].task);
-  free(fsh_interests);
+  // Taken out under the lock first: a release may drop a socket, which looks through the list.
+  pthread_mutex_lock(&fsh_io_lock);
+  fsh_interest *left = fsh_interests;
+  int64_t count = fsh_interest_count;
   fsh_interests = NULL;
   fsh_interest_count = fsh_interest_capacity = 0;
+  pthread_mutex_unlock(&fsh_io_lock);
+  for (int64_t i = 0; i < count; i++) fsh_task_release(left[i].task);
+  free(left);
   close(fsh_poller);
+  fsh_poller = -1;
 #ifndef __APPLE__
   close(fsh_io_wake);
 #endif
@@ -1777,6 +1787,8 @@ typedef struct { int64_t count; int fd; } fsh_socket;
 
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+  // A program the Fish program starts doesn't inherit its sockets.
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
 #ifdef __APPLE__
   int on = 1;
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
@@ -1796,8 +1808,13 @@ void fsh_rt_socket_release(fsh_socket *s) {
 
 // A failed call's IoError message: what was being done, and the system's reason.
 static int32_t fsh_io_failed(fsh_str **message, const char *doing) {
+  // strerror's text may be shared between threads, so it is copied under a lock.
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  int error = errno;
   char text[256];
-  snprintf(text, sizeof text, "%s: %s", doing, strerror(errno));
+  pthread_mutex_lock(&lock);
+  snprintf(text, sizeof text, "%s: %s", doing, strerror(error));
+  pthread_mutex_unlock(&lock);
   *message = fsh_rt_str_from_cstring(text);
   return 5;
 }
@@ -1812,7 +1829,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
   reason[0] = 0;
   if (port < 0 || port > 65535) snprintf(reason, sizeof reason, "port %lld is outside 0 to 65535", (long long)port);
   else if (!text || inet_pton(AF_INET, text, &at->sin_addr) != 1) {
-    snprintf(reason, sizeof reason, "'%.200s' is not an IP address like 127.0.0.1; host names aren't looked up", text ? text : "");
+    snprintf(reason, sizeof reason, "'%.200s' is not an IPv4 address like 127.0.0.1; host names aren't looked up", text ? text : "");
   }
   fsh_rt_free(text);
   if (reason[0]) *message = fsh_rt_str_from_cstring(reason);
@@ -1844,13 +1861,15 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
 }
 
 // Polls 'accept()': a new connection, a wait for one, or 5 with the reason.
+// A client that gave up before it was accepted is skipped, as servers expect.
 int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
-  int fd = accept(listener->fd, NULL, NULL);
+  int fd;
+  while ((fd = accept(listener->fd, NULL, NULL)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
     *out = fsh_socket_new(fd);
     return 1;
   }
-  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+  if (errno == EAGAIN || errno == EWOULDBLOCK) {
     fsh_io_wait(listener->fd, 0, task);
     return 0;
   }
@@ -1883,13 +1902,15 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     *message = fsh_rt_str_from_cstring(text);
     return 5;
   }
-  char *data = fsh_rt_alloc(max);
-  ssize_t n = recv(s->fd, data, (size_t)max, 0);
+  // Received onto the stack, so the array holds just what came, however much room was asked for.
+  char buffer[65536];
+  ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
   if (n > 0) {
-    *out = (fsh_array){data, n, max};
+    char *data = fsh_rt_alloc(n);
+    memcpy(data, buffer, n);
+    *out = (fsh_array){data, n, n};
     return 1;
   }
-  fsh_rt_free(data);
   if (n == 0) {
     *out = (fsh_array){NULL, 0, 0};
     return 1;
@@ -1933,7 +1954,8 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return fsh_io_failed(message, "can't make a socket");
     s = *socket_at = fsh_socket_new(fd);
-    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS) return fsh_io_failed(message, "can't connect");
+    // Interrupted, it goes on connecting all the same.
+    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect");
   }
   int error = 0;
   socklen_t size = sizeof error;
@@ -1974,10 +1996,10 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
   for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
-  // Workers get the main thread's 8 MiB stack, not the smaller default for other threads, since
-  // an async main's calls run on them.
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
+  // Workers get the main thread's 8 MiB stack, not the smaller default for other threads, since
+  // an async main's calls run on them.
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, 8 << 20);

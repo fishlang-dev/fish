@@ -1,4 +1,4 @@
-// expect: 'nowhere' is not an IP address like 127.0.0.1; host names aren't looked up
+// expect: 'nowhere' is not an IPv4 address like 127.0.0.1; host names aren't looked up
 // expect: can't listen there: Address already in use
 // expect: port 70000 is outside 0 to 65535
 async function main(): Promise<void> throws IoError {

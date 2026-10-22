@@ -2636,8 +2636,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     let given: string | undefined;
     let reason: string | undefined;
     if (leaf) {
-      // A semaphore's or channel's wait, or a sleep given a signal, polled by the runtime, which
-      // wakes the task when it may go on. A send moves its value in, leaving its slot empty.
+      // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
+      // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
+      // slot empty.
       const [slot, handle, outcome] = [temp(), temp(), temp()];
       emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
       if (leaf.method !== "sleep") emit(`${handle} = load ptr, ptr ${slot}`);
