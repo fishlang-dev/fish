@@ -19,7 +19,7 @@ export function llvm(t: Type): string {
   if (t.kind === "ref" || t.kind === "pointer") return "ptr";
   if (t.kind === "array") return ARRAY;
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
-  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" ? t.frame : t.fields).map((f) => llvm(f.type))];
+  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
   return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
 }
 
@@ -44,7 +44,7 @@ function size(t: Type): [number, number] {
   if (t.kind === "ref" || t.kind === "pointer") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
-  const parts = [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" ? t.frame : t.fields).map((f) => f.type)].map(size);
+  const parts = [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => f.type)].map(size);
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
   for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;

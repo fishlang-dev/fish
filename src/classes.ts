@@ -16,6 +16,8 @@ export type Body = Span & {
   throws?: TypeNode;
   // Whether it is a `function*`, whose call makes a generator.
   generator?: boolean;
+  // Whether it is an `async function`, whose call makes a future.
+  async?: boolean;
   // Whether it is a C function a `declare function` names, which has no body here.
   foreign?: boolean;
   // Whether an `export` names it, so a library builds it into a C function too.

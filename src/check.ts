@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, generatorElement, generatorType, yieldsOf, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, futureType, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -84,10 +84,12 @@ export type Instance = {
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
   signature?: Type[];
+  // An async function's own future, which calling it gives.
+  future?: FutureType;
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: Map<Local, number>; loops: Map<Stmt, number> };
+  frame?: { locals: Map<Local, number>; loops: Map<Stmt, number>; awaits: Map<Expr, number> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -126,13 +128,20 @@ function borrowed(instance: Instance, e: Expr): boolean {
   return false;
 }
 
+// `await e`, which the parser reads as a unary operator.
+export function isAwait(e: Expr): e is Extract<Expr, { kind: "unary" }> {
+  return e.kind === "unary" && e.op === "await";
+}
+
 // A generator's frame, everything it keeps between `next()` calls: its state, its parameters
 // in order, every other variable, then each `for...of` loop's array or generator and its
 // position. A closure's loops are its own.
-function frameOf(instance: Instance, generator: GeneratorType) {
+function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const fields: Field[] = [{ name: "state", type: "i32" }];
   const locals = new Map<Local, number>();
   const loops = new Map<Stmt, number>();
+  // Each `await` keeps the future it awaits in the frame while it is pending.
+  const awaits = new Map<Expr, number>();
   const add = (l: Local) => {
     if (locals.has(l)) return;
     locals.set(l, fields.length);
@@ -147,11 +156,16 @@ function frameOf(instance: Instance, generator: GeneratorType) {
       loops.set(s, fields.length);
       fields.push({ name: "loop", type: iterated(instance, s.right) }, { name: "at", type: "i64" });
     }
+    const e = node as Expr;
+    if (isAwait(e)) {
+      awaits.set(e, fields.length);
+      fields.push({ name: "await", type: instance.types.get(e.operand)! });
+    }
     Object.values(node).forEach(visit);
   };
   visit(instance.body.body);
   generator.frame = fields;
-  instance.frame = { locals, loops };
+  instance.frame = { locals, loops, awaits };
 }
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
@@ -226,7 +240,7 @@ export function check(program: Stmt[], library = false): Checked {
   }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
-    if (f.async) throw unsupported("async functions", f);
+    if (f.async && f.generator) throw unsupported("async generators", f);
     if (byName.has(f.name) || classes.has(f.name) || templates.has(f.name) || enums.has(f.name)) throw new CompileError(`'${f.name}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
@@ -292,7 +306,8 @@ export function check(program: Stmt[], library = false): Checked {
     else checkBody(pending.shift()!);
   }
   if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
-  if (main && instanceOf(main).returns !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
+  const started = main && instanceOf(main).returns;
+  if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
@@ -447,6 +462,7 @@ export function check(program: Stmt[], library = false): Checked {
     const f = instance.body;
     if (f.typeParams?.length) throw unsupported("generic C functions", f);
     if (f.generator) throw new CompileError("a C function can't be a generator; drop the '*'", f.start, f.end);
+    if (f.async) throw new CompileError("a C function can't be async; C calls return when they finish", f.start, f.end);
     if (f.name === "main") throw new CompileError("'main' can't be a C function; it is where the program starts", f.start, f.end);
     if (f.throws) throw new CompileError("a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
     if (!f.returnType) throw new CompileError("a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
@@ -489,6 +505,7 @@ export function check(program: Stmt[], library = false): Checked {
     if (declared && !isInterface(declared)) return declared;
     if (inProgress.has(instance)) {
       if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
+      if (f.async) throw new CompileError(`an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     checkBody(instance);
@@ -553,10 +570,20 @@ export function check(program: Stmt[], library = false): Checked {
     if (generator) declared = undefined;
     if (generator && f.throws) throw unsupported("generators that throw", f.throws);
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
+    // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
+    // give that, and calling it gives its own future, which runs nothing until awaited.
+    const future = f.async ? (instance.future ??= futureType(f.name, instance.concrete)) : undefined;
+    if (future && declared) {
+      const gives = promiseElement(declared);
+      if (gives === undefined) throw new CompileError("an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
+      declared = gives;
+    }
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
     if (trait) declared = undefined;
     let inferred: Type | undefined;
+    // The awaits written where the state machine can stop at them.
+    const awaitable = new Set<Expr>();
     // How many statements with a `finally` enclose the code being checked: a generator dropped
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
@@ -634,6 +661,8 @@ export function check(program: Stmt[], library = false): Checked {
       noteThis,
       closing: f.closure !== undefined,
       generator: f.generator === true,
+      async: f.async === true,
+      awaitable,
       unsafe: f.closure?.unsafe === true,
       changesCapture,
       reachable: (l) => !caseOnly.has(l),
@@ -696,13 +725,21 @@ export function check(program: Stmt[], library = false): Checked {
       generator.yields = laid(yielded);
       generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
     }
-    const type = generator ?? declared ?? inferred ?? "void";
+    const gives = declared ?? inferred ?? "void";
+    if (future) {
+      if (holdsRef(gives)) throw unsupported("async functions giving references", f.returnType ?? f);
+      const laid = (t: Type) => (instance.concrete ? lower(t) : t);
+      future.gives = laid(gives);
+      future.throws = errorType && laid(errorType);
+      future.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+    }
+    const type = generator ?? future ?? gives;
     if (f.closure && holdsRef(type)) throw unsupported("closures returning references", f.returnType ?? f.closure.value ?? f);
     if (!f.closure) lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
     const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
     const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
-    if (type !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
+    if (gives !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
@@ -714,6 +751,7 @@ export function check(program: Stmt[], library = false): Checked {
     instance.returns = type;
     if (instance.concrete) lowerTables(instance);
     if (generator) frameOf(instance, generator);
+    if (future) frameOf(instance, future);
     done.add(instance);
     inProgress.delete(instance);
 
@@ -836,7 +874,14 @@ export function check(program: Stmt[], library = false): Checked {
             yielding(s.expr);
             return;
           }
+          if (isAwait(s.expr)) awaiting(s.expr);
+          if (s.expr.kind === "assign" && isAwait(s.expr.value)) awaiting(s.expr.value);
           effect(s.expr);
+          // A promise runs only when awaited, so one made and dropped would silently do nothing.
+          const made = types.get(s.expr) ?? calls.get(s.expr)?.returns;
+          if (typeof made !== "string" && made?.kind === "future") {
+            throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", s.expr.start, s.expr.end);
+          }
           return;
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
@@ -844,6 +889,7 @@ export function check(program: Stmt[], library = false): Checked {
           const d = s.declarations[0]!;
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
+          if (isAwait(d.init)) awaiting(d.init);
           const annotated = (d.type && resolveType(d.type)) || demands.get(s);
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
@@ -1042,6 +1088,7 @@ export function check(program: Stmt[], library = false): Checked {
             if (s.value) throw new CompileError("a generator can't return a value yet; 'return;' ends it", s.value.start, s.value.end);
             return;
           }
+          if (s.value && isAwait(s.value)) awaiting(s.value);
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           if (declared && s.value) expect(s.value, declared);
@@ -1075,6 +1122,16 @@ export function check(program: Stmt[], library = false): Checked {
       if (!yielded) yielded = widenLet(t);
       if (holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
       coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's 'Generator<${show(yielded)}>'`);
+    }
+
+    // An `await` written as a statement of its own, or as all of a declaration's initializer,
+    // an assignment's value or a return's: one the state machine can stop at with nothing else
+    // of the statement pending.
+    function awaiting(e: Expr) {
+      if (!future) return;
+      if (targets.some((t) => t.kind === "arm")) throw unsupported("'await' inside match arms", e);
+      if (finalizing > 0) throw unsupported("'await' statements in a 'try' with a 'finally'", e);
+      awaitable.add(e);
     }
 
     function fieldAssignment(s: Stmt): Extract<Expr, { kind: "member" }> | undefined {

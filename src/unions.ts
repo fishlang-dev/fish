@@ -105,6 +105,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
   if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
   const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
   if (sources.some((s) => typeof s !== "string" && s.kind === "generator")) throw unsupported("unions holding generators", e);
+  if (sources.some((s) => typeof s !== "string" && s.kind === "future")) throw unsupported("unions holding promises", e);
   for (const source of sources) {
     // A throw expression never gives a value, so it goes nowhere in particular.
     if (source === "never") continue;

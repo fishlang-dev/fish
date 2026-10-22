@@ -165,10 +165,10 @@ for (const [expr, what, part] of PROPERTIES) {
 }
 
 // Operators that parse but have no meaning yet.
-for (const expr of ["a in b", "typeof 1", "await 1"]) {
+for (const expr of ["a in b", "typeof 1"]) {
   test(expr, () => {
     const src = `function main() {\n  let x = ${expr}\n}`;
-    const op = expr.match(/\bin\b|typeof|await/)![0];
+    const op = expr.match(/\bin\b|typeof/)![0];
     const start = src.indexOf(expr);
     expect(() => check(parse(src))).toThrow(expect.objectContaining({
       message: `operator '${op}' is not supported yet`, start, end: start + expr.length,
@@ -220,7 +220,7 @@ for (const [stmt, what] of STATEMENTS) {
 }
 
 // Declarations that parse but have no meaning yet, at the top level.
-for (const [decl, what] of [["async function f() {}", "async functions"]]) {
+for (const [decl, what] of [["async function* f() {}", "async generators"]]) {
   test(decl!, () => {
     const src = `${decl}\nfunction main() {}`;
     expect(() => check(parse(src))).toThrow(expect.objectContaining({

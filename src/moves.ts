@@ -428,7 +428,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (instance.raises.has(e)) raising();
         return;
       }
+      // An awaited future is handed to the await, which runs it to completion.
       case "unary":
+        if (e.op === "await") return expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
         return expr(e.operand);
       case "template":
         for (const x of e.exprs) expr(x);

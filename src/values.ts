@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, nextResult, pointerType, unionType, yieldsOf, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, nextResult, pointerType, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -98,6 +98,9 @@ export type Context = {
   closing: boolean;
   // Whether the body is a generator's.
   generator: boolean;
+  // Whether the body is an async function's, and the awaits written where it can stop at them.
+  async: boolean;
+  awaitable: Set<Expr>;
   // Whether the body is a closure written inside `unsafe`.
   unsafe: boolean;
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
@@ -274,6 +277,10 @@ export function expressions(ctx: Context) {
     if (e.kind === "call") call(e);
     else if (e.kind === "match") match(e, false);
     else if (e.kind === "pipe") pipe(e, false);
+    else if (e.kind === "unary" && e.op === "await") {
+      const gives = awaited(e);
+      if (gives !== "void") types.set(e, gives);
+    }
     else value(e);
   }
 
@@ -662,6 +669,11 @@ export function expressions(ctx: Context) {
       coerce(a, t, refType(t, mutable), "");
       return { type: pointerType(t, mutable), what: `'${callee.name}'` };
     }
+    // `yieldNow()`: a future that is pending once, letting other tasks run.
+    if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
+      if (e.args.length > 0) throw new CompileError("'yieldNow' takes no arguments", e.start, e.end);
+      return { type: YIELD_NOW, what: "'yieldNow'" };
+    }
     // `cString(s)`: a pointer to a NUL-terminated copy of `s` for C, which the enclosing block
     // owns and frees when it ends.
     if (callee.kind === "ident" && callee.name === "cString" && !byName.has("cString")) {
@@ -703,8 +715,9 @@ export function expressions(ctx: Context) {
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
+    // An async function's call only makes its future; its error comes at the `await`.
     const error = errorOf(instance);
-    if (error) raise(e, error, `'${target.name}'`);
+    if (error && !target.async) raise(e, error, `'${target.name}'`);
     const type = resultOf(instance, e);
     const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what
@@ -812,6 +825,17 @@ export function expressions(ctx: Context) {
     const t = value(a);
     coerce(a, t, want, `argument of type '${show(t)}' is not assignable to parameter of type '${show(want)}'`);
     return { type: callee.name === "write" ? "void" : p, what: `'${callee.name}'` };
+  }
+
+  // `await p`: the future runs to completion, the async function stopping while it is pending,
+  // and gives its value, or raises its error as a call would. It moves into the await.
+  function awaited(e: Extract<Expr, { kind: "unary" }>): Type {
+    if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
+    if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
+    const t = value(e.operand);
+    if (typeof t === "string" || t.kind !== "future") throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
+    if (t.throws) raise(e, t.throws, "this Promise");
+    return t.gives;
   }
 
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
@@ -1305,6 +1329,11 @@ export function expressions(ctx: Context) {
         if (ctx.generator) throw unsupported("'yield' inside expressions", e);
         throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
       case "unary": {
+        if (e.op === "await") {
+          const gives = awaited(e);
+          if (gives === "void") throw new CompileError("this Promise gives nothing once awaited, so its value can't be used", e.start, e.end);
+          return gives;
+        }
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = operand(e.operand);
         // The smallest i64 is written as the negation of a literal one past the largest.

@@ -101,7 +101,41 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType;
+
+// An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
+// its parameters, which say what it borrows, and the frame its state lives in, as a
+// generator's. Polled where it lives and never moved after its first poll. One per async
+// instance, so `===` is nominal identity; it has no properties.
+export type FutureType = { kind: "future"; name: string; gives: Type; throws?: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
+
+export function futureType(name: string, concrete: boolean): FutureType {
+  const t: FutureType = { kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete };
+  keys.set(t, `future ${declared++}`);
+  return t;
+}
+
+// `yieldNow()`'s future, which is pending once, then done.
+export const YIELD_NOW: FutureType = { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
+
+const promises = new Map<string, InterfaceType>();
+const promised = new WeakMap<InterfaceType, Type>();
+
+// `Promise<T>`: any future giving a `T` once awaited, as TypeScript's type of an async result is.
+export function promiseInterface(t: Type): InterfaceType {
+  let found = promises.get(keyOf(t));
+  if (!found) {
+    found = interfaceType(`Promise<${show(t)}>`);
+    promises.set(keyOf(t), found);
+    promised.set(found, t);
+  }
+  return found;
+}
+
+// What a `Promise<T>` gives, when the interface is one.
+export function promiseElement(t: Type): Type | undefined {
+  return typeof t !== "string" && t.kind === "interface" ? promised.get(t) : undefined;
+}
 
 // A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
 // only inside `unsafe`. It copies like a number and owns nothing.
@@ -316,7 +350,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "array") return holdsMut(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
-  if (t.kind === "generator") return t.params.some((f) => holdsMut(f.type));
+  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsMut(f.type));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
 
@@ -331,7 +365,7 @@ export function holdsRef(t: Type): boolean {
   if (t.kind === "variant") return t.fields.some((f) => holdsRef(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
   // A generator borrows what its parameters do; its frame's own references point into itself.
-  if (t.kind === "generator") return t.params.some((f) => holdsRef(f.type));
+  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsRef(f.type));
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
@@ -353,7 +387,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future") return t;
   if (t.kind === "param") return t.concrete ?? t;
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   let found = lowered.get(t);
@@ -514,6 +548,7 @@ export function show(t: Type): string {
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
+  if (t.kind === "future") return `Promise<${show(t.gives)}>`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
