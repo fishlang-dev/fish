@@ -1196,7 +1196,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           settle();
           leave(undefined);
         } else {
-          const v = s.value ? owned(s.value) : undefined;
+          // A future's inferred result is widened from what its returns give, as a `let` is.
+          const v = s.value ? (current.future ? convert(owned(s.value), valueType(s.value), current.future.gives) : owned(s.value)) : undefined;
           settle();
           leave(v);
         }
