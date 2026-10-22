@@ -159,7 +159,15 @@ function frameOf(instance: Instance, generator: GeneratorType) {
 // Names an export can't take in C: its and C++'s keywords and the standard type names a header
 // uses, and the C functions the runtime and its IR call, which an export would replace.
 export const C_KEYWORDS = new Set(["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "true", "false", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "class", "namespace", "template", "this", "new", "delete", "public", "private", "protected", "virtual", "operator", "friend", "using", "try", "catch", "throw", "typename", "explicit", "mutable", "nullptr", "decltype", "constexpr", "noexcept", "export", "and", "or", "not", "xor"]);
-const RUNTIME_NAMES = new Set([...[...NATIVE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!), ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? [])]);
+// The runtime's own calls are read from its code without its comments and strings, then the
+// math and unwinding functions the IR, or LLVM lowering it, calls, which no text names.
+const NATIVE_CODE = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
+const LOWERED = ["pow", "powf", "fmod", "fmodf", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "trunc", "truncf", "round", "roundf", "fabs", "fabsf", "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "memset", "memmove", "memcpy", "memcmp", "bzero", "abort", "exit", "fflush", "dprintf", "printf", "malloc", "calloc", "realloc", "free", "write", "qsort"];
+const RUNTIME_NAMES = new Set([
+  ...[...NATIVE_CODE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!).filter((n) => !C_KEYWORDS.has(n)),
+  ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []),
+  ...LOWERED,
+]);
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(program: Stmt[], library = false): Checked {
@@ -418,7 +426,9 @@ export function check(program: Stmt[], library = false): Checked {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(f.name) || C_KEYWORDS.has(f.name)) {
       throw new CompileError(`a library can't export '${f.name}' to C, which needs a name of ASCII letters, digits and underscores that isn't a C or C++ keyword`, f.start, f.end);
     }
-    if (f.name === "main" || f.name.startsWith("fsh_") || RUNTIME_NAMES.has(f.name)) {
+    // C reserves names starting with an underscore and a capital, or two underscores, for itself
+    // and its runtime: the unwinder's `_Unwind_Resume` among them.
+    if (f.name === "main" || f.name.startsWith("fsh_") || /^_[A-Z_]/.test(f.name) || RUNTIME_NAMES.has(f.name)) {
       throw new CompileError(`a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
     }
     f.params.forEach((p) => {

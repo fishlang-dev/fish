@@ -75,11 +75,11 @@ int main(int argc, char **argv) {
 }
 `;
 
-function library(kind: "static" | "shared"): string {
+function library(kind: "static" | "shared", panic: "unwind" | "abort" = "unwind"): string {
   const dir = mkdtempSync(join(tmp, `${kind}-`));
   writeFileSync(join(dir, "mathy.fsh"), LIBRARY);
   writeFileSync(join(dir, "main.c"), PROGRAM);
-  buildLibrary(join(dir, "mathy.fsh"), join(dir, "mathy"), kind);
+  buildLibrary(join(dir, "mathy.fsh"), join(dir, "mathy"), kind, false, panic);
   const linked = kind === "static" ? [join(dir, "libmathy.a"), "-lm"] : [`-L${dir}`, "-lmathy"];
   const clang = Bun.spawnSync(["clang", join(dir, "main.c"), ...linked, "-o", join(dir, "prog")]);
   if (clang.exitCode !== 0) throw new Error(clang.stderr.toString());
@@ -100,11 +100,13 @@ for (const kind of ["static", "shared"] as const) {
     expect(result.exitCode).toBe(0);
   });
 
-  test(`a panic in a ${kind} library's export aborts instead of unwinding into C`, () => {
-    const result = run(library(kind), "explode");
-    expect(result.stderr.toString()).toContain("index out of bounds");
-    expect(result.signalCode).toBe("SIGABRT");
-  });
+  for (const panic of ["unwind", "abort"] as const) {
+    test(`a panic in a ${kind} library's export aborts instead of unwinding into C, built to ${panic}`, () => {
+      const result = run(library(kind, panic), "explode");
+      expect(result.stderr.toString()).toContain("index out of bounds");
+      expect(result.signalCode).toBe("SIGABRT");
+    });
+  }
 }
 
 test("the header declares each export in C's types", () => {
@@ -149,11 +151,17 @@ for (const [src, message] of [
   ["export function exit(n: i64): i64 { return n; }", "since C's library or the Fish runtime already uses that name"],
   ["export function int(n: i64): i64 { return n; }", "isn't a C or C++ keyword"],
   ["function helper(): i64 { return 1; }", "a library has nothing for C to call"],
+  ["export function pow(a: f64): f64 { return a; }", "since C's library or the Fish runtime already uses that name"],
+  ["export function _Unwind_Resume(a: i64): i64 { return a; }", "since C's library or the Fish runtime already uses that name"],
 ]) {
   test(src!, () => {
     expect(() => check(parse(src!), true)).toThrow(message!);
   });
 }
+
+test("a library may export names that only appear in the runtime's comments", () => {
+  expect(() => check(parse("export function start(n: i64): i64 { return n; }\nexport function end(n: i64): i64 { return n; }"), true)).not.toThrow();
+});
 
 test("outside a library an export is an ordinary function", () => {
   expect(() => check(parse("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }"))).not.toThrow();

@@ -1854,10 +1854,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // reaches here aborts, its message already printed.
   function exported(i: Instance): string[] {
     const params = i.body.params.map((p, n) => [i.locals.get(p)!.type, `%a${n}`] as const);
-    const call = `${i.returns === "void" ? "" : "%r = "}${panic === "abort" ? "call" : "invoke"} ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(t)} ${a}`).join(", ")}) ${unwinds} {`;
+    // A library's panics all unwind, the runtime's default, whichever way the build chose: the
+    // abort happens here, before C sees the unwind.
+    const call = `${i.returns === "void" ? "" : "%r = "}invoke ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
+    const head = `define ${crossed(i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     const done = i.returns === "void" ? "  ret void" : `  ret ${llvm(i.returns)} %r`;
-    if (panic === "abort") return [head, `  ${call}`, done, "}", ""];
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
 
