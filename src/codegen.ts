@@ -2085,6 +2085,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !calls.has(e)) {
+        const made = temp();
+        emit(`${made} = call ptr @fsh_rt_http_date()`);
+        if (!types.has(e)) pending.push({ v: made, type: "string" });
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "utf8Encode" && !calls.has(e)) {
         const [bytes, made] = [alloca(ARRAY), temp()];
         emit(`call void @fsh_rt_utf8_encode(ptr ${bytes}, ptr ${value(e.args[0]!)})`);

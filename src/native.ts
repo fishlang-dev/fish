@@ -727,6 +727,16 @@ fsh_str *fsh_rt_utf8_decode(fsh_array *bytes) {
   return fsh_from_utf8(p + (bom ? 3 : 0), bytes->length - (bom ? 3 : 0));
 }
 
+// The time now as an HTTP Date header writes it, like "Sun, 06 Nov 1994 08:49:37 GMT".
+fsh_str *fsh_rt_http_date(void) {
+  time_t now = time(NULL);
+  struct tm at;
+  gmtime_r(&now, &at);
+  char text[64];
+  strftime(text, sizeof text, "%a, %d %b %Y %H:%M:%S GMT", &at);
+  return fsh_rt_str_from_cstring(text);
+}
+
 // 'new TextEncoder().encode(s)': its UTF-8 bytes, a lone surrogate becoming U+FFFD, whose
 // encoding is as long.
 void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {

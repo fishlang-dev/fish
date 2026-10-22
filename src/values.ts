@@ -10,6 +10,7 @@ import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEE
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
+import { STD_BASE } from "./std.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -792,6 +793,8 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, t, want, `'fromCString' takes a 'Ptr<u8>', not '${show(t)}'`);
       return { type: "string", what: "'fromCString'" };
     }
+    // The time as an HTTP Date header gives it, for the std HTTP server alone.
+    if (callee.kind === "ident" && callee.name === "httpDate" && e.start >= STD_BASE && e.args.length === 0) return { type: "string", what: "'httpDate'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
