@@ -138,6 +138,8 @@ export function expressions(ctx: Context) {
   const expecting = new Map<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
   const wanted = new Map<Expr, Type>();
+  // Names used as the object of a field read, an index or a method call.
+  const objects = new WeakSet<Expr>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
   // How many \`unsafe\` blocks enclose the code being checked.
   let unsafeDepth = ctx.unsafe ? 1 : 0;
@@ -873,6 +875,7 @@ export function expressions(ctx: Context) {
   // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
   // the same by every thread, and gives what it held before, except `store`.
   function interiorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
+    where(callee, t);
     if (t.which === "Cell") return cellCall(e, callee, t);
     if (t.which === "Lock") return lockCall(e, callee, t);
     if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
@@ -888,6 +891,21 @@ export function expressions(ctx: Context) {
       coerce(a, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     return { type: callee.name === "store" ? "void" : of, what: `'${callee.name}'` };
+  }
+
+  // An Atomic's, Cell's or Lock's method changes it where it lives, so it is called on a place,
+  // a reference, or a value just made; anything else would change a copy.
+  function where(callee: Extract<Expr, { kind: "member" }>, t: InteriorType) {
+    const inPlace = (e: Expr): boolean => {
+      const type = types.get(e);
+      if (typeof type !== "string" && type?.kind === "ref") return true;
+      if (e.kind === "ident" || e.kind === "this" || e.kind === "call" || e.kind === "new") return true;
+      if (e.kind === "member") return !calls.has(e) && !ctx.copiesOut.has(e) && inPlace(e.object);
+      return element(e) && inPlace(e.object);
+    };
+    if (inPlace(callee.object)) return;
+    const hint = callee.object.kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "";
+    throw new CompileError(`'${callee.name}' changes the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
   }
 
   // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
@@ -1097,6 +1115,7 @@ export function expressions(ctx: Context) {
   function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
     if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && (classes.has(object.name) || enums.has(object.name)))) return undefined;
+    if (object.kind === "ident") objects.add(object);
     const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
     return typeof type !== "string" && type.kind === "ref" ? type.to : type;
@@ -1321,6 +1340,10 @@ export function expressions(ctx: Context) {
           throw new CompileError(`'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
         }
         locals.set(e, local);
+        const held = typeof local.type !== "string" && local.type.kind === "ref" ? local.type.to : local.type;
+        if (ctx.sharing && local.param && !objects.has(e) && interiorMutable(held)) {
+          throw new CompileError(`inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
+        }
         return narrowed(local) ?? local.type;
       }
       // Its literal type, which a string takes it as.
@@ -1328,6 +1351,7 @@ export function expressions(ctx: Context) {
         return literalType(e.value);
       // A string's one-unit string at a `usize` index.
       case "index": {
+        if (e.object.kind === "ident") objects.add(e.object);
         // An enum's reverse mapping, `Color[0]`, has no meaning yet.
         if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
         const through = value(e.object);
@@ -1355,6 +1379,7 @@ export function expressions(ctx: Context) {
           if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
           return found;
         }
+        if (e.object.kind === "ident") objects.add(e.object);
         const through = linked(e) ? unwrapped(e.object, e.optional) : value(e.object);
         const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
         // A field read through a reference loads what it points to; a getter gets the pointer.
@@ -1963,6 +1988,7 @@ export function expressions(ctx: Context) {
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
   function assignable(target: Expr, reads: boolean): Type {
+    if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(target, types);
     if (target.kind === "index" && stringLike(read(target.object))) {

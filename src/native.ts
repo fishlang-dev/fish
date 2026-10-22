@@ -1195,17 +1195,29 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
 }
 
 // A Lock's word: 0 unlocked, 1 locked. A lock is held only for a synchronous callback, so a
-// waiter spins briefly, then gives its thread up between tries.
+// waiter spins briefly, then gives its thread up between tries. Taking a lock this thread
+// already holds would wait forever, so it is refused: 1, and the caller panics.
 // ponytail: spin-then-yield, a parking queue if contended locks show up in profiles
-void fsh_rt_lock(int32_t *word) {
+#define FSH_HELD 16
+static _Thread_local int32_t *fsh_held[FSH_HELD];
+static _Thread_local int32_t fsh_holding = 0;
+
+int32_t fsh_rt_lock(int32_t *word) {
+  for (int32_t i = 0; i < fsh_holding && i < FSH_HELD; i++) {
+    if (fsh_held[i] == word) return 1;
+  }
   for (int spins = 0;; spins++) {
     int32_t open = 0;
-    if (__atomic_compare_exchange_n(word, &open, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    if (__atomic_compare_exchange_n(word, &open, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
     if (spins >= 64) sched_yield();
   }
+  if (fsh_holding < FSH_HELD) fsh_held[fsh_holding] = word;
+  fsh_holding++;
+  return 0;
 }
 
 void fsh_rt_unlock(int32_t *word) {
+  fsh_holding--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
 
@@ -1222,8 +1234,9 @@ void fsh_rt_shared_retain(int64_t *block) {
 }
 
 // Gives up a count: whether it was the last, so the caller drops the value and frees the block.
+// A handle moved out of its slot leaves null, which holds no count.
 int32_t fsh_rt_shared_release(int64_t *block) {
-  return __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
+  return block && __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.

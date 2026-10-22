@@ -45,7 +45,7 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_join(ptr, ptr, ptr)",
   "declare void @fsh_rt_handle_drop(ptr)",
   "declare void @fsh_rt_handle_retain(ptr)",
-  "declare void @fsh_rt_lock(ptr)",
+  "declare i32 @fsh_rt_lock(ptr)",
   "declare void @fsh_rt_unlock(ptr)",
   "declare ptr @fsh_rt_shared_new(i64)",
   "declare void @fsh_rt_shared_retain(ptr)",

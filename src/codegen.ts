@@ -4,7 +4,7 @@ import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
-import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
+import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, interiorType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
@@ -416,6 +416,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     startBlock(done);
   }
 
+  // Takes a lock word, panicking if this thread already holds it, which would wait forever.
+  function takeLock(word: string, at: Span) {
+    const [taken, held] = [temp(), temp()];
+    emit(`${taken} = call i32 @fsh_rt_lock(ptr ${word})`);
+    emit(`${held} = icmp ne i32 ${taken}, 0`);
+    panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
+  }
+
   // A shared value's block: its count, then what a Lock of its value would be.
   function sharedBlock(t: SharedType): string {
     return `{ i64, ${llvm(interiorType("Lock", t.of))} }`;
@@ -444,7 +452,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const env = alloca(llvm(made));
     emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
     const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
-    emit(`call void @fsh_rt_lock(ptr ${at})`);
+    takeLock(at, e);
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = calls.get(callback)!;
@@ -457,10 +465,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A Cell's method: a plain load or store where it lives, which only one thread can reach.
   function cellCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, at: string): string | undefined {
     const ty = llvm(t.of);
+    // The argument runs first: it may use the same Cell.
+    const given = callee.name === "get" ? undefined : owned(e.args[0]!);
     const old = temp();
     emit(`${old} = load ${ty}, ptr ${at}`);
-    if (callee.name === "get") return copied(old, t.of);
-    emit(`store ${ty} ${owned(e.args[0]!)}, ptr ${at}`);
+    if (given === undefined) return copied(old, t.of);
+    emit(`store ${ty} ${given}, ptr ${at}`);
     if (callee.name === "replace") return old;
     dispose(old, t.of);
     return undefined;
@@ -1821,20 +1831,43 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.
     if (!types.has(e.object)) return "zeroinitializer";
+    // Inside a shared value's block only this field is read: its neighbours change unlocked.
+    if (inBlock(e)) {
+      const read = temp();
+      emit(`${read} = load ${llvm(stored(e))}, ptr ${address(e)}`);
+      return convert(read, stored(e), types.get(e)!);
+    }
     // Through a reference, the value it points to.
     const shared = coercions.get(e.object) ?? types.get(e.object)!;
-    if (shared === "string") return convert(units(value(e.object)), "usize", types.get(e)!);
+    const whole = () => {
+      if (!inBlock(e.object)) return value(e.object);
+      const read = temp();
+      emit(`${read} = load ${llvm(stored(e.object))}, ptr ${address(e.object)}`);
+      return read;
+    };
+    if (shared === "string") return convert(units(whole()), "usize", types.get(e)!);
     if (typeof shared !== "string" && shared.kind === "array") {
       const length = temp();
-      emit(`${length} = extractvalue ${ARRAY} ${value(e.object)}, 1`);
+      emit(`${length} = extractvalue ${ARRAY} ${whole()}, 1`);
       return convert(length, "usize", types.get(e)!);
     }
-    if (typeof shared !== "string" && shared.kind === "union") return unionField(value(e.object), shared, e.name, types.get(e)!);
+    if (typeof shared !== "string" && shared.kind === "union") return unionField(whole(), shared, e.name, types.get(e)!);
     const object = shared as ObjectType | ClassType;
     const result = temp();
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares.
     return convert(result, field(object, e.name)!.type, types.get(e)!);
+  }
+
+  // Whether a field read reaches into a shared value's block through its interior-mutable
+  // fields, where it is read in place.
+  function inBlock(e: Expr): boolean {
+    for (; e.kind === "member" && !calls.has(e); e = e.object) {
+      const holder = referent(types.get(e.object)!);
+      if (typeof holder !== "string" && holder.kind === "shared") return !current.copiesOut.has(e);
+      if (typeof holder === "string" || (holder.kind !== "object" && holder.kind !== "class")) return false;
+    }
+    return false;
   }
 
   // A shared value's block, and a pointer to one of its value's fields.
@@ -1854,7 +1887,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [block, t, at] = sharedField(e);
     const lock = temp();
     emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
-    emit(`call void @fsh_rt_lock(ptr ${lock})`);
+    takeLock(lock, e);
     const read = temp();
     const type = types.get(e)!;
     emit(`${read} = load ${llvm(type)}, ptr ${at}`);

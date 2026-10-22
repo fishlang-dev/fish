@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -829,6 +829,16 @@ export function check(program: Stmt[], library = false): Checked {
       checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant });
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
+      // A shared value's `update` callback lends its parameter only through its fields.
+      if (f.closure?.expected && sharedCallbacks.has(f.closure.expected)) {
+        for (const [alias, from] of inner.captures!) {
+          const held = from === "this" ? undefined : typeof from.type !== "string" && from.type.kind === "ref" ? from.type.to : from.type;
+          if (from !== "this" && from.param && held !== undefined && interiorMutable(held)) {
+            const at = inner.captureUses!.get(alias) ?? e;
+            throw new CompileError(`a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
+          }
+        }
+      }
       // A closure holds what it moves, or everything under `move`, and borrows the rest; `this`
       // is a reference either way.
       // In an instance, what a type parameter stands for is laid out.
