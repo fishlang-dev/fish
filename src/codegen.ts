@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, INTEGERS, isCopy, unionType, type ArrayType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, type ArrayType, type GeneratorType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -81,6 +81,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // Where the statement being lowered starts in `pending`: a statement in a match arm's block
   // runs inside an expression whose own values are pending below it.
   let floor = 0;
+  // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
+  // resumes at in order, where it starts, and where it gives that it has finished.
+  let resuming: { type: GeneratorType; frame: string; resumes: string[]; start: string; done: string } | undefined;
+  // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
+  let framed = new Set<string>();
   // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
   const arms = new Map<Stmt, { slot: string; type: Type } | undefined>();
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
@@ -98,6 +103,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
 
+  // The instance each generator type resumes.
+  const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
+
   for (const instance of instances) {
     current = instance;
     ({ types, locals, calls, setters, coercions, jumps } = instance);
@@ -112,11 +120,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     floor = 0;
     scopes = [[]];
     const type = instance.returns;
+    framed = new Set();
+    resuming = instance.generator && { type: instance.generator, frame: llvm(instance.generator), resumes: [], start: label(), done: label() };
+    // A generator's variables, and its loops' state, are fields of the frame each `next()` is
+    // given, which already holds its parameters.
+    if (resuming) {
+      const field = (at: string, i: number) => {
+        allocas.push(`  ${at} = getelementptr ${resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
+        framed.add(at);
+      };
+      field("%state", 0);
+      for (const [local, i] of instance.frame!.locals) field(slot(local), i);
+      for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop.${j}`, j));
+      startBlock(resuming.start);
+    }
     // Parameters are copied into slots like any other binding.
     const params = f.params.map((p) => {
       const local = resolved(p);
-      allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+      reserve(local);
       own(slot(local), local.type);
+      if (resuming) return "";
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
       return `${llvm(local.type)} %${local.name}.arg`;
     });
@@ -139,8 +162,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
     // The last block is unreachable when every path returned; the checker guarantees it for values.
-    if (type === "void") leave(undefined);
+    if (type === "void" || resuming) leave(undefined);
     else emit("unreachable");
+    if (resuming) {
+      // Each `next()` goes on from where the last stopped: the start, a `yield`, or the end.
+      startBlock(resuming.done);
+      emit(`ret ${resultType(instance)} ${answer(undefined, resuming.type.yields)}`);
+      const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
+      allocas.push("  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
+      out.push(`define ${resultType(instance)} ${symbol(instance)}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+      continue;
+    }
     out.push(`define ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
   }
   const main = instances.find((i) => i.symbol === "main")!;
@@ -217,6 +249,96 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
+  // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
+  function loopSlot(s: Stmt, i: number, type: string): string {
+    return resuming ? `%loop.${current.frame!.loops.get(s)! + i}` : alloca(type);
+  }
+
+  // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
+  // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
+  // it borrows through a `Mut` stays with its owner.
+  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type) {
+    const local = resolved(s.left as Stmt);
+    const generator = (isRef(iterated) ? iterated.to : iterated) as GeneratorType;
+    scopes.push([]);
+    const held = loopSlot(s, 0, llvm(iterated));
+    if (isRef(iterated)) emit(`store ptr ${value(s.right)}, ptr ${held}`);
+    else {
+      own(held, generator);
+      emit(`store ${llvm(generator)} ${owned(s.right)}, ptr ${held}`);
+    }
+    settle();
+    const [test, loop, end] = [label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    let at = held;
+    if (isRef(iterated)) {
+      at = temp();
+      emit(`${at} = load ptr, ptr ${held}`);
+    }
+    const result = resume(generator, at);
+    const [finished, more] = nextShapes(generator.yields);
+    emit(`br i1 ${holds(result, nextResult(generator.yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
+    startBlock(loop);
+    exits.set(s, { exit: end, next: test, depth: scopes.length });
+    scopes.push([]);
+    reserve(local);
+    own(slot(local), local.type);
+    const [shaped, v] = [convert(result, nextResult(generator.yields), more), temp()];
+    emit(`${v} = extractvalue ${llvm(more)} ${shaped}, 1`);
+    emit(`store ${llvm(local.type)} ${v}, ptr ${slot(local)}`);
+    s.body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
+    emit(`br label %${test}`);
+    startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
+  }
+
+  // The two shapes `next()` gives: finished, and holding a value.
+  function nextShapes(yields: Type): [ObjectType, ObjectType] {
+    const members = (nextResult(yields) as UnionType).members as ObjectType[];
+    const finished = members.find((m) => m.fields.length === 1)!;
+    return [finished, members.find((m) => m !== finished)!];
+  }
+
+  // What `next()` gives: `v`, or that the generator has finished. `done` is a literal, which
+  // takes no room: the union's tag tells the two apart.
+  function answer(v: string | undefined, yields: Type): string {
+    const [finished, more] = nextShapes(yields);
+    if (v === undefined) return convert("zeroinitializer", finished, nextResult(yields));
+    const made = temp();
+    emit(`${made} = insertvalue ${llvm(more)} zeroinitializer, ${llvm(yields)} ${v}, 1`);
+    return convert(made, more, nextResult(yields));
+  }
+
+  // Runs a generator to its next `yield`, through a pointer to it.
+  function resume(generator: GeneratorType, at: string): string {
+    const target = generatorOf.get(generator)!;
+    const result = temp();
+    unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at})`, result);
+    return result;
+  }
+
+  // `yield v`: the value goes back to `next()`'s caller, and the next call goes on from here.
+  function yielded(e: Extract<Expr, { kind: "yield" }>) {
+    const g = resuming!;
+    const v = owned(e.value!);
+    settle();
+    const result = answer(v, g.type.yields);
+    const at = label();
+    g.resumes.push(at);
+    emit(`store i32 ${g.resumes.length}, ptr %state`);
+    emit(`ret ${resultType(current)} ${result}`);
+    startBlock(at);
+  }
+
+  // A variable's slot: an alloca, or in a generator, the frame's field, reached on entry.
+  function reserve(local: Local) {
+    if (!framed.has(slot(local))) allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+  }
+
   function slot(local: Local): string {
     return captured.get(local) ?? `%${local.name === "%" ? "topic" : local.name}.${local.id}`;
   }
@@ -230,6 +352,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   function statement(s: Stmt) {
     switch (s.kind) {
       case "expr":
+        if (s.expr.kind === "yield") return yielded(s.expr);
         effect(s.expr);
         settle();
         return;
@@ -296,34 +419,40 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       // The array is read once; one the loop made itself is owned by the loop until it ends.
       // Each pass gives the variable a pointer to its element, or a copy of a Copy one.
       case "forOf": {
+        const iterated = types.get(s.right)!;
+        if (typeof iterated !== "string" && (iterated.kind === "generator" || (iterated.kind === "ref" && typeof iterated.to !== "string" && iterated.to.kind === "generator"))) {
+          return generatorLoop(s, iterated);
+        }
         const type = valueType(s.right) as ArrayType;
         const local = resolved(s.left as Stmt);
         scopes.push([]);
-        let array: string;
-        if (fresh(s.right)) {
-          array = value(s.right, true);
-          const held = alloca(ARRAY);
+        // The array, and the position reached, live in slots: a generator's loop may stop at a
+        // `yield` and go on in a later call.
+        const [held, counter] = [loopSlot(s, 0, ARRAY), loopSlot(s, 1, "i64")];
+        // In a generator, the frame says whether the loop owns its array.
+        const kept = resuming && resuming.type.fields[current.frame!.loops.get(s)!]!.type;
+        if (kept ? typeof kept !== "string" && kept.kind === "array" : fresh(s.right)) {
           own(held, type);
-          emit(`store ${ARRAY} ${array}, ptr ${held}`);
-        } else array = value(s.right);
+          emit(`store ${ARRAY} ${owned(s.right)}, ptr ${held}`);
+        } else emit(`store ${ARRAY} ${value(s.right)}, ptr ${held}`);
         settle();
-        const [data, length, counter] = [temp(), temp(), alloca("i64")];
-        emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
-        emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
         emit(`store i64 0, ptr ${counter}`);
         const [test, loop, next, end] = [label(), label(), label(), label()];
         emit(`br label %${test}`);
         startBlock(test);
-        const [i, more] = [temp(), temp()];
+        const [i, more, array, length, data] = [temp(), temp(), temp(), temp(), temp()];
         emit(`${i} = load i64, ptr ${counter}`);
+        emit(`${array} = load ${ARRAY}, ptr ${held}`);
+        emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
         emit(`${more} = icmp ult i64 ${i}, ${length}`);
         emit(`br i1 ${more}, label %${loop}, label %${end}`);
         startBlock(loop);
         exits.set(s, { exit: end, next, depth: scopes.length });
         scopes.push([]);
-        allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+        reserve(local);
         own(slot(local), local.type);
         const at = temp();
+        emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
         emit(`${at} = getelementptr ${llvm(type.element)}, ptr ${data}, i64 ${i}`);
         if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
         else {
@@ -336,8 +465,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         scopes.pop();
         emit(`br label %${next}`);
         startBlock(next);
-        const after = temp();
-        emit(`${after} = add i64 ${i}, 1`);
+        const [now, after] = [temp(), temp()];
+        emit(`${now} = load i64, ptr ${counter}`);
+        emit(`${after} = add i64 ${now}, 1`);
         emit(`store i64 ${after}, ptr ${counter}`);
         emit(`br label %${test}`);
         startBlock(end);
@@ -469,7 +599,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
           emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
           // The catch's variable owns the error; with none, the error is dropped here.
           if (local) {
-            allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+            reserve(local);
             own(slot(local), local.type);
             emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
           } else dispose(caught, type);
@@ -500,7 +630,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
       case "let": {
         const local = resolved(s);
-        allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+        reserve(local);
         own(slot(local), local.type);
         emit(`store ${llvm(local.type)} ${owned(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
         settle();
@@ -617,7 +747,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   function lowerPipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
     const local = locals.get(e)!;
     scopes.push([]);
-    allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+    reserve(local);
     own(slot(local), local.type);
     emit(`store ${llvm(local.type)} ${owned(e.value)}, ptr ${slot(local)}`);
     const mark = pending.length;
@@ -712,7 +842,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const info = current.patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
       const local = resolved(p as Expr);
-      allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+      reserve(local);
       if (isRef(local.type)) {
         let pointer = at;
         if (!pointer) {
@@ -826,7 +956,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, number][] {
-    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant") return [];
+    if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...type.fields.map((f, i): [Type, number] => [f.type, i + base.length])];
   }
@@ -1153,7 +1283,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // or again after, does nothing.
   function own(at: string, type: Type, empty = true) {
     if (!needsDrop(type)) return;
-    if (empty) allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
+    if (empty && !framed.has(at)) allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
     scopes.at(-1)!.push({ slot: at, type });
   }
 
@@ -1222,6 +1352,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
+      if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "generator") {
+        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
+        const type = nextResult((valueType(e.callee.object) as GeneratorType).yields);
+        if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
+        return result;
+      }
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
       return copied(convert(value(object), types.get(object)!, types.get(e)!), types.get(e)!);
@@ -1232,6 +1368,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
+    // Calling a generator function makes its frame, holding the arguments, ready to start.
+    if (target.generator) {
+      let frame = "zeroinitializer";
+      values.forEach((v, i) => {
+        const next = temp();
+        emit(`${next} = insertvalue ${llvm(target.generator!)} ${frame}, ${v}, ${i + 1}`);
+        frame = next;
+      });
+      if (!types.has(e)) pending.push({ v: frame, type: target.generator });
+      return frame;
+    }
     // The call takes the copy; what it leaves, the parts of a derived instance its base's
     // method doesn't drop, is dropped once it returns or raises.
     pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
@@ -1478,6 +1625,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
+    if (i.generator) return llvm(nextResult(i.generator.yields));
     if (!i.throws) return llvm(i.returns);
     return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
   }
@@ -1536,6 +1684,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     if (region) {
       const kept = v === undefined ? undefined : stash(region, "return", current.returns, v);
       return exit(region, "return", () => leave(kept && unstash(kept, current.returns)));
+    }
+    // A generator that finishes stays finished.
+    if (resuming) {
+      emit("store i32 -1, ptr %state");
+      return emit(`br label %${resuming.done}`);
     }
     if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
     const type = resultType(current);

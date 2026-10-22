@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, generatorElement, generatorType, holdsRef, isCopy, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, generatorElement, generatorType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions, substituted } from "./values.ts";
@@ -80,8 +80,10 @@ export type Instance = {
   moved?: Set<Local>;
   // A closure's own type.
   closure?: ClosureType;
-  // A generator's own type, which calling it gives.
+  // A generator's own type, which calling it gives, and where each variable and each
+  // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
+  frame?: { locals: Map<Local, number>; loops: Map<Stmt, number> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -102,6 +104,51 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 // `loop` is the loop it labels, if any. A match arm's block is where its `return`s go, with
 // whether the match gives a value and what they gave.
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: number; wanted?: boolean; gives?: [Expr, Type][] };
+
+// What a loop keeps of what it iterates over. An array it borrows is kept as a view with the
+// array's layout that owns nothing, so dropping the frame leaves the array to its owner, and
+// moving the generator doesn't leave a pointer to the frame behind.
+function iterated(instance: Instance, e: Expr): Type {
+  const type = instance.coercions.get(e) ?? instance.types.get(e)!;
+  if (typeof type === "string" || type.kind !== "array" || !borrowed(instance, e)) return type;
+  return objectType([{ name: "a", type: refType(type.element, false) }, { name: "b", type: "i64" }, { name: "c", type: "i64" }]);
+}
+
+// Whether an expression reads a value where it lives rather than making one.
+function borrowed(instance: Instance, e: Expr): boolean {
+  if (e.kind === "ident" || e.kind === "this") return true;
+  if (e.kind === "member") return !instance.calls.has(e) && borrowed(instance, e.object);
+  if (e.kind === "index" || e.kind === "nonNull") return borrowed(instance, e.kind === "index" ? e.object : e.expr);
+  return false;
+}
+
+// A generator's frame, everything it keeps between `next()` calls: its state, its parameters
+// in order, every other variable, then each `for...of` loop's array or generator and its
+// position. A closure's loops are its own.
+function frameOf(instance: Instance, generator: GeneratorType) {
+  const fields: Field[] = [{ name: "state", type: "i32" }];
+  const locals = new Map<Local, number>();
+  const loops = new Map<Stmt, number>();
+  const add = (l: Local) => {
+    if (locals.has(l)) return;
+    locals.set(l, fields.length);
+    fields.push({ name: `${l.name}.${l.id}`, type: l.type });
+  };
+  instance.body.params.forEach((p) => add(instance.locals.get(p)!));
+  [...new Set(instance.locals.values())].sort((a, b) => a.id - b.id).forEach(add);
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
+    const s = node as Stmt;
+    if (s.kind === "forOf") {
+      loops.set(s, fields.length);
+      fields.push({ name: "loop", type: iterated(instance, s.right) }, { name: "at", type: "i64" });
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(instance.body.body);
+  generator.fields = fields;
+  instance.frame = { locals, loops };
+}
 
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
@@ -583,6 +630,7 @@ export function check(program: Stmt[]): Checked {
     }
     instance.returns = type;
     if (instance.concrete) lowerTables(instance);
+    if (generator) frameOf(instance, generator);
     done.add(instance);
     inProgress.delete(instance);
 
@@ -772,7 +820,6 @@ export function check(program: Stmt[]): Checked {
           // loop ends, the loop takes an owned generator over; one behind a `Mut` is lent.
           if (typeof object !== "string" && object.kind === "generator") {
             if (isRef(through) && !through.mutable) throw new CompileError("a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
-            if (object !== through) coercions.set(s.right, object);
             scopes.push(new Map());
             declare(d.target.name, object.yields, left.keyword === "let", false, left);
             within({ stmt: s, kind: "loop" }, () => scoped(s.body));
