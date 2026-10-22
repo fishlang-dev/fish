@@ -1160,6 +1160,31 @@ static fsh_timer fsh_timer_take(void) {
   return taken;
 }
 
+// An aborted sleep takes its timer off the heap, so it neither waits out its deadline holding the
+// task nor wakes it later.
+// ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
+void fsh_rt_sleep_leave(fsh_task *task) {
+  pthread_mutex_lock(&fsh_timer_lock);
+  int64_t at = 0;
+  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal)) at++;
+  if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
+  fsh_timers[at] = fsh_timers[--fsh_timer_count];
+  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+    fsh_timer_swap(at, (at - 1) / 2);
+    at = (at - 1) / 2;
+  }
+  for (;;) {
+    int64_t least = at, left = at * 2 + 1, right = left + 1;
+    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
+    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (least == at) break;
+    fsh_timer_swap(at, least);
+    at = least;
+  }
+  pthread_mutex_unlock(&fsh_timer_lock);
+  fsh_task_release(task);
+}
+
 // What a timer does when it fires, or is dropped at shutdown: its count on the task or signal
 // is given up either way.
 static void fsh_timer_fire(fsh_timer t, int32_t fire) {
@@ -1260,7 +1285,12 @@ int32_t fsh_rt_shared_release(int64_t *block) {
 // Tasks waiting on a semaphore or a channel, oldest first, each holding a count on its task.
 typedef struct { fsh_task **tasks; int64_t count, capacity; } fsh_waiters;
 
+// A task already waiting stays where it is: a wake it didn't wait for, from a timer or an abort,
+// polls it again, and a second place in line would swallow a wake meant for the next task.
 static void fsh_wait_on(fsh_waiters *w, fsh_task *t) {
+  for (int64_t i = 0; i < w->count; i++) {
+    if (w->tasks[i] == t) return;
+  }
   if (w->count == w->capacity) {
     int64_t capacity = w->capacity ? w->capacity * 2 : 4;
     fsh_task **tasks = fsh_rt_alloc(capacity * sizeof(fsh_task *));

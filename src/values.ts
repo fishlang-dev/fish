@@ -99,6 +99,8 @@ export type Context = {
   closing: boolean;
   // Whether the body is a generator's.
   generator: boolean;
+  // Whether the program runs on the async runtime: its `main` is async.
+  runtime: boolean;
   // Whether the body is a callback a lock is held for, and whether that lock is a shared value's.
   locked: boolean;
   sharing: boolean;
@@ -711,7 +713,7 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, t, "i64", `'sleep' takes milliseconds as an 'i64', not '${show(t)}'`);
       if (e.args.length === 1) return { type: SLEEP, what: "'sleep'" };
       signalArgument(e.args[1]!, "'sleep'");
-      return { type: leafFuture("sleep", "void", abortError(e)), what: "'sleep'" };
+      return { type: leafFuture("sleep", "void", abortError()), what: "'sleep'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
@@ -984,16 +986,17 @@ export function expressions(ctx: Context) {
     if (callee.name === "available") return { type: "i64", what: "'available'" };
     if (callee.name === "abort") return { type: "void", what: "'abort'" };
     if (callee.name === "throwIfAborted") {
-      raise(e, abortError(e), "'throwIfAborted'");
+      raise(e, abortError(), "'throwIfAborted'");
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close") return { type: "void", what: "'close'" };
-    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError(e) : undefined), what: `'${callee.name}'` };
+    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined), what: `'${callee.name}'` };
   }
 
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
   function signalTimeout(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout'`, callee.start, callee.end);
+    if (!ctx.runtime) throw new CompileError("'AbortSignal.timeout' needs the async runtime's timer, which runs when 'main' is an async function", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'AbortSignal.timeout' takes how many milliseconds until it aborts, like 'AbortSignal.timeout(5000)'", e.start, e.end);
     expect(e.args[0]!, "i64");
     const t = value(e.args[0]!);
@@ -1009,8 +1012,8 @@ export function expressions(ctx: Context) {
   }
 
   // The std `AbortError` class, which aborted work throws.
-  function abortError(at: Span): Type {
-    return resolveType({ kind: "ref", name: "AbortError", args: [], start: at.start, end: at.end });
+  function abortError(): Type {
+    return classes.get("AbortError")!.type;
   }
 
   // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
@@ -2112,6 +2115,7 @@ export function expressions(ctx: Context) {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);
+      if (computed.has(target)) throw new CompileError(`'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
       // A whole value assigned to a mutable reference is written through it, to what it was
       // declared to point to, whatever a check narrowed it to. An update like `+=` keeps the
       // member, so it goes through the narrowed reference.

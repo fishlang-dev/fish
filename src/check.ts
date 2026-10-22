@@ -668,6 +668,7 @@ export function check(written: Stmt[], library = false): Checked {
       noteThis,
       closing: f.closure !== undefined,
       generator: f.generator === true,
+      runtime: funcs.some((g) => g.name === "main" && g.async === true),
       locked: f.closure?.expected !== undefined && lockCallbacks.has(f.closure.expected),
       sharing: f.closure?.expected !== undefined && sharedCallbacks.has(f.closure.expected),
       async: f.async === true,

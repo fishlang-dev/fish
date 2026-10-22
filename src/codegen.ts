@@ -2283,6 +2283,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         startBlock(cancel);
         if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx)`);
         if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx)`);
+        if (leaf.method === "sleep") emit("call void @fsh_rt_sleep_leave(ptr %cx)");
         emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
         emit(`br label %${failed}`);
         startBlock(go);
