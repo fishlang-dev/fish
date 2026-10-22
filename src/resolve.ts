@@ -122,6 +122,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function array(element: Type, at: TypeNode): Type {
     if (holdsRef(element)) throw unsupported("arrays of references", at);
     if (typeof element !== "string" && (element.kind === "function" || element.kind === "closure")) throw unsupported("arrays of functions", at);
+    // An interface describes values of many types, each laid out its own way, so an array of
+    // them has no one element size.
+    if (typeof element !== "string" && element.kind === "interface") {
+      throw new CompileError(`an array can't hold the interface type '${element.name}' directly, since its values may each be a different type; use a type parameter instead`, at.start, at.end);
+    }
     return arrayType(element);
   }
 
