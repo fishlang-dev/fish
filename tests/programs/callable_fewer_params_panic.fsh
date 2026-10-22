@@ -1,3 +1,4 @@
+// expect: 5
 // panic: attempt to divide by zero
 function main() {
   let fs: ((n: i64, m: string) => i64)[] = [];
