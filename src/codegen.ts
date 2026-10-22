@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -1473,6 +1473,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (!types.has(e)) pending.push({ v: task, type: handleType(future.gives, future.throws) });
         return task;
       }
+      // `sleep(ms)`'s future holds the delay until its first poll makes it a deadline.
+      if (e.callee.kind === "ident" && e.callee.name === "sleep") {
+        const made = temp();
+        emit(`${made} = insertvalue ${llvm(SLEEP)} zeroinitializer, i64 ${value(e.args[0]!)}, 1`);
+        return made;
+      }
       // `yieldNow()`'s future is its one state, not yet polled.
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
       if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
@@ -1935,6 +1941,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store i32 1, ptr ${at}`);
       emit(`${fresh} = icmp eq i32 ${state}, 0`);
       emit(`br i1 ${fresh}, label %${waiting}, label %${ready}`);
+    } else if (inner === SLEEP) {
+      const done = temp();
+      emit(`${done} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
+      emit(`${tag} = trunc i32 ${done} to i8`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else if (inner.kind === "handle") {
       // A spawned task: the runtime copies its result out once it is done.
       const [buffer, task, outcome] = [alloca(pollType(inner)), temp(), temp()];
@@ -1965,7 +1976,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${error} = extractvalue ${pollType(inner)} ${result}, 2`);
       finish();
       raised(e, error);
-    } else if (inner !== YIELD_NOW) {
+    } else if (inner !== YIELD_NOW && inner !== SLEEP) {
       startBlock(failed);
       emit("unreachable");
     }

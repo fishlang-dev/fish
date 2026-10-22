@@ -41,6 +41,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_str_from_i64(i64)",
   "declare ptr @fsh_rt_str_cstring(ptr)",
   "declare void @fsh_rt_wake(ptr)",
+  "declare i32 @fsh_rt_sleep(ptr, ptr)",
   "declare i32 @fsh_rt_join(ptr, ptr, ptr)",
   "declare void @fsh_rt_handle_drop(ptr)",
   "declare void @fsh_rt_handle_retain(ptr)",

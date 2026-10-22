@@ -886,7 +886,7 @@ export function check(program: Stmt[], library = false): Checked {
           }
           effect(s.expr);
           // A promise runs only when awaited, so one made and dropped would silently do nothing.
-          const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && s.expr.callee.name === "yieldNow" && !byName.has("yieldNow");
+          const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && ["yieldNow", "sleep"].includes(s.expr.callee.name) && !byName.has(s.expr.callee.name);
           const made = pausing ? YIELD_NOW : types.get(s.expr) ?? calls.get(s.expr)?.returns;
           if (s.expr.kind !== "assign" && s.expr.kind !== "destructure" && typeof made !== "string" && made?.kind === "future") {
             throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", s.expr.start, s.expr.end);

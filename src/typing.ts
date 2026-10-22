@@ -132,6 +132,9 @@ export function futureType(name: string, concrete: boolean): FutureType {
   return t;
 }
 
+// `sleep(ms)`'s future: its state, then the delay, then the deadline the runtime sets.
+export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
+
 // `yieldNow()`'s future, which is pending once, then done.
 export const YIELD_NOW: FutureType = { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
 

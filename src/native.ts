@@ -1086,6 +1086,100 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {
   return 0;
 }
 
+// Timers: a heap of deadlines, earliest first, and a thread that wakes each task when its
+// deadline passes. Each entry holds a reference to its task.
+typedef struct { int64_t deadline; fsh_task *task; } fsh_timer;
+static pthread_mutex_t fsh_timer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_timer_changed = PTHREAD_COND_INITIALIZER;
+static fsh_timer *fsh_timers = NULL;
+static int64_t fsh_timer_count = 0, fsh_timer_capacity = 0;
+static int32_t fsh_timers_stopping = 0;
+static pthread_t fsh_timer_thread;
+
+static int64_t fsh_now(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static void fsh_timer_swap(int64_t a, int64_t b) {
+  fsh_timer t = fsh_timers[a];
+  fsh_timers[a] = fsh_timers[b];
+  fsh_timers[b] = t;
+}
+
+static void fsh_timer_add(int64_t deadline, fsh_task *task) {
+  pthread_mutex_lock(&fsh_timer_lock);
+  if (fsh_timer_count == fsh_timer_capacity) {
+    fsh_timer_capacity = fsh_timer_capacity ? fsh_timer_capacity * 2 : 64;
+    fsh_timers = realloc(fsh_timers, fsh_timer_capacity * sizeof(fsh_timer));
+  }
+  int64_t at = fsh_timer_count++;
+  fsh_timers[at] = (fsh_timer){ deadline, task };
+  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+    fsh_timer_swap(at, (at - 1) / 2);
+    at = (at - 1) / 2;
+  }
+  pthread_cond_signal(&fsh_timer_changed);
+  pthread_mutex_unlock(&fsh_timer_lock);
+}
+
+static fsh_task *fsh_timer_take(void) {
+  fsh_task *task = fsh_timers[0].task;
+  fsh_timers[0] = fsh_timers[--fsh_timer_count];
+  for (int64_t at = 0;;) {
+    int64_t least = at, left = at * 2 + 1, right = left + 1;
+    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
+    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (least == at) break;
+    fsh_timer_swap(at, least);
+    at = least;
+  }
+  return task;
+}
+
+static void *fsh_timing(void *arg) {
+  pthread_mutex_lock(&fsh_timer_lock);
+  while (!fsh_timers_stopping) {
+    if (fsh_timer_count > 0 && fsh_timers[0].deadline <= fsh_now()) {
+      fsh_task *task = fsh_timer_take();
+      pthread_mutex_unlock(&fsh_timer_lock);
+      fsh_rt_wake(task);
+      fsh_task_release(task);
+      pthread_mutex_lock(&fsh_timer_lock);
+      continue;
+    }
+    if (fsh_timer_count == 0) {
+      pthread_cond_wait(&fsh_timer_changed, &fsh_timer_lock);
+      continue;
+    }
+    // Condition waits take a wall-clock time, so the wait is the monotonic gap from now.
+    int64_t gap = fsh_timers[0].deadline - fsh_now();
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    int64_t nanos = until.tv_nsec + gap % 1000000000;
+    until.tv_sec += gap / 1000000000 + nanos / 1000000000;
+    until.tv_nsec = nanos % 1000000000;
+    pthread_cond_timedwait(&fsh_timer_changed, &fsh_timer_lock, &until);
+  }
+  pthread_mutex_unlock(&fsh_timer_lock);
+  return arg;
+}
+
+// Polls a sleep, whose frame holds its state and first the delay in milliseconds, then its
+// deadline: done once the deadline has passed, and until then a timer wakes the task.
+int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
+  int32_t *state = (int32_t *)frame;
+  int64_t *deadline = frame + 1;
+  if (*state == 0) {
+    *state = 1;
+    *deadline = fsh_now() + (*deadline > 0 ? *deadline : 0) * 1000000;
+  } else if (fsh_now() >= *deadline) return 1;
+  __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+  fsh_timer_add(*deadline, task);
+  return 0;
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
@@ -1107,6 +1201,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
   for (int64_t i = 0; i < fsh_workers; i++) pthread_create(&fsh_threads[i], NULL, fsh_work, (void *)i);
+  pthread_create(&fsh_timer_thread, NULL, fsh_timing, NULL);
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
@@ -1115,6 +1210,13 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_cond_broadcast(&fsh_parked);
   pthread_mutex_unlock(&fsh_park);
   for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);
+  pthread_mutex_lock(&fsh_timer_lock);
+  fsh_timers_stopping = 1;
+  pthread_cond_signal(&fsh_timer_changed);
+  pthread_mutex_unlock(&fsh_timer_lock);
+  pthread_join(fsh_timer_thread, NULL);
+  while (fsh_timer_count > 0) fsh_task_release(fsh_timer_take());
+  free(fsh_timers);
   // Every task not done is dropped where it stopped; one dropping may release another.
   for (;;) {
     pthread_mutex_lock(&fsh_alive_lock);
