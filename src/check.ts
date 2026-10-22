@@ -197,7 +197,10 @@ const RUNTIME_NAMES = new Set([
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 // The std classes every program can use, declared before its own code.
-const PRELUDE = `class AbortError { message: string = "This operation was aborted"; }`;
+const PRELUDE = `
+class AbortError { message: string = "This operation was aborted"; }
+class IoError { message: string; constructor(message: string) { this.message = message; } }
+`;
 
 export function check(written: Stmt[], library = false): Checked {
   const program = [...parse(PRELUDE), ...written];

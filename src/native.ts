@@ -25,6 +25,18 @@ export const NATIVE = String.raw`
 #include <sched.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#else
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#endif
 
 // Tasks run on several threads, so everything they share is counted atomically.
 static int64_t fsh_live = 0;
@@ -1594,6 +1606,277 @@ void fsh_rt_signal_abort(fsh_signal *s) {
   fsh_rt_free(waiting.tasks);
 }
 
+// The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
+// on. Each interest is one task waiting for one socket to be readable or writable, once; the
+// list holds a count on each task, so shutdown can give back those never woken.
+typedef struct { int fd; int32_t writing; fsh_task *task; } fsh_interest;
+static pthread_mutex_t fsh_io_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_interest *fsh_interests = NULL;
+static int64_t fsh_interest_count = 0, fsh_interest_capacity = 0;
+static int fsh_poller = -1;
+static int32_t fsh_io_stopping = 0;
+static pthread_t fsh_io_thread;
+#ifndef __APPLE__
+static int fsh_io_wake = -1;
+#endif
+
+// Arms the kernel for what is still wanted of a socket: on epoll one registration covers both
+// directions, so it is set again from the whole list.
+static void fsh_io_arm(int fd, int32_t writing) {
+#ifdef __APPLE__
+  struct kevent change;
+  EV_SET(&change, fd, writing ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+  kevent(fsh_poller, &change, 1, NULL, 0, NULL);
+#else
+  (void)writing;
+  uint32_t events = EPOLLONESHOT;
+  for (int64_t i = 0; i < fsh_interest_count; i++) {
+    if (fsh_interests[i].fd == fd) events |= fsh_interests[i].writing ? EPOLLOUT : EPOLLIN;
+  }
+  struct epoll_event event = { .events = events, .data.fd = fd };
+  if (epoll_ctl(fsh_poller, EPOLL_CTL_MOD, fd, &event) < 0) epoll_ctl(fsh_poller, EPOLL_CTL_ADD, fd, &event);
+#endif
+}
+
+// A task waits for a socket to be ready; one already waiting for that keeps its place.
+static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
+  pthread_mutex_lock(&fsh_io_lock);
+  fsh_task *replaced = NULL;
+  int64_t at = 0;
+  while (at < fsh_interest_count && (fsh_interests[at].fd != fd || fsh_interests[at].writing != writing)) at++;
+  if (at < fsh_interest_count) {
+    if (fsh_interests[at].task != task) {
+      replaced = fsh_interests[at].task;
+      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+      fsh_interests[at].task = task;
+    }
+  } else {
+    if (fsh_interest_count == fsh_interest_capacity) {
+      fsh_interest_capacity = fsh_interest_capacity ? fsh_interest_capacity * 2 : 16;
+      fsh_interests = realloc(fsh_interests, fsh_interest_capacity * sizeof(fsh_interest));
+    }
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    fsh_interests[fsh_interest_count++] = (fsh_interest){ fd, writing, task };
+  }
+  fsh_io_arm(fd, writing);
+  pthread_mutex_unlock(&fsh_io_lock);
+  if (replaced) fsh_task_release(replaced);
+}
+
+// A socket is closing: those waiting on it are woken, to find it gone.
+static void fsh_io_forget(int fd) {
+  pthread_mutex_lock(&fsh_io_lock);
+  fsh_task *woken[2];
+  int count = 0;
+  for (int64_t i = 0; i < fsh_interest_count;) {
+    if (fsh_interests[i].fd != fd) { i++; continue; }
+    if (count < 2) woken[count++] = fsh_interests[i].task;
+    fsh_interests[i] = fsh_interests[--fsh_interest_count];
+  }
+  pthread_mutex_unlock(&fsh_io_lock);
+  for (int i = 0; i < count; i++) fsh_wake_waiter(woken[i]);
+}
+
+// Wakes the tasks waiting on what the kernel says is ready, and re-arms what is still wanted.
+static void fsh_io_ready(int fd, int32_t readable, int32_t writable) {
+  pthread_mutex_lock(&fsh_io_lock);
+  fsh_task *woken[2];
+  int count = 0;
+  for (int64_t i = 0; i < fsh_interest_count;) {
+    fsh_interest *in = &fsh_interests[i];
+    if (in->fd != fd || !(in->writing ? writable : readable)) { i++; continue; }
+    if (count < 2) woken[count++] = in->task;
+    fsh_interests[i] = fsh_interests[--fsh_interest_count];
+  }
+#ifndef __APPLE__
+  for (int64_t i = 0; i < fsh_interest_count; i++) {
+    if (fsh_interests[i].fd == fd) {
+      fsh_io_arm(fd, fsh_interests[i].writing);
+      break;
+    }
+  }
+#endif
+  pthread_mutex_unlock(&fsh_io_lock);
+  for (int i = 0; i < count; i++) fsh_wake_waiter(woken[i]);
+}
+
+static void *fsh_io_loop(void *arg) {
+  for (;;) {
+#ifdef __APPLE__
+    struct kevent events[64];
+    int n = kevent(fsh_poller, NULL, 0, events, 64, NULL);
+    for (int i = 0; i < n; i++) {
+      if (events[i].filter == EVFILT_USER) continue;
+      int fd = (int)events[i].ident;
+      int32_t error = (events[i].flags & (EV_EOF | EV_ERROR)) != 0;
+      fsh_io_ready(fd, events[i].filter == EVFILT_READ || error, events[i].filter == EVFILT_WRITE || error);
+    }
+#else
+    struct epoll_event events[64];
+    int n = epoll_wait(fsh_poller, events, 64, -1);
+    for (int i = 0; i < n; i++) {
+      if (events[i].data.fd == fsh_io_wake) continue;
+      int32_t error = (events[i].events & (EPOLLERR | EPOLLHUP)) != 0;
+      fsh_io_ready(events[i].data.fd, (events[i].events & EPOLLIN) || error, (events[i].events & EPOLLOUT) || error);
+    }
+#endif
+    if (__atomic_load_n(&fsh_io_stopping, __ATOMIC_ACQUIRE)) return arg;
+  }
+}
+
+static void fsh_io_start(void) {
+#ifdef __APPLE__
+  fsh_poller = kqueue();
+  struct kevent wake;
+  EV_SET(&wake, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#else
+  fsh_poller = epoll_create1(EPOLL_CLOEXEC);
+  fsh_io_wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  struct epoll_event event = { .events = EPOLLIN, .data.fd = fsh_io_wake };
+  epoll_ctl(fsh_poller, EPOLL_CTL_ADD, fsh_io_wake, &event);
+#endif
+  pthread_create(&fsh_io_thread, NULL, fsh_io_loop, NULL);
+}
+
+// Stops the reactor and gives back the counts its interests hold on tasks never woken.
+static void fsh_io_stop(void) {
+  __atomic_store_n(&fsh_io_stopping, 1, __ATOMIC_RELEASE);
+#ifdef __APPLE__
+  struct kevent wake;
+  EV_SET(&wake, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+  kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#else
+  uint64_t one = 1;
+  (void)!write(fsh_io_wake, &one, sizeof one);
+#endif
+  pthread_join(fsh_io_thread, NULL);
+  for (int64_t i = 0; i < fsh_interest_count; i++) fsh_task_release(fsh_interests[i].task);
+  free(fsh_interests);
+  fsh_interests = NULL;
+  fsh_interest_count = fsh_interest_capacity = 0;
+  close(fsh_poller);
+#ifndef __APPLE__
+  close(fsh_io_wake);
+#endif
+}
+
+// A socket's block: its count and its file descriptor, closed with the last count.
+typedef struct { int64_t count; int fd; } fsh_socket;
+
+static fsh_socket *fsh_socket_new(int fd) {
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef __APPLE__
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+  fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
+  s->count = 1;
+  s->fd = fd;
+  return s;
+}
+
+void fsh_rt_socket_release(fsh_socket *s) {
+  if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (fsh_poller >= 0) fsh_io_forget(s->fd);
+  close(s->fd);
+  fsh_rt_free(s);
+}
+
+// A failed call's IoError message: what was being done, and the system's reason.
+static int32_t fsh_io_failed(fsh_str **message, const char *doing) {
+  char text[256];
+  snprintf(text, sizeof text, "%s: %s", doing, strerror(errno));
+  *message = fsh_rt_str_from_cstring(text);
+  return 5;
+}
+
+// An IPv4 address and port from a string and a number, or 0 with the message saying why not.
+static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_str **message) {
+  char *text = fsh_rt_str_cstring(host);
+  memset(at, 0, sizeof *at);
+  at->sin_family = AF_INET;
+  at->sin_port = htons((uint16_t)port);
+  char reason[320];
+  reason[0] = 0;
+  if (port < 0 || port > 65535) snprintf(reason, sizeof reason, "port %lld is outside 0 to 65535", (long long)port);
+  else if (!text || inet_pton(AF_INET, text, &at->sin_addr) != 1) {
+    snprintf(reason, sizeof reason, "'%.200s' is not an IP address like 127.0.0.1; host names aren't looked up", text ? text : "");
+  }
+  fsh_rt_free(text);
+  if (reason[0]) *message = fsh_rt_str_from_cstring(reason);
+  return !reason[0];
+}
+
+// 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
+int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  struct sockaddr_in at;
+  if (!fsh_address(host, port, &at, message)) return 5;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket");
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+  if (bind(fd, (struct sockaddr *)&at, sizeof at) < 0 || listen(fd, 128) < 0) {
+    int32_t failed = fsh_io_failed(message, "can't listen there");
+    close(fd);
+    return failed;
+  }
+  *out = fsh_socket_new(fd);
+  return 1;
+}
+
+int64_t fsh_rt_tcp_port(fsh_socket *s) {
+  struct sockaddr_in at;
+  socklen_t size = sizeof at;
+  if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
+  return ntohs(at.sin_port);
+}
+
+// Polls 'accept()': a new connection, a wait for one, or 5 with the reason.
+int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  int fd = accept(listener->fd, NULL, NULL);
+  if (fd >= 0) {
+    *out = fsh_socket_new(fd);
+    return 1;
+  }
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    fsh_io_wait(listener->fd, 0, task);
+    return 0;
+  }
+  return fsh_io_failed(message, "can't accept a connection");
+}
+
+// Polls 'TcpStream.connect(host, port)': the frame keeps the socket while it connects; once
+// writable, the connection either stands, moving the socket out, or failed.
+int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_socket *s = *socket_at;
+  if (!s) {
+    struct sockaddr_in at;
+    if (!fsh_address(host, port, &at, message)) return 5;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return fsh_io_failed(message, "can't make a socket");
+    s = *socket_at = fsh_socket_new(fd);
+    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS) return fsh_io_failed(message, "can't connect");
+  }
+  int error = 0;
+  socklen_t size = sizeof error;
+  getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
+  if (error) {
+    errno = error;
+    return fsh_io_failed(message, "can't connect");
+  }
+  struct sockaddr_in peer;
+  socklen_t peer_size = sizeof peer;
+  if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) < 0) {
+    if (errno != ENOTCONN) return fsh_io_failed(message, "can't connect");
+    fsh_io_wait(s->fd, 1, task);
+    return 0;
+  }
+  *out = s;
+  *socket_at = NULL;
+  return 1;
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
@@ -1616,6 +1899,8 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
   // Workers get the main thread's 8 MiB stack, not the smaller default for other threads, since
   // an async main's calls run on them.
+  // The reactor is ready before any task can wait on a socket.
+  fsh_io_start();
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, 8 << 20);
@@ -1650,6 +1935,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
   pthread_join(fsh_timer_thread, NULL);
+  fsh_io_stop();
   while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
   // Every task not done is dropped where it stopped; one dropping may release another.

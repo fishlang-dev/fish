@@ -667,6 +667,9 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalTimeout(e, callee);
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
+      return tcpStatic(e, callee, callee.object.name);
+    }
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
@@ -763,7 +766,7 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, t, "i64", `'sleep' takes milliseconds as an 'i64', not '${show(t)}'`);
       if (e.args.length === 1) return { type: SLEEP, what: "'sleep'" };
       signalArgument(e.args[1]!, "'sleep'");
-      return { type: leafFuture("sleep", "void", abortError()), what: "'sleep'" };
+      return { type: leafFuture("sleep", "void", abortError(), true), what: "'sleep'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && !byName.has("yieldNow")) {
@@ -1022,10 +1025,11 @@ export function expressions(ctx: Context) {
     // A wait may also take an AbortSignal, as its last argument.
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive";
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
-      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : {};
+      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
-        : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'" : "dropping it gives its slot back";
+        : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
+        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "TcpStream" ? "it has 'read' and 'write'" : "dropping it gives its slot back";
       throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
@@ -1039,13 +1043,14 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
+    if (callee.name === "accept") return { type: leafFuture("accept", "void", ioError()), what: "'accept'" };
     if (callee.name === "abort") return { type: "void", what: "'abort'" };
     if (callee.name === "throwIfAborted") {
       raise(e, abortError(), "'throwIfAborted'");
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close") return { type: "void", what: "'close'" };
-    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined), what: `'${callee.name}'` };
+    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
@@ -1057,6 +1062,28 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, "i64", `'AbortSignal.timeout' takes milliseconds as an 'i64', not '${show(t)}'`);
     return { type: blockType("AbortSignal"), what: "'AbortSignal.timeout'" };
+  }
+
+  // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`: futures the async
+  // runtime's reactor completes, throwing an `IoError` when the system says no.
+  function tcpStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream"): { type: Type; what: string } {
+    const method = which === "TcpListener" ? "bind" : "connect";
+    if (callee.name !== method) throw new CompileError(`'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
+    if (!ctx.runtime) throw new CompileError(`'${which}.${method}' needs the async runtime's reactor, which runs when 'main' is an async function`, e.start, e.end);
+    if (e.args.length !== 2) throw new CompileError(`'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'`, e.start, e.end);
+    const [host, port] = e.args as [Expr, Expr];
+    expect(host, "string");
+    const h = value(host);
+    coerce(host, h, "string", `the host is a 'string' like "127.0.0.1", not '${show(h)}'`);
+    expect(port, "i64");
+    const p = value(port);
+    coerce(port, p, "i64", `the port is an 'i64', not '${show(p)}'`);
+    return { type: leafFuture(method, "void", ioError()), what: `'${which}.${method}'` };
+  }
+
+  // The std `IoError` class, which failed socket calls throw.
+  function ioError(): Type {
+    return classes.get("IoError")!.type;
   }
 
   // A wait's AbortSignal, lent to it: the wait keeps a count on it of its own.
@@ -1078,6 +1105,7 @@ export function expressions(ctx: Context) {
     computed.add(e);
     if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
     if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
+    if (t.which === "TcpListener" && e.name === "port") return "i64";
     throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 

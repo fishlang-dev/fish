@@ -465,6 +465,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const handle = isRef(holder) ? temp() : value(e.object);
     if (isRef(holder)) emit(`${handle} = load ptr, ptr ${value(e.object)}`);
     if (e.name === "signal") return copied(handle, types.get(e)!);
+    if (e.name === "port") {
+      const port = temp();
+      emit(`${port} = call i64 @fsh_rt_tcp_port(ptr ${handle})`);
+      return port;
+    }
     const [aborted, yes] = [temp(), temp()];
     emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
     emit(`${yes} = icmp ne i32 ${aborted}, 0`);
@@ -1674,7 +1679,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${full} ]`);
       }
     } else if (type.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release" }[type.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release" }[type.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -2061,6 +2066,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const made = sharedNew(e);
         if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
         return made;
+      }
+      // `TcpListener.bind` and `TcpStream.connect` make a future holding the address; connect's
+      // frame also keeps the socket while it connects.
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && (e.callee.object.name === "TcpListener" || e.callee.object.name === "TcpStream") && !types.has(e.callee.object)) {
+        const future = types.get(e) as FutureType;
+        const first = e.callee.object.name === "TcpStream" ? 2 : 1;
+        const [host, port, made, frame] = [owned(e.args[0]!), value(e.args[1]!), temp(), temp()];
+        emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
+        emit(`${frame} = insertvalue ${llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
+        return frame;
       }
       if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !types.has(e.callee.object)) {
         const made = temp();
@@ -2606,6 +2621,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
     const leaf = inner.kind === "future" ? leafOf.get(inner) : undefined;
     let given: string | undefined;
+    let reason: string | undefined;
     if (leaf) {
       // A semaphore's or channel's wait, or a sleep given a signal, polled by the runtime, which
       // wakes the task when it may go on. A send moves its value in, leaving its slot empty.
@@ -2633,7 +2649,29 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         startBlock(go);
         signal = [sig, flag];
       }
-      if (leaf.method === "sleep") {
+      // A socket's poll gives its result through `made`, and on failure the system's reason
+      // through `reason`, for the IoError its awaiter is thrown.
+      const socket = ["bind", "connect", "accept"].includes(leaf.method);
+      if (socket) {
+        const [made, field] = [alloca("ptr"), (i: number) => {
+          const [ptr, v] = [temp(), temp()];
+          emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
+          return [ptr, v] as const;
+        }];
+        reason = alloca("ptr");
+        if (leaf.method === "accept") emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        else {
+          const first = leaf.method === "bind" ? 1 : 2;
+          const [hostAt, host] = field(first);
+          const [portAt, port] = field(first + 1);
+          emit(`${host} = load ptr, ptr ${hostAt}`);
+          emit(`${port} = load i64, ptr ${portAt}`);
+          if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        }
+        given = temp();
+        emit(`${given} = load ptr, ptr ${made}`);
+      } else if (leaf.method === "sleep") {
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {
         const [permit, made] = [alloca("ptr"), temp()];
@@ -2657,7 +2695,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         given = option;
       }
       emit(`${tag} = trunc i32 ${outcome} to i8`);
-      if (!signal) emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} ]`);
+      if (!signal) emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} i8 5, label %${failed} ]`);
       else {
         const over = label();
         emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} ]`);
@@ -2715,8 +2753,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (shape.throws) {
       startBlock(failed);
       // An aborted wait throws a new AbortError; any other future gives its own error.
-      const error = leaf ? abortError(shape.throws) : temp();
-      if (!leaf) emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
+      // A socket's failure is an IoError with the system's reason; any other leaf's, an abort.
+      let error = "";
+      if (leaf && reason) {
+        const [text, made] = [temp(), temp()];
+        emit(`${text} = load ptr, ptr ${reason}`);
+        emit(`${made} = insertvalue ${llvm(shape.throws)} zeroinitializer, ptr ${text}, 0`);
+        error = made;
+      } else if (leaf) error = abortError(shape.throws);
+      else {
+        error = temp();
+        emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
+      }
       finish();
       raised(e, error);
     } else if (inner !== YIELD_NOW && inner !== SLEEP) {
