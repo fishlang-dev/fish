@@ -1,5 +1,5 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, isPrint } from "./values.ts";
+import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
@@ -543,7 +543,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (made) return made;
     const name = `@"fsh.vtable.${vtables.size}"`;
     vtables.set(key, name);
-    const slots = [dynDrop(type), dynCopy(type), dynClone(type), ...dynSlots(type, to)];
+    const table = dynMembers.get(key)!;
+    const copy = dynCopy(type);
+    const slots = [dynDrop(type), copy, table.clone === "copy" ? copy : dynClone(type, table), ...dynSlots(type, to, table)];
     globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
     return name;
   }
@@ -585,14 +587,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  // What a Dyn's '.clone()' runs; none yet, so its slot is null.
-  function dynClone(_type: Type): string {
-    return "null";
+  // What a Dyn's '.clone()' runs when the class has its own `clone`: a new block holding what
+  // it gives. Null when the type can't be cloned, which the call panics on.
+  function dynClone(type: Type, table: DynTable): string {
+    if (!table.clone || table.clone === "copy") return "null";
+    const own = table.clone;
+    const name = `@"fsh.dyn.clone.${vtables.size}"`;
+    thunk(name, "ptr", () => {
+      const made = invoke(own, "%p", [])!;
+      const [end, size, block] = [temp(), temp(), temp()];
+      emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
+      emit(`${size} = ptrtoint ptr ${end} to i64`);
+      emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+      emit(`store ${llvm(type)} ${made}, ptr ${block}`);
+      emit(`ret ptr ${block}`);
+    });
+    return name;
   }
 
   // A slot per interface member: each method, then each field.
-  function dynSlots(type: Type, to: DynType): string[] {
-    const { methods, fields } = dynMembers.get(`${keyOf(type)} ${keyOf(to)}`)!;
+  function dynSlots(type: Type, to: DynType, { methods, fields }: DynTable): string[] {
     const n = vtables.size;
     const made = to.of.methods.map((m, i) => methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
@@ -637,6 +651,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`ret ${llvm(f.type)} ${convert(copied(v, own), own, f.type)}`);
     });
     return name;
+  }
+
+  // `d.clone()`: a new Dyn with the clone its vtable gives, or a panic when its value can't be.
+  function dynCloned(e: Expr, object: Expr): string {
+    const dyn = temp();
+    emit(`${dyn} = load ${DYN}, ptr ${receiver(object)}`);
+    const [data, table, at, fn, none, made, copy, result] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+    emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+    emit(`${at} = getelementptr ptr, ptr ${table}, i64 2`);
+    emit(`${fn} = load ptr, ptr ${at}`);
+    emit(`${none} = icmp eq ptr ${fn}, null`);
+    panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
+    emit(`${made} = call ptr ${fn}(ptr ${data})`);
+    emit(`${copy} = insertvalue ${DYN} ${dyn}, ptr ${made}, 0`);
+    emit(`${result} = insertvalue ${DYN} ${copy}, ptr ${table}, 1`);
+    return result;
   }
 
   // A Dyn's block and vtable, for a call or a field read through it.
@@ -1979,6 +2010,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
+      if (isDyn(types.get(e)!)) return dynCloned(e, object);
       return copied(convert(value(object), types.get(object)!, types.get(e)!), types.get(e)!);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;

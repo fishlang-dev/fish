@@ -140,7 +140,12 @@ export const computed = new WeakSet<Expr>();
 // For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
 // each interface method runs, then for each field the getter supplying it, or none when it is
 // a field. And each method call through a Dyn, with the receiver its interface declares.
-export const dynMembers = new Map<string, { methods: Instance[]; fields: (Instance | undefined)[] }>();
+export const dynMembers = new Map<string, DynTable>();
+
+// What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
+// what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
+// can't be cloned.
+export type DynTable = { methods: Instance[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean }>();
 
 export function expressions(ctx: Context) {
@@ -2256,7 +2261,7 @@ export function expressions(ctx: Context) {
   // What a Dyn of this type runs for each interface member. A method may not need more of its
   // object than the interface declares, since a call through a Dyn only knows the interface,
   // and one taking an interface or function has a version per argument type, so no one slot.
-  function dynTable(e: Expr, type: Type, to: DynType): { methods: Instance[]; fields: (Instance | undefined)[] } {
+  function dynTable(e: Expr, type: Type, to: DynType): DynTable {
     const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
@@ -2267,7 +2272,9 @@ export function expressions(ctx: Context) {
       return instanceOf(body);
     });
     const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : instanceOf(inherited(c!, "getters", f.name)!)));
-    return { methods, fields };
+    const own = c?.methods.get("clone");
+    const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
+    return { methods, fields, clone: own ? instanceOf(own) : fixed || holdsMut(type) ? undefined : "copy" };
   }
 
   // A method call through a Dyn: the interface's method, run through its slot.
