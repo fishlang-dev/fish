@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { ARRAY, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, type ArrayType, type GeneratorType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, INTEGERS, isCopy, nextResult, unionType, type ArrayType, type GeneratorType, type PointerType, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -249,6 +249,28 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
+  // A raw pointer's method: a load or a store of what it points at, the address `n` elements
+  // along, or whether it is null.
+  function pointerCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const p = valueType(callee.object) as PointerType;
+    const at = value(callee.object);
+    const result = temp();
+    switch (callee.name) {
+      case "read":
+        emit(`${result} = load ${llvm(p.to)}, ptr ${at}`);
+        return result;
+      case "write":
+        emit(`store ${llvm(p.to)} ${value(e.args[0]!)}, ptr ${at}`);
+        return undefined;
+      case "offset":
+        emit(`${result} = getelementptr ${llvm(p.to)}, ptr ${at}, i64 ${value(e.args[0]!)}`);
+        return result;
+      default:
+        emit(`${result} = icmp eq ptr ${at}, null`);
+        return result;
+    }
+  }
+
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
   function loopSlot(s: Stmt, i: number, type: string): string {
     return resuming ? `%loop.${current.frame!.loops.get(s)! + i}` : alloca(type);
@@ -1344,6 +1366,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
+      if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
       if (e.callee.kind === "ident" && e.callee.name === "String") {
@@ -1853,8 +1877,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
       }
       case "float":
         return floatConstant(e.value, types.get(e) as "f32" | "f64");
-      case "as":
-        return cast(value(e.expr), coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)! as Numeric);
+      case "as": {
+        const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
+        const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
+        if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
+        // A raw pointer is an address: another pointer is the same one, and an integer is its
+        // number.
+        if (pointer(from) && pointer(to)) return value(e.expr);
+        const converted = temp();
+        emit(pointer(to) ? `${converted} = inttoptr ${llvm(from)} ${value(e.expr)} to ptr` : `${converted} = ptrtoint ptr ${value(e.expr)} to ${llvm(to)}`);
+        return converted;
+      }
       case "bool":
         return String(e.value);
       // A string literal on its own has only its literal type, which takes no space.
