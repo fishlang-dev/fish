@@ -22,6 +22,7 @@ export const NATIVE = String.raw`
 #include <string.h>
 #include <unwind.h>
 #include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -1191,6 +1192,21 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
   fsh_timer_add(*deadline, task);
   return 0;
+}
+
+// A Lock's word: 0 unlocked, 1 locked. A lock is held only for a synchronous callback, so a
+// waiter spins briefly, then gives its thread up between tries.
+// ponytail: spin-then-yield, a parking queue if contended locks show up in profiles
+void fsh_rt_lock(int32_t *word) {
+  for (int spins = 0;; spins++) {
+    int32_t open = 0;
+    if (__atomic_compare_exchange_n(word, &open, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    if (spins >= 64) sched_yield();
+  }
+}
+
+void fsh_rt_unlock(int32_t *word) {
+  __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
 
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.

@@ -364,6 +364,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = referent(valueType(callee.object)) as InteriorType;
     const at = receiver(callee.object);
     if (t.which === "Cell") return cellCall(e, callee, t, at);
+    if (t.which === "Lock") return lockUpdate(e, t, at);
     const ty = llvm(t);
     const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
     const byte = ty !== llvm(t.of);
@@ -397,6 +398,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const narrow = temp();
     emit(`${narrow} = trunc i8 ${result} to i1`);
     return narrow;
+  }
+
+  // `update`: the callback runs with a pointer to what the Lock holds, between taking and
+  // releasing its word. The callback's captures are made before the lock is taken.
+  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string): string | undefined {
+    const callback = e.args[0]!;
+    // The callback's value lives in a slot it is called through; what it leaves of its captures
+    // is dropped after it, as at any closure's call.
+    const made = types.get(callback)!;
+    const env = alloca(llvm(made));
+    emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
+    const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
+    emit(`call void @fsh_rt_lock(ptr ${at})`);
+    const inside = temp();
+    emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
+    const target = calls.get(callback)!;
+    const result = invoke(target, env, target.body.params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
+    emit(`call void @fsh_rt_unlock(ptr ${at})`);
+    if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
+    return result;
   }
 
   // A Cell's method: a plain load or store where it lives, which only one thread can reach.

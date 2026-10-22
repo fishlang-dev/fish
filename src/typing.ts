@@ -429,6 +429,9 @@ export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) =>
 
 export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
 
+// The signatures of callbacks that run while a lock is held, so their bodies can't await.
+export const lockCallbacks = new WeakSet<FunctionType>();
+
 // The first Atomic, Lock or Cell a value holds, if any.
 export function holdsInterior(t: Type): InteriorType | undefined {
   let found: InteriorType | undefined;
