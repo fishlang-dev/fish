@@ -62,6 +62,11 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     infer(node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
     return;
   }
+  // `Ptr<T>` against a raw pointer points at a T.
+  if (node.kind === "ref" && (node.name === "Ptr" || node.name === "MutPtr") && node.args.length === 1 && !names.has(node.name)) {
+    if (typeof arg !== "string" && arg.kind === "pointer") infer(node.args[0]!, arg.to, names, bindings, at);
+    return;
+  }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));

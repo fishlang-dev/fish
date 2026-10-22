@@ -1884,8 +1884,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         // A raw pointer is an address: another pointer is the same one, and an integer is its
         // number.
         if (pointer(from) && pointer(to)) return value(e.expr);
+        // An integer becomes an address as a `usize` would, sign-extending a narrower signed one.
         const converted = temp();
-        emit(pointer(to) ? `${converted} = inttoptr ${llvm(from)} ${value(e.expr)} to ptr` : `${converted} = ptrtoint ptr ${value(e.expr)} to ${llvm(to)}`);
+        if (pointer(to)) emit(`${converted} = inttoptr i64 ${cast(value(e.expr), from, "usize")} to ptr`);
+        else emit(`${converted} = ptrtoint ptr ${value(e.expr)} to ${llvm(to)}`);
         return converted;
       }
       case "bool":

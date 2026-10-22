@@ -31,7 +31,7 @@ export type Body = Span & {
   // is a `return` of it, `value`.
   // `expected`, the function type it is given to, types parameters it leaves unwritten.
   // `move`: it captures everything by value.
-  closure?: { value?: Expr; parent: Instance; expected?: FunctionType; move: boolean };
+  closure?: { value?: Expr; parent: Instance; expected?: FunctionType; move: boolean; unsafe?: boolean };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather

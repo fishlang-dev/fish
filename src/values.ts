@@ -98,6 +98,8 @@ export type Context = {
   closing: boolean;
   // Whether the body is a generator's.
   generator: boolean;
+  // Whether the body is a closure written inside `unsafe`.
+  unsafe: boolean;
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
   // Records a whole write through a narrowed mutable reference that may change its member.
   rewritten(l: Local, at: Expr): void;
@@ -106,7 +108,8 @@ export type Context = {
   // A written type, as this body sees it.
   resolveType(t: TypeNode): Type;
   // An arrow function's type, its body checked; and the instance a closure type runs.
-  closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType): ClosureType;
+  // A closure written inside `unsafe` is checked inside it too.
+  closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean): ClosureType;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
@@ -130,7 +133,7 @@ export function expressions(ctx: Context) {
   const wanted = new Map<Expr, Type>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
   // How many \`unsafe\` blocks enclose the code being checked.
-  let unsafeDepth = 0;
+  let unsafeDepth = ctx.unsafe ? 1 : 0;
   // Literals found to fit the type they were given, `-9223372036854775808` among them.
   const fitted = new Set<Expr>();
   // Powers of literals whose exponent no u32 holds, unless they became floats.
@@ -173,6 +176,11 @@ export function expressions(ctx: Context) {
   // A float literal only becomes a float type.
   function adapt(e: Expr, to: Type): boolean {
     if (!isNumeric(to)) return false;
+    if (e.kind === "unsafe") {
+      if (!adapt(e.expr, to)) return false;
+      types.set(e, to);
+      return true;
+    }
     // A `?:` or match whose every branch is a number literal gives the number type it meets.
     if (e.kind === "conditional" || e.kind === "match") {
       const branches = e.kind === "conditional" ? [e.then, e.else] : e.arms.map((a) => a.body);
@@ -187,6 +195,7 @@ export function expressions(ctx: Context) {
   }
 
   function literalOnly(e: Expr, floats: boolean): boolean {
+    if (e.kind === "unsafe") return literalOnly(e.expr, floats);
     if (e.kind === "int" || (e.kind === "float" && floats)) return true;
     if (e.kind === "unary") return (e.op === "-" || (e.op === "~" && !floats)) && literalOnly(e.operand, floats);
     return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && (!floats || !BITWISE_OPERATORS.has(e.op)) && literalOnly(e.left, floats) && literalOnly(e.right, floats);
@@ -225,6 +234,7 @@ export function expressions(ctx: Context) {
       expect(e.then, t);
       expect(e.else, t);
     }
+    if (e.kind === "unsafe") expect(e.expr, t);
     if (e.kind === "match") for (const arm of e.arms) for (const v of armValues(arm.body)) expect(v, t);
     if (e.kind === "pipe") expect(e.body, t);
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
@@ -640,6 +650,9 @@ export function expressions(ctx: Context) {
       if (e.args.length !== 1) throw new CompileError(`'${callee.name}' takes 1 argument`, e.start, e.end);
       const a = e.args[0]!;
       const t = value(a);
+      // A type parameter may stand for a reference in one instance and a value in another, and
+      // the two point at different things.
+      if (typeof t !== "string" && t.kind === "param") throw unsupported(`'${callee.name}' calls on values whose type is a type parameter`, a);
       if (isRefType(t)) {
         if (mutable && !t.mutable) throw new CompileError("'mutPtrOf' needs a 'Mut' reference, or a place that may change", a.start, a.end);
         return { type: pointerType(t.to, mutable), what: `'${callee.name}'` };
@@ -765,6 +778,9 @@ export function expressions(ctx: Context) {
     const counts: Record<string, number> = { read: 0, write: 1, offset: 1, isNull: 0 };
     if (!(callee.name in counts)) throw new CompileError(`raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
     needsUnsafe(`'${callee.name}' on a raw pointer`, callee);
+    if (linked(callee)) throw unsupported("optional chains calling raw pointer methods", callee);
+    const held = types.get(callee.object)!;
+    if (isRefType(held)) coercions.set(callee.object, p);
     if (e.args.length !== counts[callee.name]) throw new CompileError(`'${callee.name}' takes ${counts[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     const plain = isNumeric(p.to) || p.to === "boolean" || (typeof p.to !== "string" && p.to.kind === "pointer");
     if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${show(p.to)}'`, callee);
@@ -1215,7 +1231,7 @@ export function expressions(ctx: Context) {
         return arrayType(element);
       }
       case "arrow":
-        return closure(e, expecting.get(e));
+        return closure(e, expecting.get(e), unsafeDepth > 0);
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
       case "as": {

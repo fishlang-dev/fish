@@ -555,6 +555,7 @@ export function check(program: Stmt[]): Checked {
       noteThis,
       closing: f.closure !== undefined,
       generator: f.generator === true,
+      unsafe: f.closure?.unsafe === true,
       changesCapture,
       reachable: (l) => !caseOnly.has(l),
       rewritten,
@@ -686,12 +687,12 @@ export function check(program: Stmt[]): Checked {
     }
 
     // An arrow function: its own type, and its body checked here, where it is written.
-    function closure(e: Arrow, expected?: FunctionType): ClosureType {
+    function closure(e: Arrow, expected?: FunctionType, unsafe = false): ClosureType {
       if (e.async) throw unsupported("async arrow functions", e);
       if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move, unsafe },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
