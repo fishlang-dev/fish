@@ -76,6 +76,8 @@ class Request {
   headers: Headers;
   body: string;
   signal: AbortSignal;
+  // The :params a Router's route took from the path, as name then value.
+  params: string[] = [];
 
   constructor(url: string, init?: RequestInit) {
     this.url = url;
@@ -102,6 +104,14 @@ class Request {
 
   async text(): Promise<string> {
     return this.body;
+  }
+
+  // The path segment a Router's ':name' matched, or "" when its route has no such parameter.
+  param(name: string): string {
+    for (let i: usize = 0; i + 1 < this.params.length; i += 2) {
+      if (this.params[i] === name) return this.params[i + 1];
+    }
+    return "";
   }
 }
 
@@ -270,6 +280,69 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
     }
   } catch (e) {
     return;
+  }
+}
+
+// Routes requests by method and path, as Hono and Express do: the first route matching both
+// runs, ':name' segments match any one segment, and a request no route matches gets a 404.
+// ponytail: each request walks every route in order; a tree of segments would scale further.
+class Router {
+  methods: string[] = [];
+  paths: string[] = [];
+  handlers: ServeHandler[] = [];
+
+  get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
+  post(this: Mut<this>, path: string, handler: ServeHandler) { this.route("POST", path, handler); }
+  put(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PUT", path, handler); }
+  patch(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PATCH", path, handler); }
+  delete(this: Mut<this>, path: string, handler: ServeHandler) { this.route("DELETE", path, handler); }
+  // A route for every method.
+  all(this: Mut<this>, path: string, handler: ServeHandler) { this.route("", path, handler); }
+
+  route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
+    this.methods.push(method);
+    this.paths.push(path);
+    this.handlers.push(handler);
+  }
+
+  // The matching route's response; a HEAD request runs a GET route.
+  async handle(req: Request): Promise<Response> {
+    const method = req.method === "HEAD" ? "GET" : req.method;
+    for (let i = 0; i < this.paths.length; i++) {
+      if (this.methods[i] !== "" && this.methods[i] !== method) continue;
+      const found = Router.match(this.paths[i], req.path);
+      if (found === null) continue;
+      let routed = req;
+      routed.params = found;
+      const res = await this.handlers[i](routed);
+      return res;
+    }
+    return new Response("Not Found\\n", { status: 404 });
+  }
+
+  // The router as the handler serve takes; the handler owns it.
+  handler(this: Own<this>): ServeHandler {
+    const router = this;
+    return async (req: Request) => {
+      const res = await router.handle(req);
+      return res;
+    };
+  }
+
+  // The :params a route's path takes from a request's, or null when they don't match.
+  static match(pattern: string, path: string): string[] | null {
+    const want = pattern.split("/");
+    const have = path.split("/");
+    if (want.length !== have.length) return null;
+    let params: string[] = [];
+    for (let i = 0; i < want.length; i++) {
+      if (want[i].startsWith(":")) {
+        if (have[i].length === 0) return null;
+        params.push(want[i].slice(1));
+        params.push(have[i]);
+      } else if (want[i] !== have[i]) return null;
+    }
+    return params;
   }
 }
 
@@ -507,7 +580,7 @@ class Http1 {
 }
 `;
 
-const HTTP_NAMES = ["serve", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's in offsets, so a position says which it is in.
 export const STD_BASE = 1 << 30;
