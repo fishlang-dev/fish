@@ -679,6 +679,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "ident" && callee.name === "cString" && !byName.has("cString")) {
       if (e.args.length !== 1) throw new CompileError("'cString' takes 1 argument", e.start, e.end);
       if (ctx.generator) throw unsupported("'cString' inside generators", callee);
+      if (ctx.async) throw unsupported("'cString' inside async functions", callee);
       const t = value(e.args[0]!);
       coerce(e.args[0]!, t, "string", `'cString' takes a string, not '${show(t)}'`);
       return { type: pointerType("u8", false), what: "'cString'" };
@@ -833,6 +834,7 @@ export function expressions(ctx: Context) {
     if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     const t = value(e.operand);
+    if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaiting a 'Promise<T>' parameter", e.operand);
     if (typeof t === "string" || t.kind !== "future") throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
     if (t.throws) raise(e, t.throws, "this Promise");
     return t.gives;

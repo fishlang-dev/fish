@@ -8,4 +8,4 @@ function bad(q: Ref<P>): Ref<P> {
 }
 
 function main() {}
-// error: can't return a reference to a temporary or a copy
+// error: 'r' would keep borrowing this temporary, which is gone once its statement ends

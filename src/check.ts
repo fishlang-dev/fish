@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, futureType, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -875,11 +875,18 @@ export function check(program: Stmt[], library = false): Checked {
             return;
           }
           if (isAwait(s.expr)) awaiting(s.expr);
-          if (s.expr.kind === "assign" && isAwait(s.expr.value)) awaiting(s.expr.value);
+          if (s.expr.kind === "assign" && isAwait(s.expr.value)) {
+            // The target is found after the await resumes, so it must be one that can be.
+            if (s.expr.op !== "=" || (s.expr.target.kind !== "ident" && s.expr.target.kind !== "member")) {
+              throw new CompileError("'await' can only be assigned with '=' to a variable or a field for now; await into a 'const' first, then use it", s.expr.start, s.expr.end);
+            }
+            awaiting(s.expr.value);
+          }
           effect(s.expr);
           // A promise runs only when awaited, so one made and dropped would silently do nothing.
-          const made = types.get(s.expr) ?? calls.get(s.expr)?.returns;
-          if (typeof made !== "string" && made?.kind === "future") {
+          const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && s.expr.callee.name === "yieldNow" && !byName.has("yieldNow");
+          const made = pausing ? YIELD_NOW : types.get(s.expr) ?? calls.get(s.expr)?.returns;
+          if (s.expr.kind !== "assign" && s.expr.kind !== "destructure" && typeof made !== "string" && made?.kind === "future") {
             throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", s.expr.start, s.expr.end);
           }
           return;

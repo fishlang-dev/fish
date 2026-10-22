@@ -430,7 +430,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       // An awaited future is handed to the await, which runs it to completion.
       case "unary":
-        if (e.op === "await") return expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
+        if (e.op === "await") {
+          // The future runs across suspensions, after this statement's temporaries are gone.
+          for (const s of borrowsFrom.get(e.operand) ?? []) if (lentTemporary(s)) throw outlived(s, "the awaited Promise");
+          return expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
+        }
         return expr(e.operand);
       case "template":
         for (const x of e.exprs) expr(x);
@@ -748,11 +752,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       hold(holder, e.else);
       return;
     }
+    if (lentTemporary(e)) throw outlived(e, `'${holder.name}'`);
     // A call's returned reference holds what its sources do: a receiver where it lives.
     const from = borrowsFrom.get(e);
     if (from) {
       const result = (coercions.get(e) ?? types.get(e)!) as RefType;
       for (const s of from) {
+        if (lentTemporary(s)) throw outlived(s, `'${holder.name}'`);
         if (holdsRef(coercions.get(s) ?? types.get(s)!) && (isRef(coercions.get(s) ?? types.get(s)!) || key(s) === undefined)) hold(holder, s);
         else if (key(s) !== undefined) {
           lend(key(s)!, result.mutable, s, holder);
@@ -806,6 +812,19 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function inheritFrom(holder: Local, root: Local) {
     if (!state || root === holder) return;
     for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new Set([...loan.holders, holder]) });
+  }
+
+  // Whether an argument lends a value made for the statement, rather than a place or a
+  // reference it already is.
+  function lentTemporary(s: Expr): boolean {
+    const lent = coercions.get(s);
+    return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && key(s) === undefined;
+  }
+
+  // A borrow kept past its statement can't point at a temporary, which is gone once the
+  // statement ends.
+  function outlived(s: Expr, holder: string): CompileError {
+    return new CompileError(`${holder} would keep borrowing this temporary, which is gone once its statement ends; give it a name first, as in 'const xs = ...;'`, s.start, s.end);
   }
 
   // A reference to a temporary or a copy holds that, so it is never returned.
