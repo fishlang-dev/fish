@@ -2,6 +2,7 @@
 // expect: lowercase method|ok
 // expect: head route|head
 // expect: head falls back|get
+// expect: first match for head|get x
 // expect: repeated param|2
 // expect: query and fragment|a
 // expect: trailing slash|Not Found
@@ -17,8 +18,10 @@ async function main(): Promise<void> {
   let app = new Router();
   app.get("noslash", async (req) => new Response("ok"));
   app.route("post", "/lower", async (req) => new Response("ok"));
-  app.get("/h", async (req) => new Response("get"));
   app.route("HEAD", "/h", async (req) => new Response("head"));
+  app.get("/h", async (req) => new Response("get"));
+  app.get("/x", async (req) => new Response("get x"));
+  app.all("/x", async (req) => new Response("all x"));
   app.get("/g", async (req) => new Response("get"));
   app.get("/a/:id/b/:id", async (req) => new Response(req.param("id")));
   app.get("/q/:x", async (req) => new Response(req.param("x")));
@@ -27,6 +30,7 @@ async function main(): Promise<void> {
   await show(app, "lowercase method", "POST", "http://h/lower");
   await show(app, "head route", "HEAD", "http://h/h");
   await show(app, "head falls back", "HEAD", "http://h/g");
+  await show(app, "first match for head", "HEAD", "http://h/x");
   await show(app, "repeated param", "GET", "http://h/a/1/b/2");
   await show(app, "query and fragment", "GET", "http://h/q/a?b=/c#d");
   await show(app, "trailing slash", "GET", "http://h/users/");

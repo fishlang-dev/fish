@@ -308,21 +308,19 @@ class Router {
     this.handlers.push(handler);
   }
 
-  // The matching route's response; a HEAD request runs a GET route unless one is for HEAD.
+  // The first matching route's response; a HEAD request may run a GET route.
   async handle(req: Request): Promise<Response> {
     const have = req.path.split("/");
-    for (let pass = 0; pass < 2; pass++) {
-      const method = pass === 1 && req.method === "HEAD" ? "GET" : req.method;
-      if (pass === 1 && method === req.method) break;
-      for (let i = 0; i < this.routes.length; i++) {
-        if (this.methods[i] !== "" && this.methods[i] !== method) continue;
-        const found = Router.match(this.routes[i], have);
-        if (found === null) continue;
-        let routed = req;
-        routed.params = found;
-        const res = await this.handlers[i](routed);
-        return res;
-      }
+    const head = req.method === "HEAD";
+    for (let i = 0; i < this.routes.length; i++) {
+      const method = this.methods[i];
+      if (method !== "" && method !== req.method && !(head && method === "GET")) continue;
+      const found = Router.match(this.routes[i], have);
+      if (found === null) continue;
+      let routed = req;
+      routed.params = found;
+      const res = await this.handlers[i](routed);
+      return res;
     }
     return new Response("Not Found\\n", { status: 404 });
   }

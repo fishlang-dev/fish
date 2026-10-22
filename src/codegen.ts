@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -589,7 +589,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     } else {
       const copied = dynCopy(type);
       const cloned = table.clone === "copy" ? copied : dynClone(type, table);
-      const copy = table.clone === "copy" || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
+      // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
+      // own vtables; one that does would split that state, so its copy panics.
+      const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
+      const copy = !pinned || promiseElement(to.of) !== undefined ? copied : dynUncopyable();
       slots = [dynDrop(type), copy, cloned];
     }
     slots.push(...dynSlots(type, to, table));
