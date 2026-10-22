@@ -1162,6 +1162,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function text(e: Named): string {
     if (e.kind === "member") return `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
+    if (e.kind === "nonNull") return `${text(e.expr)}!`;
     return e.kind === "ident" || e.kind === "shorthand" ? e.name : e.kind === "this" || e.kind === "super" ? "this" : "(...)";
   }
 
