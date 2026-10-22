@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1899,6 +1899,7 @@ export function expressions(ctx: Context) {
       if (!fits(type, to)) throw new CompileError(message, e.start, e.end);
       return;
     }
+    if (typeof to !== "string" && to.kind === "dyn") return boxing(e, type, to, message);
     if (typeof to !== "string" && to.kind === "interface") {
       const reason = unsatisfied(type, to, members, e);
       if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
@@ -2225,6 +2226,20 @@ export function expressions(ctx: Context) {
     }
     if (root.kind === "this" || root.kind === "super") return changesThis(path, action, target);
     changesLocal(locals.get(root)!, path, action, target, throughMut);
+  }
+
+  // A value moved into a new `Dyn`: its type implements the interface, and owns everything and
+  // changes only under locks, since a Dyn hides what it holds from every later check and may
+  // cross to another thread.
+  function boxing(e: Expr, type: Type, to: DynType, message: string) {
+    const reason = unsatisfied(type, to.of, members, e);
+    if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
+    const blocker = unsent(lower(type));
+    if (blocker) {
+      const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
+      throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
+    }
+    coercions.set(e, to);
   }
 
   // Whether a place is inside the value a callback is passed: its parameter, or a field of it.

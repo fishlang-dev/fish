@@ -35,6 +35,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_panic(ptr) noreturn cold",
   "declare ptr @fsh_rt_array_alloc(i64)",
   "declare void @fsh_rt_array_reserve(ptr, i64)",
+  "declare ptr @fsh_rt_alloc(i64)",
   "declare void @fsh_rt_free(ptr)",
   "declare void @fsh_rt_panic_bounds(ptr, i64, i64) noreturn cold",
   "declare i32 @__gcc_personality_v0(...)",

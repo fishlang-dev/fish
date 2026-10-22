@@ -101,7 +101,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -134,6 +134,22 @@ export function sharedType(of: Type): SharedType {
     t = { kind: "shared", of, fields: [] };
     shareds.set(key, t);
     keys.set(t, key);
+  }
+  return t;
+}
+
+// `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
+// of what that type does: drop it, clone it, and each of I's members.
+export type DynType = { kind: "dyn"; of: InterfaceType; fields: Field[] };
+
+const dyns = new Map<InterfaceType, DynType>();
+
+export function dynType(of: InterfaceType): DynType {
+  let t = dyns.get(of);
+  if (!t) {
+    t = { kind: "dyn", of, fields: [] };
+    dyns.set(of, t);
+    keys.set(t, `dyn ${keyOf(of)}`);
   }
   return t;
 }
@@ -522,7 +538,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn") return t;
   if (t.kind === "param") return t.concrete ?? t;
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
@@ -691,6 +707,7 @@ export function show(t: Type): string {
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which;
+  if (t.kind === "dyn") return `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

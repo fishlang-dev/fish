@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { arrayType, blockType, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { arrayType, blockType, dynType, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -125,7 +125,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // An interface describes values of many types, each laid out its own way, so an array of
     // them has no one element size.
     if (typeof element !== "string" && element.kind === "interface") {
-      throw new CompileError(`an array can't hold the interface type '${element.name}' directly, since its values may each be a different type; use a type parameter instead`, at.start, at.end);
+      throw new CompileError(`an array can't hold the interface type '${element.name}' directly, since its values may each be a different type; use 'Dyn<${element.name}>[]' to hold any of them`, at.start, at.end);
     }
     return arrayType(element);
   }
@@ -166,6 +166,13 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.name === "Atomic" || t.name === "Lock" || t.name === "Cell") {
       if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
       return interior(t.name, resolveType(t.args[0]!), t);
+    }
+    if (t.name === "Dyn") {
+      const of = t.args.length === 1 ? resolveType(t.args[0]!) : undefined;
+      if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined) {
+        throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
+      }
+      return dynType(of);
     }
     if (t.name === "Semaphore" || t.name === "Permit" || t.name === "AbortController" || t.name === "AbortSignal") {
       if (t.args.length !== 0) throw new CompileError(`'${t.name}' takes no type arguments`, t.start, t.end);
@@ -369,7 +376,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels" };
+const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -431,7 +438,7 @@ export function channel(of: Type, at: Span): BlockType {
   return blockType("Channel", of);
 }
 
-const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set([...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "Dyn", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

@@ -5,15 +5,16 @@ import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, conversions, llvm } from "./layout.ts";
+import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, keyOf, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
 
 // What a reference points to, or the type itself.
+const isDyn = (t: Type): t is DynType => typeof t !== "string" && t.kind === "dyn";
 const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -113,6 +114,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
   const elementDrops = new Map<Type, string>();
+  const vtables = new Map<string, string>();
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
@@ -519,6 +521,77 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       frame = next;
     }
     return signalled(e, future, frame);
+  }
+
+  // A value moved into a new Dyn's block, with the vtable of its type for the Dyn's interface.
+  function box(v: string, type: Type, to: DynType): string {
+    const [end, size, block, made, dyn] = [temp(), temp(), temp(), temp(), temp()];
+    emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
+    emit(`${size} = ptrtoint ptr ${end} to i64`);
+    emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+    emit(`store ${llvm(type)} ${v}, ptr ${block}`);
+    emit(`${made} = insertvalue ${DYN} undef, ptr ${block}, 0`);
+    emit(`${dyn} = insertvalue ${DYN} ${made}, ptr ${vtable(type, to)}, 1`);
+    return dyn;
+  }
+
+  // The vtable of a type for an interface: drop the block, copy it (the compiler's copies),
+  // clone it as '.clone()' would (null when the type can't be), then a slot per member.
+  function vtable(type: Type, to: DynType): string {
+    const key = `${keyOf(type)} ${keyOf(to)}`;
+    const made = vtables.get(key);
+    if (made) return made;
+    const name = `@"fsh.vtable.${vtables.size}"`;
+    vtables.set(key, name);
+    const slots = [dynDrop(type), dynCopy(type), dynClone(type), ...dynSlots(type, to)];
+    globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
+    return name;
+  }
+
+  // Emits a thunk taking the pointer to a Dyn's block, its body from `fill`.
+  function thunk(name: string, returns: string, fill: () => void) {
+    const saved = { allocas, body, temps, labels, block };
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    fill();
+    out.push(`define internal ${returns} ${name}(ptr %p) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block } = saved);
+  }
+
+  function dynDrop(type: Type): string {
+    const name = `@"fsh.dyn.drop.${vtables.size}"`;
+    thunk(name, "void", () => {
+      const v = temp();
+      emit(`${v} = load ${llvm(type)}, ptr %p`);
+      dispose(v, type);
+      emit("call void @fsh_rt_free(ptr %p)");
+      emit("ret void");
+    });
+    return name;
+  }
+
+  // A new block holding the compiler's copy of the value: what its copies and drops balance on.
+  function dynCopy(type: Type): string {
+    const name = `@"fsh.dyn.copy.${vtables.size}"`;
+    thunk(name, "ptr", () => {
+      const [v, end, size, block] = [temp(), temp(), temp(), temp()];
+      emit(`${v} = load ${llvm(type)}, ptr %p`);
+      emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
+      emit(`${size} = ptrtoint ptr ${end} to i64`);
+      emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+      emit(`store ${llvm(type)} ${copied(v, type)}, ptr ${block}`);
+      emit(`ret ptr ${block}`);
+    });
+    return name;
+  }
+
+  // What a Dyn's '.clone()' runs; none yet, so its slot is null.
+  function dynClone(_type: Type): string {
+    return "null";
+  }
+
+  // A slot per interface member; none yet.
+  function dynSlots(_type: Type, _to: DynType): string[] {
+    return [];
   }
 
   // A function dropping one value where it lives, for a channel to drop what it still holds.
@@ -1302,7 +1375,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
-    if (type.kind === "array" || type.kind === "shared" || type.kind === "block") return true;
+    if (type.kind === "array" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn") return true;
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
@@ -1361,6 +1434,31 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     } else if (type.kind === "shared") {
       if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
+    } else if (type.kind === "dyn") {
+      // Through the vtable: its drop frees the block; its copy gives a new block. A Dyn moved
+      // out of its place left it empty, with nothing to drop or copy.
+      const [data, table, empty, at, fn, full, done] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
+      emit(`${data} = extractvalue ${DYN} %v, 0`);
+      emit(`${table} = extractvalue ${DYN} %v, 1`);
+      emit(`${empty} = icmp eq ptr ${data}, null`);
+      emit(`br i1 ${empty}, label %${done}, label %${full}`);
+      startBlock(full);
+      emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${kind === "drop" ? 0 : 1}`);
+      emit(`${fn} = load ptr, ptr ${at}`);
+      let copy: string | undefined;
+      if (kind === "drop") emit(`call void ${fn}(ptr ${data})`);
+      else {
+        const made = temp();
+        copy = temp();
+        emit(`${made} = call ptr ${fn}(ptr ${data})`);
+        emit(`${copy} = insertvalue ${DYN} %v, ptr ${made}, 0`);
+      }
+      emit(`br label %${done}`);
+      startBlock(done);
+      if (copy) {
+        result = temp();
+        emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${full} ]`);
+      }
     } else if (type.kind === "block") {
       const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release" }[type.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
@@ -1584,6 +1682,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // conversion that leaves part of a value behind copies the part it keeps.
   function owned(e: Expr): string {
     const to = coercions.get(e);
+    // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
+    // else a copy of it.
+    if (to && isDyn(to) && !isDyn(types.get(e)!)) {
+      const type = types.get(e)!;
+      let v = known.get(e) ?? evaluate(e);
+      if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
+      else if (!fresh(e)) v = copied(v, type);
+      return box(v, type, to);
+    }
     const whole = !to || keepsAll(types.get(e)!, to);
     if (whole && fresh(e)) return value(e, true);
     const v = value(e);
@@ -1598,7 +1705,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // union, taking a union's member out, or moving it to a union holding all its members.
   function keepsAll(from: Type, to: Type): boolean {
     const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
-    return !needsDrop(from) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
+    return !needsDrop(from) || isDyn(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
   }
 
   // A receiver copied into a slot for an owning method: the copy is its own, pending until the
@@ -2565,6 +2672,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const result = known.get(e) ?? evaluate(e);
     // Nothing runs after a value of `never`, so it stands for any value at all.
     if (type === "never") return "undef";
+    // A value meeting a Dyn moves into its block; a temporary then drops as the Dyn.
+    if (to && isDyn(to) && !isDyn(type)) {
+      const boxed = box(result, type, to);
+      if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
+      return boxed;
+    }
     if (!consume && fresh(e) && !known.has(e)) pending.push({ v: result, type });
     return to ? convert(result, type, to) : result;
   }

@@ -1,4 +1,4 @@
-// error: an array can't hold the interface type 'Shape' directly, since its values may each be a different type
+// error: an array can't hold the interface type 'Shape' directly, since its values may each be a different type; use 'Dyn<Shape>[]' to hold any of them
 interface Shape {
   area(): i64;
 }

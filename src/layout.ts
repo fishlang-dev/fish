@@ -18,6 +18,7 @@ export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
   if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block") return "ptr";
   if (t.kind === "array") return ARRAY;
+  if (t.kind === "dyn") return DYN;
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
   // Atomic instructions need whole bytes, so an atomic boolean is a byte.
   if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
@@ -33,9 +34,12 @@ function words(t: UnionType): number {
 // Fish supports.
 // An array is its elements' buffer, its length and its capacity, in elements.
 export const ARRAY = "{ ptr, i64, i64 }";
+// A Dyn is a pointer to its value's block, then to its vtable.
+export const DYN = "{ ptr, ptr }";
 
 function size(t: Type): [number, number] {
   if (typeof t !== "string" && t.kind === "array") return [24, 8];
+  if (typeof t !== "string" && t.kind === "dyn") return [16, 8];
   if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
   if (t === "f32") return [4, 4];
   if (t === "f64") return [8, 8];
