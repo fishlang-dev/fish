@@ -156,6 +156,39 @@ export function dynType(of: InterfaceType): DynType {
   return t;
 }
 
+// A stored callable: a written function type in a field, an element, an annotated variable or
+// a return is a Dyn of an interface with one method, `call`, which a closure satisfies by its
+// signature. One per function type as written, so messages show its own parameter names;
+// those with the same types convert freely (`sameCallable`).
+const callables = new Map<string, InterfaceType>();
+export const callableOf = new WeakMap<InterfaceType, FunctionType>();
+
+export function callableType(fn: FunctionType): DynType {
+  const key = fn.name;
+  let i = callables.get(key);
+  if (!i) {
+    i = interfaceType(fn.name);
+    i.methods.push({ name: "call", params: fn.params, returns: fn.returns });
+    callables.set(key, i);
+    callableOf.set(i, fn);
+  }
+  return dynType(i);
+}
+
+// Whether two stored callables take and give the same types, so either holds the other's value.
+export function sameCallable(a: Type, b: Type): boolean {
+  const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
+  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
+}
+
+// A function type where a value is stored becomes its callable, inside arrays too.
+export function stored(t: Type): Type {
+  if (typeof t === "string") return t;
+  if (t.kind === "function") return callableType(t);
+  if (t.kind === "array") return arrayType(stored(t.element));
+  return t;
+}
+
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
@@ -639,7 +672,7 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
   // In an instance, a type parameter and the concrete type it stands for are one value.
-  if (from === to || lower(from) === lower(to) || from === "never") return true;
+  if (from === to || lower(from) === lower(to) || from === "never" || sameCallable(from, to)) return true;
   // A reference reads the value where it lives, so it fits only a reference to the same type;
   // a mutable one also lends itself as shared. Lifetimes are checked on their own.
   if (typeof to !== "string" && to.kind === "ref") {
@@ -660,7 +693,9 @@ export function fits(from: Type, to: Type): boolean {
   // returning what it returns, or anything when it returns nothing.
   // A parameter of a function type fits through its signature.
   if (typeof to !== "string" && to.kind === "function") {
-    const sig = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
+    const given = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
+    // A stored callable fits by the function type it was written as.
+    const sig = typeof given !== "string" && given.kind === "dyn" && callableOf.has(given.of) ? callableOf.get(given.of)! : given;
     return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
       && sig.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
   }
@@ -710,7 +745,7 @@ export function show(t: Type): string {
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which;
-  if (t.kind === "dyn") return `Dyn<${t.of.name}>`;
+  if (t.kind === "dyn") return callableOf.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

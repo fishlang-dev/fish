@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -118,7 +118,7 @@ export type Context = {
   resolveType(t: TypeNode): Type;
   // An arrow function's type, its body checked; and the instance a closure type runs.
   // A closure written inside `unsafe` is checked inside it too.
-  closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean): ClosureType;
+  closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean, owning?: boolean): ClosureType;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
@@ -133,6 +133,8 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
+const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
+
 // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
 // through a Dyn: values, not places.
 export const computed = new WeakSet<Expr>();
@@ -146,7 +148,7 @@ export const dynMembers = new Map<string, DynTable>();
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
 export type DynTable = { methods: Instance[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
-export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean }>();
+export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
@@ -155,6 +157,8 @@ export function expressions(ctx: Context) {
   const expecting = new Map<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
   const wanted = new Map<Expr, Type>();
+  // Arrows checked to own what they capture, being stored.
+  const owning = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
   const objects = new WeakSet<Expr>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -253,9 +257,17 @@ export function expressions(ctx: Context) {
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
   function expect(e: Expr, t: Type) {
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    // An arrow written where a callable is stored captures by move: the callable owns it all.
+    if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
+      expecting.set(e, callableOf.get(t.of)!);
+      owning.add(e);
+    }
     // An array literal's elements are expected to be its element type, and an object literal's
     // properties their fields'.
-    if (e.kind === "array" && isArray(t)) for (const x of e.elements) if (x) expect(x, t.element);
+    if (e.kind === "array" && isArray(t)) {
+      wanted.set(e, t.element);
+      for (const x of e.elements) if (x) expect(x, t.element);
+    }
     if (e.kind === "conditional") {
       expect(e.then, t);
       expect(e.else, t);
@@ -670,6 +682,16 @@ export function expressions(ctx: Context) {
       return traitCall(e, callee, receiver);
     }
     if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
+    if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
+      const stored = field(receiver, callee.name);
+      const method = receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name);
+      if (stored && !method && isCallable(lower(stored.type))) return callableCall(e, callee, lower(stored.type) as DynType);
+    }
+    if (callee.kind !== "ident" && callee.kind !== "member") {
+      const held = lower(value(callee));
+      if (isCallable(held)) return callableCall(e, callee, held as DynType);
+    }
     // `Shape.Circle(1.5)` builds a variant from its payload.
     const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
     if (named?.data && callee.kind === "member") {
@@ -810,6 +832,7 @@ export function expressions(ctx: Context) {
   // A call of a closure held by a variable runs the closure's body.
   function closureCall(e: Call, callee: Extract<Expr, { kind: "ident" }>): { type: Type; what: string } {
     const held = value(callee);
+    if (isCallable(lower(held))) return callableCall(e, callee, lower(held) as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
     // closure it was given.
     const type = typeof held !== "string" && held.kind === "param" && held.bound?.kind === "function" ? held.bound : held;
@@ -1559,8 +1582,15 @@ export function expressions(ctx: Context) {
         const elements = e.elements as Expr[];
         const spread = elements.find((x) => x.kind === "spread");
         if (spread) throw unsupported("spread elements", spread);
+        // Closures meeting the callable an annotation expects of each element are boxed into it.
+        const want = wanted.get(e);
+        const callable = typeof want !== "string" && want?.kind === "dyn" && callableOf.has(want.of) ? want : undefined;
         const given = elements.map((x) => {
           const t = value(x);
+          if (typeof t !== "string" && t.kind === "closure" && callable) {
+            coerce(x, t, callable, `type '${show(t)}' is not assignable to type '${show(callable)}'`);
+            return callable;
+          }
           if (typeof t !== "string" && t.kind === "closure") throw unsupported("arrays of functions", x);
           if (holdsRef(t)) throw unsupported("arrays of references", x);
           const widened = widenLet(t);
@@ -1572,7 +1602,7 @@ export function expressions(ctx: Context) {
         return arrayType(element);
       }
       case "arrow":
-        return closure(e, expecting.get(e), unsafeDepth > 0);
+        return closure(e, expecting.get(e), unsafeDepth > 0, owning.has(e));
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
       case "as": {
@@ -1874,7 +1904,7 @@ export function expressions(ctx: Context) {
     }
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
-    if (type === to || lower(type) === lower(to)) return;
+    if (type === to || lower(type) === lower(to) || sameCallable(type, to)) return;
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
     if (type === to) return;
@@ -2251,10 +2281,11 @@ export function expressions(ctx: Context) {
   // changes only under locks, since a Dyn hides what it holds from every later check and may
   // cross to another thread.
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
-    if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+    if (callableOf.has(to.of)) storing(e, lower(type), to, message);
+    else if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = lower(type);
     if (typeof held !== "string" && held.kind === "dyn") throw new CompileError(`a '${show(held)}' can't become a '${show(to)}' yet; box the value it was made from`, e.start, e.end);
-    const reason = unsatisfied(type, to.of, members, e);
+    const reason = callableOf.has(to.of) ? undefined : unsatisfied(type, to.of, members, e);
     if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     const blocker = unsent(held);
     if (blocker) {
@@ -2265,11 +2296,32 @@ export function expressions(ctx: Context) {
     coercions.set(e, to);
   }
 
+  // A closure stored as a callable: it fits the function type, owns what it captures, changes
+  // none of it, and can run any number of times.
+  function storing(e: Expr, type: Type, to: DynType, message: string) {
+    const fn = callableOf.get(to.of)!;
+    if (typeof type === "string" || type.kind !== "closure") {
+      // A function-typed parameter is checked when its instance knows the closure.
+      if (typeof type !== "string" && (type.kind === "function" || type.kind === "param")) return;
+      throw new CompileError(message, e.start, e.end);
+    }
+    if (!fits(type, fn)) throw new CompileError(message, e.start, e.end);
+    const body = closureBody(type);
+    const capture = (name: string) => `'${name}'`;
+    const borrowed = type.fields.find((f) => isRefType(f.type));
+    if (borrowed) throw new CompileError(`this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
+    if (type.once) throw new CompileError(`this closure moves ${capture(type.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(type.once)} inside it instead`, e.start, e.end);
+    const changed = [...(body.changed ?? [])][0];
+    if (changed) throw new CompileError(`this closure changes ${capture(changed.name)}, which it captures, but a stored callable can't change what it captures; keep that state in an 'Atomic' or a 'Lock'`, e.start, e.end);
+  }
+
   // What a Dyn of this type runs for each interface member. A method may not need more of its
   // object than the interface declares, since a call through a Dyn only knows the interface,
   // and one taking an interface or function has a version per argument type, so no one slot.
   function dynTable(e: Expr, type: Type, to: DynType): DynTable {
     const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
+    const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
+    if (typeof type !== "string" && type.kind === "closure") return { methods: [closureBody(type)], fields: [], clone: fixed ? undefined : "copy" };
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
       const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
@@ -2280,7 +2332,6 @@ export function expressions(ctx: Context) {
     });
     const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
     const own = c?.methods.get("clone");
-    const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
     return { methods, fields, clone: own ? instanceOf(own) : fixed ? undefined : "copy" };
   }
 
@@ -2313,6 +2364,24 @@ export function expressions(ctx: Context) {
     });
     dynCalls.set(e, { index, mutable: m.mutable === true, owned: m.owned === true });
     return { type: m.returns, what: `'${m.name}'` };
+  }
+
+  // A call of a stored callable: whatever expression gives it, run through its one slot.
+  function callableCall(e: Call, callee: Expr, t: DynType): { type: Type; what: string } {
+    const fn = callableOf.get(t.of)!;
+    // A field holding it is read as any field is.
+    if (!types.has(callee)) value(callee);
+    if (e.typeArgs.length > 0) throw new CompileError("a stored function takes no type arguments", e.start, e.end);
+    if (e.args.length !== fn.params.length) throw new CompileError(`expected ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    e.args.forEach((a, i) => {
+      const want = fn.params[i]!;
+      expect(a, want);
+      const given = value(a);
+      coerce(a, given, want, `argument of type '${show(given)}' is not assignable to parameter of type '${show(want)}'`);
+    });
+    if (holdsRef(fn.returns)) borrowsFrom.set(e, [callee]);
+    dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
+    return { type: fn.returns, what: "this function" };
   }
 
   // A field read through a Dyn, through its slot: a copy of the value.

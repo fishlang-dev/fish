@@ -1,4 +1,6 @@
 function main() {
   let fs: (() => i64)[] = [];
+  fs.push(() => 2);
+  print(fs.length, fs[0]())
 }
-// error: arrays of functions are not supported yet
+// expect: 1 2

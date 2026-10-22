@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsRef, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { field, fits, holdsRef, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -173,7 +173,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
   function returnTypeOf(f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
-    const t = withScope(scope, () => resolveType(f.returnType!));
+    // A function type returned is a stored callable.
+    const t = stored(withScope(scope, () => resolveType(f.returnType!)));
     if (typeof t === "string" || t.kind !== "ref") return t;
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = implicitOf(f);

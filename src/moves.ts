@@ -383,7 +383,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
-        const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : "'super'";
+        const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {

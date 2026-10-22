@@ -13,7 +13,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -568,8 +568,7 @@ export function check(written: Stmt[], library = false): Checked {
     // A closure returns the number type the function type it meets returns, so its literals
     // take that type.
     const given = f.closure?.expected?.returns;
-    let declared = f.closure ? (f.returnType ? resolveType(f.returnType) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
-    if (typeof declared !== "string" && declared?.kind === "function") throw unsupported("functions returned from functions", f.returnType!);
+    let declared = f.closure ? (f.returnType ? stored(resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
     // A generator's declared `Generator<T>` says what it yields; calling it gives its own type.
     const generator = f.generator ? (instance.generator ??= generatorType(f.name, instance.concrete)) : undefined;
     let yielded = generator && declared ? generatorElement(declared) : undefined;
@@ -814,12 +813,12 @@ export function check(written: Stmt[], library = false): Checked {
     }
 
     // An arrow function: its own type, and its body checked here, where it is written.
-    function closure(e: Arrow, expected?: FunctionType, unsafe = false): ClosureType {
+    function closure(e: Arrow, expected?: FunctionType, unsafe = false, owning = false): ClosureType {
       if (e.async) throw unsupported("async arrow functions", e);
       if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move, unsafe },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, closure: { value, parent: instance, expected, move: e.move || owning, unsafe },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -851,7 +850,7 @@ export function check(written: Stmt[], library = false): Checked {
       const laid = (t: Type) => (inner.concrete ? lower(t) : t);
       const fields = [...inner.captures].map(([alias, from]) => ({
         name: alias.name,
-        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
+        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
       inner.closure = type;
@@ -919,7 +918,8 @@ export function check(written: Stmt[], library = false): Checked {
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);
-          const annotated = (d.type && resolveType(d.type)) || demands.get(s);
+          // A function type there makes the variable a stored callable.
+          const annotated = (d.type && stored(resolveType(d.type))) || demands.get(s);
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
@@ -930,8 +930,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (!annotated && typeof widened !== "string" && widened.kind === "array" && widened.element === "never") {
             throw new CompileError(`an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
           }
-          // So does a function type, which the closure given fits.
-          const describes = annotated && (isInterface(annotated) || (typeof annotated !== "string" && annotated.kind === "function"));
+          const describes = annotated && isInterface(annotated);
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
           if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
           return;
@@ -1123,7 +1122,8 @@ export function check(written: Stmt[], library = false): Checked {
           if (declared && s.value) expect(s.value, declared);
           // An arrow's expression body may be a call returning nothing.
           const type = !s.value ? "void" : s.value === f.closure?.value && s.value.kind === "call" ? result(s.value) : value(s.value);
-          if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions returned from functions", s.value!);
+          // A closure returned is boxed into the callable the function declares.
+          if (typeof type !== "string" && type.kind === "closure" && (typeof declared === "string" || declared?.kind !== "dyn")) throw unsupported("functions returned without a function return type", s.value!);
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);

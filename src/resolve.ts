@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { arrayType, blockType, dynType, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { mutates, owns } from "./classes.ts";
 
@@ -29,8 +29,8 @@ export function storable(type: Type, at: Span): Type {
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
-  if (typeof type !== "string" && (type.kind === "function" || type.kind === "closure")) throw unsupported("functions stored in fields", at);
-  return type;
+  if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions stored in fields", at);
+  return stored(type);
 }
 
 // The class a name and type arguments refer to; a generic one is instantiated on first use.
@@ -122,7 +122,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // calls boxed, aren't supported yet.
   function array(element: Type, at: TypeNode): Type {
     if (holdsRef(element)) throw unsupported("arrays of references", at);
-    if (typeof element !== "string" && (element.kind === "function" || element.kind === "closure")) throw unsupported("arrays of functions", at);
+    if (typeof element !== "string" && element.kind === "closure") throw unsupported("arrays of functions", at);
+    if (typeof element !== "string" && element.kind === "function") return arrayType(stored(element));
     // An interface describes values of many types, each laid out its own way, so an array of
     // them has no one element size.
     if (typeof element !== "string" && element.kind === "interface") {

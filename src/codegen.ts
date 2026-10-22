@@ -523,12 +523,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return signalled(e, future, frame);
   }
 
-  // A value moved into a new Dyn's block, with the vtable of its type for the Dyn's interface.
-  function box(v: string, type: Type, to: DynType): string {
-    const [end, size, block, made, dyn] = [temp(), temp(), temp(), temp(), temp()];
+  // A new block for a Dyn's value. At least a byte, so an empty class has an address of its own.
+  function dynBlock(type: Type): string {
+    const [end, size, empty, some, block] = [temp(), temp(), temp(), temp(), temp()];
     emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
     emit(`${size} = ptrtoint ptr ${end} to i64`);
-    emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+    emit(`${empty} = icmp eq i64 ${size}, 0`);
+    emit(`${some} = select i1 ${empty}, i64 1, i64 ${size}`);
+    emit(`${block} = call ptr @fsh_rt_alloc(i64 ${some})`);
+    return block;
+  }
+
+  // A value moved into a new Dyn's block, with the vtable of its type for the Dyn's interface.
+  function box(v: string, type: Type, to: DynType): string {
+    const [made, dyn] = [temp(), temp()];
+    const block = dynBlock(type);
     emit(`store ${llvm(type)} ${v}, ptr ${block}`);
     emit(`${made} = insertvalue ${DYN} undef, ptr ${block}, 0`);
     emit(`${dyn} = insertvalue ${DYN} ${made}, ptr ${vtable(type, to)}, 1`);
@@ -576,11 +585,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function dynCopy(type: Type): string {
     const name = `@"fsh.dyn.copy.${vtables.size}"`;
     thunk(name, "ptr", () => {
-      const [v, end, size, block] = [temp(), temp(), temp(), temp()];
+      const v = temp();
       emit(`${v} = load ${llvm(type)}, ptr %p`);
-      emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
-      emit(`${size} = ptrtoint ptr ${end} to i64`);
-      emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+      const block = dynBlock(type);
       emit(`store ${llvm(type)} ${copied(v, type)}, ptr ${block}`);
       emit(`ret ptr ${block}`);
     });
@@ -595,10 +602,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const name = `@"fsh.dyn.clone.${vtables.size}"`;
     thunk(name, "ptr", () => {
       const made = invoke(own, "%p", [])!;
-      const [end, size, block] = [temp(), temp(), temp()];
-      emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
-      emit(`${size} = ptrtoint ptr ${end} to i64`);
-      emit(`${block} = call ptr @fsh_rt_alloc(i64 ${size})`);
+      const block = dynBlock(type);
       emit(`store ${llvm(type)} ${made}, ptr ${block}`);
       emit(`ret ptr ${block}`);
     });
@@ -705,11 +709,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A method call through a Dyn: one taking its object over takes the Dyn.
-  function dynCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+  // A stored callable's call is its one method's, on the callee itself.
+  function dynCall(e: Extract<Expr, { kind: "call" }>, callee: Expr): string | undefined {
     const info = dynCalls.get(e)!;
-    const t = referent(valueType(callee.object)) as DynType;
+    const object = info.callable ?? (callee as Extract<Expr, { kind: "member" }>).object;
+    const t = referent(valueType(object)) as DynType;
     const m = t.of.methods[info.index]!;
-    const [data, table] = opened(callee.object, info.owned);
+    const [data, table] = opened(object, info.owned);
     const fn = vslot(table, info.index);
     const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
     const returns = m.returns === "void" ? "void" : llvm(m.returns);
@@ -1998,7 +2004,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "block") return blockCall(e, e.callee);
-      if (e.callee.kind === "member" && dynCalls.has(e)) return dynCall(e, e.callee);
+      if (dynCalls.has(e)) return dynCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name === "update" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();
