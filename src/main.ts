@@ -1,18 +1,77 @@
 #!/usr/bin/env bun
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
+import type { Instance } from "./check.ts";
+import type { Type } from "./typing.ts";
 
 export type Panic = "unwind" | "abort";
+// A library C can call: an archive to link, or a shared library to load.
+export type Library = "static" | "shared";
 
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind"): string {
   return codegen(check(parse(src)), { src, file, release, panic });
+}
+
+// Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
+// `<name>.h` declaring its exports beside it.
+export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
+  const src = readFileSync(file, "utf8");
+  const checked = check(parse(src), true);
+  const ir = codegen(checked, { src, file, release, panic, library: true });
+  const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
+  const at = (f: string) => join(dirname(out), f);
+  writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
+  const dir = mkdtempSync(join(tmpdir(), "fishc-"));
+  const [native, fish, runtime] = [join(dir, "native.c"), join(dir, "fish.o"), join(dir, "native.o")];
+  writeFileSync(native, NATIVE);
+  const optimize = release ? "-O2" : "-O0";
+  const run = (args: string[], stdin?: string) => {
+    const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
+    if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
+  };
+  try {
+    if (kind === "shared") {
+      const extension = process.platform === "darwin" ? "dylib" : "so";
+      run(["clang", "-shared", "-fPIC", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
+    } else {
+      run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
+      run(["clang", "-c", "-fPIC", "-funwind-tables", native, "-o", runtime, optimize]);
+      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime]);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A C header declaring a library's exports.
+function header(name: string, exports: Instance[]): string {
+  const guard = `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
+  const lines = exports.map((i) => {
+    const params = i.body.params.map((p) => {
+      const type = cType(i.locals.get(p)!.type);
+      return `${type}${type.endsWith("*") ? "" : " "}${i.locals.get(p)!.name}`;
+    });
+    return `${cType(i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
+  });
+  return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", ...lines, "", `#endif`, ""].join("\n");
+}
+
+// How C names a type that crosses to it. A pointer to something C has no name for points to `void`.
+function cType(t: Type): string {
+  if (typeof t !== "string") {
+    if (t.kind !== "pointer") return "void";
+    const to = cType(t.to);
+    return `${t.mutable ? "" : "const "}${to === "void" && typeof t.to !== "string" && t.to.kind !== "pointer" ? "void" : to} *`;
+  }
+  const names: Record<string, string> = { boolean: "bool", f32: "float", f64: "double", usize: "size_t", isize: "ptrdiff_t", void: "void" };
+  return names[t] ?? (t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`);
 }
 
 // Compiles `file` to a native executable at `out`, piping the IR through clang along with the
@@ -34,7 +93,9 @@ export function build(file: string, out: string, release = false, panic: Panic =
 }
 
 if (import.meta.main) {
+  // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = parseArgs({
+    args: Bun.argv.slice(2).map((a) => (a === "--lib" ? "--lib=static" : a)),
     allowPositionals: true,
     options: {
       out: { type: "string", short: "o" },
@@ -42,16 +103,19 @@ if (import.meta.main) {
       release: { type: "boolean" },
       panic: { type: "string", default: "unwind" },
       link: { type: "string", multiple: true },
+      lib: { type: "string" },
     },
   });
   const [command, file] = positionals;
   const panic = values.panic as Panic;
-  if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--emit-llvm]");
+  const lib = values.lib as Library | undefined;
+  if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]");
     process.exit(2);
   }
   try {
     if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release, panic));
+    else if (lib) buildLibrary(file, values.out ?? basename(file, ".fsh"), lib, values.release, panic, values.link ?? []);
     else build(file, values.out ?? basename(file, ".fsh"), values.release, panic, values.link ?? []);
   } catch (e) {
     if (e instanceof CompileError) console.error(formatError(e, file, readFileSync(file, "utf8")));

@@ -18,6 +18,8 @@ export type Body = Span & {
   generator?: boolean;
   // Whether it is a C function a `declare function` names, which has no body here.
   foreign?: boolean;
+  // Whether an `export` names it, so a library builds it into a C function too.
+  exported?: boolean;
   // A generic function's type parameters; each set of type arguments gets its own instance.
   typeParams?: TypeParam[];
   // An accessor's parameter is the property's type, so it is never generic.

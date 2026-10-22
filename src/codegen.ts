@@ -52,12 +52,13 @@ const extension = (type: Type) => (type === "boolean" || type === "u8" || type =
 const crossing = (type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
 const crossed = (type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
 
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort" };
+// A library has no C `main`; each export gets a C function under its own name instead.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release, panic, library = false }: Options): string {
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
   const out: string[] = [];
@@ -197,7 +198,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
-  const start = entry();
+  const start = library ? instances.filter((i) => i.body.exported).flatMap(exported) : entry();
 
   return [
     ...globals,
@@ -1847,6 +1848,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
+  // A C function under an export's name, calling it. A panic can't unwind into C, so one that
+  // reaches here aborts, its message already printed.
+  function exported(i: Instance): string[] {
+    const params = i.body.params.map((p, n) => [i.locals.get(p)!.type, `%a${n}`] as const);
+    const call = `${i.returns === "void" ? "" : "%r = "}${panic === "abort" ? "call" : "invoke"} ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
+    const head = `define ${crossed(i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(t)} ${a}`).join(", ")}) ${unwinds} {`;
+    const done = i.returns === "void" ? "  ret void" : `  ret ${llvm(i.returns)} %r`;
+    if (panic === "abort") return [head, `  ${call}`, done, "}", ""];
+    return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
+  }
+
   function entry(): string[] {
     if (!main.throws) return [`define i32 @main() ${unwinds} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
     current = main;

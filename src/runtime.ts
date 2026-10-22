@@ -9,6 +9,7 @@ export const RUNTIME = [
   "declare i32 @dprintf(i32, ptr, ...)",
   "declare i32 @fflush(ptr)",
   "declare void @exit(i32) noreturn",
+  "declare void @abort() noreturn",
   "declare ptr @fsh_rt_format_f64(double, ptr)",
   "declare ptr @fsh_rt_format_f32(float, ptr)",
   "declare void @fsh_rt_str_retain(ptr)",
