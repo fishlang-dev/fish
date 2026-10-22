@@ -1239,6 +1239,16 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   return 0;
 }
 
+// One printed line is several writes; holding the stream's lock across them keeps lines from
+// tasks on other threads whole.
+void fsh_rt_print_begin(int32_t stream) {
+  flockfile(stream == 2 ? stderr : stdout);
+}
+
+void fsh_rt_print_end(int32_t stream) {
+  funlockfile(stream == 2 ? stderr : stdout);
+}
+
 // A Lock's word: 0 unlocked, or the token of the thread holding it. A lock is held only for a
 // synchronous callback, so a waiter spins briefly, then gives its thread up between tries.
 // Taking a lock this thread already holds would wait forever, so it is refused: 1, and the
@@ -1273,7 +1283,7 @@ void *fsh_rt_shared_new(int64_t size) {
 }
 
 void fsh_rt_shared_retain(int64_t *block) {
-  __atomic_fetch_add(block, 1, __ATOMIC_RELAXED);
+  if (block) __atomic_fetch_add(block, 1, __ATOMIC_RELAXED);
 }
 
 // Gives up a count: whether it was the last, so the caller drops the value and frees the block.

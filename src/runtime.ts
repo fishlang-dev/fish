@@ -36,6 +36,8 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_array_alloc(i64)",
   "declare void @fsh_rt_array_reserve(ptr, i64)",
   "declare ptr @fsh_rt_alloc(i64)",
+  "declare void @fsh_rt_print_begin(i32)",
+  "declare void @fsh_rt_print_end(i32)",
   "declare void @fsh_rt_free(ptr)",
   "declare void @fsh_rt_panic_bounds(ptr, i64, i64) noreturn cold",
   "declare i32 @__gcc_personality_v0(...)",
@@ -99,6 +101,7 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
   const { emit, temp, label, startBlock, cString } = b;
   let format = "";
   let values: string[] = [];
+  emit(`call void @fsh_rt_print_begin(i32 ${stream})`);
   parts.forEach((part, i) => {
     if (i > 0) format += " ";
     if (typeof part === "string") literal(part);
@@ -106,6 +109,7 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
   });
   format += "\n";
   flush();
+  emit(`call void @fsh_rt_print_end(i32 ${stream})`);
 
   function piece(v: string, type: Type) {
     if (typeof type !== "string" && type.kind === "literal") {
