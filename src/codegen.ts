@@ -92,6 +92,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   let floor = 0;
   // The scopes matches and pipes open for themselves.
   const transient = new WeakSet<object>();
+  // The slot each C string in a loop's condition or update was given when the loop began.
+  const reserved = new Map<Expr, string>();
   // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
   // resumes at in order, where it starts, and where it gives that it has finished.
   let resuming: { type: GeneratorType; frame: string; resumes: string[]; start: string; done: string } | undefined;
@@ -135,6 +137,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
     block = "entry";
     pending = [];
     floor = 0;
+    reserved.clear();
     scopes = [[]];
     const type = instance.returns;
     framed = new Set();
@@ -266,6 +269,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   }
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
+  // A loop's condition and update run again after its body, which may leave first: each C
+  // string they make gets its slot in the loop's scope up front, so every way out drops it.
+  function reserveC(e: Expr | undefined) {
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
+      const call = node as Expr;
+      if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !calls.has(call) && !reserved.has(call)) {
+        const held = alloca(ARRAY);
+        allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
+        scopes.at(-1)!.push({ slot: held, type: arrayType("u8") });
+        reserved.set(call, held);
+      }
+      Object.values(node).forEach(visit);
+    };
+    visit(e);
+  }
+
   // A scope a match or a pipe opens for itself, which ends with the expression.
   function passing(scope: { slot: string; type: Type }[]) {
     transient.add(scope);
@@ -277,12 +297,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
   // so the slot drops what it holds first. C would read only up to a NUL inside, so a string
   // holding one can't cross, as Rust's `CString` refuses it.
   function forC(s: string, at: Expr): string {
-    const [made, held, old, refused] = [temp(), alloca(ARRAY), temp(), temp()];
+    const [made, old, refused] = [temp(), temp(), temp()];
     unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
     emit(`${refused} = icmp eq ptr ${made}, null`);
     panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
-    allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
-    scopes.findLast((scope) => !transient.has(scope))!.push({ slot: held, type: arrayType("u8") });
+    let held = reserved.get(at);
+    if (!held) {
+      held = alloca(ARRAY);
+      allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
+      scopes.findLast((scope) => !transient.has(scope))!.push({ slot: held, type: arrayType("u8") });
+    }
     emit(`${old} = load ${ARRAY}, ptr ${held}`);
     dispose(old, arrayType("u8"));
     const array = temp();
@@ -443,6 +467,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return;
       }
       case "while": {
+        reserveC(s.cond);
         const test = label();
         const loop = label();
         const end = label();
@@ -462,6 +487,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         // The initializer's variables last for the whole loop.
         scopes.push([]);
         if (s.init) statement(s.init);
+        reserveC(s.test);
+        reserveC(s.update);
         const [test, loop, next, end] = [label(), label(), label(), label()];
         emit(`br label %${test}`);
         startBlock(test);
@@ -541,6 +568,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return;
       }
       case "doWhile": {
+        reserveC(s.cond);
         const [loop, test, end] = [label(), label(), label()];
         emit(`br label %${loop}`);
         startBlock(loop);
