@@ -19,7 +19,9 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
 // are filled in once resolved.
-export type Method = { name: string; params: Type[]; returns: Type };
+// An interface's method; `mutable` and `owned` when it declares `this: Mut<this>` or
+// `this: Own<this>`, which a call through a Dyn must allow for.
+export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean };
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[] };
 
 // A type parameter: it stands for any type satisfying its bound, and offers only the bound's

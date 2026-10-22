@@ -4,6 +4,7 @@ import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { arrayType, blockType, dynType, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
+import { mutates, owns } from "./classes.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
 
@@ -316,7 +317,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         if (m.typeParams.length > 0) throw unsupported("generic methods", m);
         if (!m.returns) throw new CompileError(`method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
-        const method: Method = { name: m.name, params: m.params.map((p) => paramType(p)), returns: resolveType(m.returns) };
+        const first = m.params[0];
+        const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
+        const params = (self ? m.params.slice(1) : m.params).map((p) => paramType(p));
+        const method: Method = { name: m.name, params, returns: resolveType(m.returns), mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
         t.methods.push(method);
       } else {
         const f = member(m);

@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -133,8 +133,15 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
-// Member reads the runtime computes, like `c.signal` and `signal.aborted`: values, not places.
+// Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
+// through a Dyn: values, not places.
 export const computed = new WeakSet<Expr>();
+
+// For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
+// each interface method runs, then for each field the getter supplying it, or none when it is
+// a field. And each method call through a Dyn, with the receiver its interface declares.
+export const dynMembers = new Map<string, { methods: Instance[]; fields: (Instance | undefined)[] }>();
+export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean }>();
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
@@ -652,6 +659,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
+    if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name)) return sharedNew(e);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
@@ -1488,6 +1496,7 @@ export function expressions(ctx: Context) {
         // A field read through a reference loads what it points to; a getter gets the pointer.
         if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
         if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
+        if (typeof object !== "string" && object.kind === "dyn") return dynField(e, object);
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
@@ -2239,7 +2248,64 @@ export function expressions(ctx: Context) {
       const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
+    const held = lower(type);
+    if (typeof held !== "string" && held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(to)}`, dynTable(e, held, to));
     coercions.set(e, to);
+  }
+
+  // What a Dyn of this type runs for each interface member. A method may not need more of its
+  // object than the interface declares, since a call through a Dyn only knows the interface,
+  // and one taking an interface or function has a version per argument type, so no one slot.
+  function dynTable(e: Expr, type: Type, to: DynType): { methods: Instance[]; fields: (Instance | undefined)[] } {
+    const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
+    const methods = to.of.methods.map((m) => {
+      const body = inherited(c!, "methods", m.name)!;
+      const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
+      if (body.self?.owned && !m.owned) throw refuse("takes its object over", "this: Own<this>");
+      if (body.self?.mutable && !body.self.owned && !m.mutable && !m.owned) throw refuse("changes its object", "this: Mut<this>");
+      if (implicitOf(body).size > 0) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface, a function or an object type, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
+      return instanceOf(body);
+    });
+    const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : instanceOf(inherited(c!, "getters", f.name)!)));
+    return { methods, fields };
+  }
+
+  // A method call through a Dyn: the interface's method, run through its slot.
+  function dynCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: DynType): { type: Type; what: string } {
+    const index = t.of.methods.findIndex((m) => m.name === callee.name);
+    const m = t.of.methods[index];
+    if (!m) {
+      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : "";
+      throw new CompileError(`property '${callee.name}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
+    }
+    if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
+    if (typeof m.returns !== "string" && m.returns.kind === "interface") {
+      throw new CompileError(`'${m.name}' returns the interface type '${m.returns.name}', which each type implementing '${t.of.name}' gives its own way, so a Dyn can't call it; have it return 'Dyn<${m.returns.name}>'`, callee.start, callee.end);
+    }
+    if (e.typeArgs.length > 0) throw new CompileError(`'${m.name}' takes no type arguments`, e.start, e.end);
+    if (e.args.length !== m.params.length) throw new CompileError(`expected ${m.params.length} argument${m.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    if (m.owned) takesOver(callee.object, m.name);
+    else if (m.mutable) mutates(callee.object, m.name);
+    e.args.forEach((a, i) => {
+      const want = m.params[i]!;
+      expect(a, want);
+      const given = value(a);
+      coerce(a, given, want, `argument of type '${show(given)}' is not assignable to parameter of type '${show(want)}'`);
+    });
+    dynCalls.set(e, { index, mutable: m.mutable === true, owned: m.owned === true });
+    return { type: m.returns, what: `'${m.name}'` };
+  }
+
+  // A field read through a Dyn, through its slot: a copy of the value.
+  function dynField(e: Extract<Expr, { kind: "member" }>, t: DynType): Type {
+    if (linked(e)) throw unsupported("optional chains through a Dyn", e);
+    const f = t.of.fields.find((x) => x.name === e.name);
+    if (!f) {
+      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : "";
+      throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
+    }
+    computed.add(e);
+    return f.type;
   }
 
   // Whether a place is inside the value a callback is passed: its parameter, or a field of it.

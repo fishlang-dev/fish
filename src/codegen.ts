@@ -1,5 +1,5 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, isPrint } from "./values.ts";
+import { computed, dynCalls, dynMembers, isPrint } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate } from "./diag.ts";
@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, keyOf, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -548,13 +548,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  // Emits a thunk taking the pointer to a Dyn's block, its body from `fill`.
-  function thunk(name: string, returns: string, fill: () => void) {
-    const saved = { allocas, body, temps, labels, block };
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+  // Emits a thunk taking the pointer to a Dyn's block, then `params`, its body from `fill`. It
+  // is a function of its own, so nothing the function being emitted holds drops in it.
+  function thunk(name: string, returns: string, fill: () => void, params: string[] = []) {
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
     fill();
-    out.push(`define internal ${returns} ${name}(ptr %p) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block } = saved);
+    out.push(`define internal ${returns} ${name}(${["ptr %p", ...params].join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
   }
 
   function dynDrop(type: Type): string {
@@ -589,9 +590,96 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return "null";
   }
 
-  // A slot per interface member; none yet.
-  function dynSlots(_type: Type, _to: DynType): string[] {
-    return [];
+  // A slot per interface member: each method, then each field.
+  function dynSlots(type: Type, to: DynType): string[] {
+    const { methods, fields } = dynMembers.get(`${keyOf(type)} ${keyOf(to)}`)!;
+    const n = vtables.size;
+    const made = to.of.methods.map((m, i) => methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!));
+    return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
+  }
+
+  // A method's slot: the type's method run on the block, its result as the interface gives it.
+  // Through a method declaring `this: Own<this>` the Dyn is given up: its block is freed after,
+  // and its value dropped first unless the type's method took it over.
+  function methodThunk(name: string, type: Type, m: Method, target: Instance): string {
+    const returns = m.returns === "void" ? "void" : llvm(m.returns);
+    thunk(name, returns, () => {
+      const owner = target.body.owner;
+      const self = typeof type !== "string" && type.kind === "class" && owner && owner !== type ? upcast("%p", type, owner) : "%p";
+      const result = invoke(target, self, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+      if (m.owned) {
+        if (!target.body.self?.owned) {
+          const v = temp();
+          emit(`${v} = load ${llvm(type)}, ptr %p`);
+          dispose(v, type);
+        }
+        emit("call void @fsh_rt_free(ptr %p)");
+      }
+      emit(result === undefined || m.returns === "void" ? "ret void" : `ret ${returns} ${convert(result, target.returns, m.returns)}`);
+    }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+    return name;
+  }
+
+  // A field's slot: a copy of the field, or what the getter supplying it gives.
+  function fieldThunk(name: string, type: Type, f: Field, getter: Instance | undefined): string {
+    thunk(name, llvm(f.type), () => {
+      if (getter) {
+        const owner = getter.body.owner;
+        const self = typeof type !== "string" && type.kind === "class" && owner && owner !== type ? upcast("%p", type, owner) : "%p";
+        emit(`ret ${llvm(f.type)} ${convert(invoke(getter, self, [])!, getter.returns, f.type)}`);
+        return;
+      }
+      const holder = type as ObjectType | ClassType;
+      const own = field(holder, f.name)!.type;
+      const [at, v] = [temp(), temp()];
+      emit(`${at} = getelementptr ${llvm(holder)}, ptr %p, i32 0, ${fieldPath(holder, f.name).map((i) => `i32 ${i}`).join(", ")}`);
+      emit(`${v} = load ${llvm(own)}, ptr ${at}`);
+      emit(`ret ${llvm(f.type)} ${convert(copied(v, own), own, f.type)}`);
+    });
+    return name;
+  }
+
+  // A Dyn's block and vtable, for a call or a field read through it.
+  function opened(object: Expr, take: boolean): [string, string] {
+    const dyn = take ? owned(object) : temp();
+    if (!take) emit(`${dyn} = load ${DYN}, ptr ${receiver(object)}`);
+    const [data, table] = [temp(), temp()];
+    emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+    emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+    return [data, table];
+  }
+
+  // The function in a vtable's slot after its drop, copy and clone.
+  function vslot(table: string, i: number): string {
+    const [at, fn] = [temp(), temp()];
+    emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${3 + i}`);
+    emit(`${fn} = load ptr, ptr ${at}`);
+    return fn;
+  }
+
+  // A method call through a Dyn: one taking its object over takes the Dyn.
+  function dynCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const info = dynCalls.get(e)!;
+    const t = referent(valueType(callee.object)) as DynType;
+    const m = t.of.methods[info.index]!;
+    const [data, table] = opened(callee.object, info.owned);
+    const fn = vslot(table, info.index);
+    const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
+    const returns = m.returns === "void" ? "void" : llvm(m.returns);
+    const result = m.returns === "void" ? undefined : temp();
+    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, result);
+    if (result && !types.has(e) && needsDrop(m.returns)) pending.push({ v: result, type: m.returns });
+    return result;
+  }
+
+  // A field read through a Dyn: a copy, through its slot after the methods'.
+  function dynField(e: Extract<Expr, { kind: "member" }>): string {
+    const t = referent(types.get(e.object)!) as DynType;
+    const [data, table] = opened(e.object, false);
+    const fn = vslot(table, t.of.methods.length + t.of.fields.findIndex((f) => f.name === e.name));
+    const result = temp();
+    emit(`${result} = call ${llvm(types.get(e)!)} ${fn}(ptr ${data})`);
+    return result;
   }
 
   // A function dropping one value where it lives, for a channel to drop what it still holds.
@@ -1863,6 +1951,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "interior") return atomicCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "block") return blockCall(e, e.callee);
+      if (e.callee.kind === "member" && dynCalls.has(e)) return dynCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name === "update" && typeof referent(valueType(e.callee.object)) !== "string" && (referent(valueType(e.callee.object)) as Exclude<Type, string>).kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();
@@ -2059,7 +2148,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A field read, or a getter's result.
   function member(e: Extract<Expr, { kind: "member" }>): string {
     if (current.copiesOut.has(e)) return copyOut(e);
-    if (computed.has(e)) return blockProperty(e);
+    if (computed.has(e)) return isDyn(referent(types.get(e.object)!)) ? dynField(e) : blockProperty(e);
     const getter = calls.get(e);
     if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.

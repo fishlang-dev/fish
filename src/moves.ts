@@ -3,7 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
-import { computed, isPrint } from "./values.ts";
+import { computed, dynCalls, isPrint } from "./values.ts";
 import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -398,7 +398,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // mutably for the call itself.
           const object = e.callee.kind === "member" ? e.callee.object : undefined;
           const place = object && key(object);
-          const self = calls.get(e)?.body.self;
+          // Through a Dyn, the receiver its interface declares.
+          const dyn = dynCalls.get(e);
+          const self: { mutable: boolean; owned?: boolean } | undefined = calls.get(e)?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
           if (object && self?.owned) {
             expr(object, (p) => `'${p}' moved here: ${name} takes its object over; call it on '${p}.clone()' to keep a copy`);

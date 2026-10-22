@@ -286,14 +286,14 @@ function usesOnThis(node: unknown, name: string): boolean {
 }
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.
-function mutates(p: Param): boolean {
+export function mutates(p: Param): boolean {
   if (wraps(p, "Mut") || wraps(p, "Own")) return true;
   if (wraps(p, "Ref")) return false;
   throw unsupported("receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>'", p);
 }
 
 // `this: Own<this>` takes the object over: an owner may change it too.
-const owns = (p: Param) => wraps(p, "Own");
+export const owns = (p: Param) => wraps(p, "Own");
 
 function wraps(p: Param, name: string): boolean {
   const t = p.type;
