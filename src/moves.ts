@@ -347,7 +347,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         free("this", e, "read");
         if (f.self?.owned) return use(e, consume);
         if (consume && state && !isCopy(types.get(e)!)) {
-          throw new CompileError("'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy", e.start, e.end);
+          throw new CompileError(hinted(types.get(e)!, "'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy"), e.start, e.end);
         }
         return;
       case "member":
@@ -440,7 +440,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         for (const x of e.exprs) expr(x);
         return;
       case "index":
-        if (consume && element(e) && !isCopy(types.get(e)!)) throw elementMove(e);
+        if (consume && element(e) && !isCopy(types.get(e)!)) throw elementMove(e, types.get(e)!);
         if (key(e) === undefined) expr(e.object);
         else use(e, consume);
         return expr(e.index);
@@ -670,7 +670,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const place = key(e)!;
     usable(e, place);
     const moving = consume !== undefined && !isCopy(type);
-    if (moving && place.includes(".[]")) throw elementMove(e);
+    if (moving && place.includes(".[]")) throw elementMove(e, type);
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
@@ -694,7 +694,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
   function hinted(type: Type, message: string): string {
-    return holdsHandle(type) ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
+    return holdsHandle(type, true) ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
   }
 
   // A place can't be used once it, something it is inside, or something inside it moved.
@@ -1096,7 +1096,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function outOfBorrow(option: Expr, e: Expr, consume?: Consumer) {
     const t = types.get(option);
     if (consume && state && t && isRef(t) && !isCopy(types.get(e)!)) {
-      throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+      throw new CompileError(hinted(types.get(e)!, "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy"), e.start, e.end);
     }
   }
 
@@ -1159,8 +1159,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // Moving a value out of an array by index would leave a hole in it, as in Rust.
-  function elementMove(e: Named): CompileError {
-    return new CompileError(`'${text(e)}' can't be moved out of its array; use '${text(e)}.clone()' to take a copy, or 'pop()' to take the last element out`, e.start, e.end);
+  function elementMove(e: Named, type: Type): CompileError {
+    const advice = holdsHandle(type, true) ? "" : `'${text(e)}.clone()' to take a copy, or `;
+    return new CompileError(`'${text(e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
   }
 
   // How a place reads in a message.

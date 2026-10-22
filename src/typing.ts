@@ -389,17 +389,19 @@ export function holdsRef(t: Type): boolean {
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
 }
 
-// Whether a value owns a JoinHandle anywhere in it: only one place may await a task's result.
-export function holdsHandle(t: Type): boolean {
+// Whether a value owns a JoinHandle anywhere in it, or with `throughRefs` borrows one: only one
+// place may await a task's result.
+export function holdsHandle(t: Type, throughRefs = false): boolean {
+  const holds = (u: Type) => holdsHandle(u, throughRefs);
   if (typeof t === "string") return false;
   if (t.kind === "handle") return true;
-  if (t.kind === "ref") return holdsHandle(t.to);
-  if (t.kind === "param") return t.concrete !== undefined && holdsHandle(t.concrete);
-  if (t.kind === "union") return t.members.some(holdsHandle);
-  if (t.kind === "array") return holdsHandle(t.element);
-  if (t.kind === "class") return t.fields.some((f) => holdsHandle(f.type)) || (t.base !== undefined && holdsHandle(t.base));
-  if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holdsHandle(f.type));
-  return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holdsHandle(f.type));
+  if (t.kind === "ref") return throughRefs && holds(t.to);
+  if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
+  if (t.kind === "union") return t.members.some(holds);
+  if (t.kind === "array") return holds(t.element);
+  if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
+  if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
+  return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holds(f.type));
 }
 
 // A type parameter as an instance sees it: standing for `concrete`, which has no type
