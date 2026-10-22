@@ -511,9 +511,10 @@ export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
 export const lockCallbacks = new WeakSet<FunctionType>();
 export const sharedCallbacks = new WeakSet<FunctionType>();
 
-// Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock or a
-// shared value. Readers of a shared value borrow such fields without its lock.
-export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || (u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && u.which !== "Permit")));
+// Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
+// shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
+// such fields without its lock.
+export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || u.kind === "dyn" || (u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && u.which !== "Permit")));
 
 // The first Atomic, Lock or Cell a value holds, if any.
 export function holdsInterior(t: Type): InteriorType | undefined {

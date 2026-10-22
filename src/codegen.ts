@@ -605,10 +605,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  // A slot per interface member: each method, then each field.
+  // A slot per interface member: each method, then each field. A method giving an interface
+  // type can't be called through a Dyn, so its slot is null.
   function dynSlots(type: Type, to: DynType, { methods, fields }: DynTable): string[] {
     const n = vtables.size;
-    const made = to.of.methods.map((m, i) => methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!));
+    const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface";
+    const made = to.of.methods.map((m, i) => (abstract(m.returns) ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
   }
 
@@ -619,16 +621,30 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const returns = m.returns === "void" ? "void" : llvm(m.returns);
     thunk(name, returns, () => {
       const owner = target.body.owner;
-      const self = typeof type !== "string" && type.kind === "class" && owner && owner !== type ? upcast("%p", type, owner) : "%p";
-      const result = invoke(target, self, m.params.map((p, i) => `${llvm(p)} %a${i}`));
-      if (m.owned) {
+      const upcasts = typeof type !== "string" && type.kind === "class" && owner !== undefined && owner !== type;
+      const self = upcasts ? upcast("%p", type, owner) : "%p";
+      // Given up, the block is freed once the method returns or unwinds: its value dropped first,
+      // or for a base's owning method, the derived fields it doesn't know of.
+      const giveUp = !m.owned ? undefined : () => {
         if (!target.body.self?.owned) {
           const v = temp();
           emit(`${v} = load ${llvm(type)}, ptr %p`);
           dispose(v, type);
+        } else if (upcasts) {
+          for (let t = type as ClassType; t !== owner; t = t.base!) {
+            const at = upcast("%p", type as ClassType, t);
+            for (const [part, i] of parts(t)) {
+              if (i === 0 || !needsDrop(part)) continue;
+              const [slot, v] = [temp(), temp()];
+              emit(`${slot} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+              emit(`${v} = load ${llvm(part)}, ptr ${slot}`);
+              dispose(v, part);
+            }
+          }
         }
         emit("call void @fsh_rt_free(ptr %p)");
-      }
+      };
+      const result = invoke(target, self, m.params.map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
       emit(result === undefined || m.returns === "void" ? "ret void" : `ret ${returns} ${convert(result, target.returns, m.returns)}`);
     }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
     return name;

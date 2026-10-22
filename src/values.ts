@@ -1219,6 +1219,7 @@ export function expressions(ctx: Context) {
     }
     const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
     if (permit) throw new CompileError("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead", e.start, e.end);
+    if ((typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw new CompileError("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one", e.start, e.end);
     const inner = holdsInterior(stored);
     if (inner) throw new CompileError(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`, e.start, e.end);
     if (holdsHandle(stored)) throw new CompileError("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself", e.start, e.end);
@@ -2130,7 +2131,11 @@ export function expressions(ctx: Context) {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);
-      if (computed.has(target)) throw new CompileError(`'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
+      if (computed.has(target)) {
+        const holder = types.get((target as Extract<Expr, { kind: "member" }>).object);
+        const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
+        throw new CompileError(through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
+      }
       // A whole value assigned to a mutable reference is written through it, to what it was
       // declared to point to, whatever a check narrowed it to. An update like `+=` keeps the
       // member, so it goes through the narrowed reference.
@@ -2246,15 +2251,17 @@ export function expressions(ctx: Context) {
   // changes only under locks, since a Dyn hides what it holds from every later check and may
   // cross to another thread.
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
+    if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+    const held = lower(type);
+    if (typeof held !== "string" && held.kind === "dyn") throw new CompileError(`a '${show(held)}' can't become a '${show(to)}' yet; box the value it was made from`, e.start, e.end);
     const reason = unsatisfied(type, to.of, members, e);
     if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
-    const blocker = unsent(lower(type));
+    const blocker = unsent(held);
     if (blocker) {
       const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
-    const held = lower(type);
-    if (typeof held !== "string" && held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(to)}`, dynTable(e, held, to));
+    if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(to)}`, dynTable(e, held, to));
     coercions.set(e, to);
   }
 
@@ -2271,10 +2278,10 @@ export function expressions(ctx: Context) {
       if (implicitOf(body).size > 0) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface, a function or an object type, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
       return instanceOf(body);
     });
-    const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : instanceOf(inherited(c!, "getters", f.name)!)));
+    const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
     const own = c?.methods.get("clone");
     const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
-    return { methods, fields, clone: own ? instanceOf(own) : fixed || holdsMut(type) ? undefined : "copy" };
+    return { methods, fields, clone: own ? instanceOf(own) : fixed ? undefined : "copy" };
   }
 
   // A method call through a Dyn: the interface's method, run through its slot.
@@ -2291,6 +2298,11 @@ export function expressions(ctx: Context) {
     }
     if (e.typeArgs.length > 0) throw new CompileError(`'${m.name}' takes no type arguments`, e.start, e.end);
     if (e.args.length !== m.params.length) throw new CompileError(`expected ${m.params.length} argument${m.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    // A reference it gives borrows the Dyn, unless the call frees the Dyn's block.
+    if (holdsRef(m.returns)) {
+      if (m.owned) throw new CompileError(`'${m.name}' takes its object over and frees it, so the reference it gives would point at nothing`, callee.start, callee.end);
+      borrowsFrom.set(e, [callee.object]);
+    }
     if (m.owned) takesOver(callee.object, m.name);
     else if (m.mutable) mutates(callee.object, m.name);
     e.args.forEach((a, i) => {
@@ -2311,6 +2323,8 @@ export function expressions(ctx: Context) {
       const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : "";
       throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
     }
+    // A copy of an Atomic, a Lock or a Dyn would change apart from the original.
+    if (interiorMutable(f.type) || holdsHandle(f.type)) throw new CompileError(`'${e.name}' can't be read through a Dyn, which gives a copy of it, and a copy of a '${show(f.type)}' would change apart from the one the Dyn holds; read it through a method`, e.start, e.end);
     computed.add(e);
     return f.type;
   }

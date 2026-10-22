@@ -75,7 +75,11 @@ export function unionField(union: UnionType, name: string, at: Span): Type | und
 // `x instanceof C` checks whether x holds an instance of exactly C: with embedding, an
 // instance of a class that extends C is not a C.
 export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, value, classNamed }: Union): Type {
-  value(e.left);
+  const left = value(e.left);
+  const held = typeof left !== "string" && left.kind === "ref" ? left.to : left;
+  if (typeof held !== "string" && held.kind === "dyn") {
+    throw new CompileError(`a '${show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
+  }
   const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
   if (!c) throw new CompileError("the right side of 'instanceof' must be a class", e.right.start, e.right.end);
   types.set(e.right, c);
