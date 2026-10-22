@@ -19,6 +19,7 @@ import { parse } from "../src/parser.ts";
 const dir = join(import.meta.dir, "programs");
 const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
 
+// Each program may take 30 seconds: some wait on real time, like a server closing an idle connection.
 for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
   test(name, () => {
     const file = join(dir, name);
@@ -51,5 +52,5 @@ for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
     if (!src.includes("// mode: abort")) expect(run.stderr.toString()).not.toContain("fish: leaked");
     if (panics.length > 0 && src.includes("// mode: abort")) expect(run.signalCode).toBe("SIGABRT");
     else expect(run.exitCode).toBe(panics.length > 0 ? 101 : failures.length > 0 ? 1 : 0);
-  });
+  }, 30000);
 }

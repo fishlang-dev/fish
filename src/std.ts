@@ -161,11 +161,24 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   const bound = listener.port;
   const listen = options.onListen;
   if (listen !== null) listen({ hostname: hostname, port: bound });
+  let stop = new AbortController().signal;
+  const given = options.signal;
+  if (given !== null) stop = given;
+  const live = shared({ count: new Atomic(0) });
   const boxed: ServeHandler = handler;
+  const host = hostname + ":" + String(bound);
   while (true) {
-    const conn = await listener.accept();
-    spawn(serveConnection(conn, boxed.clone(), hostname + ":" + String(bound)));
+    try {
+      const conn = await listener.accept(stop);
+      live.count.add(1);
+      spawn(Http1.tracked(conn, boxed.clone(), host, stop.clone(), live.clone()));
+    } catch (e) {
+      if (e instanceof AbortError) break;
+      throw e;
+    }
   }
+  // ponytail: polls until the last connection ends; a wait group would wake at once.
+  while (live.count.load() > 0) await sleep(10);
 }
 
 // What a request's head says: its request line and headers.
@@ -183,7 +196,7 @@ class HttpHead {
 }
 
 // One connection's requests, one after another while both sides keep it open.
-async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string): Promise<void> {
+async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal): Promise<void> {
   let buffer: u8[] = [];
   try {
     while (true) {
@@ -191,7 +204,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       while (end < 0) {
         // A head may take 16 KiB, and a body 1 MiB.
         if ((buffer.length as i64) > 16384) { await Http1.refuse(conn, 431); return; }
-        const got = await conn.read(16384);
+        const got = await Http1.idleRead(conn, stop, buffer.length === 0);
         if (got.length === 0) return;
         for (const b of got) buffer.push(b);
         end = Http1.headEnd(buffer);
@@ -219,9 +232,17 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       let hostHeader = host;
       const named = head.headers.get("host");
       if (named !== null) hostHeader = named;
-      const req = new Request("http://" + hostHeader + head.target, { method: method, headers: head.headers, body: body });
+      // While the handler runs, a watcher aborts the request's signal if the client goes away.
+      const client = new AbortController();
+      const signal = client.signal;
+      const done = new AbortController();
+      const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
+      const req = new Request("http://" + hostHeader + head.target, { method: method, headers: head.headers, body: body, signal: signal });
       const res = await handler(req);
-      const close = !keep || res.headers.get("connection") === "close";
+      done.abort();
+      const early = await watching;
+      for (const b of early) buffer.push(b);
+      const close = !keep || stop.aborted || res.headers.get("connection") === "close";
       await conn.write(new TextEncoder().encode(Http1.responseText(res, method === "HEAD", close)));
       if (close) return;
     }
@@ -232,6 +253,44 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 
 // The wire format of HTTP/1.x.
 class Http1 {
+  // A connection's requests, counted while it is open so the server can wait for it at shutdown.
+  static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>): Promise<void> {
+    await serveConnection(conn, handler, host, stop);
+    live.count.sub(1);
+  }
+
+  // Waits for the client's next bytes. Between requests the connection is idle: it closes after
+  // 5 seconds, or once the server stops, giving nothing.
+  // ponytail: wakes every 250 ms to look at the server's signal; AbortSignal.any would combine them.
+  static async idleRead(conn: Ref<TcpStream>, stop: Ref<AbortSignal>, idle: boolean): Promise<u8[]> throws IoError {
+    if (!idle) {
+      const got = await conn.read(16384);
+      return got;
+    }
+    for (let waited = 0; waited < 5000 && !stop.aborted; waited += 250) {
+      try {
+        const got = await conn.read(16384, AbortSignal.timeout(250));
+        return got;
+      } catch (e) {
+        if (e instanceof IoError) throw e;
+      }
+    }
+    return [];
+  }
+
+  // Reads from the client while its request is handled: the end of the stream, or a broken
+  // connection, aborts the request's signal. Bytes that arrive are handed back for the next request.
+  static async watch(conn: TcpStream, client: AbortController, done: AbortSignal): Promise<u8[]> {
+    try {
+      const got = await conn.read(16384, done);
+      if (got.length === 0) client.abort();
+      return got;
+    } catch (e) {
+      if (e instanceof IoError) client.abort();
+      return [];
+    }
+  }
+
   // Answers a request the server won't serve, and ends the connection.
   static async refuse(conn: Ref<TcpStream>, status: i64): Promise<void> throws IoError {
     const res = new Response(Http1.reasonPhrase(status) + "\\n", { status: status });
