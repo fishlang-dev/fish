@@ -2201,9 +2201,16 @@ export function expressions(ctx: Context) {
     const field = propertyField(p);
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
-    if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {
+    const callable = want && (isCallable(want) || (typeof want !== "string" && want.kind === "union" && want.members.some(isCallable)));
+    if (typeof field.type !== "string" && field.type.kind === "closure" && callable) {
       coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, want, `type '${show(field.type)}' is not assignable to type '${show(want)}'`);
       return { ...field, type: want };
+    }
+    // With no type to say which, a sync arrow is stored as a callable of its own signature.
+    if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
+      const own = storedType({ kind: "function", name: field.type.name, params: field.type.params, returns: field.type.returns, fields: [] });
+      coerce(p.value, field.type, own, `type '${show(field.type)}' is not assignable to type '${show(own)}'`);
+      return { ...field, type: own };
     }
     if (typeof field.type !== "string" && field.type.kind === "closure") throw unsupported("functions stored in objects", p);
     return field;
@@ -2212,6 +2219,8 @@ export function expressions(ctx: Context) {
   function propertyField(p: ObjectProp): Field {
     if (p.kind === "property") {
       if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
+      // An object stores its fields, so an arrow written in one owns what it captures.
+      if (p.value.kind === "arrow") owning.add(p.value);
       const type = value(p.value);
       const widened = widenLet(type);
       if (widened !== type) coerce(p.value, type, widened, "");

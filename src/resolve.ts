@@ -258,7 +258,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
     if (typeof t !== "string" && t.kind === "param") throw unsupported("unions holding a type parameter", node);
-    if (typeof t !== "string" && t.kind === "function") throw unsupported("unions holding functions", node);
+    // A union holds a value, so a function type in one is a stored callable.
+    if (typeof t !== "string" && t.kind === "function") return stored(t);
     if (holdsRef(t)) throw unsupported("unions holding references", node);
     return t;
   }

@@ -2,7 +2,7 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
-import { locate } from "./diag.ts";
+import { locate, sourceOf } from "./diag.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
@@ -2268,8 +2268,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // The "panicked at" line for a panic the runtime raises at an expression.
   function panicAt(at: Expr): string {
-    const { line, col } = locate(src, at.start);
-    return cString(`panicked at ${file}:${line}:${col}:\n`);
+    return cString(`panicked at ${where(at)}:\n`);
+  }
+
+  // `file:line:col` of an expression, in the program or the std library.
+  function where(at: Span): string {
+    const place = sourceOf(src, file, at.start);
+    const { line, col } = locate(place.src, place.offset);
+    return `${place.file}:${line}:${col}`;
   }
 
   function units(s: string): string {
@@ -2289,8 +2295,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${outside} = icmp uge i64 ${index}, ${length}`);
     emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    const { line, col } = locate(src, at.start);
-    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${file}:${line}:${col}:\n`)}, i64 ${length}, i64 ${index})`);
+    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${where(at)}:\n`)}, i64 ${length}, i64 ${index})`);
     emit("unreachable");
     startBlock(ok);
   }

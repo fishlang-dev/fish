@@ -1,4 +1,4 @@
-import { locate } from "./diag.ts";
+import { locate, sourceOf } from "./diag.ts";
 import type { ArithmeticOp, BinaryOp, Span } from "./parser.ts";
 import { INTEGERS, range, type Integer } from "./typing.ts";
 
@@ -162,10 +162,11 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
   function panicIf(condition: string, reason: string, at: Span) {
     const fail = label();
     const ok = label();
-    const { line, col } = locate(src, at.start);
+    const place = sourceOf(src, file, at.start);
+    const { line, col } = locate(place.src, place.offset);
     emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${file}:${line}:${col}:\n${reason}\n`)})`);
+    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${place.file}:${line}:${col}:\n${reason}\n`)})`);
     emit("unreachable");
     startBlock(ok);
   }

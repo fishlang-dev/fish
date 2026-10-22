@@ -1,3 +1,5 @@
+import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
+
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
 
@@ -15,6 +17,11 @@ export class CompileError extends Error {
   }
 }
 
+// Which source an offset is in, the program's or the std library's, which sits past it.
+export function sourceOf(src: string, file: string, offset: number): { src: string; file: string; offset: number } {
+  return offset >= STD_BASE ? { src: STD_SOURCE, file: STD_FILE, offset: offset - STD_BASE } : { src, file, offset };
+}
+
 // 1-based line and column of a source offset, plus the bounds of its line.
 export function locate(src: string, offset: number) {
   const lineStart = src.lastIndexOf("\n", offset - 1) + 1;
@@ -26,8 +33,11 @@ export function locate(src: string, offset: number) {
 
 // Renders `file:line:col: error: msg` followed by the source line with a caret underline,
 // then the same for its note.
-export function formatError(e: CompileError, file: string, src: string): string {
-  const lines = (kind: string, { message, start, end }: Note) => {
+export function formatError(e: CompileError, written: string, program: string): string {
+  const lines = (kind: string, note: Note) => {
+    const { src, file, offset: start } = sourceOf(program, written, note.start);
+    const { message } = note;
+    const end = note.end - (note.start - start);
     const { line, col, lineStart, lineEnd } = locate(src, start);
     const width = Math.max(1, Math.min(end, lineEnd) - start);
     const pad = " ".repeat(String(line).length);
