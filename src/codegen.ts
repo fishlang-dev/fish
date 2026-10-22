@@ -158,8 +158,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         framed.add(at);
       };
       field("%state", 0);
-      // An async arrow's captures are its frame's copy of the closure.
+      // An async arrow's captures are its frame's copy of the closure; an async method's object is
+      // borrowed through its frame, or held in it under `Own<this>`.
       if (f.closure) field("%env", 1);
+      if (f.self && !f.self.constructor) {
+        if (f.self.owned) field("%this", 1);
+        else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
+      }
       for (const [local, i] of instance.frame!.locals) field(slot(local), i);
       for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop.${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await.${i}`, i);
@@ -2065,8 +2070,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const machine = target.generator ?? target.future;
     if (machine) {
       let frame = "zeroinitializer";
-      // An async arrow's frame starts with its own copy of the closure, then the arguments.
-      const first = target.body.closure ? 2 : 1;
+      // An async arrow's frame starts with its own copy of the closure, and an async method's
+      // with its object, then the arguments.
+      const method = target.body.self && !target.body.self.constructor;
+      const first = target.body.closure || method ? 2 : 1;
+      if (method) {
+        const owns = target.body.self!.owned;
+        const self = owns ? unstash(pointer!, target.body.self!.type) : pointer!;
+        const next = temp();
+        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${owns ? llvm(target.body.self!.type) : "ptr"} ${self}, 1`);
+        frame = next;
+      }
       if (target.body.closure) {
         const [env, next] = [temp(), temp()];
         emit(`${env} = load ${llvm(target.closure!)}, ptr ${pointer}`);

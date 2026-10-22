@@ -1142,7 +1142,13 @@ export function expressions(ctx: Context) {
     if (ctx.locked) throw new CompileError("'update' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the update, then await", e.start, e.end);
     if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
-    const t = value(e.operand);
+    let t = value(e.operand);
+    // Through a bound: in an instance, the concrete method's own future; in the definition, what
+    // the bound's `Promise<T>` gives.
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) t = t.concrete;
+    const promise = typeof t !== "string" && t.kind === "param" ? t.bound : t;
+    const described = typeof promise !== "string" && promise?.kind === "interface" ? promiseElement(promise) : undefined;
+    if (described !== undefined && typeof t !== "string" && (t.kind === "interface" || t.kind === "param")) return described;
     if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
     if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of)!;
     if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);

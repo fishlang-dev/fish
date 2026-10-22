@@ -184,7 +184,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const isStatic = m.modifiers.includes("static");
     if (isStatic && node.typeParams.length > 0) throw unsupported("static methods in generic classes", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
+    const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator) throw unsupported("generator methods", m);
     if (m.typeParams.some((p) => !isLifetime(p))) throw unsupported("generic methods", span(m.typeParams));
@@ -203,6 +203,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       body: m.body,
       returnType: m.returnType,
       ...(m.throws && { throws: m.throws }),
+      ...(m.modifiers.includes("async") && { async: true }),
       typeParams: m.typeParams,
       self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false, owned: receiver ? owns(receiver) : false },
       owner: type,

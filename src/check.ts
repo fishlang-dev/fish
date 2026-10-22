@@ -139,6 +139,11 @@ export function isAwait(e: Expr): e is Extract<Expr, { kind: "unary" }> {
 // A generator's frame, everything it keeps between `next()` calls: its state, its parameters
 // in order, every other variable, then each `for...of` loop's array or generator and its
 // position. A closure's loops are its own.
+// An async method's object as its future holds it.
+function receiverField(self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
+  return { name: "this", type: laid(self.owned ? self.type : refType(self.type, self.mutable)) };
+}
+
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const fields: Field[] = [{ name: "state", type: "i32" }];
   const locals = new Map<Local, number>();
@@ -150,8 +155,10 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     locals.set(l, fields.length);
     fields.push({ name: `${l.name}.${l.id}`, type: l.type });
   };
-  // An async arrow's frame holds what it captured, first.
+  // An async arrow's frame holds what it captured, first, and an async method's its object.
   if (instance.body.closure) fields.push({ name: "env", type: "void" });
+  const self = instance.body.self;
+  if (self && !self.constructor) fields.push(receiverField(self, (t) => (instance.concrete ? lower(t) : t)));
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   [...new Set(instance.locals.values())].sort((a, b) => a.id - b.id).forEach(add);
   const visit = (node: unknown) => {
@@ -743,6 +750,9 @@ export function check(written: Stmt[], library = false): Checked {
       future.gives = laid(gives);
       future.throws = errorType && laid(errorType);
       future.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+      // An async method's future holds its object: borrowed, or owned under `Own<this>`.
+      const self = f.self && !f.self.constructor ? receiverField(f.self, laid) : undefined;
+      if (self) future.params.unshift(self);
     }
     const type = generator ?? future ?? gives;
     if (f.closure && holdsRef(type)) throw unsupported("closures returning references", f.returnType ?? f.closure.value ?? f);

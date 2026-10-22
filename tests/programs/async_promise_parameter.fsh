@@ -10,4 +10,4 @@ async function main() {
   console.log(r);
   const unused = twice(word("c" + 1), word("d" + 1));
 }
-// error: awaits of 'Promise<T>' parameters are not supported yet
+// expect: a1!b1!
