@@ -67,6 +67,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The pass each enclosing loop is on.
   const passes = new Map<Stmt, number>();
   const last = lastUses(body, instance);
+  const byId = new Map([...locals.values()].map((l) => [l.id, l]));
   // What `this` keeps stays held to the end of the body, and after it.
   const kept: Local = { name: "this", type: "void", mutable: false, param: false, id: -1 };
   last.set(kept, Infinity);
@@ -191,6 +192,18 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // The loop reads its array once and keeps it lent, shared, until it ends; its variable,
       // when it is a reference, borrows the array as well.
       case "forOf": {
+        // Like JavaScript closing a generator when its loop ends, the loop takes one it owns.
+        const taken = types.get(s.right);
+        if (typeof taken !== "string" && taken?.kind === "generator") {
+          expr(s.right, (p) => `'${p}' moved here: the 'for...of' loop takes the generator over, as JavaScript closes it when the loop ends; call 'next()' instead to keep it`);
+          // Each pass gives the variable a new value, which it owns.
+          const each = locals.get(s.left as Stmt)!;
+          loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => {
+            revive(String(each.id));
+            statements(s.body);
+          });
+          return;
+        }
         expr(s.right);
         const place = key(s.right);
         const each = locals.get(s.left as Stmt)!;
@@ -385,9 +398,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             return;
           }
           if (object) expr(object);
-          // An array's `push` and `pop` change it: it is lent shared while the arguments run, as
-          // a mutating method's object is, then changed, which nothing borrowing it may see.
-          const changes = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && array(object);
+          // An array's `push` and `pop`, and a generator's `next`, change it: it is lent shared
+          // while the arguments run, as a mutating method's object is, then changed, which nothing
+          // borrowing it may see.
+          const changes = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && (array(object) || generator(object));
           if (object && place !== undefined && (self || changes)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           if (object && changes) {
@@ -531,6 +545,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // A yielded value is handed to whoever called `next()`.
       case "yield":
         if (e.value) expr(e.value, (p) => `'${p}' moved here: yielding it hands it on; use '${p}.clone()' to keep a copy`);
+        stillBorrowed(e);
         return;
       // A pipe over a value hands it to the topic, new each time the pipe runs.
       // Like a `let`, the topic holds what its value borrows, until the pipe ends.
@@ -1073,6 +1088,28 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // Whether an expression's value is an array, or a reference to one.
+  // A generator's variables live in the generator itself, which may move between `next()`
+  // calls, so no reference into one may still be in use at a `yield`. What a reference
+  // parameter points to, and an array's elements, live elsewhere.
+  function stillBorrowed(e: Expr) {
+    if (!state) return;
+    for (const loan of state.loans.values()) {
+      if (loan.loop || loan.guard || !live(loan, e.start)) continue;
+      const [root, ...path] = loan.place.split(".");
+      const local = byId.get(Number(root));
+      if (!local || isRef(local.type) || path.includes("[]")) continue;
+      throw new CompileError(`a reference into '${pathOf(loan.place)}' is still in use at this 'yield'; a generator's variables move with it between 'next()' calls, so let the reference end before the yield`, e.start, e.end, {
+        message: `'${pathOf(loan.place)}' is borrowed here`, start: loan.start, end: loan.end,
+      });
+    }
+  }
+
+  function generator(e: Expr): boolean {
+    const t = types.get(e);
+    const held = t !== undefined && isRef(t) ? t.to : t;
+    return held !== undefined && typeof held !== "string" && held.kind === "generator";
+  }
+
   function array(e: Expr): boolean {
     const t = types.get(e);
     const held = t !== undefined && isRef(t) ? t.to : t;
