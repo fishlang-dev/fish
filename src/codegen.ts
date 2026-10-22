@@ -3,6 +3,7 @@ import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { locate, sourceOf } from "./diag.ts";
+import { comptimeValue, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
@@ -3152,6 +3153,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "bool":
         return String(e.value);
+      case "comptime":
+        return bake(comptimeValue(current, e), types.get(e)!);
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
         return "zeroinitializer";
@@ -3559,6 +3562,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${result} = call ptr @fsh_rt_str_from_${from}(${from === "f32" ? "float" : from === "f64" ? "double" : "i64"} ${wide})`);
     pending.push({ v: result, type: "string" });
     return result;
+  }
+
+  // A value computed while compiling, as a constant of its type.
+  function bake(v: Value, type: Type): string {
+    if (typeof v === "string") return text(v);
+    if (typeof v === "boolean") return String(v);
+    if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
+    if (typeof v === "bigint") return String(v);
+    throw new Error(`internal error: no baked form for a comptime value of type ${keyOf(type)}`);
   }
 
   // A literal's string block: a count below zero, so it is never freed, its length, a pointer

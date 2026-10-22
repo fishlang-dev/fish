@@ -562,6 +562,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "as":
       case "unsafe":
         return expr(e.expr, consume, discarded);
+      // Comptime code runs while compiling, so it moves and borrows nothing at run time.
+      case "comptime":
+        return;
       // A yielded value is handed to whoever called `next()`.
       case "yield":
         if (e.value) expr(e.value, (p) => `'${p}' moved here: yielding it hands it on; use '${p}.clone()' to keep a copy`);
@@ -1324,6 +1327,8 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return;
       case "throw":
         return expr(e.value);
+      case "comptime":
+        return;
       case "nonNull":
       case "as":
       case "unsafe":

@@ -207,7 +207,7 @@ export function expressions(ctx: Context) {
   // A float literal only becomes a float type.
   function adapt(e: Expr, to: Type): boolean {
     if (!isNumeric(to)) return false;
-    if (e.kind === "unsafe") {
+    if (e.kind === "unsafe" || e.kind === "comptime") {
       if (!adapt(e.expr, to)) return false;
       types.set(e, to);
       return true;
@@ -226,7 +226,7 @@ export function expressions(ctx: Context) {
   }
 
   function literalOnly(e: Expr, floats: boolean): boolean {
-    if (e.kind === "unsafe") return literalOnly(e.expr, floats);
+    if (e.kind === "unsafe" || e.kind === "comptime") return literalOnly(e.expr, floats);
     if (e.kind === "int" || (e.kind === "float" && floats)) return true;
     if (e.kind === "unary") return (e.op === "-" || (e.op === "~" && !floats)) && literalOnly(e.operand, floats);
     return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && (!floats || !BITWISE_OPERATORS.has(e.op)) && literalOnly(e.left, floats) && literalOnly(e.right, floats);
@@ -1768,6 +1768,9 @@ export function expressions(ctx: Context) {
         return pipe(e, true);
       case "unsafe":
         return unsafely(() => value(e.expr));
+      // Checked as the code it is; it runs while compiling, and codegen bakes its value.
+      case "comptime":
+        return value(e.expr);
       case "yield":
         if (ctx.generator) throw unsupported("'yield' inside expressions", e);
         throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);

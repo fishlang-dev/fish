@@ -120,7 +120,6 @@ const EXPRESSIONS: [string, string][] = [
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
   ["<T>(x: T) => x", "generic arrow functions"],
-  ["comptime 1", "comptime expressions"],
   ["class {}", "class expressions"],
   ["true[0]", "indexed access expressions"],
   ["f<i64>", "instantiation expressions"],
