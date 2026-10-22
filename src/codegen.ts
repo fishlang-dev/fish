@@ -533,12 +533,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return result;
     }
     const future = types.get(e) as FutureType;
-    const given = callee.name === "send" ? owned(e.args[0]!) : undefined;
+    // What a send, read or write carries: the value going in, the most bytes, or the bytes.
+    const carried = ["send", "read", "write"].includes(callee.name) ? future.frame[2]!.type : undefined;
+    const given = carried === undefined ? undefined : carried === "i64" ? value(e.args[0]!) : owned(e.args[0]!);
     let frame = temp();
     emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${copied(handle, t)}, 1`);
     if (given !== undefined) {
       const next = temp();
-      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(t.of)} ${given}, 2`);
+      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(carried!)} ${given}, 2`);
       frame = next;
     }
     return signalled(e, future, frame);
@@ -2083,6 +2085,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "utf8Encode" && !calls.has(e)) {
+        const [bytes, made] = [alloca(ARRAY), temp()];
+        emit(`call void @fsh_rt_utf8_encode(ptr ${bytes}, ptr ${value(e.args[0]!)})`);
+        emit(`${made} = load ${ARRAY}, ptr ${bytes}`);
+        return made;
+      }
+      if (e.callee.kind === "ident" && e.callee.name === "utf8Decode" && !calls.has(e)) {
+        const made = temp();
+        emit(`${made} = call ptr @fsh_rt_utf8_decode(ptr ${value(e.args[0]!)})`);
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
         const made = temp();
         unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
@@ -2651,16 +2664,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       // A socket's poll gives its result through `made`, and on failure the system's reason
       // through `reason`, for the IoError its awaiter is thrown.
-      const socket = ["bind", "connect", "accept"].includes(leaf.method);
+      const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
       if (socket) {
-        const [made, field] = [alloca("ptr"), (i: number) => {
+        const [made, field] = [alloca(leaf.method === "read" ? ARRAY : "ptr"), (i: number) => {
           const [ptr, v] = [temp(), temp()];
           emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
           return [ptr, v] as const;
         }];
         reason = alloca("ptr");
         if (leaf.method === "accept") emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
-        else {
+        else if (leaf.method === "read") {
+          const [maxAt, max] = field(2);
+          emit(`${max} = load i64, ptr ${maxAt}`);
+          emit(`${outcome} = call i32 @fsh_rt_tcp_read(ptr ${handle}, i64 ${max}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        } else if (leaf.method === "write") {
+          const [bytesAt] = field(2);
+          const [writtenAt] = field(3);
+          emit(`${outcome} = call i32 @fsh_rt_tcp_write(ptr ${handle}, ptr ${bytesAt}, ptr ${writtenAt}, ptr %cx, ptr ${reason})`);
+        } else {
           const first = leaf.method === "bind" ? 1 : 2;
           const [hostAt, host] = field(first);
           const [portAt, port] = field(first + 1);
@@ -2669,8 +2690,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
           else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
         }
-        given = temp();
-        emit(`${given} = load ptr, ptr ${made}`);
+        if (leaf.method !== "write") {
+          given = temp();
+          emit(`${given} = load ${leaf.method === "read" ? ARRAY : "ptr"}, ptr ${made}`);
+        }
       } else if (leaf.method === "sleep") {
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {

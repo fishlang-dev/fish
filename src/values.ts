@@ -792,6 +792,11 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, t, want, `'fromCString' takes a 'Ptr<u8>', not '${show(t)}'`);
       return { type: "string", what: "'fromCString'" };
     }
+    // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
+    if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
+      value(e.args[0]!);
+      return { type: callee.name === "utf8Encode" ? arrayType("u8") : "string", what: `'${callee.name}'` };
+    }
     // `nullPtr<T>()`: a pointer to nothing, which may be used as either kind.
     if (callee.kind === "ident" && callee.name === "nullPtr" && !byName.has("nullPtr")) {
       needsUnsafe("'nullPtr'", callee);
@@ -1025,7 +1030,7 @@ export function expressions(ctx: Context) {
     // A wait may also take an AbortSignal, as its last argument.
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive";
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
-      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : {};
+      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
         : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
@@ -1044,6 +1049,14 @@ export function expressions(ctx: Context) {
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
     if (callee.name === "accept") return { type: leafFuture("accept", "void", ioError()), what: "'accept'" };
+    // `read(max)` gives at most max bytes, and `write(bytes)` takes its bytes to send them all.
+    if (callee.name === "read" || callee.name === "write") {
+      const want = callee.name === "read" ? "i64" : arrayType("u8");
+      expect(e.args[0]!, want);
+      const given = value(e.args[0]!);
+      coerce(e.args[0]!, given, want, callee.name === "read" ? `'read' takes the most bytes to read as an 'i64', not '${show(given)}'` : `'write' takes the bytes to send as a 'u8[]', like 'new TextEncoder().encode(text)', not '${show(given)}'`);
+      return { type: leafFuture(callee.name, "void", ioError()), what: `'${callee.name}'` };
+    }
     if (callee.name === "abort") return { type: "void", what: "'abort'" };
     if (callee.name === "throwIfAborted") {
       raise(e, abortError(), "'throwIfAborted'");

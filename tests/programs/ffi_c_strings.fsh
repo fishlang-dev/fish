@@ -30,7 +30,7 @@ function main() {
 // expect: , here
 // expect: from fish ✓
 // expect: true
-// expect: hi�!��
+// expect: hi�!�
 // expect: 3
 // expect: 3
 // expect: 3

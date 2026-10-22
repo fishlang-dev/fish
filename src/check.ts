@@ -200,6 +200,8 @@ const RUNTIME_NAMES = new Set([
 const PRELUDE = `
 class AbortError { message: string = "This operation was aborted"; }
 class IoError { message: string; constructor(message: string) { this.message = message; } }
+class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
+class TextDecoder { decode(input: Ref<u8[]>): string { return utf8Decode(input); } }
 `;
 
 export function check(written: Stmt[], library = false): Checked {

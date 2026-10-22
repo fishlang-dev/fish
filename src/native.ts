@@ -687,24 +687,19 @@ char *fsh_rt_str_cstring(fsh_str *s) {
   return c;
 }
 
-// A string of a C string's bytes up to its NUL. A byte that doesn't start a UTF-8 sequence, or
-// starts one that is cut short, overlong, a surrogate or past U+10FFFF, becomes U+FFFD.
-fsh_str *fsh_rt_str_from_cstring(const char *c) {
-  const unsigned char *p = (const unsigned char *)c;
-  size_t n = strlen(c);
+// A string of n bytes of UTF-8, decoded as the web's TextDecoder does: each byte that can't
+// start a sequence, and each longest start of one that is cut short or broken, becomes U+FFFD.
+static fsh_str *fsh_from_utf8(const unsigned char *p, size_t n) {
   fsh_str *s = fsh_str_new(n * 3);
   unsigned char *at = (unsigned char *)s->own;
   for (size_t i = 0; i < n;) {
     unsigned char b = p[i];
-    int need = b < 0x80 ? 0 : (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : -1;
-    uint32_t code = need == 1 ? b & 0x1F : need == 2 ? b & 0x0F : need == 3 ? b & 0x07 : b;
-    int ok = need >= 0 && i + need < n;
-    for (int k = 1; ok && k <= need; k++) {
-      if ((p[i + k] & 0xC0) != 0x80) ok = 0;
-      else code = code << 6 | (p[i + k] & 0x3F);
-    }
-    if (ok && ((need == 1 && code < 0x80) || (need == 2 && (code < 0x800 || (code >= 0xD800 && code <= 0xDFFF))) || (need == 3 && (code < 0x10000 || code > 0x10FFFF)))) ok = 0;
-    if (ok) {
+    int need = b < 0x80 ? 0 : b >= 0xC2 && b <= 0xDF ? 1 : b >= 0xE0 && b <= 0xEF ? 2 : b >= 0xF0 && b <= 0xF4 ? 3 : -1;
+    // The second byte's range rules out overlong forms, surrogates and what is past U+10FFFF.
+    unsigned char low = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, high = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+    int k = 1;
+    while (need > 0 && k <= need && i + k < n && p[i + k] >= (k == 1 ? low : 0x80) && p[i + k] <= (k == 1 ? high : 0xBF)) k++;
+    if (need >= 0 && k > need) {
       memcpy(at, p + i, need + 1);
       at += need + 1;
       i += need + 1;
@@ -712,11 +707,39 @@ fsh_str *fsh_rt_str_from_cstring(const char *c) {
       *at++ = 0xEF;
       *at++ = 0xBF;
       *at++ = 0xBD;
-      i++;
+      i += need < 0 ? 1 : k;
     }
   }
   s->length = at - (unsigned char *)s->own;
   return s;
+}
+
+// A string of a C string's bytes up to its NUL.
+fsh_str *fsh_rt_str_from_cstring(const char *c) {
+  return fsh_from_utf8((const unsigned char *)c, strlen(c));
+}
+
+// 'new TextDecoder().decode(bytes)'.
+fsh_str *fsh_rt_utf8_decode(fsh_array *bytes) {
+  return fsh_from_utf8((const unsigned char *)bytes->data, bytes->length);
+}
+
+// 'new TextEncoder().encode(s)': its UTF-8 bytes, a lone surrogate becoming U+FFFD, whose
+// encoding is as long.
+void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
+  out->data = fsh_rt_array_alloc(s->length);
+  out->length = out->capacity = s->length;
+  if (!s->length) return;
+  memcpy(out->data, s->bytes, s->length);
+  unsigned char *p = (unsigned char *)out->data;
+  for (int64_t i = 0; i + 2 < s->length; i++) {
+    if (p[i] == 0xED && p[i + 1] >= 0xA0) {
+      p[i] = 0xEF;
+      p[i + 1] = 0xBF;
+      p[i + 2] = 0xBD;
+      i += 2;
+    }
+  }
 }
 
 fsh_str *fsh_rt_str_from_i64(int64_t v) {
@@ -1638,19 +1661,13 @@ static void fsh_io_arm(int fd, int32_t writing) {
 #endif
 }
 
-// A task waits for a socket to be ready; one already waiting for that keeps its place.
+// A task waits for a socket to be ready. Several may wait on one socket, as tasks sharing a
+// cloned listener do, and each is woken.
 static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
   pthread_mutex_lock(&fsh_io_lock);
-  fsh_task *replaced = NULL;
   int64_t at = 0;
-  while (at < fsh_interest_count && (fsh_interests[at].fd != fd || fsh_interests[at].writing != writing)) at++;
-  if (at < fsh_interest_count) {
-    if (fsh_interests[at].task != task) {
-      replaced = fsh_interests[at].task;
-      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
-      fsh_interests[at].task = task;
-    }
-  } else {
+  while (at < fsh_interest_count && (fsh_interests[at].fd != fd || fsh_interests[at].writing != writing || fsh_interests[at].task != task)) at++;
+  if (at == fsh_interest_count) {
     if (fsh_interest_count == fsh_interest_capacity) {
       fsh_interest_capacity = fsh_interest_capacity ? fsh_interest_capacity * 2 : 16;
       fsh_interests = realloc(fsh_interests, fsh_interest_capacity * sizeof(fsh_interest));
@@ -1660,36 +1677,23 @@ static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
   }
   fsh_io_arm(fd, writing);
   pthread_mutex_unlock(&fsh_io_lock);
-  if (replaced) fsh_task_release(replaced);
 }
 
-// A socket is closing: those waiting on it are woken, to find it gone.
-static void fsh_io_forget(int fd) {
+// Takes out the interests in a socket that are ready, or all of them when it is closing, and
+// wakes their tasks outside the lock. On epoll, what is still wanted of it is armed again.
+static void fsh_io_take(int fd, int32_t readable, int32_t writable, int32_t closing) {
   pthread_mutex_lock(&fsh_io_lock);
-  fsh_task *woken[2];
-  int count = 0;
-  for (int64_t i = 0; i < fsh_interest_count;) {
-    if (fsh_interests[i].fd != fd) { i++; continue; }
-    if (count < 2) woken[count++] = fsh_interests[i].task;
-    fsh_interests[i] = fsh_interests[--fsh_interest_count];
-  }
-  pthread_mutex_unlock(&fsh_io_lock);
-  for (int i = 0; i < count; i++) fsh_wake_waiter(woken[i]);
-}
-
-// Wakes the tasks waiting on what the kernel says is ready, and re-arms what is still wanted.
-static void fsh_io_ready(int fd, int32_t readable, int32_t writable) {
-  pthread_mutex_lock(&fsh_io_lock);
-  fsh_task *woken[2];
-  int count = 0;
+  fsh_task **woken = NULL;
+  int64_t count = 0;
   for (int64_t i = 0; i < fsh_interest_count;) {
     fsh_interest *in = &fsh_interests[i];
-    if (in->fd != fd || !(in->writing ? writable : readable)) { i++; continue; }
-    if (count < 2) woken[count++] = in->task;
+    if (in->fd != fd || !(closing || (in->writing ? writable : readable))) { i++; continue; }
+    woken = realloc(woken, (count + 1) * sizeof *woken);
+    woken[count++] = in->task;
     fsh_interests[i] = fsh_interests[--fsh_interest_count];
   }
 #ifndef __APPLE__
-  for (int64_t i = 0; i < fsh_interest_count; i++) {
+  for (int64_t i = 0; !closing && i < fsh_interest_count; i++) {
     if (fsh_interests[i].fd == fd) {
       fsh_io_arm(fd, fsh_interests[i].writing);
       break;
@@ -1697,8 +1701,15 @@ static void fsh_io_ready(int fd, int32_t readable, int32_t writable) {
   }
 #endif
   pthread_mutex_unlock(&fsh_io_lock);
-  for (int i = 0; i < count; i++) fsh_wake_waiter(woken[i]);
+  for (int64_t i = 0; i < count; i++) fsh_wake_waiter(woken[i]);
+  free(woken);
 }
+
+// A socket is closing: those waiting on it are woken, to find it gone.
+static void fsh_io_forget(int fd) { fsh_io_take(fd, 0, 0, 1); }
+
+// Wakes the tasks waiting on what the kernel says is ready.
+static void fsh_io_ready(int fd, int32_t readable, int32_t writable) { fsh_io_take(fd, readable, writable, 0); }
 
 static void *fsh_io_loop(void *arg) {
   for (;;) {
@@ -1844,6 +1855,54 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
     return 0;
   }
   return fsh_io_failed(message, "can't accept a connection");
+}
+
+// Polls 'read(max)': up to max bytes, none at the end of the stream, a wait, or 5 with the reason.
+int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message) {
+  if (max < 1) {
+    char text[96];
+    snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
+    *message = fsh_rt_str_from_cstring(text);
+    return 5;
+  }
+  char *data = fsh_rt_alloc(max);
+  ssize_t n = recv(s->fd, data, (size_t)max, 0);
+  if (n > 0) {
+    *out = (fsh_array){data, n, max};
+    return 1;
+  }
+  fsh_rt_free(data);
+  if (n == 0) {
+    *out = (fsh_array){NULL, 0, 0};
+    return 1;
+  }
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    fsh_io_wait(s->fd, 0, task);
+    return 0;
+  }
+  return fsh_io_failed(message, "can't read");
+}
+
+// Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
+int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
+  while (*written < bytes->length) {
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
+#else
+    ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), 0);
+#endif
+    if (n >= 0) {
+      *written += n;
+      continue;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fsh_io_wait(s->fd, 1, task);
+      return 0;
+    }
+    return fsh_io_failed(message, "can't write");
+  }
+  return 1;
 }
 
 // Polls 'TcpStream.connect(host, port)': the frame keeps the socket while it connects; once
