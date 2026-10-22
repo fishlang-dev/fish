@@ -1028,7 +1028,8 @@ export function expressions(ctx: Context) {
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
     // A wait may also take an AbortSignal, as its last argument.
-    const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive";
+    const sockets = ["accept", "read", "write"].includes(callee.name);
+    const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
       : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
@@ -1048,14 +1049,14 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
-    if (callee.name === "accept") return { type: leafFuture("accept", "void", ioError()), what: "'accept'" };
+    if (callee.name === "accept") return { type: leafFuture("accept", "void", socketError(signalled), signalled), what: "'accept'" };
     // `read(max)` gives at most max bytes, and `write(bytes)` takes its bytes to send them all.
     if (callee.name === "read" || callee.name === "write") {
       const want = callee.name === "read" ? "i64" : arrayType("u8");
       expect(e.args[0]!, want);
       const given = value(e.args[0]!);
       coerce(e.args[0]!, given, want, callee.name === "read" ? `'read' takes the most bytes to read as an 'i64', not '${show(given)}'` : `'write' takes the bytes to send as a 'u8[]', like 'new TextEncoder().encode(text)', not '${show(given)}'`);
-      return { type: leafFuture(callee.name, "void", ioError()), what: `'${callee.name}'` };
+      return { type: leafFuture(callee.name, "void", socketError(signalled), signalled), what: `'${callee.name}'` };
     }
     if (callee.name === "abort") return { type: "void", what: "'abort'" };
     if (callee.name === "throwIfAborted") {
@@ -1083,7 +1084,10 @@ export function expressions(ctx: Context) {
     const method = which === "TcpListener" ? "bind" : "connect";
     if (callee.name !== method) throw new CompileError(`'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
     if (!ctx.runtime) throw new CompileError(`'${which}.${method}' needs the async runtime's reactor, which runs when 'main' is an async function`, e.start, e.end);
-    if (e.args.length !== 2) throw new CompileError(`'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'`, e.start, e.end);
+    // Connecting waits, so it may take an AbortSignal; binding doesn't.
+    const signalled = method === "connect" && e.args.length === 3;
+    if (e.args.length !== 2 && !signalled) throw new CompileError(`'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
+    if (signalled) signalArgument(e.args[2]!, `'${which}.${method}'`);
     const [host, port] = e.args as [Expr, Expr];
     expect(host, "string");
     const h = value(host);
@@ -1091,12 +1095,17 @@ export function expressions(ctx: Context) {
     expect(port, "i64");
     const p = value(port);
     coerce(port, p, "i64", `the port is an 'i64', not '${show(p)}'`);
-    return { type: leafFuture(method, "void", ioError()), what: `'${which}.${method}'` };
+    return { type: leafFuture(method, "void", socketError(signalled), signalled), what: `'${which}.${method}'` };
   }
 
   // The std `IoError` class, which failed socket calls throw.
   function ioError(): Type {
     return classes.get("IoError")!.type;
+  }
+
+  // What a socket's wait throws: an IoError, or an AbortError too when it was given a signal.
+  function socketError(signalled: boolean): Type {
+    return signalled ? unionType([ioError(), abortError()]) : ioError();
   }
 
   // A wait's AbortSignal, lent to it: the wait keeps a count on it of its own.

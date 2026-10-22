@@ -2077,7 +2077,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const [host, port, made, frame] = [owned(e.args[0]!), value(e.args[1]!), temp(), temp()];
         emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
         emit(`${frame} = insertvalue ${llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
-        return frame;
+        return signalled(e, future, frame);
       }
       if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !types.has(e.callee.object)) {
         const made = temp();
@@ -2641,6 +2641,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const [slot, handle, outcome] = [temp(), temp(), temp()];
       emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
       if (leaf.method !== "sleep") emit(`${handle} = load ptr, ptr ${slot}`);
+      // A socket's poll gives its result through `made`, and on failure the system's reason
+      // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
+      const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
+      if (socket) {
+        reason = alloca("ptr");
+        emit(`store ptr null, ptr ${reason}`);
+      }
       // One given a signal joins its waiters first, and stops if it has aborted, leaving the
       // waiters it joined; once done any other way, it leaves the signal's.
       let signal: [string, string] | undefined;
@@ -2657,21 +2664,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx)`);
         if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx)`);
         if (leaf.method === "sleep") emit("call void @fsh_rt_sleep_leave(ptr %cx)");
+        if (socket) emit(`call void @fsh_rt_socket_leave(ptr ${handle}, ptr %cx)`);
         emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
         emit(`br label %${failed}`);
         startBlock(go);
         signal = [sig, flag];
       }
-      // A socket's poll gives its result through `made`, and on failure the system's reason
-      // through `reason`, for the IoError its awaiter is thrown.
-      const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
       if (socket) {
         const [made, field] = [alloca(leaf.method === "read" ? ARRAY : "ptr"), (i: number) => {
           const [ptr, v] = [temp(), temp()];
           emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
           return [ptr, v] as const;
         }];
-        reason = alloca("ptr");
         if (leaf.method === "accept") emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
         else if (leaf.method === "read") {
           const [maxAt, max] = field(2);
@@ -2720,11 +2724,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${tag} = trunc i32 ${outcome} to i8`);
       if (!signal) emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} i8 5, label %${failed} ]`);
       else {
-        const over = label();
-        emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} ]`);
+        const [over, broke] = [label(), label()];
+        emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} i8 5, label %${broke} ]`);
         startBlock(over);
         emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
         emit(`br label %${ready}`);
+        startBlock(broke);
+        emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
+        emit(`br label %${failed}`);
       }
     } else if (inner === YIELD_NOW) {
       // Pending the first time it is polled, done the next.
@@ -2778,10 +2785,31 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // An aborted wait throws a new AbortError; any other future gives its own error.
       // A socket's failure is an IoError with the system's reason; any other leaf's, an abort.
       let error = "";
-      if (leaf && reason) {
+      if (leaf && reason && !leaf.signal) {
         const [text, made] = [temp(), temp()];
         emit(`${text} = load ptr, ptr ${reason}`);
         emit(`${made} = insertvalue ${llvm(shape.throws)} zeroinitializer, ptr ${text}, 0`);
+        error = made;
+      } else if (leaf && reason) {
+        // Given a signal, it throws either: an AbortError when it was aborted, leaving no reason.
+        const members = (shape.throws as UnionType).members as ClassType[];
+        const [io, aborted] = [members.find((m) => m.name === "IoError")!, members.find((m) => m.name === "AbortError")!];
+        const [text, none, ioAt, abortAt, join, made] = [temp(), temp(), label(), label(), label(), temp()];
+        emit(`${text} = load ptr, ptr ${reason}`);
+        emit(`${none} = icmp eq ptr ${text}, null`);
+        emit(`br i1 ${none}, label %${abortAt}, label %${ioAt}`);
+        startBlock(ioAt);
+        const failure = temp();
+        emit(`${failure} = insertvalue ${llvm(io)} zeroinitializer, ptr ${text}, 0`);
+        const asIo = convert(failure, io, shape.throws);
+        const fromIo = block;
+        emit(`br label %${join}`);
+        startBlock(abortAt);
+        const asAbort = convert(abortError(aborted), aborted, shape.throws);
+        const fromAbort = block;
+        emit(`br label %${join}`);
+        startBlock(join);
+        emit(`${made} = phi ${llvm(shape.throws)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
       } else if (leaf) error = abortError(shape.throws);
       else {

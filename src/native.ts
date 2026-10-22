@@ -1857,6 +1857,24 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   return fsh_io_failed(message, "can't accept a connection");
 }
 
+// A task's wait on a socket was aborted: it is no longer woken when the socket is ready. A
+// connect aborted before its first poll has no socket yet.
+void fsh_rt_socket_leave(fsh_socket *s, fsh_task *task) {
+  if (!s) return;
+  pthread_mutex_lock(&fsh_io_lock);
+  fsh_task **left = NULL;
+  int64_t count = 0;
+  for (int64_t i = 0; i < fsh_interest_count;) {
+    if (fsh_interests[i].fd != s->fd || fsh_interests[i].task != task) { i++; continue; }
+    left = realloc(left, (count + 1) * sizeof *left);
+    left[count++] = task;
+    fsh_interests[i] = fsh_interests[--fsh_interest_count];
+  }
+  pthread_mutex_unlock(&fsh_io_lock);
+  for (int64_t i = 0; i < count; i++) fsh_task_release(left[i]);
+  free(left);
+}
+
 // Polls 'read(max)': up to max bytes, none at the end of the stream, a wait, or 5 with the reason.
 int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message) {
   if (max < 1) {

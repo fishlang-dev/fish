@@ -75,6 +75,7 @@ export const RUNTIME = [
   "declare i64 @fsh_rt_tcp_port(ptr)",
   "declare i32 @fsh_rt_tcp_accept(ptr, ptr, ptr, ptr)",
   "declare i32 @fsh_rt_tcp_read(ptr, i64, ptr, ptr, ptr)",
+  "declare void @fsh_rt_socket_leave(ptr, ptr)",
   "declare void @fsh_rt_utf8_encode(ptr, ptr)",
   "declare ptr @fsh_rt_utf8_decode(ptr)",
   "declare i32 @fsh_rt_tcp_write(ptr, ptr, ptr, ptr, ptr)",
