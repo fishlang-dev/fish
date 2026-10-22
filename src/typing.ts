@@ -183,10 +183,13 @@ export function sameCallable(a: Type, b: Type): boolean {
   return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
 }
 
-// A function type where a value is stored becomes its callable, inside arrays too.
+// A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside
+// arrays too.
 export function stored(t: Type): Type {
   if (typeof t === "string") return t;
   if (t.kind === "function") return callableType(t);
+  // A `Promise<T>` stored holds a future, boxed.
+  if (t.kind === "interface" && promised.has(t)) return dynType(t);
   if (t.kind === "array") return arrayType(stored(t.element));
   return t;
 }
@@ -750,7 +753,7 @@ export function show(t: Type): string {
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which;
-  if (t.kind === "dyn") return callableOf.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
+  if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";

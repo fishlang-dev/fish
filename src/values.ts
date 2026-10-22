@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1137,6 +1137,7 @@ export function expressions(ctx: Context) {
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     const t = value(e.operand);
     if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
+    if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of)!;
     if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
     if (t.throws) raise(e, t.throws, "this Promise");
     return t.gives;
@@ -2300,6 +2301,7 @@ export function expressions(ctx: Context) {
   // changes only under locks, since a Dyn hides what it holds from every later check and may
   // cross to another thread.
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
+    if (promiseElement(to.of) !== undefined) return boxingFuture(e, lower(type), to, message);
     if (callableOf.has(to.of)) storing(e, lower(type), to, message);
     else if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = lower(type);
@@ -2312,6 +2314,22 @@ export function expressions(ctx: Context) {
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
     if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(to)}`, dynTable(e, held, to));
+    coercions.set(e, to);
+  }
+
+  // A future stored as a `Promise<T>`: one an async function's call made, giving T, throwing
+  // nothing, and owning what it holds, since it may be awaited on any thread.
+  function boxingFuture(e: Expr, type: Type, to: DynType, message: string) {
+    if (typeof type !== "string" && type.kind === "param") return coercions.set(e, to), undefined;
+    if (typeof type === "string" || type.kind !== "future" || type === YIELD_NOW || type === SLEEP || leafOf.has(type)) {
+      const what = typeof type !== "string" && type.kind === "future" ? "; store the async function's call instead" : "";
+      throw new CompileError(`${message}${what}`, e.start, e.end);
+    }
+    if (lower(type.gives) !== lower(promiseElement(to.of)!)) throw new CompileError(message, e.start, e.end);
+    if (type.throws) throw new CompileError(`a stored '${show(to)}' can't throw yet, and this one can throw '${show(type.throws)}'; await it where it is made, or catch inside the async function`, e.start, e.end);
+    const blocker = unsent(type);
+    if (blocker) throw new CompileError(`a stored '${show(to)}' may be awaited on any thread, so its future can't hold a '${show(blocker)}'`, e.start, e.end);
+    dynMembers.set(`${keyOf(type)} ${keyOf(to)}`, { methods: [], fields: [], clone: undefined });
     coercions.set(e, to);
   }
 

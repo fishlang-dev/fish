@@ -25,12 +25,13 @@ export function typeName(name: string, at: Span, ...namespaces: Map<string, unkn
 
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
-export function storable(type: Type, at: Span): Type {
+export function storable(written: Type, at: Span): Type {
+  const type = stored(written);
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions stored in fields", at);
-  return stored(type);
+  return type;
 }
 
 // The class a name and type arguments refer to; a generic one is instantiated on first use.
@@ -124,6 +125,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (holdsRef(element)) throw unsupported("arrays of references", at);
     if (typeof element !== "string" && element.kind === "closure") throw unsupported("arrays of functions", at);
     if (typeof element !== "string" && element.kind === "function") return arrayType(stored(element));
+    if (typeof element !== "string" && element.kind === "interface" && stored(element) !== element) return arrayType(stored(element));
     // An interface describes values of many types, each laid out its own way, so an array of
     // them has no one element size.
     if (typeof element !== "string" && element.kind === "interface") {

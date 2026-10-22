@@ -7,7 +7,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, field, fieldPath, handleType, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -612,6 +612,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A slot per interface member: each method, then each field. A method giving an interface
   // type can't be called through a Dyn, so its slot is null.
   function dynSlots(type: Type, to: DynType, { methods, fields }: DynTable): string[] {
+    // A boxed future's one slot is its poll, which takes its frame as the block.
+    if (promiseElement(to.of) !== undefined) return [symbol(futureOf.get(type as FutureType)!)];
     const n = vtables.size;
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface";
     const made = to.of.methods.map((m, i) => (abstract(m.returns) ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
@@ -2511,7 +2513,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // each later poll of this one until it is done. While it is pending, so is this future. Its
   // value comes out, or its error is raised; either way it is finished, and dropped.
   function awaitFuture(e: Extract<Expr, { kind: "unary" }>): string | undefined {
-    const inner = valueType(e.operand) as FutureType | HandleType;
+    const inner = valueType(e.operand) as FutureType | HandleType | DynType;
+    // A boxed future polls as a future giving what its Promise does, and throws nothing.
+    const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
     const g = resuming!;
     const at = `%await.${current.frame!.awaits.get(e)!}`;
     emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
@@ -2572,7 +2576,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const [got, read, option] = [temp(), temp(), temp()];
         emit(`${got} = icmp eq i32 ${outcome}, 1`);
         emit(`${read} = load ${llvm(leaf.of)}, ptr ${buffer}`);
-        emit(`${option} = select i1 ${got}, ${llvm(inner.gives)} ${convert(read, leaf.of, inner.gives)}, ${llvm(inner.gives)} ${convert("zeroinitializer", "null", inner.gives)}`);
+        emit(`${option} = select i1 ${got}, ${llvm(shape.gives)} ${convert(read, leaf.of, shape.gives)}, ${llvm(shape.gives)} ${convert("zeroinitializer", "null", shape.gives)}`);
         given = option;
       }
       emit(`${tag} = trunc i32 ${outcome} to i8`);
@@ -2598,15 +2602,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else if (inner.kind === "handle") {
       // A spawned task: the runtime copies its result out once it is done.
-      const [buffer, task, outcome] = [alloca(pollType(inner)), temp(), temp()];
+      const [buffer, task, outcome] = [alloca(pollType(shape)), temp(), temp()];
       emit(`${task} = load ptr, ptr ${at}`);
       emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer})`);
-      emit(`${result} = load ${pollType(inner)}, ptr ${buffer}`);
+      emit(`${result} = load ${pollType(shape)}, ptr ${buffer}`);
       emit(`${tag} = trunc i32 ${outcome} to i8`);
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+    } else if (inner.kind === "dyn") {
+      // Through its vtable: the slot after drop, copy and clone is the future's own poll.
+      const [dyn, data, table, slot, fn] = [temp(), temp(), temp(), temp(), temp()];
+      emit(`${dyn} = load ${DYN}, ptr ${at}`);
+      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      emit(`${slot} = getelementptr ptr, ptr ${table}, i64 3`);
+      emit(`${fn} = load ptr, ptr ${slot}`);
+      unwinding(`call ${pollType(shape)} ${fn}(ptr ${data}, ptr %cx)`, result);
+      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else {
-      unwinding(`call ${pollType(inner)} ${symbol(futureOf.get(inner)!)}(ptr ${at}, ptr %cx)`, result);
-      emit(`${tag} = extractvalue ${pollType(inner)} ${result}, 0`);
+      unwinding(`call ${pollType(shape)} ${symbol(futureOf.get(inner)!)}(ptr ${at}, ptr %cx)`, result);
+      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     }
     startBlock(waiting);
@@ -2620,11 +2635,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store ${llvm(inner)} zeroinitializer, ptr ${at}`);
       dispose(old, inner);
     };
-    if (inner.throws) {
+    if (shape.throws) {
       startBlock(failed);
       // An aborted wait throws a new AbortError; any other future gives its own error.
-      const error = leaf ? abortError(inner.throws) : temp();
-      if (!leaf) emit(`${error} = extractvalue ${pollType(inner)} ${result}, 2`);
+      const error = leaf ? abortError(shape.throws) : temp();
+      if (!leaf) emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
       finish();
       raised(e, error);
     } else if (inner !== YIELD_NOW && inner !== SLEEP) {
@@ -2633,9 +2648,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     startBlock(ready);
     let v: string | undefined = given;
-    if (inner.gives !== "void" && !leaf) {
+    if (shape.gives !== "void" && !leaf) {
       v = temp();
-      emit(`${v} = extractvalue ${pollType(inner)} ${result}, 1`);
+      emit(`${v} = extractvalue ${pollType(shape)} ${result}, 1`);
     }
     finish();
     return v;

@@ -173,8 +173,10 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
   function returnTypeOf(f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
-    // A function type returned is a stored callable.
-    const t = stored(withScope(scope, () => resolveType(f.returnType!)));
+    // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
+    // as an async function's own result, which its `Promise<T>` describes.
+    const written = withScope(scope, () => resolveType(f.returnType!));
+    const t = f.async ? written : stored(written);
     if (typeof t === "string" || t.kind !== "ref") return t;
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = implicitOf(f);
