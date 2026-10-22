@@ -1,6 +1,6 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, fits, keyOf, refType, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
+import { field, fits, generatorElement, keyOf, refType, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -45,6 +45,12 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   // A type parameter has what its bound has.
   if (typeof type !== "string" && type.kind === "param") {
     return type.bound ? unsatisfied(type.bound, trait, members, at) : `type '${type.name}' has no members`;
+  }
+  // A generator is a `Generator<T>` for exactly what it yields, its `next` being its only member.
+  if (typeof type !== "string" && type.kind === "generator") {
+    const element = generatorElement(trait);
+    if (element === undefined) return `a generator has only 'next', which type '${trait.name}' doesn't describe`;
+    return type.yields === element ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
   }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;
   for (const f of trait.fields) {

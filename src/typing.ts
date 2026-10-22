@@ -153,6 +153,14 @@ export function generatorInterface(t: Type): InterfaceType {
   return found;
 }
 
+// What a generator, or a type parameter standing for one or bounded by `Generator<T>`, yields.
+export function yieldsOf(t: Type): Type | undefined {
+  if (typeof t === "string") return undefined;
+  if (t.kind === "generator") return t.yields;
+  if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete) : t.bound && generatorElement(t.bound);
+  return generatorElement(t);
+}
+
 // What a `Generator<T>` yields, when the interface is one.
 export function generatorElement(t: Type): Type | undefined {
   return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;

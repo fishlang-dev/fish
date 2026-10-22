@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { isPrint } from "./values.ts";
-import { field, holdsMut, holdsRef, isCopy, lower, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -194,7 +194,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "forOf": {
         // Like JavaScript closing a generator when its loop ends, the loop takes one it owns.
         const taken = types.get(s.right);
-        if (typeof taken !== "string" && taken?.kind === "generator") {
+        if (taken !== undefined && !isRef(taken) && yieldsOf(taken) !== undefined) {
           expr(s.right, (p) => `'${p}' moved here: the 'for...of' loop takes the generator over, as JavaScript closes it when the loop ends; call 'next()' instead to keep it`);
           // Each pass gives the variable a new value, which it owns.
           const each = locals.get(s.left as Stmt)!;
@@ -1107,7 +1107,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function generator(e: Expr): boolean {
     const t = types.get(e);
     const held = t !== undefined && isRef(t) ? t.to : t;
-    return held !== undefined && typeof held !== "string" && held.kind === "generator";
+    return held !== undefined && yieldsOf(held) !== undefined;
   }
 
   function array(e: Expr): boolean {

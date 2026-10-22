@@ -12,7 +12,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, generatorElement, generatorType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, generatorElement, generatorType, yieldsOf, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { expressions, substituted } from "./values.ts";
@@ -739,6 +739,16 @@ export function check(program: Stmt[]): Checked {
       switch (s.kind) {
         case "expr":
           whole = s.expr;
+          // `yield* g` gives each value `g` gives, as `for (const % of g) yield %;` does.
+          if (s.expr.kind === "yield" && s.expr.delegate && generator && s.expr.value) {
+            const { value, start, end } = s.expr;
+            const topic = { kind: "ident" as const, name: "%", start, end };
+            const each: Stmt = { kind: "let", keyword: "const", declarations: [{ target: topic, type: undefined, init: undefined, start, end }], start, end };
+            const body: Stmt[] = [{ kind: "expr", expr: { kind: "yield", value: { ...topic }, delegate: false, start, end }, start, end }];
+            Object.assign(s, { kind: "forOf", await: false, left: each, right: value, body });
+            delete (s as { expr?: unknown }).expr;
+            return statement(s);
+          }
           if (s.expr.kind === "yield") {
             yielding(s.expr);
             return;
@@ -818,10 +828,11 @@ export function check(program: Stmt[]): Checked {
           if (object === "string" || (typeof object !== "string" && object.kind === "literal" && typeof object.value === "string")) throw unsupported("'for...of' loops over strings", s.right);
           // A generator gives each value it yields, owned. Like JavaScript closing it when the
           // loop ends, the loop takes an owned generator over; one behind a `Mut` is lent.
-          if (typeof object !== "string" && object.kind === "generator") {
+          const yields = yieldsOf(object);
+          if (yields !== undefined) {
             if (isRef(through) && !through.mutable) throw new CompileError("a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
             scopes.push(new Map());
-            declare(d.target.name, object.yields, left.keyword === "let", false, left);
+            declare(d.target.name, yields, left.keyword === "let", false, left);
             within({ stmt: s, kind: "loop" }, () => scoped(s.body));
             scopes.pop();
             return;
