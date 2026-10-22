@@ -592,7 +592,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
       const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
-      const copy = !pinned || promiseElement(to.of) !== undefined ? copied : dynUncopyable();
+      const copy = !pinned || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
       slots = [dynDrop(type), copy, cloned];
     }
     slots.push(...dynSlots(type, to, table));
@@ -659,8 +659,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     thunk(name, "ptr", () => {
       const v = temp();
       emit(`${v} = load ${llvm(type)}, ptr %p`);
+      // Copied before its block is made, since a copy may panic part way.
+      const made = copied(v, type);
       const block = dynBlock(type);
-      emit(`store ${llvm(type)} ${copied(v, type)}, ptr ${block}`);
+      emit(`store ${llvm(type)} ${made}, ptr ${block}`);
       emit(`ret ptr ${block}`);
     });
     return name;
@@ -1673,8 +1675,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`call void @fsh_rt_handle_retain(ptr ${v})`);
       return v;
     }
+    // A copy may panic part way, on a Dyn whose value can't be copied.
     const result = temp();
-    emit(`${result} = call ${llvm(type)} ${helper("copy", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
+    unwinding(`call ${llvm(type)} ${helper("copy", type as Exclude<Type, string>)}(${llvm(type)} ${v})`, result);
     return result;
   }
 
@@ -1695,10 +1698,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (made) return made;
     const name = `@"fsh.${kind}.${glue[kind].size}"`;
     glue[kind].set(type, name);
-    const saved = { allocas, body, temps, labels, block };
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    // A copy keeps the parts it has made pending, so a panic part way drops them.
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
     const t = llvm(type);
-    const each = (v: string, part: Type) => (kind === "drop" ? (dispose(v, part), v) : copied(v, part));
+    const each = (v: string, part: Type, track = true) => {
+      if (kind === "drop") return (dispose(v, part), v);
+      const made = copied(v, part);
+      if (track) pending.push({ v: made, type: part });
+      return made;
+    };
     let result = "%v";
     if (type.kind === "array") {
       result = kind === "drop" ? dropArray(type) : copyArray(type);
@@ -1721,14 +1730,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       else {
         const made = temp();
         copy = temp();
-        emit(`${made} = call ptr ${fn}(ptr ${data})`);
+        unwinding(`call ptr ${fn}(ptr ${data})`, made);
         emit(`${copy} = insertvalue ${DYN} %v, ptr ${made}, 0`);
       }
+      const from = block;
       emit(`br label %${done}`);
       startBlock(done);
       if (copy) {
         result = temp();
-        emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${full} ]`);
+        emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (type.kind === "block") {
       const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release" }[type.which];
@@ -1745,7 +1755,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${type.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
       owners.forEach((m, i) => {
         startBlock(cases[i]!);
-        const part = each(convert("%v", type, m), m);
+        // One member's copy, made on its own path, so nothing else is pending beside it.
+        const part = each(convert("%v", type, m), m, false);
         if (copy) emit(`store ${t} ${convert(part, m, type)}, ptr ${copy}`);
         emit(`br label %${end}`);
       });
@@ -1768,7 +1779,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
     out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block } = saved);
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
     return name;
   }
 
@@ -1795,11 +1806,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${length} = extractvalue ${ARRAY} %v, 1`);
     emit(`${copy} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, length)})`);
     const t = llvm(type.element);
-    elements(type.element, data, length, (at, i) => {
+    const element = type.element;
+    const glued = typeof element !== "string" && element.kind !== "handle" && element.kind !== "interior" && needsDrop(element);
+    elements(element, data, length, (at, i) => {
       const [v, to] = [temp(), temp()];
       emit(`${v} = load ${t}, ptr ${at}`);
       emit(`${to} = getelementptr ${t}, ptr ${copy}, i64 ${i}`);
-      emit(`store ${t} ${copied(v, type.element)}, ptr ${to}`);
+      if (!glued) return emit(`store ${t} ${copied(v, element)}, ptr ${to}`);
+      // An element's copy may panic: the elements copied so far, and the buffer, go with it.
+      const made = temp();
+      unwinding(`call ${t} ${helper("copy", element)}(${t} ${v})`, made, () => dispose(built(copy, i, i), type));
+      emit(`store ${t} ${made}, ptr ${to}`);
     });
     return built(copy, length, length);
   }
