@@ -747,7 +747,8 @@ export function check(written: Stmt[], library = false): Checked {
     if (future) {
       if (holdsRef(gives)) throw unsupported("async functions giving references", f.returnType ?? f);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);
-      future.gives = laid(gives);
+      // An inferred result widens as a `let` does: an async `return "x"` gives a string.
+      future.gives = laid(f.returnType ? gives : widenLet(gives));
       future.throws = errorType && laid(errorType);
       future.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
       // An async method's future holds its object: borrowed, or owned under `Own<this>`.
@@ -867,6 +868,12 @@ export function check(written: Stmt[], library = false): Checked {
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
       const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      // Each call's future works on its own copy of the captures, so a change would be lost.
+      const changed = e.async ? [...inner.changed!][0] : undefined;
+      if (changed) {
+        const at = inner.captureUses!.get(changed) ?? e;
+        throw new CompileError(`this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
+      }
       // Its future holds the captures as it holds parameters, for what crosses threads.
       if (inner.future) {
         inner.future.frame[1] = { name: "env", type };

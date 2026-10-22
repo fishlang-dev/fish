@@ -865,6 +865,8 @@ export function expressions(ctx: Context) {
     e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
+    // An async arrow's future holds a copy of what it captured, references too.
+    if (typeof type.returns !== "string" && type.returns.kind === "future" && holdsRef(type.returns)) borrowsFrom.set(e, [callee]);
     return { type: type.returns, what: name };
   }
 
@@ -1335,11 +1337,13 @@ export function expressions(ctx: Context) {
       const type = value(a);
       coerce(a, type, found.params[i]!, `argument of type '${show(type)}' is not assignable to parameter of type '${show(found.params[i]!)}'`);
     });
-    // A reference an interface's method returns borrows from its receiver.
-    if (holdsRef(found.returns)) borrowsFrom.set(e, [callee.object]);
+    // A reference an interface's method returns borrows from its receiver, as may the future a
+    // `Promise<T>` describes, which in the definition is checked as one borrowing it.
+    const promised = promiseElement(found.returns);
+    if (holdsRef(found.returns) || promised !== undefined) borrowsFrom.set(e, [callee.object, ...e.args.filter(lends)]);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, found.returns), what: `'${callee.name}'` };
-    return { type: found.returns, what: `'${callee.name}'` };
+    return { type: promised !== undefined ? lentPromise(promised) : found.returns, what: `'${callee.name}'` };
   }
 
   // In an instance, a call through a type parameter runs its concrete class's method. An
@@ -1612,11 +1616,14 @@ export function expressions(ctx: Context) {
         // Closures meeting the callable an annotation expects of each element are boxed into it.
         const want = wanted.get(e);
         const callable = typeof want !== "string" && want?.kind === "dyn" && callableOf.has(want.of) ? want : undefined;
+        const promise = typeof want !== "string" && want?.kind === "dyn" && promiseElement(want.of) !== undefined ? want : undefined;
         const given = elements.map((x) => {
           const t = value(x);
-          if (typeof t !== "string" && t.kind === "closure" && callable) {
-            coerce(x, t, callable, `type '${show(t)}' is not assignable to type '${show(callable)}'`);
-            return callable;
+          const boxed = typeof t !== "string" && ((t.kind === "closure" && callable) || (t.kind === "future" && promise));
+          if (boxed) {
+            const into = (callable ?? promise)!;
+            coerce(x, t, into, `type '${show(t)}' is not assignable to type '${show(into)}'`);
+            return into;
           }
           if (typeof t !== "string" && t.kind === "closure") throw unsupported("arrays of functions", x);
           if (holdsRef(t)) throw unsupported("arrays of references", x);
@@ -2439,7 +2446,7 @@ export function expressions(ctx: Context) {
     dynCalls.set(e, { index, mutable: m.mutable === true, owned: m.owned === true });
     // An async method's future, boxed, borrows the Dyn until it is done.
     if (async !== undefined) {
-      borrowsFrom.set(e, [callee.object]);
+      borrowsFrom.set(e, [callee.object, ...e.args.filter(lends)]);
       return { type: lentPromise(async), what: `'${m.name}'` };
     }
     return { type: m.returns, what: `'${m.name}'` };

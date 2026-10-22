@@ -160,7 +160,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       field("%state", 0);
       // An async arrow's captures are its frame's copy of the closure; an async method's object is
       // borrowed through its frame, or held in it under `Own<this>`.
-      if (f.closure) field("%env", 1);
+      if (f.closure) {
+        field("%env", 1);
+        // Its copy of the captures is the future's own, dropped once the body is done.
+        own("%env", instance.closure!);
+      }
       if (f.self && !f.self.constructor) {
         if (f.self.owned) field("%this", 1);
         else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
@@ -195,7 +199,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       else emit(line);
       if (!isRef(instance.closure!.fields[i]!.type)) return captured.set(alias, at);
       const pointer = from === "this" ? "%this" : temp();
-      emit(`${pointer} = load ptr, ptr ${at}`);
+      const load = `${pointer} = load ptr, ptr ${at}`;
+      if (resuming) allocas.push(`  ${load}`);
+      else emit(load);
       captured.set(alias, pointer);
     });
     if (f.closure) self = selfOf(f)?.type;
@@ -2115,6 +2121,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // with its object, then the arguments.
       const method = target.body.self && !target.body.self.constructor;
       const first = target.body.closure || method ? 2 : 1;
+      // The frame takes the call's spilled receiver, which then drops nothing of its own.
+      pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
       if (method) {
         const owns = target.body.self!.owned;
         const self = owns ? unstash(pointer!, target.body.self!.type) : pointer!;

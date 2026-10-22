@@ -771,12 +771,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A call's returned reference holds what its sources do: a receiver where it lives.
     const from = borrowsFrom.get(e);
     if (from) {
-      const result = (coercions.get(e) ?? types.get(e)!) as RefType;
+      const result = coercions.get(e) ?? types.get(e)!;
+      // A future holding a mutable reference, or a Dyn's async method declaring `Mut<this>`,
+      // lends what it borrows mutably until it is done.
+      const mutable = isRef(result) ? result.mutable : holdsMut(result) || dynCalls.get(e)?.mutable === true;
       for (const s of from) {
         if (lentTemporary(s)) throw outlived(s, `'${holder.name}'`);
         if (holdsRef(coercions.get(s) ?? types.get(s)!) && (isRef(coercions.get(s) ?? types.get(s)!) || key(s) === undefined)) hold(holder, s);
         else if (key(s) !== undefined) {
-          lend(key(s)!, result.mutable, s, holder);
+          lend(key(s)!, mutable, s, holder);
           inherit(holder, s);
           if (throughUnion(s)) temporary(holder, s);
         } else temporary(holder, s);
