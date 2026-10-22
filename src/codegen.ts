@@ -650,8 +650,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = target.body.closure ? target.body.params.length : m.params.length;
-      const result = invoke(target, self, m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
       m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
+      const result = invoke(target, self, m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) dispose(result, target.returns);
         return emit("ret void");
