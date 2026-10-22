@@ -83,6 +83,7 @@ export type Expr = Span & (
   | { kind: "match"; subject: Expr; arms: MatchArm[] }
   // `comptime expr`: evaluated while compiling.
   | { kind: "comptime"; expr: Expr }
+  | { kind: "unsafe"; expr: Expr }
   // `[a, b] = [b, a]`: an assignment whose left side is a pattern.
   | { kind: "destructure"; pattern: Pattern; value: Expr }
   // `a, b`; only where a full expression is allowed, never as an argument or element.
@@ -121,6 +122,7 @@ export type Stmt = Span & (
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
   | { kind: "declare"; body: Stmt }
   | { kind: "comptime"; body: Stmt[] }
+  | { kind: "unsafe"; body: Stmt[] }
   // `named` is undefined without braces; `attributes` is the object after `with`.
   | { kind: "import"; typeOnly: boolean; defer: boolean; default: string | undefined; namespace: string | undefined;
       named: Specifier[] | undefined; module: string; attributes: Expr | undefined }
@@ -425,6 +427,10 @@ export function statement(c: Cursor): Stmt {
   if (c.at("comptime") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
     c.next();
     return { kind: "comptime", body: block(c), start, end: c.end() };
+  }
+  if (c.at("unsafe") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
+    c.next();
+    return { kind: "unsafe", body: block(c), start, end: c.end() };
   }
   if (c.at("macro") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore) {
     c.next();

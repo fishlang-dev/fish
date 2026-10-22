@@ -86,6 +86,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
       case "block":
+      case "unsafe":
       case "while":
       case "doWhile":
         return s.body.flatMap(inside);
@@ -136,6 +137,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
       case "block":
+      case "unsafe":
         return statements(s.body);
       // The catch runs from wherever the block raised, so from what all those points had in
       // common; after the try, either path may have run.
@@ -547,6 +549,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
       case "as":
+      case "unsafe":
         return expr(e.expr, consume, discarded);
       // A yielded value is handed to whoever called `next()`.
       case "yield":
@@ -1184,6 +1187,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         if (s.finalizer) stmts(s.finalizer);
         return;
       case "block":
+      case "unsafe":
         return stmts(s.body);
       case "while":
       case "doWhile":
@@ -1274,6 +1278,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(e.value);
       case "nonNull":
       case "as":
+      case "unsafe":
         return expr(e.expr, call);
       case "binary":
         expr(e.left);

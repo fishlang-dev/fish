@@ -11,6 +11,7 @@ export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<S
       case "if":
         return s.else !== undefined && alwaysReturns(s.then, broken, continued) && alwaysReturns(s.else, broken, continued);
       case "block":
+      case "unsafe":
         return alwaysReturns(s.body, broken, continued);
       // Either the block finishes or an error sends control to the catch, so both must leave.
       case "try":

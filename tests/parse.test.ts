@@ -247,6 +247,8 @@ function showExpr(e: Expr): string {
       return "%";
     case "comptime":
       return `(comptime ${showExpr(e.expr)})`;
+    case "unsafe":
+      return `(unsafe ${showExpr(e.expr)})`;
     case "match": {
       const arms = e.arms.map((a) => {
         const guard = a.guard ? ` if ${showExpr(a.guard)}` : "";
@@ -520,6 +522,8 @@ function showStmt(s: Stmt): string {
       return `${s.macro ? "macro " : ""}function ${s.name}(${showParams(s.params)})${s.body ? ` { ${s.body.length} }` : ";"}`;
     case "comptime":
       return `comptime { ${s.body.length} }`;
+    case "unsafe":
+      return `unsafe { ${s.body.length} }`;
     case "import": {
       const clauses = [
         s.default,

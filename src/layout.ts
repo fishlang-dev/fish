@@ -16,7 +16,7 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // union is its member's index, then enough 64-bit words for its largest member.
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
-  if (t.kind === "ref") return "ptr";
+  if (t.kind === "ref" || t.kind === "pointer") return "ptr";
   if (t.kind === "array") return ARRAY;
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
   const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" ? t.frame : t.fields).map((f) => llvm(f.type))];
@@ -41,7 +41,7 @@ function size(t: Type): [number, number] {
   if (t === "null" || t === "never") return [0, 1];
   if (t === "string") return [8, 8];
   if (typeof t === "string") return [0, 1];
-  if (t.kind === "ref") return [8, 8];
+  if (t.kind === "ref" || t.kind === "pointer") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
   const parts = [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" ? t.frame : t.fields).map((f) => f.type)].map(size);
@@ -169,6 +169,8 @@ export function conversions(b: Slots) {
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // Raw pointers are addresses, whatever they point at or may write.
+    if (typeof from !== "string" && from.kind === "pointer" && typeof to !== "string" && to.kind === "pointer") return v;
     // A string literal's type takes no space; as a string, it is its static block.
     if (to === "string" && typeof from !== "string" && from.kind === "literal") return b.text(String(from.value));
     // Code holding a `never` value never runs.

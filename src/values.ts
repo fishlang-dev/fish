@@ -6,8 +6,8 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { fields } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, nextResult, unionType, yieldsOf, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
-import type { Access, ArrayType, GeneratorType, LiteralType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, arrayType, baseOf, nextResult, pointerType, unionType, yieldsOf, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsMut, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import type { Instance, Local } from "./check.ts";
@@ -129,6 +129,8 @@ export function expressions(ctx: Context) {
   // The type each generic enum's member is expected to have, by the member expression.
   const wanted = new Map<Expr, Type>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
+  // How many \`unsafe\` blocks enclose the code being checked.
+  let unsafeDepth = 0;
   // Literals found to fit the type they were given, `-9223372036854775808` among them.
   const fitted = new Set<Expr>();
   // Powers of literals whose exponent no u32 holds, unless they became floats.
@@ -138,7 +140,22 @@ export function expressions(ctx: Context) {
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
     adapt: (e, to) => adapt(e, to),
   };
-  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly };
+  return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely };
+
+  // Runs a check inside \`unsafe\`, where raw pointers can be used.
+  function unsafely<T>(check: () => T): T {
+    unsafeDepth++;
+    try {
+      return check();
+    } finally {
+      unsafeDepth--;
+    }
+  }
+
+  // Refuses an operation outside \`unsafe\`.
+  function needsUnsafe(what: string, at: Span) {
+    if (unsafeDepth === 0) throw new CompileError(`${what} can only happen inside 'unsafe { }': the compiler can't check what a raw pointer points to, so you vouch for it there`, at.start, at.end);
+  }
 
   // Literals too large for an i64 that nothing gave a wider type.
   function finish() {
@@ -594,6 +611,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
@@ -614,6 +632,28 @@ export function expressions(ctx: Context) {
       });
       types.set(callee, v);
       return { type: v, what: `'${v.name}'` };
+    }
+    // `ptrOf(r)` and `mutPtrOf(m)`: a raw pointer to what a reference, or a place, holds. Making
+    // one is safe; the borrow lasts only for the call.
+    if (callee.kind === "ident" && (callee.name === "ptrOf" || callee.name === "mutPtrOf") && !byName.has(callee.name)) {
+      const mutable = callee.name === "mutPtrOf";
+      if (e.args.length !== 1) throw new CompileError(`'${callee.name}' takes 1 argument`, e.start, e.end);
+      const a = e.args[0]!;
+      const t = value(a);
+      if (isRefType(t)) {
+        if (mutable && !t.mutable) throw new CompileError("'mutPtrOf' needs a 'Mut' reference, or a place that may change", a.start, a.end);
+        return { type: pointerType(t.to, mutable), what: `'${callee.name}'` };
+      }
+      if (!place(a)) throw new CompileError(`'${callee.name}' needs a variable or a field to point at; a temporary is gone once its statement ends`, a.start, a.end);
+      if (mutable) changeable(a, "point mutably at");
+      coerce(a, t, refType(t, mutable), "");
+      return { type: pointerType(t, mutable), what: `'${callee.name}'` };
+    }
+    // `nullPtr<T>()`: a pointer to nothing, which may be used as either kind.
+    if (callee.kind === "ident" && callee.name === "nullPtr" && !byName.has("nullPtr")) {
+      needsUnsafe("'nullPtr'", callee);
+      if (e.typeArgs.length !== 1 || e.args.length > 0) throw new CompileError("'nullPtr' takes the type it points to, like 'nullPtr<u8>()'", e.start, e.end);
+      return { type: pointerType(resolveType(e.typeArgs[0]!), true), what: "'nullPtr'" };
     }
     // `String(x)`: a string, number or boolean written as JavaScript writes it.
     if (callee.kind === "ident" && callee.name === "String" && !byName.has("String")) {
@@ -716,6 +756,27 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
     return { type: "void", what: "'push'" };
+  }
+
+  // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
+  // must be a plain value a raw write can't leave dangling, moving along by elements, and
+  // telling whether it points anywhere.
+  function pointerCall(e: Call, callee: Extract<Expr, { kind: "member" }>, p: PointerType): { type: Type; what: string } {
+    const counts: Record<string, number> = { read: 0, write: 1, offset: 1, isNull: 0 };
+    if (!(callee.name in counts)) throw new CompileError(`raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
+    needsUnsafe(`'${callee.name}' on a raw pointer`, callee);
+    if (e.args.length !== counts[callee.name]) throw new CompileError(`'${callee.name}' takes ${counts[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
+    const plain = isNumeric(p.to) || p.to === "boolean" || (typeof p.to !== "string" && p.to.kind === "pointer");
+    if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${show(p.to)}'`, callee);
+    if (callee.name === "read") return { type: p.to, what: "'read'" };
+    if (callee.name === "isNull") return { type: "boolean", what: "'isNull'" };
+    const a = e.args[0]!;
+    const want = callee.name === "write" ? p.to : "i64";
+    if (callee.name === "write" && !p.mutable) throw new CompileError("'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at", callee.start, callee.end);
+    expect(a, want);
+    const t = value(a);
+    coerce(a, t, want, `argument of type '${show(t)}' is not assignable to parameter of type '${show(want)}'`);
+    return { type: callee.name === "write" ? "void" : p, what: `'${callee.name}'` };
   }
 
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
@@ -1160,6 +1221,15 @@ export function expressions(ctx: Context) {
       case "as": {
         const to = resolveType(e.type);
         const from = operand(e.expr);
+        // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
+        const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
+        if (pointer(to) || pointer(from)) {
+          needsUnsafe("'as' with a raw pointer", e);
+          if (!((pointer(to) && (pointer(from) || isInteger(from))) || (to === "usize" && pointer(from)))) {
+            throw new CompileError(`a raw pointer converts only to another raw pointer or a 'usize', not '${show(pointer(to) ? from : to)}'`, e.start, e.end);
+          }
+          return to;
+        }
         if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
           throw unsupported("'as' conversions other than between numbers", e);
         }
@@ -1194,6 +1264,8 @@ export function expressions(ctx: Context) {
         return match(e, true);
       case "pipe":
         return pipe(e, true);
+      case "unsafe":
+        return unsafely(() => value(e.expr));
       case "yield":
         if (ctx.generator) throw unsupported("'yield' inside expressions", e);
         throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);

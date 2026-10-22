@@ -357,6 +357,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         settle();
         return;
       case "block":
+      case "unsafe":
         scoped(s.body);
         return;
       case "if": {
@@ -1341,6 +1342,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         if (!types.has(e)) pending.push({ v: result, type: built });
         return result;
       }
+      // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
+      if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
       if (e.callee.kind === "ident" && e.callee.name === "String") {
@@ -2009,6 +2012,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         return fixing(e.target, () => assign(e));
       case "match":
         return lowerMatch(e, true)!;
+      case "unsafe":
+        return value(e.expr);
       case "pipe":
         return lowerPipe(e, true)!;
       case "update":
@@ -2057,6 +2062,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic }: O
         if (!condition) return numeric(e.op, a, b, e, type);
         // Empty values are always equal.
         if (type === "null") return String(e.op === "===");
+        // Raw pointers compare by address.
+        if (typeof type !== "string" && type.kind === "pointer") {
+          const same = temp();
+          emit(`${same} = icmp ${condition} ptr ${a}, ${b}`);
+          return same;
+        }
         if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
         if (isFloat(type)) {

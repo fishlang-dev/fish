@@ -101,7 +101,24 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType;
+
+// A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
+// only inside `unsafe`. It copies like a number and owns nothing.
+export type PointerType = { kind: "pointer"; to: Type; mutable: boolean; fields: Field[] };
+
+const pointers = new Map<string, PointerType>();
+
+export function pointerType(to: Type, mutable: boolean): PointerType {
+  const key = `${mutable ? "mutptr" : "ptr"} ${keyOf(to)}`;
+  let t = pointers.get(key);
+  if (!t) {
+    t = { kind: "pointer", to, mutable, fields: [] };
+    pointers.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
 
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
@@ -284,7 +301,7 @@ const variants = new Map<string, VariantType>();
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
 export function isCopy(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "ref") return true;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "ref" || t.kind === "pointer") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   return t.kind === "union" && t.members.every(isCopy);
@@ -338,6 +355,7 @@ const wrappers = new Map<string, ParamType>();
 export function lower(t: Type): Type {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator") return t;
   if (t.kind === "param") return t.concrete ?? t;
+  if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -435,6 +453,10 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof to !== "string" && to.kind === "ref") {
     return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
   }
+  // A `MutPtr<T>` may be used as a `Ptr<T>`, as Rust's `*mut T` coerces to `*const T`.
+  if (typeof to !== "string" && to.kind === "pointer") {
+    return typeof from !== "string" && from.kind === "pointer" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
+  }
   if (typeof to !== "string" && to.kind === "union") {
     if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
     return to.members.some((m) => fits(from, m));
@@ -485,6 +507,7 @@ export function show(t: Type): string {
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
+  if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;
   if (t.kind === "array") {
     const e = t.element;
     const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure");

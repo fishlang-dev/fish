@@ -519,7 +519,7 @@ export function check(program: Stmt[]): Checked {
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly } = expressions({
+    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
@@ -802,6 +802,9 @@ export function check(program: Stmt[]): Checked {
           throw unsupported("comptime blocks", s);
         case "block":
           scoped(s.body);
+          return;
+        case "unsafe":
+          unsafely(() => scoped(s.body));
           return;
         case "debugger":
           throw unsupported("'debugger' statements", s);

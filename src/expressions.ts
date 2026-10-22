@@ -217,6 +217,15 @@ export function unary(c: Cursor): Expr {
     const expr = unary(c);
     return { kind: "comptime", expr, start: t.start, end: expr.end };
   }
+  // `unsafe { expr }` gives `expr`'s value; like `comptime {`, it is a syntax error in TypeScript.
+  if (c.at("unsafe") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
+    c.next();
+    c.expect("{");
+    const expr = expression(c);
+    c.eat(";");
+    c.expect("}");
+    return { kind: "unsafe", expr, start: t.start, end: c.end() };
+  }
   if (c.eat("<")) {
     const asserted = type(c);
     c.expect(">");
