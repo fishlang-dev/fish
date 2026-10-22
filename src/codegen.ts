@@ -120,6 +120,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
   const futureOf = new Map(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
+  // The future types whose task glue is made.
+  const glued = new Set<FutureType>();
 
   for (const instance of instances) {
     // A C function is declared under its own name, unless the runtime already declares it.
@@ -1923,6 +1925,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     }
     startBlock(waiting);
+    // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
+    if (inner === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
     emit(`store i32 ${resumed}, ptr %state`);
     emit(`ret ${resultType(current)} ${polled(current.future!, 0)}`);
     const finish = () => {
@@ -1987,23 +1991,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
   }
 
-  // An async `main`, polled until it is done; an error it gives is reported as a throwing
-  // `main`'s is. Nothing wakes it yet, so it is polled again at once while pending.
+  // An async `main`, run by the runtime as its first task; an error it gives is reported as a
+  // throwing `main`'s is.
   function driver(future: FutureType): string[] {
+    const [poll, drop, dropOutput] = taskGlue(future);
     current = main;
     ({ types, locals, calls, setters, coercions, jumps } = main);
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
     const type = pollType(future);
-    const [frame, result, tag, poll, ok, bad] = [temp(), temp(), temp(), label(), label(), label()];
-    allocas.push(`  ${frame} = alloca ${llvm(future)}`, `  store ${llvm(future)} zeroinitializer, ptr ${frame}`);
-    emit(`br label %${poll}`);
-    startBlock(poll);
-    emit(`${result} = call ${type} @"fsh.main"(ptr ${frame}, ptr null)`);
-    emit(`${tag} = extractvalue ${type} ${result}, 0`);
-    emit(`switch i8 ${tag}, label %${poll} [ i8 1, label %${ok} i8 2, label %${bad} ]`);
+    const [frame, out, outcome, result, failed, ok, bad] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
+    allocas.push(`  ${frame} = alloca ${llvm(future)}`, `  store ${llvm(future)} zeroinitializer, ptr ${frame}`, `  ${out} = alloca ${type}`);
+    emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(type)}, ptr ${out})`);
+    emit(`${failed} = icmp eq i32 ${outcome}, 2`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     startBlock(ok);
     emit("ret i32 0");
     startBlock(bad);
+    emit(`${result} = load ${type}, ptr ${out}`);
     if (future.throws) {
       const error = temp();
       emit(`${error} = extractvalue ${type} ${result}, 2`);
@@ -2013,6 +2017,70 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit("ret i32 1");
     } else emit("unreachable");
     return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+  }
+
+  // The size of an LLVM type in bytes, as a constant.
+  function sizeOf(type: string): string {
+    return `ptrtoint (ptr getelementptr (${type}, ptr null, i32 1) to i64)`;
+  }
+
+  // What the runtime needs to run a future as a task, made once per future type: a poll that
+  // writes the result into the task's output and says pending (0), ready (1), failed (2) or
+  // panicked (3); a drop of the frame where it stopped; and a drop of the output it gave.
+  function taskGlue(future: FutureType): [string, string, string] {
+    const name = (kind: string) => `@"task.${kind}.${futureOf.get(future)!.symbol}"`;
+    if (!glued.has(future)) {
+      glued.add(future);
+      const [frame, type] = [llvm(future), pollType(future)];
+      const output = `getelementptr i8, ptr %frame, i64 ${sizeOf(frame)}`;
+      const caught = panic === "abort" ? [] : ["pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  ret i32 3"];
+      const call = panic === "abort" ? `  %r = call ${type} ${symbol(futureOf.get(future)!)}(ptr %frame, ptr %task)` : `  %r = invoke ${type} ${symbol(futureOf.get(future)!)}(ptr %frame, ptr %task) to label %polled unwind label %pad`;
+      const [dropFrame, dropOutput] = [helperBody((v) => dispose(v, future)), outputDrop(future)];
+      out.push(
+        `define internal i32 ${name("poll")}(ptr %task, ptr %frame) ${UNWINDS} {`, "entry:", call, ...(panic === "abort" ? [] : ["polled:"]),
+        "  %tag = extractvalue " + type + " %r, 0", "  %done = icmp ne i8 %tag, 0", "  br i1 %done, label %finished, label %waiting",
+        "waiting:", "  ret i32 0",
+        "finished:", `  %out = ${output}`, `  store ${type} %r, ptr %out`, "  %outcome = zext i8 %tag to i32", "  ret i32 %outcome", ...caught, "}", "",
+        `define internal void ${name("drop")}(ptr %frame) ${unwinds} {`, "entry:", `  %v = load ${frame}, ptr %frame`, ...dropFrame, "  ret void", "}", "",
+        `define internal void ${name("output")}(ptr %out) ${unwinds} {`, "entry:", `  %v = load ${type}, ptr %out`, ...dropOutput, "  ret void", "}", "",
+      );
+    }
+    return [name("poll"), name("drop"), name("output")];
+  }
+
+  // The instructions dropping `%v` of `type`, as a helper's body.
+  function helperBody(drop: (v: string) => void): string[] {
+    const saved = [allocas, body, temps, labels, block] as const;
+    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+    drop("%v");
+    const lines = [...allocas, ...body];
+    [allocas, body, temps, labels, block] = saved as unknown as [string[], string[], number, number, string];
+    return lines;
+  }
+
+  // Drops the value or the error in a finished future's poll result.
+  function outputDrop(future: FutureType): string[] {
+    return helperBody((v) => {
+      const type = pollType(future);
+      const [tag, ready, failed, end] = [temp(), label(), label(), label()];
+      emit(`${tag} = extractvalue ${type} ${v}, 0`);
+      emit(`switch i8 ${tag}, label %${end} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+      startBlock(ready);
+      if (needsDrop(future.gives)) {
+        const value = temp();
+        emit(`${value} = extractvalue ${type} ${v}, 1`);
+        dispose(value, future.gives);
+      }
+      emit(`br label %${end}`);
+      startBlock(failed);
+      if (future.throws && needsDrop(future.throws)) {
+        const error = temp();
+        emit(`${error} = extractvalue ${type} ${v}, 2`);
+        dispose(error, future.throws);
+      }
+      emit(`br label %${end}`);
+      startBlock(end);
+    });
   }
 
   // A pointer to the base embedded in an instance of `from`, through as many bases as it

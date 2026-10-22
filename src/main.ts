@@ -39,10 +39,10 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   try {
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
+      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
     } else {
       run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
-      run(["clang", "-c", "-fPIC", "-funwind-tables", native, "-o", runtime, optimize]);
+      run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", native, "-o", runtime, optimize]);
       run(["ar", "rcs", at(`lib${name}.a`), fish, runtime]);
     }
     writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
@@ -93,7 +93,7 @@ export function build(file: string, out: string, release = false, panic: Panic =
   const native = join(dir, "native.c");
   writeFileSync(native, NATIVE);
   try {
-    const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)], {
+    const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)], {
       stdin: new TextEncoder().encode(ir),
     });
     if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);

@@ -21,7 +21,11 @@ export const NATIVE = String.raw`
 #include <stdint.h>
 #include <string.h>
 #include <unwind.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
 
+// Tasks run on several threads, so everything they share is counted atomically.
 static int64_t fsh_live = 0;
 
 void *fsh_rt_alloc(int64_t size) {
@@ -30,13 +34,13 @@ void *fsh_rt_alloc(int64_t size) {
     fputs("out of memory\n", stderr);
     exit(101);
   }
-  fsh_live++;
+  __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
   return p;
 }
 
 void fsh_rt_free(void *p) {
   if (!p) return;
-  fsh_live--;
+  __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
   free(p);
 }
 
@@ -55,12 +59,13 @@ typedef struct fsh_str {
   char own[];
 } fsh_str;
 
+// A string may be shared between tasks on different threads, so its count changes atomically.
 void fsh_rt_str_retain(fsh_str *s) {
-  if (s && s->count >= 0) s->count++;
+  if (s && s->count >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
 }
 
 void fsh_rt_str_release(fsh_str *s) {
-  if (!s || s->count < 0 || --s->count > 0) return;
+  if (!s || s->count < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   fsh_rt_str_release(s->base);
   fsh_rt_free(s->crumbs);
   fsh_rt_free(s);
@@ -143,20 +148,24 @@ static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
 
 // The UTF-16 length, counted once and kept.
 int64_t fsh_rt_str_units(fsh_str *s) {
-  if (s->units >= 0) return s->units;
+  int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
+  if (known >= 0) return known;
   int64_t at = 0, n = 0;
   int half = 0;
   while (at < s->length) {
     fsh_next((const unsigned char *)s->bytes, &at, &half);
     n++;
   }
-  return s->units = n;
+  __atomic_store_n(&s->units, n, __ATOMIC_RELEASE);
+  return n;
 }
 
 // Breadcrumbs: where every 64th UTF-16 unit is, as its character's byte offset times two, plus
 // one when the unit is a pair's second half. A literal's are made by the compiler.
 #define FSH_STRIDE 64
 
+// Two threads may build them at once; the first to finish installs its own, and the other
+// frees what it built.
 static void fsh_crumbs(fsh_str *s) {
   int64_t *crumbs = fsh_rt_alloc((s->units / FSH_STRIDE + 1) * sizeof(int64_t));
   int64_t at = 0;
@@ -165,22 +174,25 @@ static void fsh_crumbs(fsh_str *s) {
     if (unit % FSH_STRIDE == 0) crumbs[unit / FSH_STRIDE] = at * 2 + half;
     fsh_next((const unsigned char *)s->bytes, &at, &half);
   }
-  s->crumbs = crumbs;
+  int64_t *none = NULL;
+  if (!__atomic_compare_exchange_n(&s->crumbs, &none, crumbs, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) fsh_rt_free(crumbs);
 }
 
 // Where UTF-16 unit i is: the byte its character starts at, and whether it is the second half
 // of a pair. All-ASCII text is indexed directly; other text walks on from the breadcrumb at
 // or before i, at most 63 units.
-// ponytail: building breadcrumbs writes to a string that may be shared; once strings cross
-// threads this needs an atomic publish.
 static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
   *half = 0;
   if (fsh_rt_str_units(s) == s->length) return i;
   if (i >= s->units) return s->length;
   int64_t at = 0, unit = 0;
-  if (!s->crumbs && s->count >= 0 && s->units > FSH_STRIDE) fsh_crumbs(s);
-  if (s->crumbs) {
-    int64_t crumb = s->crumbs[i / FSH_STRIDE];
+  int64_t *crumbs = __atomic_load_n(&s->crumbs, __ATOMIC_ACQUIRE);
+  if (!crumbs && s->count >= 0 && s->units > FSH_STRIDE) {
+    fsh_crumbs(s);
+    crumbs = __atomic_load_n(&s->crumbs, __ATOMIC_ACQUIRE);
+  }
+  if (crumbs) {
+    int64_t crumb = crumbs[i / FSH_STRIDE];
     at = crumb / 2;
     *half = crumb % 2;
     unit = i / FSH_STRIDE * FSH_STRIDE;
@@ -398,7 +410,7 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
 // Every panic: the message, after what was already printed, then an abort, or an unwind that
 // runs each frame's drops and exits with 101 once it reaches the end of the stack.
 void fsh_rt_panic(const char *message) {
-  static struct _Unwind_Exception exception;
+  static _Thread_local struct _Unwind_Exception exception;
   fflush(NULL);
   fputs(message, stderr);
   if (fsh_panic_abort) abort();
@@ -858,5 +870,247 @@ fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
   out->length = at - out->own;
   fsh_rt_free(cps);
   return out;
+}
+
+// The async runtime: tasks polled by one worker thread per core.
+//
+// A task is a block holding a future's frame, the functions that poll it, drop it and drop
+// what it gave, then the poll result it finished with. Its state says whether it is waiting
+// (idle), queued, being polled, being polled after a wake, or done. It is freed when the last
+// of its references goes: the runtime's while it is alive, each JoinHandle, each timer.
+enum { FSH_IDLE, FSH_QUEUED, FSH_RUNNING, FSH_NOTIFIED, FSH_DONE };
+
+typedef struct fsh_task fsh_task;
+typedef int32_t (*fsh_poll_fn)(fsh_task *task, void *frame);
+typedef void (*fsh_drop_fn)(void *frame);
+struct fsh_task {
+  int32_t state;
+  int32_t outcome;
+  int64_t refs;
+  fsh_poll_fn poll;
+  fsh_drop_fn drop;
+  fsh_drop_fn drop_output;
+  fsh_task *joiner;
+  fsh_task *prev, *next;
+  int64_t frame_size;
+  char memory[];
+};
+
+static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
+
+// A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
+typedef struct {
+  pthread_mutex_t lock;
+  fsh_task **ring;
+  int64_t head, count, capacity;
+} fsh_queue;
+
+static int64_t fsh_workers = 0;
+static fsh_queue *fsh_queues = NULL;
+static fsh_queue fsh_injected = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0 };
+static pthread_t *fsh_threads = NULL;
+static _Thread_local int64_t fsh_worker = -1;
+// Workers with nothing to do wait here until a task is queued or the runtime stops.
+static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
+static int64_t fsh_queued = 0;
+static int32_t fsh_stopping = 0;
+// The tasks not yet done, dropped when the runtime stops; and how the program ends.
+static pthread_mutex_t fsh_alive_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_task *fsh_alive = NULL;
+static pthread_cond_t fsh_finished = PTHREAD_COND_INITIALIZER;
+static int32_t fsh_panicked = 0;
+static fsh_task *fsh_main_task = NULL;
+
+static void fsh_push(fsh_queue *q, fsh_task *t) {
+  pthread_mutex_lock(&q->lock);
+  if (q->count == q->capacity) {
+    int64_t capacity = q->capacity ? q->capacity * 2 : 64;
+    fsh_task **ring = malloc(capacity * sizeof(fsh_task *));
+    for (int64_t i = 0; i < q->count; i++) ring[i] = q->ring[(q->head + i) % q->capacity];
+    free(q->ring);
+    q->ring = ring;
+    q->head = 0;
+    q->capacity = capacity;
+  }
+  q->ring[(q->head + q->count) % q->capacity] = t;
+  q->count++;
+  pthread_mutex_unlock(&q->lock);
+}
+
+static fsh_task *fsh_pop(fsh_queue *q) {
+  pthread_mutex_lock(&q->lock);
+  fsh_task *t = NULL;
+  if (q->count > 0) {
+    t = q->ring[q->head];
+    q->head = (q->head + 1) % q->capacity;
+    q->count--;
+  }
+  pthread_mutex_unlock(&q->lock);
+  return t;
+}
+
+// Queues a task: on the waking worker's own queue, or from any other thread on the shared
+// one, then lets a parked worker know.
+static void fsh_schedule(fsh_task *t) {
+  fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
+  pthread_mutex_lock(&fsh_park);
+  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
+  pthread_cond_signal(&fsh_parked);
+  pthread_mutex_unlock(&fsh_park);
+}
+
+void fsh_task_release(fsh_task *t) {
+  if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (t->outcome) t->drop_output(fsh_output(t));
+  fsh_rt_free(t);
+}
+
+// A waker: runs the task again soon. Waking one being polled has it polled again after.
+void fsh_rt_wake(fsh_task *t) {
+  for (;;) {
+    int32_t state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+    if (state == FSH_IDLE) {
+      if (__atomic_compare_exchange_n(&t->state, &state, FSH_QUEUED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return fsh_schedule(t);
+    } else if (state == FSH_RUNNING) {
+      if (__atomic_compare_exchange_n(&t->state, &state, FSH_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+    } else return;
+  }
+}
+
+static void fsh_unlink(fsh_task *t) {
+  if (t->prev) t->prev->next = t->next;
+  else fsh_alive = t->next;
+  if (t->next) t->next->prev = t->prev;
+  t->prev = t->next = NULL;
+}
+
+// Polls a task once. Pending, it waits for a wake, or goes round again if one came while it
+// ran. Finished, its output is kept and whoever awaits it is woken.
+static void fsh_run(fsh_task *t) {
+  __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  int32_t result = t->poll(t, t->memory);
+  if (result == 3) {
+    pthread_mutex_lock(&fsh_alive_lock);
+    fsh_panicked = 1;
+    pthread_cond_broadcast(&fsh_finished);
+    pthread_mutex_unlock(&fsh_alive_lock);
+    return;
+  }
+  if (result == 0) {
+    int32_t running = FSH_RUNNING;
+    if (__atomic_compare_exchange_n(&t->state, &running, FSH_IDLE, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&t->state, FSH_QUEUED, __ATOMIC_RELEASE);
+    return fsh_schedule(t);
+  }
+  pthread_mutex_lock(&fsh_alive_lock);
+  t->outcome = result;
+  __atomic_store_n(&t->state, FSH_DONE, __ATOMIC_RELEASE);
+  fsh_unlink(t);
+  fsh_task *joiner = t->joiner;
+  t->joiner = NULL;
+  if (t == fsh_main_task) pthread_cond_broadcast(&fsh_finished);
+  pthread_mutex_unlock(&fsh_alive_lock);
+  if (joiner) {
+    fsh_rt_wake(joiner);
+    fsh_task_release(joiner);
+  }
+  fsh_task_release(t);
+}
+
+static fsh_task *fsh_next_task(int64_t me) {
+  fsh_task *t = fsh_pop(&fsh_queues[me]);
+  if (!t) t = fsh_pop(&fsh_injected);
+  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers]);
+  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_RELAXED);
+  return t;
+}
+
+static void *fsh_work(void *arg) {
+  fsh_worker = (int64_t)arg;
+  for (;;) {
+    fsh_task *t = fsh_next_task(fsh_worker);
+    if (t) {
+      fsh_run(t);
+      continue;
+    }
+    pthread_mutex_lock(&fsh_park);
+    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
+    int32_t stop = fsh_stopping;
+    pthread_mutex_unlock(&fsh_park);
+    if (stop) return NULL;
+  }
+}
+
+// A new task for a future's frame, which it takes over: alive, queued, and with one more
+// reference for whoever made it.
+fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
+  memcpy(t->memory, frame, frame_size);
+  t->frame_size = frame_size;
+  t->poll = poll;
+  t->drop = drop;
+  t->drop_output = drop_output;
+  t->outcome = 0;
+  t->refs = 2;
+  t->joiner = NULL;
+  t->state = FSH_QUEUED;
+  pthread_mutex_lock(&fsh_alive_lock);
+  t->prev = NULL;
+  t->next = fsh_alive;
+  if (fsh_alive) fsh_alive->prev = t;
+  fsh_alive = t;
+  pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_schedule(t);
+  return t;
+}
+
+// Runs an async main: starts the workers, runs main as the first task until it is done or a
+// task panics, stops them, drops every task still alive, and gives main's outcome, its poll
+// result copied to out.
+int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out) {
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  fsh_workers = cores > 0 ? cores : 1;
+  fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
+  fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
+  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
+  for (int64_t i = 0; i < fsh_workers; i++) pthread_create(&fsh_threads[i], NULL, fsh_work, (void *)i);
+  pthread_mutex_lock(&fsh_alive_lock);
+  while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
+  pthread_mutex_unlock(&fsh_alive_lock);
+  pthread_mutex_lock(&fsh_park);
+  fsh_stopping = 1;
+  pthread_cond_broadcast(&fsh_parked);
+  pthread_mutex_unlock(&fsh_park);
+  for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);
+  // Every task not done is dropped where it stopped; one dropping may release another.
+  for (;;) {
+    pthread_mutex_lock(&fsh_alive_lock);
+    fsh_task *t = fsh_alive;
+    if (t) {
+      fsh_unlink(t);
+      __atomic_store_n(&t->state, FSH_DONE, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&fsh_alive_lock);
+    if (!t) break;
+    t->drop(t->memory);
+    if (t->joiner) fsh_task_release(t->joiner);
+    t->joiner = NULL;
+    fsh_task_release(t);
+  }
+  for (int64_t i = 0; i < fsh_workers; i++) free(fsh_queues[i].ring);
+  free(fsh_injected.ring);
+  free(fsh_queues);
+  free(fsh_threads);
+  if (fsh_panicked) {
+    fsh_task_release(fsh_main_task);
+    exit(101);
+  }
+  int32_t outcome = fsh_main_task->outcome;
+  memcpy(out, fsh_output(fsh_main_task), output_size);
+  fsh_main_task->outcome = 0;
+  fsh_task_release(fsh_main_task);
+  return outcome;
 }
 `;
