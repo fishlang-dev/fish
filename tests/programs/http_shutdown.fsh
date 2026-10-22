@@ -16,13 +16,13 @@ async function readAll(conn: Ref<TcpStream>): Promise<string> throws IoError {
 
 async function slow(port: i64): Promise<string> throws IoError {
   const conn = await TcpStream.connect("127.0.0.1", port);
-  await conn.write(new TextEncoder().encode("GET /slow HTTP/1.1\r\n\r\n"));
+  await conn.write(new TextEncoder().encode("GET /slow HTTP/1.1\r\nHost: h\r\n\r\n"));
   const text = await readAll(conn);
   return text;
 }
 
 async function main(): Promise<void> throws IoError {
-  const state = shared({ port: new Atomic(0), left: new Atomic(0) });
+  const state = shared({ port: new Atomic(0), left: new Atomic(0), busy: new Atomic(0) });
   const seen = state.clone();
   const watched = state.clone();
   const ctl = new AbortController();
@@ -32,6 +32,8 @@ async function main(): Promise<void> throws IoError {
       watched.left.store(1);
       return new Response("gone");
     }
+    if (req.path === "/first") return new Response("first");
+    watched.busy.store(1);
     await sleep(100);
     return new Response("slow done");
   }));
@@ -40,7 +42,7 @@ async function main(): Promise<void> throws IoError {
 
   {
     const conn = await TcpStream.connect("127.0.0.1", port);
-    await conn.write(new TextEncoder().encode("GET /wait HTTP/1.1\r\n\r\n"));
+    await conn.write(new TextEncoder().encode("GET /wait HTTP/1.1\r\nHost: h\r\n\r\n"));
     await sleep(20);
   }
   while (state.left.load() === 0) await sleep(5);
@@ -48,10 +50,10 @@ async function main(): Promise<void> throws IoError {
 
   // An idle keep-alive connection, and a request still being handled when the server stops.
   const idle = await TcpStream.connect("127.0.0.1", port);
-  await idle.write(new TextEncoder().encode("GET /first HTTP/1.1\r\n\r\n"));
+  await idle.write(new TextEncoder().encode("GET /first HTTP/1.1\r\nHost: h\r\n\r\n"));
   const first = await idle.read(4096);
   const answer = spawn(slow(port));
-  await sleep(30);
+  while (state.busy.load() === 0) await sleep(1);
   ctl.abort();
   const text = await answer;
   const lines = text.split("\r\n");

@@ -79,6 +79,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_utf8_encode(ptr, ptr)",
   "declare ptr @fsh_rt_utf8_decode(ptr)",
   "declare ptr @fsh_rt_http_date()",
+  "declare i64 @fsh_rt_now_ms()",
   "declare i32 @fsh_rt_tcp_write(ptr, ptr, ptr, ptr, ptr)",
   "declare i32 @fsh_rt_tcp_connect(ptr, ptr, i64, ptr, ptr, ptr)",
   "declare i32 @fsh_rt_signal_enter(ptr, ptr, ptr)",

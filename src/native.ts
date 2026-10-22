@@ -727,6 +727,13 @@ fsh_str *fsh_rt_utf8_decode(fsh_array *bytes) {
   return fsh_from_utf8(p + (bom ? 3 : 0), bytes->length - (bom ? 3 : 0));
 }
 
+// Milliseconds on the monotonic clock.
+int64_t fsh_rt_now_ms(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
 // The time now as an HTTP Date header writes it, like "Sun, 06 Nov 1994 08:49:37 GMT".
 fsh_str *fsh_rt_http_date(void) {
   time_t now = time(NULL);

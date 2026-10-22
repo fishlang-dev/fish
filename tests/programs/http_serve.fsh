@@ -48,7 +48,7 @@ async function one(conn: Ref<TcpStream>, held: Mut<u8[]>): Promise<string> throw
 
 async function many(port: i64, i: i64): Promise<i64> {
   try {
-    const text = await ask(port, "GET /n/" + String(i) + " HTTP/1.1\r\nConnection: close\r\n\r\n");
+    const text = await ask(port, "GET /n/" + String(i) + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
     return text.includes("\r\n\r\nGET /n/" + String(i) + " ") ? 1 : 0;
   } catch (e) {
     return 0;
@@ -86,7 +86,7 @@ async function main(): Promise<void> throws IoError {
   const old = await ask(port, "GET /old HTTP/1.0\r\n\r\n");
   console.log("http/1.0 closes|" + String(old.includes("connection: close")));
 
-  const head = await ask(port, "HEAD /h HTTP/1.1\r\nConnection: close\r\n\r\n");
+  const head = await ask(port, "HEAD /h HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
   console.log("head|" + String(head.endsWith("\r\n\r\n")) + "|" + String(!head.includes("content-length: 0\r\n")));
 
   let handles: JoinHandle<i64>[] = [];

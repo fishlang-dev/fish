@@ -258,6 +258,9 @@ export function expressions(ctx: Context) {
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
   function expect(e: Expr, t: Type) {
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    // An arrow for a union holding one callable, like an optional callback, takes its signature.
+    const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
+    if (e.kind === "arrow" && callables.length === 1) expecting.set(e, callableOf.get((callables[0] as DynType).of)!);
     // An arrow written where a callable is stored captures by move: the callable owns it all.
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
       expecting.set(e, callableOf.get(t.of)!);
@@ -795,6 +798,8 @@ export function expressions(ctx: Context) {
     }
     // The time as an HTTP Date header gives it, for the std HTTP server alone.
     if (callee.kind === "ident" && callee.name === "httpDate" && e.start >= STD_BASE && e.args.length === 0) return { type: "string", what: "'httpDate'" };
+    // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
+    if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
@@ -842,6 +847,13 @@ export function expressions(ctx: Context) {
     list.forEach((a, i) => {
       const t = bounds.get(i);
       if (t?.kind === "function") expect(a, t);
+      // An arrow in an object literal given for an object-typed parameter takes its field's type.
+      if (t?.kind === "object" && a.kind === "object") {
+        for (const p of a.props) {
+          const want = p.kind === "property" && p.value.kind === "arrow" ? field(t, p.key as string)?.type : undefined;
+          if (want && p.kind === "property") expect(p.value, want);
+        }
+      }
       // A parameter of a function that isn't generic has its type before the call.
       if (a.kind !== "arrow" && known) expect(a, known[i]!);
     });
@@ -1075,7 +1087,8 @@ export function expressions(ctx: Context) {
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
   function signalTimeout(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout'`, callee.start, callee.end);
-    if (!ctx.runtime) throw new CompileError("'AbortSignal.timeout' needs the async runtime's timer, which runs when 'main' is an async function", e.start, e.end);
+    // The std library's own code is compiled whatever main is; a sync main never reaches it.
+    if (!ctx.runtime && e.start < STD_BASE) throw new CompileError("'AbortSignal.timeout' needs the async runtime's timer, which runs when 'main' is an async function", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'AbortSignal.timeout' takes how many milliseconds until it aborts, like 'AbortSignal.timeout(5000)'", e.start, e.end);
     expect(e.args[0]!, "i64");
     const t = value(e.args[0]!);
@@ -1088,7 +1101,7 @@ export function expressions(ctx: Context) {
   function tcpStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream"): { type: Type; what: string } {
     const method = which === "TcpListener" ? "bind" : "connect";
     if (callee.name !== method) throw new CompileError(`'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
-    if (!ctx.runtime) throw new CompileError(`'${which}.${method}' works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
+    if (!ctx.runtime && e.start < STD_BASE) throw new CompileError(`'${which}.${method}' works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
     // Connecting waits, so it may take an AbortSignal; binding doesn't.
     const signalled = method === "connect" && e.args.length === 3;
     if (e.args.length !== 2 && !signalled) throw new CompileError(`'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
@@ -2204,10 +2217,11 @@ export function expressions(ctx: Context) {
     const field = propertyField(p);
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
-    const callable = want && (isCallable(want) || (typeof want !== "string" && want.kind === "union" && want.members.some(isCallable)));
+    // An optional callback's field is a union; the arrow boxes into its callable member.
+    const callable = want && (isCallable(want) ? want : typeof want !== "string" && want.kind === "union" ? want.members.find(isCallable) : undefined);
     if (typeof field.type !== "string" && field.type.kind === "closure" && callable) {
-      coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, want, `type '${show(field.type)}' is not assignable to type '${show(want)}'`);
-      return { ...field, type: want };
+      coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, callable, `type '${show(field.type)}' is not assignable to type '${show(callable)}'`);
+      return { ...field, type: callable };
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
     if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {

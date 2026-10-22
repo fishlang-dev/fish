@@ -33,9 +33,9 @@ export function locate(src: string, offset: number) {
 
 // Renders `file:line:col: error: msg` followed by the source line with a caret underline,
 // then the same for its note.
-export function formatError(e: CompileError, written: string, program: string): string {
+export function formatError(e: CompileError, path: string, program: string): string {
   const lines = (kind: string, note: Note) => {
-    const { src, file, offset: start } = sourceOf(program, written, note.start);
+    const { src, file, offset: start } = sourceOf(program, path, note.start);
     const { message } = note;
     const end = note.end - (note.start - start);
     const { line, col, lineStart, lineEnd } = locate(src, start);
