@@ -393,6 +393,7 @@ export function holdsRef(t: Type): boolean {
 export function holdsHandle(t: Type): boolean {
   if (typeof t === "string") return false;
   if (t.kind === "handle") return true;
+  if (t.kind === "ref") return holdsHandle(t.to);
   if (t.kind === "param") return t.concrete !== undefined && holdsHandle(t.concrete);
   if (t.kind === "union") return t.members.some(holdsHandle);
   if (t.kind === "array") return holdsHandle(t.element);

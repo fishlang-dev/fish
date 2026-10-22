@@ -309,7 +309,7 @@ export function expressions(ctx: Context) {
     for (let i = 0; i < given.length; i++) given[i]![1] = types[i]!;
     const type = types.every((t) => t === types[0]) ? types[0]! : unionType(types);
     if (type !== types[0] && types.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
-    if (holdsRef(type)) throw new CompileError("a match can't give a reference it binds yet; give a copy with '.clone()', or a field of it", e.start, e.subject.end + 1);
+    if (holdsRef(type)) throw new CompileError(`a match can't give a reference it binds yet; ${holdsHandle(type) ? "match on a value just made to move its parts out" : "give a copy with '.clone()', or a field of it"}`, e.start, e.subject.end + 1);
     for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
     return type;
   }

@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { isPrint } from "./values.ts";
-import { field, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsHandle, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -675,21 +675,26 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
     if (root && isRef(root.type)) {
-      throw new CompileError(`'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
+      throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // Nor out of a reference a field holds.
     for (let p: Named = e; p.kind === "member"; p = p.object) {
       if (p !== e && isRef(types.get(p)!)) {
-        throw new CompileError(`'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`, e.start, e.end);
+        throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
       }
     }
     if (place.startsWith("this") && !f.self?.owned) {
-      throw new CompileError(`'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`, e.start, e.end);
+      throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // A closure moving out what it captures holds it, and can run only once.
     if (root && instance.captures?.has(root)) instance.moved!.add(root);
     instance.consumes.add(e);
-    state.moves.set(place, { start: e.start, end: e.end, note: consume!(text(e)), passes: new Map(passes) });
+    state.moves.set(place, { start: e.start, end: e.end, note: hinted(type, consume!(text(e))), passes: new Map(passes) });
+  }
+
+  // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
+  function hinted(type: Type, message: string): string {
+    return holdsHandle(type) ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
   }
 
   // A place can't be used once it, something it is inside, or something inside it moved.
