@@ -1,5 +1,4 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { builtinModules } from "node:module";
 import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { parse } from "./parser.ts";
@@ -304,7 +303,10 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   if (simple[n.kind]) push(simple[n.kind]!);
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
-  if (MODULE_FORMS.has(n.kind)) push(moduleRule(n.module ?? n.require));
+  // A dynamic `import("x")` names its module as its first argument.
+  const [first] = Array.isArray(n.args) ? n.args : [];
+  const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
+  if (MODULE_FORMS.has(n.kind)) push(moduleRule(n.module ?? n.require ?? dynamic));
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
@@ -313,12 +315,19 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   return found;
 }
 
-// What an import or re-export needs: another file of the program, a Node built-in, or an npm
-// package, told apart by how its specifier is written.
+// What an import or re-export needs: another file of the program (a relative path, or a path
+// alias written as `~/`, `@/` or `#`), a Node built-in, or an npm package, told apart by how its
+// specifier is written.
 function moduleRule(specifier: unknown): string {
-  if (typeof specifier !== "string" || /^[./]/.test(specifier)) return "modules";
-  return specifier.startsWith("node:") || builtinModules.includes(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
+  if (typeof specifier !== "string" || /^([./#~]|@\/)/.test(specifier)) return "modules";
+  return specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
 }
+
+// Node's own modules, fixed so the answer doesn't depend on the runtime running the survey.
+const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants", "crypto",
+  "dgram", "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2", "https", "inspector", "module", "net", "os",
+  "path", "perf_hooks", "process", "punycode", "querystring", "readline", "repl", "stream", "string_decoder", "sys", "timers",
+  "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib"]);
 
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;

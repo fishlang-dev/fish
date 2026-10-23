@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { formatRanking, rank, readPlan } from "../src/rank.ts";
+import { formatRanking, rank, readPlan, stepsOf } from "../src/rank.ts";
 import { featuresOf, formatReport, grade, scanFiles, survey } from "../src/survey.ts";
 
 const sample = join(import.meta.dir, "survey", "sample");
@@ -222,14 +222,17 @@ test("imports wait on other files, npm packages or Node built-ins by how they ar
   project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import fs from \"node:fs\";\nimport path = require(\"path\");\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Multi-file programs"], ["npm interop"], ["Node built-ins"]]);
   });
+  project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["npm interop"], ["Multi-file programs"], ["npm interop"]]);
+  });
 });
 
 test("ties go to the feature carrying most of what waits, then to the name, despite float noise", () => {
-  const files: Record<string, string> = { "z.ts": "const t: [number, number] = [1, 2];\nfor (const k in o) {}\n" };
-  for (let i = 0; i < 10; i++) files[`f${i}.ts`] = "const xs = ys.map(f);\n" + ["const o = { ...p };", "const r = /a/;", "const s = Math.max(1, 2);", "let a, b;", "process.exit(1);", "fetch(u);", "setTimeout(f, 1);", "Date.now();", "Promise.all([]);"].filter((_, k) => k !== i % 9).join("\n") + "\n";
-  project(files, (dir) => {
-    expect(rank([dir]).curve.steps[0]!.feature).toBe("Array methods");
-  });
+  // Ten 1-line files share their line among ten features, so A weighs ten tenths, which floats
+  // add to just under 1; B and Z weigh exactly 1, tied with A, which comes first by name.
+  const unit = (lines: number, waits: string[]) => ({ lines, waits: new Set(waits), rules: [] as [string, string][] });
+  const units = [...Array.from({ length: 10 }, (_, i) => unit(1, ["A", ...Array.from({ length: 9 }, (_, k) => `F${i}-${k}`)])), unit(2, ["B", "Z"])];
+  expect(stepsOf(units, 12).steps.slice(0, 2).map((s) => s.feature)).toEqual(["A", "B"]);
 });
 
 test("a plan names each feature's item and whether it is done", () => {

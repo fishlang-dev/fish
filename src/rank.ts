@@ -16,7 +16,7 @@ export type Curve = { start: Share; steps: Step[]; unread: { feature: string; fi
 export type Repo = { dir: string; files: number; lines: number; unread: { files: number; lines: number } };
 export type Ranking = { repos: Repo[]; curve: Curve; self?: { dir: string; curve: Curve } };
 
-type Unit = { lines: number; waits: Set<string>; rules: [string, string][] };
+export type Unit = { lines: number; waits: Set<string>; rules: [string, string][] };
 type Plan = Map<string, { item: string; done: boolean }>;
 
 export function rank(dirs: string[], self?: string, plan?: Plan): Ranking {
@@ -32,8 +32,19 @@ function unit(f: FileScan): Unit {
 }
 
 function curveOf(scans: FileScan[], plan?: Plan): Curve {
-  const units = scans.filter((f) => f.read).map(unit);
-  const total = scans.reduce((n, f) => n + f.lines, 0);
+  const { start, steps } = stepsOf(scans.filter((f) => f.read).map(unit), scans.reduce((n, f) => n + f.lines, 0), plan);
+  const unread = new Map<string, { files: number; lines: number }>();
+  for (const f of scans.filter((s) => !s.read)) {
+    const feature = featuresOf(f)[0] ?? "files that couldn't be opened";
+    const entry = unread.get(feature) ?? { files: 0, lines: 0 };
+    unread.set(feature, { files: entry.files + 1, lines: entry.lines + f.lines });
+  }
+  return { start, steps, unread: [...unread].map(([feature, n]) => ({ feature, ...n })).sort((a, b) => b.lines - a.lines) };
+}
+
+// The steps over files already read, each a unit of lines waiting on features; `total` counts
+// every line surveyed, unread ones too.
+export function stepsOf(units: Unit[], total: number, plan?: Plan): { start: Share; steps: Step[] } {
   // Rounded down, so 100% means every line, unread ones included.
   const share = (files: number, lines: number): Share => ({ files, lines, share: total === 0 ? 0 : Math.floor((lines * 1000) / total) / 10 });
   const sum = (us: Unit[]) => us.reduce((n, u) => n + u.lines, 0);
@@ -67,13 +78,7 @@ function curveOf(scans: FileScan[], plan?: Plan): Curve {
       portable: share(portable.files, portable.lines),
     });
   }
-  const unread = new Map<string, { files: number; lines: number }>();
-  for (const f of scans.filter((s) => !s.read)) {
-    const feature = featuresOf(f)[0] ?? "files that couldn't be opened";
-    const entry = unread.get(feature) ?? { files: 0, lines: 0 };
-    unread.set(feature, { files: entry.files + 1, lines: entry.lines + f.lines });
-  }
-  return { start, steps, unread: [...unread].map(([feature, n]) => ({ feature, ...n })).sort((a, b) => b.lines - a.lines) };
+  return { start, steps };
 }
 
 // The plan's items by title, ignoring case and backticks: each `- [ ] N. **Title**` line, ticked
