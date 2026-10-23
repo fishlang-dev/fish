@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsRef, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { field, fits, holdsRef, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -470,6 +470,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // Where each instance was first used, and each template's instances by their arguments.
   const uses = new Map<ClassInfo, Span>();
   const instancesOf = new Map<ClassNode, Map<string, ClassInfo>>();
+  const shapesOf = new Map<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   let ready = false;
@@ -506,12 +507,17 @@ export function genericClasses({ classes, templates, register, layout, members, 
     const key = args.map(keyOf).join(",");
     const found = byKey.get(key);
     if (found) return found;
-    if (byKey.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    // Spellings of one value shape, like `{ a?: T }` and `{ a: T | null }`, count once.
+    let shapes = shapesOf.get(template);
+    if (!shapes) shapesOf.set(template, shapes = new Set());
+    const shape = args.map(shapeKey).join(",");
+    if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     if (args.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure"))) throw unsupported("functions as type arguments of classes", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);
+    shapes.add(shape);
     register(c);
     uses.set(c, at);
     if (ready) bounded(c);

@@ -1,6 +1,6 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, fits, generatorElement, keyOf, promiseElement, refType, shapeOf, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
+import { field, fits, generatorElement, keyOf, promiseElement, refType, shapeKey, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -32,7 +32,7 @@ const assuming = new Set<string>();
 // Two parameter types are one when they differ only in a reference's lifetime, which each
 // method names for itself, or in how an optional field is spelled.
 function same(a: Type, b: Type): boolean {
-  const plain = (t: Type) => shapeOf(typeof t !== "string" && t.kind === "ref" ? refType(t.to, t.mutable) : t);
+  const plain = (t: Type) => shapeKey(typeof t !== "string" && t.kind === "ref" ? refType(t.to, t.mutable) : t);
   return plain(a) === plain(b);
 }
 

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { fits, optionalField, shapeOf, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { fits, optionalField, shapeKey, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -98,7 +98,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
           const type = storable(resolveType(t), t);
           // A held reference would need its enum tracked as a borrower.
           // Said where the enum is used when its type argument brought the reference.
-          if (holdsRef(type)) throw unsupported("enum members holding references", args.some(holdsRef) ? at : t);
+          if (holdsRef(type)) throw unsupported("enum members holding references", args.some((a) => holdsRef(a)) ? at : t);
           return type;
         }));
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
@@ -321,7 +321,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     for (const m of sides.flatMap((s) => (s.kind === "interface" ? s.methods : []))) {
       const same = found.methods.find((x) => x.name === m.name);
       if (!same) found.methods.push(m);
-      else if (shapeOf(same.returns) !== shapeOf(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => shapeOf(p) !== shapeOf(m.params[i]!))) {
+      else if (shapeKey(same.returns) !== shapeKey(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => shapeKey(p) !== shapeKey(m.params[i]!))) {
         throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
       }
     }

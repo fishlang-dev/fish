@@ -440,12 +440,12 @@ export function unionType(parts: Type[], name?: string): Type {
   const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
   // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
   // as whichever sorts first.
-  const seen = new Set<Type>();
+  const seen = new Set<string>();
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
     .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
     .filter((t) => {
-      const shape = shapeOf(t);
+      const shape = shapeKey(t);
       return !seen.has(shape) && seen.add(shape) !== undefined;
     });
   if (members.length === 1) return members[0]!;
@@ -554,19 +554,22 @@ export function holdsMut(t: Type): boolean {
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
 }
 
-// Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid.
-export function holdsRef(t: Type): boolean {
-  if (typeof t === "string") return false;
+// Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid. A
+// class met again inside itself adds nothing; one that contains itself is refused elsewhere.
+export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
+  if (typeof t === "string" || seen.has(t)) return false;
+  seen.add(t);
+  const holds = (u: Type) => holdsRef(u, seen);
   if (t.kind === "ref" || (t.kind === "dyn" && borrowing.has(t.of))) return true;
   // A type parameter holds references when what it stands for, or its bound, does.
-  if (t.kind === "param") return t.concrete ? holdsRef(t.concrete) : t.bound !== undefined && holdsRef(t.bound);
-  if (t.kind === "union") return t.members.some(holdsRef);
-  if (t.kind === "array") return holdsRef(t.element);
-  if (t.kind === "variant") return t.fields.some((f) => holdsRef(f.type));
-  if (t.kind === "class") return t.fields.some((f) => holdsRef(f.type)) || (t.base !== undefined && holdsRef(t.base));
+  if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
+  if (t.kind === "union") return t.members.some(holds);
+  if (t.kind === "array") return holds(t.element);
+  if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
+  if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   // A generator borrows what its parameters do; its frame's own references point into itself.
-  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsRef(f.type));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsRef(f.type));
+  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holds(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holds(f.type));
 }
 
 // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
@@ -627,7 +630,7 @@ const wrappers = new Map<string, ParamType>();
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn") return t;
-  if (t.kind === "param") return t.concrete ?? t;
+  if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
@@ -710,24 +713,25 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
   return [0, ...fieldPath((t as ClassType).base!, name)];
 }
 
-// A type with no field anywhere in it marked optional: the shape its values have, in which
-// `{ a?: T }` is `{ a: T | null }`.
-export function shapeOf(t: Type): Type {
+// A key that is the same exactly when two types' values have one shape: like `keyOf`, but
+// blind to which fields are marked optional, so `{ a?: T }` and `{ a: T | null }` share one.
+export function shapeKey(t: Type): string {
   if (typeof t === "string") return t;
-  let found = shapes.get(t);
-  if (!found) {
-    if (t.kind === "object") found = objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: shapeOf(f.type) })));
-    else if (t.kind === "array") found = arrayType(shapeOf(t.element));
-    else if (t.kind === "union") found = unionType(t.members.map(shapeOf), t.name);
-    else if (t.kind === "ref") found = refType(shapeOf(t.to), t.mutable, t.life);
-    else if (t.kind === "class" && t.generic?.args.some((a) => shapeOf(a) !== a)) found = instanceClass(t, t.generic.args.map(shapeOf));
-    else found = t;
-    shapes.set(t, found);
-    if (typeof found !== "string") shapes.set(found, found);
+  let found = shapeKeys.get(t);
+  if (found === undefined) {
+    if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
+    else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
+    else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
+    else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;
+    // A type parameter standing for a concrete type has that type's shape.
+    else if (t.kind === "param" && t.concrete) return shapeKey(t.concrete);
+    else if (t.kind === "class" && t.generic) found = `${t.generic.name}<${t.generic.args.map(shapeKey).join(",")}>`;
+    else found = keyOf(t);
+    shapeKeys.set(t, found);
   }
   return found;
 }
-const shapes = new WeakMap<Exclude<Type, string>, Type>();
+const shapeKeys = new WeakMap<Exclude<Type, string>, string>();
 
 // A type without the empty value an optional field adds.
 export function withoutNull(t: Type): Type {
