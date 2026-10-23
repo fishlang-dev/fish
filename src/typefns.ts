@@ -1,14 +1,26 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, isNumeric, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, fits, isNumeric, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Type } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
+// Thrown by a type function given a generic alias's own type parameter while that alias is
+// checked before any use: its result waits for the alias's type arguments.
+export class Deferred {}
+
+// A type function can't look inside a type parameter: the type it stands for is known only per
+// instance. A generic alias being checked waits; generic function code is refused.
+export function opaque(t: Type, what: string, at: Span, deferring: () => boolean): void {
+  if (typeof t === "string" || t.kind !== "param" || t.concrete) return;
+  if (deferring()) throw new Deferred();
+  throw new CompileError(`${what} of the type parameter '${t.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+}
+
 // TypeScript's type-level functions, computed while compiling into ordinary types: `keyof`,
 // indexed access, and the utility types. A class's fields are known once it is laid out, which
 // `layout` does when first asked, saying whether they are known yet.
-export function typeFunctions(layout: (c: ClassType) => boolean) {
+export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () => boolean) {
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
@@ -17,9 +29,8 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
       if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while the field types of '${t.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
       return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
-    if (typeof t !== "string" && t.kind === "param") {
-      throw new CompileError(`${what} of the type parameter '${t.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
-    }
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) return fieldsOf(t.concrete, what, at);
+    opaque(t, what, at, deferring);
     if (typeof t !== "string" && t.kind === "interface") {
       throw new CompileError(`${what} takes an object type or a class, not the interface '${show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
     }
@@ -28,6 +39,8 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
 
   // The keys a type names: a string literal, or a union of them.
   function keysOf(k: Type, what: string, at: Span): string[] {
+    if (typeof k !== "string" && k.kind === "param" && k.concrete) return keysOf(k.concrete, what, at);
+    opaque(k, what, at, deferring);
     const members = typeof k !== "string" && k.kind === "union" ? k.members : [k];
     if (members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string")) {
       return members.map((m) => (m as { value: string }).value);
@@ -45,6 +58,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
   // `T[K]`: the type of the field K names, or the union of those a union of keys names; an array's
   // `T[number]` is its element type.
   function indexedType(t: Type, k: Type, at: Span, keyAt: Span): Type {
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) return indexedType(t.concrete, k, at, keyAt);
     if (typeof t !== "string" && t.kind === "array") {
       if (isNumeric(k)) return t.element;
       throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
@@ -88,14 +102,34 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
     return objectType(fieldsOf(t!, "'Omit'", at).filter((f) => !names.includes(f.name)));
   };
 
+  // The members of a union, or the one type that isn't one.
+  const membersOf = (t: Type, what: string, at: Span): Type[] => {
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) return membersOf(t.concrete, what, at);
+    opaque(t, what, at, deferring);
+    return typeof t !== "string" && t.kind === "union" ? t.members : [t];
+  };
+  const kept = (members: Type[]): Type => (members.length === 0 ? "never" : unionType(members));
+
+  // `Exclude<T, U>`: T's members that don't fit U.
+  const excludeType: Utility = ([t, u], at) => kept(membersOf(t!, "'Exclude'", at).filter((m) => !fits(m, u!)));
+
+  // `Extract<T, U>`: T's members that fit U.
+  const extractType: Utility = ([t, u], at) => kept(membersOf(t!, "'Extract'", at).filter((m) => fits(m, u!)));
+
+  // `NonNullable<T>`: T without the empty value.
+  const nonNullableType: Utility = ([t], at) => kept(membersOf(t!, "'NonNullable'", at).filter((m) => m !== "null"));
+
   // The utility types by name, and how many type arguments each takes.
-  const UTILITIES = new Map<string, [number, Utility]>([
-    ["Partial", [1, partialType]],
-    ["Required", [1, requiredType]],
-    ["Readonly", [1, readonlyType]],
-    ["Pick", [2, pickType]],
-    ["Omit", [2, omitType]],
-    ["Record", [2, recordType]],
+  const UTILITIES = new Map<string, [number, Utility, string]>([
+    ["Partial", [1, partialType, "Partial<User>"]],
+    ["Required", [1, requiredType, "Required<User>"]],
+    ["Readonly", [1, readonlyType, "Readonly<User>"]],
+    ["Pick", [2, pickType, 'Pick<User, "id">']],
+    ["Omit", [2, omitType, 'Omit<User, "id">']],
+    ["Record", [2, recordType, 'Record<"a" | "b", i64>']],
+    ["Exclude", [2, excludeType, 'Exclude<"a" | "b", "a">']],
+    ["Extract", [2, extractType, 'Extract<"a" | "b", "a">']],
+    ["NonNullable", [1, nonNullableType, "NonNullable<string | null>"]],
   ]);
   return { keyofType, indexedType, UTILITIES };
 }

@@ -4,7 +4,7 @@ import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { fits, optionalField, shapeKey, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
-import { typeFunctions } from "./typefns.ts";
+import { Deferred, opaque, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -55,7 +55,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     } finally {
       layouts.pop();
     }
-  });
+  }, () => deferring > 0);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -63,6 +63,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   let scope = new Map<string, Type>();
+  // Above zero while a generic alias is checked with placeholders, before any use.
+  let deferring = 0;
   // The data-carrying enums being made, to catch one that holds itself.
   const making = new Set<DataEnum>();
   return { resolveType, paramType, withScope, enumInstance, validate };
@@ -72,7 +74,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function validate() {
     aliases.forEach((a) => {
       const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
-      aliasType(a, [...scope.values()], a);
+      if (a.typeParams.length > 0) deferring++;
+      try {
+        aliasType(a, [...scope.values()], a);
+      } catch (e) {
+        if (!(e instanceof Deferred)) throw e;
+      } finally {
+        if (a.typeParams.length > 0) deferring--;
+      }
     });
     interfaces.forEach(interfaceOf);
   }
@@ -163,6 +172,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
+    if (t.kind === "conditional") return conditional(t);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
@@ -184,6 +194,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.name === "Array" && t.args.length === 1) return array(resolveType(t.args[0]!), t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
+    if (t.name === "never" && t.args.length === 0) return "never";
     if (t.name === "null" || t.name === "undefined") {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
       return "null";
@@ -255,8 +266,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
-      const [count, apply] = utility;
-      if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${t.name}<${count === 1 ? "User" : t.name === "Record" ? '"a" | "b", i64' : 'User, "id"'}>'`, t.start, t.end);
+      const [count, apply, example] = utility;
+      if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
       return apply(args, t, t.args);
     }
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
@@ -378,12 +389,33 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (layouts.some((s) => s.has(key))) {
       throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
-    if (resolving.has(key) || resolving.size > 64) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
+    if (resolving.has(key)) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
+    if (resolving.size > 64) throw new CompileError(`type '${a.name}' is still being computed 64 aliases deep; a type that uses itself must reach a branch that stops`, at.start, at.end);
     resolving.add(key);
-    const type = withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type));
-    resolving.delete(key);
+    let type: Type;
+    try {
+      type = withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type));
+    } finally {
+      resolving.delete(key);
+    }
     resolved.set(key, type);
     return type;
+  }
+
+  // `T extends U ? X : Y`: X when every value of T fits U. A check type that is a bare type
+  // parameter distributes over the union it stands for, each member checked on its own, as in
+  // TypeScript.
+  function conditional(t: Extract<TypeNode, { kind: "conditional" }>): Type {
+    const naked = t.check.kind === "ref" && t.check.args.length === 0 && scope.has(t.check.name) ? t.check.name : undefined;
+    let check = resolveType(t.check);
+    if (typeof check !== "string" && check.kind === "param" && check.concrete) check = check.concrete;
+    opaque(check, "a conditional type", t.check, () => deferring > 0);
+    if (naked && check === "never") return "never";
+    if (naked && typeof check !== "string" && check.kind === "union") {
+      const each = check.members.map((m) => withScope(new Map([...scope, [naked, m]]), () => resolveType(fits(m, resolveType(t.extends)) ? t.then : t.else)));
+      return unionType(each);
+    }
+    return resolveType(fits(check, resolveType(t.extends)) ? t.then : t.else);
   }
 
   function member(m: TypeMember): Field {
