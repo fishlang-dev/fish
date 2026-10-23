@@ -1614,7 +1614,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (info.kind === "any" && p.kind === "ident") {
       const local = resolved(p as Expr);
       reserve(local);
-      if (isRef(local.type)) {
+      // A binding borrowing the part points where it lives; one of a part that is itself a
+      // reference, like a `Mut` field, holds that reference.
+      if (isRef(local.type) && local.type !== info.type) {
         let pointer = at;
         if (!pointer) {
           pointer = alloca(llvm(info.type));

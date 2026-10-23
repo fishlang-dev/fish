@@ -406,7 +406,7 @@ function interpreter() {
             const local = f.instance.locals.get(p)!;
             if (!f.locals.has(local.id)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
             const held = f.locals.get(local.id);
-            fields.set(p.name, isPlace(held) ? unwrap(held.get()) : held);
+            fields.set(p.name, held);
           } else return unsupported("this property", p);
         }
         return { kind: "record", type: type as ObjectType, fields };
@@ -827,6 +827,8 @@ function mutable(t: Type | undefined): boolean {
 // type is, and a union's fields and elements are tagged the same way, so each is baked as the
 // member the program would hold.
 function retag(value: Value, from: Type | undefined, to: Type | undefined): Value {
+  // A `Mut` held in a field stays the place it points at.
+  if (isPlace(value)) return value;
   if (to === undefined || from === to) return typeof to !== "string" && to?.kind === "union" ? value : unwrap(value);
   if (typeof to !== "string" && to.kind === "union") {
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
