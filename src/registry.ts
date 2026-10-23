@@ -113,6 +113,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       const [param, returns] = withScope(c.scope, () => [resolveType(from.params[0]!.type!), resolveType(from.returnType!)]);
       if (!fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
       if (from.throws) throw new CompileError(`'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
+      if (from.params[0]!.comptime) throw new CompileError(`'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
       c.wraps.push([x, from, param]);
     }
     return c.wraps;
