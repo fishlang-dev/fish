@@ -14,6 +14,9 @@ export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...other
   typeName(s.name, s, aliases, ...others);
   aliases.set(s.name, s);
 }
+// The rest parameters given a meaning so far: a tag's, which the template's values fill.
+export const restParams = new WeakSet<Param>();
+
 export function paramName(p: Param): string {
   if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
   return p.pattern.name;
@@ -154,7 +157,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
   // constructor's parameters may carry modifiers, which make them parameter properties.
   function paramType(p: Param, property = false): Type {
-    if (p.rest) throw unsupported("rest parameters", p);
+    if (p.rest && !restParams.has(p)) throw unsupported("rest parameters", p);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
@@ -163,9 +166,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     // A call may leave out an optional parameter, which is then empty.
     const type = p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
+    if (p.rest && (typeof type === "string" || type.kind !== "array")) throw new CompileError(`a rest parameter takes an array of the values, as in '...${name}: ${show(type)}[]'`, p.type.start, p.type.end);
     // A comptime parameter makes an instance per value, so its type is one whose values compare.
     const keyed = (t: Type): boolean => isInteger(t) || t === "boolean" || t === "string" || (typeof t !== "string" && (t.kind === "literal" || (t.kind === "union" && t.members.every(keyed))));
-    if (p.comptime && (p.optional || !keyed(type))) throw new CompileError(`a comptime parameter takes an integer, a boolean, a string or an enum member, not '${show(type)}'`, p.type.start, p.type.end);
+    // A tag's strings, `TemplateStringsArray`, are an array of strings.
+    const strings = typeof type !== "string" && type.kind === "array" && type.element === "string";
+    if (p.comptime && (p.optional || !(keyed(type) || strings))) throw new CompileError(`a comptime parameter takes an integer, a boolean, a string, an enum member or a string array, not '${show(type)}'`, p.type.start, p.type.end);
     return type;
   }
 

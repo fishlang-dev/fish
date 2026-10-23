@@ -122,7 +122,6 @@ const EXPRESSIONS: [string, string][] = [
   ["true as boolean", "'as' conversions other than between numbers"],
   ["1 satisfies i64", "'satisfies' expressions"],
   ["<i64>1", "type assertions"],
-  ["tag`a`", "tagged templates"],
 ];
 
 for (const [expr, what] of EXPRESSIONS) {

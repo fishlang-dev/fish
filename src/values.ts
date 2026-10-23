@@ -136,6 +136,9 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
+// The calls a tagged template became, the only calls yet that fill a rest parameter.
+const tagCalls = new WeakSet<Expr>();
+
 const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
 // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
@@ -319,6 +322,7 @@ export function expressions(ctx: Context) {
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
+    if (e.kind === "tagged") untag(e);
     if (e.kind === "call") {
       const { type } = call(e);
       if (typeof type !== "string" && type.kind === "future" && leafOf.has(type)) {
@@ -828,6 +832,9 @@ export function expressions(ctx: Context) {
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
     if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
+    if (target.params.at(-1)?.rest && !tagCalls.has(e)) {
+      throw new CompileError(`'${target.name}' takes a rest parameter, which so far only a tag's values fill; call it as a tag, as in ${target.name}\`text \${value}\``, e.start, e.end);
+    }
     expectFrom(target, e.args);
     const argTypes = e.args.map(value);
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
@@ -842,6 +849,25 @@ export function expressions(ctx: Context) {
     // was lent to the call, its receiver included.
     if (holdsRef(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, object, e, lends));
     return { type, what: `'${target.name}'` };
+  }
+
+  // `` tag`a ${x} b` `` calls the tag with the template's text, known while compiling, then an
+  // array of its values for the tag's rest parameter.
+  function untag(e: Extract<Expr, { kind: "tagged" }>) {
+    const { tag, template } = e;
+    const target = tag.kind === "ident" && !lookup(tag.name) ? byName.get(tag.name) : undefined;
+    if (!target || tag.kind !== "ident") throw new CompileError("a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
+    const shape = `'comptime strings: TemplateStringsArray, ...values: T[]'`;
+    if (!target.params[0]?.comptime) {
+      throw new CompileError(`'${tag.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, tag.start, tag.end);
+    }
+    if (target.params.length !== 2 || !target.params[1]!.rest) throw new CompileError(`'${tag.name}' can't be a tag: a tag takes ${shape}`, tag.start, tag.end);
+    if (template.kind !== "template") throw new CompileError("a tag is followed by a template literal", template.start, template.end);
+    const at = { start: template.start, end: template.end };
+    const strings: Expr = { kind: "array", elements: template.quasis.map((value) => ({ kind: "string", value, ...at })), ...at };
+    const values: Expr = { kind: "array", elements: template.exprs, ...at };
+    Object.assign(e, { kind: "call", callee: tag, args: [strings, values], optional: false });
+    tagCalls.add(e);
   }
 
   // An arrow passed where a function type is declared takes its parameter types from it.
@@ -1768,6 +1794,9 @@ export function expressions(ctx: Context) {
         if (holdsRef(c.type)) borrowsFrom.set(e, list.filter(lends));
         return c.type;
       }
+      case "tagged":
+        untag(e);
+        return typeOf(e);
       case "call": {
         const { type, what } = call(e);
         if (type === "void") throw new CompileError(`${what} does not return a value`, e.start, e.end);

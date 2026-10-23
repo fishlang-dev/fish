@@ -4,6 +4,7 @@ import { parse, shiftSpans, type Stmt } from "./parser.ts";
 // program; the HTTP library only into one that names it.
 
 const PRELUDE = `
+type TemplateStringsArray = string[];
 class AbortError { message: string = "This operation was aborted"; }
 class IoError { message: string; constructor(message: string) { this.message = message; } }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }

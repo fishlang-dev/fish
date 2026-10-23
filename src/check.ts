@@ -1,7 +1,7 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { stdFor } from "./std.ts";
-import { comptimeArgument, comptimeChecks, untagged } from "./comptime.ts";
+import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
@@ -13,7 +13,7 @@ import { comparable, objectsMeet } from "./unions.ts";
 import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
-import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
+import { addAlias, paramName, resolver, restParams, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { functionType, holdsPattern, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
@@ -274,6 +274,8 @@ export function check(written: Stmt[], library = false): Checked {
   }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
+    // Only a tag's values fill a rest parameter so far.
+    if (f.params.length === 2 && f.params[0]!.comptime && f.params[1]!.rest) restParams.add(f.params[1]!);
     if (f.async && f.generator) throw unsupported("async generators", f);
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
@@ -409,7 +411,8 @@ export function check(written: Stmt[], library = false): Checked {
     if (typeof tag !== "string" && tag?.kind === "literal") return tag;
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
-    throw new CompileError("a comptime parameter takes an integer, a boolean, a string or an enum member", arg.start, arg.end);
+    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(v.items as string[]);
+    throw new CompileError("a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
   }
   // A generic definition's placeholder for each comptime argument, one per argument.
   const placeholders = new WeakMap<Expr, Type>();
