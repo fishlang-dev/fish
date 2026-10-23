@@ -412,12 +412,20 @@ function callRules(n: Node, push: (id: string) => void) {
   if (name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) push("G10");
 }
 
+// A pattern of names, holes and renames only, with no defaults, rest or nesting.
+function plainPattern(p: Node): boolean {
+  const name = (x: unknown) => x === undefined || x === null || (isNode(x) && x.kind === "ident");
+  if (p.kind === "array") return !p.rest && (p.elements as unknown[]).every(name);
+  return p.kind === "object" && !p.rest && (p.props as Node[]).every((q) => typeof q.key === "string" && name(q.value));
+}
+
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; init: unknown }[];
   if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (declarations.length > 1 || (!head && !ambient && declarations.some((d) => !d.init))) push("declarators");
-  if (declarations.some((d) => d.target.kind !== "ident")) push("destructuring");
+  // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.
+  if (declarations.some((d) => d.target.kind !== "ident" && !(head && plainPattern(d.target)))) push("destructuring");
 }
 
 function memberRules(n: Node, push: (id: string) => void) {
