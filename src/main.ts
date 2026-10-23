@@ -8,7 +8,8 @@ import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
-import { formatReport, survey } from "./survey.ts";
+import { formatRanking, rank, readPlan } from "./rank.ts";
+import { formatReport, sources, survey } from "./survey.ts";
 import type { Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
@@ -103,6 +104,23 @@ export function build(file: string, out: string, release = false, panic: Panic =
   }
 }
 
+function fail(message: string): never {
+  console.error(message);
+  process.exit(2);
+}
+
+// A directory `fishc survey` can read, holding TypeScript.
+function checkProject(dir: string) {
+  if (!existsSync(dir)) fail(`fishc survey: '${dir}' doesn't exist`);
+  if (!statSync(dir).isDirectory()) fail(`fishc survey: '${dir}' is a file; give the directory of a TypeScript project`);
+  try {
+    readdirSync(dir);
+  } catch (e) {
+    fail(`fishc survey: '${dir}' can't be read: ${e instanceof Error ? e.message : e}`);
+  }
+  if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
+}
+
 if (import.meta.main) {
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = parseArgs({
@@ -116,36 +134,36 @@ if (import.meta.main) {
       link: { type: "string", multiple: true },
       lib: { type: "string" },
       json: { type: "boolean" },
+      rank: { type: "boolean" },
+      self: { type: "string" },
+      plan: { type: "string" },
     },
   });
   const [command, file] = positionals;
   if (command === "survey") {
-    if (!file) {
-      console.error("usage: fishc survey <dir> [--json]");
-      process.exit(2);
+    const dirs = positionals.slice(1);
+    const usage = "usage: fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
+    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || values.self || values.plan))) fail(usage);
+    for (const dir of [...dirs, ...(values.self ? [values.self] : [])]) checkProject(dir);
+    if (values.rank) {
+      let plan;
+      try {
+        plan = values.plan ? readPlan(values.plan) : undefined;
+      } catch (e) {
+        fail(`fishc survey: the plan '${values.plan}' can't be read: ${e instanceof Error ? e.message : e}`);
+      }
+      const ranking = rank(dirs, values.self, plan);
+      console.log(values.json ? JSON.stringify(ranking, null, 2) : formatRanking(ranking));
+    } else {
+      const report = survey(file!);
+      console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
     }
-    if (!existsSync(file) || !statSync(file).isDirectory()) {
-      console.error(existsSync(file) ? `fishc survey: '${file}' is a file; give the directory of a TypeScript project` : `fishc survey: '${file}' doesn't exist`);
-      process.exit(2);
-    }
-    try {
-      readdirSync(file);
-    } catch (e) {
-      console.error(`fishc survey: '${file}' can't be read: ${e instanceof Error ? e.message : e}`);
-      process.exit(2);
-    }
-    const report = survey(file);
-    if (report.files === 0) {
-      console.error(`fishc survey: '${file}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
-      process.exit(2);
-    }
-    console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
     process.exit(0);
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || values.json || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]");
+  if (command !== "build" || !file || values.json || values.rank || values.self || values.plan || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { formatRanking, rank, readPlan } from "../src/rank.ts";
 import { featuresOf, formatReport, grade, scanFiles, survey } from "../src/survey.ts";
 
 const sample = join(import.meta.dir, "survey", "sample");
@@ -175,4 +176,64 @@ test("fishc survey refuses a missing directory, a file, and a directory with no 
     expect(run.stderr.toString()).toContain("holds no TypeScript files");
   });
   expect(fishc("build", "x.fsh", "--json").exitCode).toBe(2);
+});
+
+// Several projects at once, each from file paths to their text.
+function projects(repos: Record<string, string>[], run: (dirs: string[]) => void) {
+  const dirs: string[] = [];
+  const next = (i: number) => {
+    if (i === repos.length) return run(dirs);
+    project(repos[i]!, (dir) => {
+      dirs.push(dir);
+      next(i + 1);
+    });
+  };
+  next(0);
+}
+
+const big = "const xs = ys.map(f);\n".repeat(10);
+
+test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
+  projects([{ "a.ts": big, "b.ts": "const o = { ...p };\n", "c.ts": "const t: [number, number] = [1, 2];\nconst o = { ...p };\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
+    const r = rank(dirs);
+    expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
+    expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
+      ["Array methods", 1, 10, 78.6],
+      ["Object spread", 1, 1, 85.7],
+      ["Tuples", 1, 2, 100],
+    ]);
+    expect(r.curve.steps[1]!).toMatchObject({ rules: ["objectSpread"], files: 2, lines: 3 });
+    expect(r.repos.map((x) => x.files)).toEqual([3, 1]);
+  });
+});
+
+test("unread files are left out of the curve, and the self curve stands alone", () => {
+  projects([{ "a.ts": big, "bad.ts": "const = ;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
+    const r = rank([repo!], self);
+    expect(r.repos[0]!.unread).toEqual({ files: 1, lines: 1 });
+    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Array methods"]);
+    expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
+  });
+});
+
+test("a plan names each feature's item and whether it is done", () => {
+  project({ "a.ts": big + "const o = { ...p };\nfor (const k in o) {}\n", "plan.md": "## Plan\n\n- [ ] 7. **Array methods** - map\n  - [x] 9b. **object spread** - copies\n" }, (dir) => {
+    const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
+    expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
+      "Array methods": { item: "7", done: false }, "Object spread": { item: "9b", done: true }, "for...in": null,
+    });
+    expect(formatRanking(r)).toContain("(plan item 9b, done)");
+  });
+});
+
+test("fishc survey --rank prints and gives JSON, and refuses what it can't read", () => {
+  projects([{ "a.ts": big }, { "s.ts": "const o = { ...p };\n" }], ([a, s]) => {
+    const text = fishc("survey", "--rank", a!, "--self", s!).stdout.toString();
+    expect(text).toContain("1. Array methods");
+    expect(text).toContain(`self-hosting (${s})`);
+    expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString())).toEqual(JSON.parse(JSON.stringify(rank([a!]))));
+    expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
+    expect(fishc("survey", "--rank", a!, join(a!, "nope")).exitCode).toBe(2);
+    expect(fishc("survey", a!, s!).exitCode).toBe(2);
+  });
 });

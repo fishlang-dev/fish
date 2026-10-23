@@ -139,8 +139,10 @@ function scanFile(path: string, file: string): FileScan {
 // The planned Fish features a file waits on, by title; a file the parser can't read waits on
 // the parser.
 export function featuresOf(f: FileScan): string[] {
-  return [...new Set(f.findings.flatMap(([id]) => FEATURES.get(id) ?? []))].sort();
+  return [...new Set(f.findings.flatMap(([id]) => featureOf(id) ?? []))].sort();
 }
+
+export const featureOf = (id: string) => FEATURES.get(id);
 const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
 
 export function survey(dir: string): Report {
