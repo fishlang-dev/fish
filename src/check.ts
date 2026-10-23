@@ -295,8 +295,6 @@ export function check(written: Stmt[], library = false): Checked {
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   const { resolveType, paramType, withScope, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)));
-  // An enum with no type parameters is made now, so a payload naming no type is caught unused.
-  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   // A class first made while lowering is reported at the function being checked.
@@ -360,8 +358,10 @@ export function check(written: Stmt[], library = false): Checked {
 
   classes.forEach((c) => link(c, new Set()));
   classes.forEach(checkOverrides);
-  // Aliases are checked once classes are linked, since one may read a class's fields.
+  // Aliases are checked once classes are linked, since one may read a class's fields, and so
+  // is an enum with no type parameters, made now so a payload naming no type is caught unused.
   validate();
+  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
   infoOf.forEach(layout);

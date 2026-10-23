@@ -438,15 +438,13 @@ export function literalType(value: string | bigint | boolean, owner?: LiteralTyp
 // An enum's union carries the enum's name, for messages.
 export function unionType(parts: Type[], name?: string): Type {
   const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
-  // `{ a?: T }` and `{ a: T | null }` are one value shape, so a union keeps the first spelling.
+  // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
+  // as whichever sorts first.
   const shapes = new Set<Type>();
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
-    .filter((t) => {
-      const shape = typeof t !== "string" && t.kind === "object" ? objectType(t.fields.map(({ optional: _, ...f }) => f)) : t;
-      return !shapes.has(shape) && shapes.add(shape) !== undefined;
-    })
-    .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
+    .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
+    .filter((t) => !shapes.has(shapeOf(t)) && shapes.add(shapeOf(t)) !== undefined);
   if (members.length === 1) return members[0]!;
   const key = `union ${members.map(keyOf).join("|")}`;
   let t = unions.get(key);
@@ -707,6 +705,16 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
   const i = t.fields.findIndex((f) => f.name === name);
   if (i >= 0) return [i + (embeds ? 1 : 0)];
   return [0, ...fieldPath((t as ClassType).base!, name)];
+}
+
+// A type with no field anywhere in it marked optional: the shape its values have, in which
+// `{ a?: T }` is `{ a: T | null }`.
+export function shapeOf(t: Type): Type {
+  if (typeof t === "string") return t;
+  if (t.kind === "object") return objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: shapeOf(f.type) })));
+  if (t.kind === "array") return arrayType(shapeOf(t.element));
+  if (t.kind === "union") return unionType(t.members.map(shapeOf), t.name);
+  return t;
 }
 
 // A type without the empty value an optional field adds.

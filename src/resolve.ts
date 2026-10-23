@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { fits, optionalField, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { fits, optionalField, shapeOf, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -45,7 +45,17 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
 export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean) {
-  const { keyofType, indexedType, UTILITIES } = typeFunctions(layout);
+  // What was being resolved as each class layout under way began: an alias met again inside one
+  // reads the fields of a class whose own field types need it.
+  const layouts: Set<string>[] = [];
+  const { keyofType, indexedType, UTILITIES } = typeFunctions((c) => {
+    layouts.push(new Set(resolving));
+    try {
+      return layout(c);
+    } finally {
+      layouts.pop();
+    }
+  });
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -311,7 +321,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     for (const m of sides.flatMap((s) => (s.kind === "interface" ? s.methods : []))) {
       const same = found.methods.find((x) => x.name === m.name);
       if (!same) found.methods.push(m);
-      else if (same.returns !== m.returns || same.params.length !== m.params.length || same.params.some((p, i) => p !== m.params[i])) {
+      else if (shapeOf(same.returns) !== shapeOf(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => shapeOf(p) !== shapeOf(m.params[i]!))) {
         throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
       }
     }
@@ -365,6 +375,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const key = `${a.name}<${args.map(keyOf).join(",")}>`;
     const done = resolved.get(key);
     if (done) return done;
+    if (layouts.some((s) => s.has(key))) {
+      throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
+    }
     if (resolving.has(key) || resolving.size > 64) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
     resolving.add(key);
     const type = withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type));

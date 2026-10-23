@@ -1,4 +1,4 @@
-// error: 'Partial' of 'Node' can't be used in the types of the class's own fields yet
+// error: 'Partial' of 'Node' is needed while 'Node''s own field types are being worked out
 // A class's fields aren't known while its own field types are being worked out.
 class Node {
   value: i64 = 0;

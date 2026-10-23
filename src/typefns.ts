@@ -14,7 +14,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
     if (typeof t !== "string" && t.kind === "object") return t.fields;
     if (typeof t !== "string" && t.kind === "class") {
-      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' can't be used in the types of the class's own fields yet, since they aren't known until those types are`, at.start, at.end);
+      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while '${t.name}''s own field types are being worked out, so it can't be computed yet`, at.start, at.end);
       return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (typeof t !== "string" && t.kind === "param") {
@@ -47,7 +47,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
   function indexedType(t: Type, k: Type, at: Span, keyAt: Span): Type {
     if (typeof t !== "string" && t.kind === "array") {
       if (isNumeric(k)) return t.element;
-      throw new CompileError(`an array type is indexed by 'number', as in '${show(t)}[number]', which gives its element type`, keyAt.start, keyAt.end);
+      throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
     }
     const fields = fieldsOf(t, "an indexed access type", at);
     return unionType(keysOf(k, "an indexed access type", keyAt).map((name) => {
