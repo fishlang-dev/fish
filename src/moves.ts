@@ -233,7 +233,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (known) return known[1];
           state = from;
           // Whichever way control left the try and its catch, their variables are gone.
-          dropped(new Set([...s.block.flatMap(scoped), ...(s.param && locals.get(s) ? [locals.get(s)!] : []), ...(s.handler ?? []).flatMap(scoped)]), (s.handler ?? s.block).at(-1)?.end ?? s.start);
+          dropped(new Set([...s.block.flatMap(scoped), ...(s.param && locals.get(s) ? [locals.get(s)!] : []), ...(s.handler ?? []).flatMap(scoped)]), [...s.block, ...(s.handler ?? [])].at(-1)?.end ?? s.start);
           statements(s.finalizer!);
           ends.push([from, state]);
           return state;
