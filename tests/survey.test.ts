@@ -43,3 +43,32 @@ test("a project with nothing to port grades A", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const fishc = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), ...args]);
+
+test("fishc survey prints the grade, the counts and the top blockers with locations", () => {
+  const run = fishc("survey", sample);
+  const out = run.stdout.toString();
+  expect(run.exitCode).toBe(0);
+  expect(out).toContain("fishc survey: 3 files");
+  expect(out).toMatch(/grade F \(score [\d.]+ per 1000 lines\)/);
+  expect(out).toContain("top blockers");
+  expect(out).toMatch(/e\.g\. src\/app\.ts:\d+:\d+/);
+});
+
+test("fishc survey --json gives the same report as data", () => {
+  const run = fishc("survey", sample, "--json");
+  expect(JSON.parse(run.stdout.toString())).toEqual(survey(sample));
+});
+
+test("fishc survey refuses a missing directory and one with no TypeScript", () => {
+  expect(fishc("survey", join(sample, "missing")).exitCode).toBe(2);
+  const empty = mkdtempSync(join(tmpdir(), "survey-"));
+  try {
+    const run = fishc("survey", empty);
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr.toString()).toContain("holds no TypeScript files");
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+});

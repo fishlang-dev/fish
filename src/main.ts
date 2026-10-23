@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -8,6 +8,7 @@ import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
+import { formatReport, sources, survey } from "./survey.ts";
 import type { Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
@@ -114,13 +115,27 @@ if (import.meta.main) {
       panic: { type: "string", default: "unwind" },
       link: { type: "string", multiple: true },
       lib: { type: "string" },
+      json: { type: "boolean" },
     },
   });
   const [command, file] = positionals;
+  if (command === "survey") {
+    if (!file || !existsSync(file) || !statSync(file).isDirectory()) {
+      console.error(file ? `fishc survey: '${file}' isn't a directory` : "usage: fishc survey <dir> [--json]");
+      process.exit(2);
+    }
+    if (sources(file).length === 0) {
+      console.error(`fishc survey: '${file}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
+      process.exit(2);
+    }
+    const report = survey(file);
+    console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
+    process.exit(0);
+  }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
   if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]");
+    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]");
     process.exit(2);
   }
   try {
