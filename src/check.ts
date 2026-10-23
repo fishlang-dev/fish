@@ -14,7 +14,7 @@ import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { functionType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -294,7 +294,7 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)));
+  const { resolveType, paramType, withScope, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at) => valueTypeOf(name, at));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   // A class first made while lowering is reported at the function being checked.
@@ -321,6 +321,23 @@ export function check(written: Stmt[], library = false): Checked {
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
   });
+  // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
+  // whose result is checked from its body when it isn't written.
+  function valueTypeOf(name: string, at: Span): Type {
+    const constant = byName.get(`const ${name}`);
+    if (constant) return returnOf(instanceOf(constant), at);
+    const f = byName.get(name);
+    if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
+    if (f.typeParams.length > 0 || implicitOf(f).size > 0 || f.params.some((p) => p.comptime)) {
+      throw new CompileError(`'typeof' of the generic function '${name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
+    }
+    if (f.generator) throw unsupported("'typeof' of generator functions", at);
+    const instance = instanceOf(f);
+    const returns = returnOf(instance, at);
+    const result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
+    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? p.pattern.name : "_")), declaredParams(f), result);
+  }
+
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
   // type. Inside a generic definition the caller's own values aren't known, so it stays open.
   function comptimeLiteral(arg: Expr): Type {
@@ -358,15 +375,16 @@ export function check(written: Stmt[], library = false): Checked {
 
   classes.forEach((c) => link(c, new Set()));
   classes.forEach(checkOverrides);
-  // Aliases are checked once classes are linked, since one may read a class's fields, and so
-  // is an enum with no type parameters, made now so a payload naming no type is caught unused.
-  validate();
-  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
   infoOf.forEach(layout);
   start();
   define();
+  // Aliases are checked once classes are laid out, since one may read a class's fields or a
+  // function's inferred result, and so is an enum with no type parameters, made now so a
+  // payload naming no type is caught unused.
+  validate();
+  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
   funcs.forEach((f) => checkBody(definition(f)));
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
