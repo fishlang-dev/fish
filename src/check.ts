@@ -1031,11 +1031,12 @@ export function check(written: Stmt[], library = false): Checked {
       if (init.kind === "index" && !isTuple(element)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(element)}'`, d.start, d.end);
       const type = value(init);
       const name = (d.target as Extract<Pattern, { kind: "ident" }>).name;
-      // A `let` part of its own may change; a borrowed one is read through.
+      // A `let` part may change, or be pointed elsewhere when it is borrowed, as a `let` loop
+      // variable may.
       if (isRef(whole) && !isCopy(type)) {
         const lent = refType(type, false);
         coerce(init, type, lent, "");
-        declare(name, lent, false, false, s);
+        declare(name, lent, s.keyword === "let", false, s);
       } else declare(name, type, s.keyword === "let", false, s);
       return undefined;
     }
