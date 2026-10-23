@@ -1,5 +1,6 @@
 // expect: B.X B.X
-// Members of two enums sharing a value make instances of their own, and compare equal, as at run time.
+// Members of two enums sharing a value compare equal, at comptime as at run time, where literals
+// compare by value.
 enum A { X, Y }
 enum B { X, Y }
 function which(comptime v: A | B): string {

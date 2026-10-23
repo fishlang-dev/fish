@@ -233,7 +233,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     let found = byKey.get(key);
     if (!found) {
       // Every type parameter, implicit ones included, needs a concrete binding to compile.
-      const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`));
+      const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       const count = [...byKey.values()].filter((i) => i.concrete).length;

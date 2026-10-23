@@ -492,7 +492,9 @@ export function check(written: Stmt[], library = false): Checked {
     if (!owner || to === owner) return target;
     const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(target.body)]!;
     const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
-    return instanceOf(body, new Map([...body.scope!, ...implicit]));
+    // Its comptime parameters' values carry over too.
+    const fixed = [...target.bindings].filter(([name]) => name.startsWith("comptime "));
+    return instanceOf(body, new Map([...body.scope!, ...implicit, ...fixed]));
   }
 
   // An export in a library is a C function too, so its signature crosses to C as a declared
@@ -610,6 +612,8 @@ export function check(written: Stmt[], library = false): Checked {
     instance.returns = "void";
     delete instance.throws;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
+    // A closure checked within a discarded pass isn't in progress any more either.
+    for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
     const kept = closures.filter((c) => !within(c));
     closures.length = 0;
     closures.push(...kept);
