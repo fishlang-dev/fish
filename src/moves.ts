@@ -110,6 +110,25 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function statements(list: Stmt[]) {
     for (const s of list) statement(s);
     for (const s of list) if (s.kind === "let" && holdsRef(locals.get(s)!.type)) release(locals.get(s)!);
+    ended(list);
+  }
+
+  // A list's own variables end with it, so a borrow of one still held by a variable from outside
+  // the list, and used after it, would point at a dropped value.
+  function ended(list: Stmt[]) {
+    const tail = list.at(-1);
+    if (!state || !tail) return;
+    const own = new Set(list.flatMap((s) => (s.kind === "let" ? [String(locals.get(s)!.id)] : [])));
+    for (const loan of state.loans.values()) {
+      if (!own.has(loan.place.split(".")[0]!)) continue;
+      const outside = [...loan.holders].filter((h) => !own.has(String(h.id)) && (last.get(h) ?? -1) > tail.end);
+      if (outside.length === 0) continue;
+      const lent = pathOf(loan.place);
+      throw new CompileError(`'${lent}' doesn't live long enough: ${named(outside).join(" and ")} still ${outside.length > 1 ? "borrow" : "borrows"} it after its block ends`, loan.start, loan.end, {
+        message: `'${lent.split(".")[0]}' is dropped here, at the end of its block; declare it outside the block, or give ${named(outside).join(" and ")} an owned value`,
+        start: tail.end, end: tail.end,
+      });
+    }
   }
 
   function statement(s: Stmt) {
