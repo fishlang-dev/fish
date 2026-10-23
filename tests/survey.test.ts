@@ -77,7 +77,7 @@ test("each file names the planned features it waits on", () => {
     "d.ts": "function main(): void {}\n",
   }, (dir) => {
     expect(Object.fromEntries(scanFiles(dir).map((f) => [f.file, featuresOf(f)]))).toEqual({
-      "a.ts": ["Object spread", "Rest parameters and array spread", "forEach and flatMap"],
+      "a.ts": ["Array mutation methods", "Object spread", "Rest parameters and array spread"],
       "b.ts": ["Destructuring", "Destructuring assignment", "Several declarators and deferred initialization"],
       "c.ts": ["parser gaps"],
       "d.ts": [],
@@ -154,7 +154,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(50);
+  expect(r.rules.length + r.waiting.length).toBe(49);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -199,7 +199,7 @@ test("the curve picks the feature freeing the most lines first, and frees a file
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
-      ["forEach and flatMap", 1, 10, 78.5],
+      ["Array mutation methods", 1, 10, 78.5],
       ["Object spread", 1, 1, 85.7],
       ["Tuples", 1, 2, 100],
     ]);
@@ -212,7 +212,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
   projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
     expect(r.repos[0]!.unread).toEqual({ files: 2, lines: 3 });
-    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["forEach and flatMap", 76.9]]);
+    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["Array mutation methods", 76.9]]);
     expect(r.curve.unread).toEqual([{ feature: "JSX for server-side HTML", files: 1, lines: 2 }, { feature: "parser gaps", files: 1, lines: 1 }]);
     expect(formatRanking(r)).toContain("also waiting, in files Fish couldn't read");
     expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
@@ -237,16 +237,16 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "const o = { ...p };\nfor (const k in o) {}\n", "plan.md": "## Plan\n\n- [ ] 7. **forEach and flatMap** - forEach\n  - [x] 9b. **object spread** - copies\n" }, (dir) => {
+  project({ "a.ts": big + "const o = { ...p };\nfor (const k in o) {}\n", "plan.md": "## Plan\n\n- [ ] 7. **Array mutation methods** - forEach\n  - [x] 9b. **object spread** - copies\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "forEach and flatMap": { item: "7", done: false }, "Object spread": { item: "9b", done: true }, "for...in": null,
+      "Array mutation methods": { item: "7", done: false }, "Object spread": { item: "9b", done: true }, "for...in": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
-  project({ "plan.md": "- [ ] 1. **`for...in`** - keys\r\n- [x]  2.  **forEach and flatMap**\r\n- [ ] 3. **forEach and flatMap**\r\n" }, (dir) => {
+  project({ "plan.md": "- [ ] 1. **`for...in`** - keys\r\n- [x]  2.  **Array mutation methods**\r\n- [ ] 3. **Array mutation methods**\r\n" }, (dir) => {
     const plan = readPlan(join(dir, "plan.md"));
-    expect([plan.get("for...in"), plan.get("foreach and flatmap")]).toEqual([{ item: "1", done: false }, { item: "2", done: true }]);
+    expect([plan.get("for...in"), plan.get("array mutation methods")]).toEqual([{ item: "1", done: false }, { item: "2", done: true }]);
   });
   project({ "readme.md": "# Hello\n" }, (dir) => {
     expect(() => readPlan(join(dir, "readme.md"))).toThrow("no '- [ ] N. **Title**' items");
@@ -256,7 +256,7 @@ test("a plan names each feature's item and whether it is done", () => {
 test("fishc survey --rank prints and gives JSON, and refuses what it can't read", () => {
   projects([{ "a.ts": big }, { "s.ts": "const o = { ...p };\n" }], ([a, s]) => {
     const text = fishc("survey", "--rank", a!, "--self", s!).stdout.toString();
-    expect(text).toContain("1. forEach and flatMap");
+    expect(text).toContain("1. Array mutation methods");
     expect(text).toContain(`self-hosting (${s})`);
     expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString())).toEqual(JSON.parse(JSON.stringify(rank([a!]))));
     expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
@@ -282,7 +282,7 @@ test("a comparison lists the rules that moved, the furthest first, a new rule fr
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("      +2  the array methods forEach and flatMap (1 -> 3)");
+    expect(text).toContain("      +2  forEach, flatMap, splice, shift, unshift, reverse, fill, flat and findIndex on arrays (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
     expect(formatComparison(compare(then, then))).toContain("no rule's count changed");
   });
