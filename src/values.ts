@@ -952,6 +952,7 @@ export function expressions(ctx: Context) {
     if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, array);
+    if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
@@ -961,6 +962,44 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
     return { type: "void", what: "'push'" };
+  }
+
+  // `map`, `filter`, `find`, `some`, `every` and `reduce` run the callback on each element in
+  // turn, given it as a shared borrow, or a copy when it copies, and its index. `filter` and
+  // `find` give clones of what they keep, and `reduce` without an initial value starts from a
+  // clone of the first element.
+  function callbackCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    const reducing = name === "reduce";
+    if (reducing ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
+      throw new CompileError(`'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
+    }
+    const [callback, init] = e.args as [Expr, Expr | undefined];
+    if (callback.kind !== "arrow") throw unsupported(`callbacks passed to '${name}' by name; write the arrow function in place`, callback);
+    const element = isCopy(array.element) ? array.element : refType(array.element, false);
+    const acc = !reducing ? undefined : init ? widenLet(value(init)) : array.element;
+    const params = acc ? [acc, element, "i64" as const] : [element, "i64" as const];
+    if (callback.params.length > params.length) {
+      throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.params[params.length]!.start, callback.params[params.length]!.end);
+    }
+    const signature = functionType(acc ? ["accumulator", "value", "index"] : ["value", "index"], params, "void");
+    expect(callback, signature);
+    const c = value(callback);
+    if (typeof c === "string" || c.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
+    if (c.params.length > params.length) {
+      throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.start, callback.end);
+    }
+    c.params.forEach((p, i) => {
+      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback a '${show(params[i]!)}' here, not a '${show(p)}'`, callback.start, callback.end);
+    });
+    const gives = c.returns;
+    if (name !== "map" && !reducing && gives !== "boolean") {
+      throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
+    }
+    if (acc && !fits(gives, acc)) throw new CompileError(`'reduce''s callback gives the next accumulator, a '${show(acc)}', but this one gives '${show(gives)}'`, callback.start, callback.end);
+    if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
+    const type = name === "map" ? arrayType(gives) : name === "filter" ? array : name === "find" ? unionType([array.element, "null"]) : acc ?? "boolean";
+    return { type, what: `'${name}'` };
   }
 
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
@@ -2781,7 +2820,9 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
 
 // The methods an array has.
-const ARRAY_METHODS = new Set(["push", "pop"]);
+// The methods that run a callback on each element.
+const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce"]);
+const ARRAY_METHODS = new Set(["push", "pop", ...CALLBACK_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
 const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));

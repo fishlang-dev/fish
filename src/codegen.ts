@@ -8,7 +8,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, type ClosureType, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -1905,6 +1905,119 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return built(copy, length, length);
   }
 
+  // Puts `v` at the end of the array at `at`, growing it when it is full.
+  function appended(at: string, element: Type, v: string) {
+    const t = llvm(element);
+    emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(element, "1")})`);
+    const [lengthAt, dataAt, length, data, slot, more] = [temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${length}`);
+    emit(`store ${t} ${v}, ptr ${slot}`);
+    emit(`${more} = add i64 ${length}, 1`);
+    emit(`store i64 ${more}, ptr ${lengthAt}`);
+  }
+
+  // `map`, `filter`, `find`, `some`, `every` and `reduce`: a loop calling the callback with each
+  // element, a copy when it copies and otherwise a pointer to it, and its index. The array is
+  // only read, so its length and data are read once. `some`, `every` and `find` stop at the
+  // first element that decides them.
+  function callbackLoop(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+    const [callback, init] = e.args as [Expr, Expr | undefined];
+    const element = array.element;
+    const t = llvm(element);
+    const closure = types.get(callback) as ClosureType;
+    const target = calls.get(callback)!;
+    const env = alloca(llvm(closure));
+    emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
+    const result = types.get(e) ?? (method === "map" ? arrayType(closure.returns) : method === "filter" ? array : method === "find" ? unionType([element, "null"]) : method === "reduce" ? closure.params[0]! : "boolean");
+    const out = alloca(llvm(result));
+    const [lengthAt, dataAt, length, data, index] = [temp(), temp(), temp(), temp(), alloca("i64")];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    const elementAt = (i: string) => {
+      const slot = temp();
+      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+      return slot;
+    };
+    const load = (slot: string) => {
+      const v = temp();
+      emit(`${v} = load ${t}, ptr ${slot}`);
+      return v;
+    };
+    const reducing = method === "reduce";
+    let first = "0";
+    if (method === "map" || method === "filter") emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    if (method === "find") emit(`store ${llvm(result)} ${convert("zeroinitializer", "null", result)}, ptr ${out}`);
+    if (method === "some" || method === "every") emit(`store i1 ${method === "every"}, ptr ${out}`);
+    if (reducing && init) emit(`store ${llvm(result)} ${convert(owned(init), types.get(init)!, result)}, ptr ${out}`);
+    if (reducing && !init) {
+      // Without an initial value the first element starts, and an empty array has none.
+      const [empty, fail, ok] = [temp(), label(), label()];
+      emit(`${empty} = icmp eq i64 ${length}, 0`);
+      emit(`br i1 ${empty}, label %${fail}, label %${ok}`);
+      startBlock(fail);
+      unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nreduce of empty array with no initial value\n`)})`);
+      emit("unreachable");
+      startBlock(ok);
+      emit(`store ${llvm(result)} ${convert(copied(load(elementAt("0")), element), element, result)}, ptr ${out}`);
+      first = "1";
+    }
+    emit(`store i64 ${first}, ptr ${index}`);
+    const [head, body, next, done] = [label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const slot = elementAt(i);
+    const given = closure.params[reducing ? 1 : 0];
+    const passed = given === undefined ? [] : [isRef(given) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
+    if (closure.params.length > (reducing ? 2 : 1)) passed.push(`i64 ${i}`);
+    if (reducing) {
+      const acc = temp();
+      emit(`${acc} = load ${llvm(result)}, ptr ${out}`);
+      passed.unshift(`${llvm(closure.params[0]!)} ${convert(acc, result, closure.params[0]!)}`);
+    }
+    const gives = invoke(target, env, passed.slice(0, target.body.params.length), e)!;
+    if (method === "map") appended(out, closure.returns, gives);
+    else if (reducing) emit(`store ${llvm(result)} ${convert(gives, closure.returns, result)}, ptr ${out}`);
+    else {
+      const [hit, miss] = [label(), next];
+      // `every` stops at the first element its callback rejects; the others at one it accepts.
+      if (method === "every") emit(`br i1 ${gives}, label %${miss}, label %${hit}`);
+      else emit(`br i1 ${gives}, label %${hit}, label %${miss}`);
+      startBlock(hit);
+      if (method === "filter") {
+        appended(out, element, copied(load(slot), element));
+        emit(`br label %${next}`);
+      } else {
+        if (method === "find") emit(`store ${llvm(result)} ${convert(copied(load(slot), element), element, result)}, ptr ${out}`);
+        else emit(`store i1 ${method === "some"}, ptr ${out}`);
+        emit(`br label %${done}`);
+      }
+    }
+    if (method === "map" || reducing) emit(`br label %${next}`);
+    startBlock(next);
+    const after = temp();
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    // What the callback left of its captures drops once, after the last call.
+    if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    const v = temp();
+    emit(`${v} = load ${llvm(result)}, ptr ${out}`);
+    if (!types.has(e) && needsDrop(result)) pending.push({ v, type: result });
+    return v;
+  }
+
   // The size in bytes of `count` elements, as LLVM lays them out.
   function bytes(element: Type, count: string): string {
     const [end, size] = [temp(), temp()];
@@ -1953,19 +2066,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [lengthAt, dataAt] = [temp(), temp()];
     const field = (to: string, i: number) => emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
     if (callee.name === "push") {
-      const v = owned(e.args[0]!);
-      emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(type.element, "1")})`);
-      field(lengthAt, 1);
-      field(dataAt, 0);
-      const [length, data, slot, more] = [temp(), temp(), temp(), temp()];
-      emit(`${length} = load i64, ptr ${lengthAt}`);
-      emit(`${data} = load ptr, ptr ${dataAt}`);
-      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${length}`);
-      emit(`store ${t} ${v}, ptr ${slot}`);
-      emit(`${more} = add i64 ${length}, 1`);
-      emit(`store i64 ${more}, ptr ${lengthAt}`);
+      appended(at, type.element, owned(e.args[0]!));
       return undefined;
     }
+    if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = unionType([type.element, "null"]);
     field(lengthAt, 1);
     const [length, empty, some, none, end] = [temp(), temp(), label(), label(), label()];

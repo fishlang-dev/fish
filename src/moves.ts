@@ -34,6 +34,8 @@ type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 // What an access does to a place.
 type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
+// The array methods that change their array.
+const ARRAY_CHANGES = new Set(["push", "pop", "sort"]);
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union";
@@ -486,8 +488,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // An array's `push` and `pop`, and a generator's `next`, change it: it is lent shared
           // while the arguments run, as a mutating method's object is, then changed, which nothing
           // borrowing it may see.
-          const changes = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone" && (array(object) || generator(object));
-          if (object && place !== undefined && (self || changes)) lend(place, false, object, undefined, name, e);
+          const builtin = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone";
+          const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has((e.callee as { name: string }).name)));
+          // Any other array method reads it, lent shared while its callback runs.
+          const reads = builtin && !changes && array(object);
+          if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           if (object && changes) {
             state?.loans.delete(object.start);
