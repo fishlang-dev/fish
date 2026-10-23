@@ -14,7 +14,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean) {
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
     if (typeof t !== "string" && t.kind === "object") return t.fields;
     if (typeof t !== "string" && t.kind === "class") {
-      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while '${t.name}''s own field types are being worked out, so it can't be computed yet`, at.start, at.end);
+      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while the field types of '${t.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
       return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (typeof t !== "string" && t.kind === "param") {

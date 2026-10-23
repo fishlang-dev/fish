@@ -440,11 +440,14 @@ export function unionType(parts: Type[], name?: string): Type {
   const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
   // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
   // as whichever sorts first.
-  const shapes = new Set<Type>();
+  const seen = new Set<Type>();
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
     .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
-    .filter((t) => !shapes.has(shapeOf(t)) && shapes.add(shapeOf(t)) !== undefined);
+    .filter((t) => {
+      const shape = shapeOf(t);
+      return !seen.has(shape) && seen.add(shape) !== undefined;
+    });
   if (members.length === 1) return members[0]!;
   const key = `union ${members.map(keyOf).join("|")}`;
   let t = unions.get(key);
@@ -711,11 +714,20 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
 // `{ a?: T }` is `{ a: T | null }`.
 export function shapeOf(t: Type): Type {
   if (typeof t === "string") return t;
-  if (t.kind === "object") return objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: shapeOf(f.type) })));
-  if (t.kind === "array") return arrayType(shapeOf(t.element));
-  if (t.kind === "union") return unionType(t.members.map(shapeOf), t.name);
-  return t;
+  let found = shapes.get(t);
+  if (!found) {
+    if (t.kind === "object") found = objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: shapeOf(f.type) })));
+    else if (t.kind === "array") found = arrayType(shapeOf(t.element));
+    else if (t.kind === "union") found = unionType(t.members.map(shapeOf), t.name);
+    else if (t.kind === "ref") found = refType(shapeOf(t.to), t.mutable, t.life);
+    else if (t.kind === "class" && t.generic?.args.some((a) => shapeOf(a) !== a)) found = instanceClass(t, t.generic.args.map(shapeOf));
+    else found = t;
+    shapes.set(t, found);
+    if (typeof found !== "string") shapes.set(found, found);
+  }
+  return found;
 }
+const shapes = new WeakMap<Exclude<Type, string>, Type>();
 
 // A type without the empty value an optional field adds.
 export function withoutNull(t: Type): Type {
