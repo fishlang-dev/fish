@@ -276,6 +276,13 @@ export function check(written: Stmt[], library = false): Checked {
   for (const f of funcs) {
     // Only a tag's values fill a rest parameter so far.
     if (f.params.length === 2 && f.params[0]!.comptime && f.params[1]!.rest) restParams.add(f.params[1]!);
+    else if (f.params.length === 2 && f.params[1]!.rest && f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray") {
+      const strings = f.params[0]!;
+      throw new CompileError(`'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
+    } else if (f.params[0]?.comptime && f.params.at(-1)?.rest) {
+      const rest = f.params.at(-1)!;
+      throw new CompileError("a tag's rest parameter comes right after its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'; rest parameters elsewhere aren't supported yet", rest.start, rest.end);
+    }
     if (f.async && f.generator) throw unsupported("async generators", f);
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
