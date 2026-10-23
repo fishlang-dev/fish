@@ -2150,7 +2150,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const element = array.element;
     const t = llvm(element);
     const size = bytes(element, "1");
-    const args = e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? owned(a) : value(a)));
+    // What the call takes over is dropped if a later argument panics before the call.
+    const args = delivered((hand) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? hand(owned(a), element) : value(a))));
     const [lengthAt, length] = [temp(), temp()];
     emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     emit(`${length} = load i64, ptr ${lengthAt}`);
@@ -2310,8 +2311,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const inner = array.element as ArrayType;
       cloneAll(at, array.element, (slot) => cloneAll(slot, inner.element));
     } else {
+      // The arguments run first, as in JavaScript, before anything is cloned.
+      const sources = e.args.map((a) => value(a));
       cloneAll(at, array.element);
-      for (const a of e.args) cloneAll(value(a), array.element);
+      for (const from of sources) cloneAll(from, array.element);
     }
     const v = temp();
     emit(`${v} = load ${ARRAY}, ptr ${out}`);
@@ -2370,12 +2373,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${v} = load ${t}, ptr ${slot}`);
     if (searching) {
       const hit = label();
-      let same = equals(v, element, args[0]!, types.get(e.args[0]!)!);
+      let same = equals(v, element, args[0]!, valueType(e.args[0]!));
       // `includes` finds NaN, as JavaScript's SameValueZero does; `indexOf` never does.
-      if (method === "includes" && isFloat(lower(element)) && isFloat(lower(types.get(e.args[0]!)!))) {
+      if (method === "includes" && isFloat(lower(element)) && isFloat(lower(valueType(e.args[0]!)))) {
         const [here, there, both, either] = [temp(), temp(), temp(), temp()];
         emit(`${here} = fcmp uno ${t} ${v}, ${v}`);
-        emit(`${there} = fcmp uno ${llvm(lower(types.get(e.args[0]!)!))} ${args[0]}, ${args[0]}`);
+        emit(`${there} = fcmp uno ${llvm(lower(valueType(e.args[0]!)))} ${args[0]}, ${args[0]}`);
         emit(`${both} = and i1 ${here}, ${there}`);
         emit(`${either} = or i1 ${same}, ${both}`);
         same = either;
@@ -2402,7 +2405,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const before = temp();
       emit(`${before} = phi ptr [ ${so}, %${from} ], [ ${withSep}, %${sepEnd} ]`);
       const mark = pending.length;
-      const piece = written(lower(element) === "string" ? convert(v, element, "string") : v, lower(element));
+      const base = lower(element);
+      const plain = isInteger(base) || isFloat(base) || base === "boolean";
+      const piece = plain ? written(v, base) : written(convert(v, element, "string"), "string");
       const made = pending.splice(mark);
       const after = concat(before, piece);
       emit(`call void @fsh_rt_str_release(ptr ${before})`);

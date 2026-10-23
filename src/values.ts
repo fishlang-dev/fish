@@ -635,7 +635,7 @@ export function expressions(ctx: Context) {
         if (p.rest) throw unsupported("rest patterns", p.rest);
         if (p.elements.some((x) => x === undefined)) throw unsupported("holes in array patterns", p);
         const array = members.find(isArray);
-        if (members.some(isTuple)) throw unsupported("array patterns over tuples in 'match'; take the tuple apart first, as in 'const [a, b] = t',", p);
+        if (members.some(isTuple)) throw new CompileError("array patterns over tuples in 'match' are not supported yet; take the tuple apart first, as in 'const [a, b] = t'", p.start, p.end);
         if (!array || members.length > 1) throw never();
         const items = p.elements as Pattern[];
         for (const item of items) pattern(item, array.element, borrowing);
@@ -1003,7 +1003,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
     }
     const [callback, init] = e.args as [Expr, Expr | undefined];
-    if (callback.kind !== "arrow") throw unsupported(`callbacks passed to '${name}' by name; write the arrow function in place`, callback);
+    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place; passing a function by name isn't supported yet`, callback.start, callback.end);
     const element = isCopy(array.element) ? array.element : refType(array.element, false);
     const acc = !reducing ? undefined : init ? widenLet(value(init)) : array.element;
     const params = acc ? [acc, element, "i64" as const] : [element, "i64" as const];
@@ -1054,7 +1054,7 @@ export function expressions(ctx: Context) {
       }
       return { type: "void", what };
     }
-    if (compare.kind !== "arrow") throw unsupported("comparators passed to 'sort' by name; write the arrow function in place", compare);
+    if (compare.kind !== "arrow") throw new CompileError("'sort' takes a comparator written in place, like '(a, b) => a - b'; passing a function by name isn't supported yet", compare.start, compare.end);
     if (compare.params.length > 2) throw new CompileError("'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
     const element = isCopy(array.element) ? array.element : refType(array.element, false);
     expect(compare, functionType(["a", "b"], [element, element], "void"));
@@ -1133,6 +1133,8 @@ export function expressions(ctx: Context) {
   // its elements, and the expression becomes that field's read.
   function untuple(e: Expr): boolean {
     if (e.kind !== "index") return false;
+    // Named as the object of an index, as the index's own check would name it.
+    if (e.object.kind === "ident") objects.add(e.object);
     const through = value(e.object);
     // Whatever reads the object next, the index's check or the field's, takes this type, so a
     // chain of indexes is checked once, not once per level and again for each.
@@ -1172,9 +1174,8 @@ export function expressions(ctx: Context) {
         expect(a, array);
         const t = value(a);
         const given = isRefType(t) ? t.to : t;
-        // An empty literal, `[]`, is an empty array of any element type.
-        if (a.kind === "array" && a.elements.length === 0) types.set(a, array);
-        else if (!fits(given, array)) throw new CompileError(`'concat' joins arrays of the same element type, '${show(array)}', not '${show(t)}'; to add single values, push them`, a.start, a.end);
+        // A literal, `[]` and `[2]` among them, takes the element type as an annotated one does.
+        if (!(a.kind === "array" && literalArray(a, t, array)) && !fits(given, array)) throw new CompileError(`'concat' joins arrays of the same element type, '${show(array)}', not '${show(t)}'; to add single values, push them`, a.start, a.end);
         coercions.set(a, refType(array, false));
       }
       return { type: array, what: "'concat'" };
@@ -1194,8 +1195,9 @@ export function expressions(ctx: Context) {
       coerce(a, t, want, `argument of type '${show(t)}' is not assignable to parameter of type '${show(want)}'`);
     };
     if (name === "join") {
-      const element = lower(array.element);
-      if (!(isNumeric(element) || element === "boolean" || element === "string")) {
+      // Literals, and unions of them, are written as their values.
+      const writable = (t: Type): boolean => isNumeric(t) || t === "boolean" || t === "string" || (typeof t !== "string" && (t.kind === "literal" || (t.kind === "union" && t.members.every(writable))));
+      if (!writable(lower(array.element))) {
         throw new CompileError(`'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${show(array.element)}'`, callee.start, callee.end);
       }
       if (e.args[0]) argument(e.args[0], "string");
@@ -2708,7 +2710,7 @@ export function expressions(ctx: Context) {
       else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
-      path = `${root.kind === "member" ? `.${root.name}` : "[...]"}${path}`;
+      path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${root.name}`) : "[...]"}${path}`;
       root = root.object;
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {
@@ -2973,7 +2975,7 @@ export function expressions(ctx: Context) {
 
   // How a place reads in a message, like `p.inner.x`.
   function placeText(e: Expr): string {
-    if (e.kind === "member") return `${placeText(e.object)}.${e.name}`;
+    if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${e.name}`;
     if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }

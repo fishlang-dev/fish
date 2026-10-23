@@ -1449,7 +1449,8 @@ export function check(written: Stmt[], library = false): Checked {
 
     function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
       const scope = scopes[scopes.length - 1]!;
-      if (scope.has(name)) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
+      // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
+      if (scope.has(name) && !name.startsWith("[")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = { name, type, mutable, param, id: nextId++ };
       depths.set(local, scopes.length);
       scope.set(name, local);
