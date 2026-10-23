@@ -8,7 +8,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, type ClosureType, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, type ClosureType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -2018,6 +2018,99 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return v;
   }
 
+  // A position as JavaScript reads one against a length: a negative one counts from the end,
+  // and either is kept between 0 and the length.
+  function position(v: string, length: string): string {
+    const [negative, fromEnd, low, high, past, kept, result] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${negative} = icmp slt i64 ${v}, 0`);
+    emit(`${fromEnd} = add i64 ${length}, ${v}`);
+    emit(`${low} = icmp slt i64 ${fromEnd}, 0`);
+    emit(`${high} = select i1 ${low}, i64 0, i64 ${fromEnd}`);
+    emit(`${past} = icmp sgt i64 ${v}, ${length}`);
+    emit(`${kept} = select i1 ${past}, i64 ${length}, i64 ${v}`);
+    emit(`${result} = select i1 ${negative}, i64 ${high}, i64 ${kept}`);
+    return result;
+  }
+
+  // `includes`, `indexOf`, `join` and `slice`: one loop over the elements from a start
+  // position, reading each where it lives.
+  function readingLoop(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+    const element = array.element;
+    const t = llvm(element);
+    const [lengthAt, dataAt, length, data] = [temp(), temp(), temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    const args = e.args.map((a) => value(a));
+    const searching = method === "includes" || method === "indexOf";
+    const start = method === "slice" || method === "indexOf" ? (args[method === "slice" ? 0 : 1] ? position(args[method === "slice" ? 0 : 1]!, length) : "0") : "0";
+    const end = method === "slice" && args[1] ? position(args[1], length) : length;
+    const result: Type = searching ? (method === "includes" ? "boolean" : "i64") : method === "join" ? "string" : array;
+    const out = alloca(llvm(result));
+    if (searching) emit(`store ${llvm(result)} ${method === "includes" ? "false" : "-1"}, ptr ${out}`);
+    else if (method === "join") emit(`store ptr ${text("")}, ptr ${out}`);
+    else emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    const index = alloca("i64");
+    emit(`store i64 ${start}, ptr ${index}`);
+    const [head, body, next, done] = [label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${end}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const [slot, v] = [temp(), temp()];
+    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    emit(`${v} = load ${t}, ptr ${slot}`);
+    if (searching) {
+      const hit = label();
+      emit(`br i1 ${equals(v, element, args[0]!, types.get(e.args[0]!)!)}, label %${hit}, label %${next}`);
+      startBlock(hit);
+      emit(`store ${llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
+      emit(`br label %${done}`);
+    } else if (method === "join") {
+      // ponytail: each element copies the text so far, quadratic in the result's length; an
+      // in-place append of a uniquely owned string makes it linear.
+      const so = temp();
+      emit(`${so} = load ptr, ptr ${out}`);
+      const [first, separated, joined] = [temp(), label(), label()];
+      emit(`${first} = icmp eq i64 ${i}, 0`);
+      const from = block;
+      emit(`br i1 ${first}, label %${joined}, label %${separated}`);
+      startBlock(separated);
+      const withSep = concat(so, args[0] ?? text(","));
+      emit(`call void @fsh_rt_str_release(ptr ${so})`);
+      const sepEnd = block;
+      emit(`br label %${joined}`);
+      startBlock(joined);
+      const before = temp();
+      emit(`${before} = phi ptr [ ${so}, %${from} ], [ ${withSep}, %${sepEnd} ]`);
+      const mark = pending.length;
+      const piece = written(lower(element) === "string" ? convert(v, element, "string") : v, lower(element));
+      const made = pending.splice(mark);
+      const after = concat(before, piece);
+      emit(`call void @fsh_rt_str_release(ptr ${before})`);
+      for (const p of made) dispose(p.v, p.type);
+      emit(`store ptr ${after}, ptr ${out}`);
+      emit(`br label %${next}`);
+    } else {
+      appended(out, element, copied(v, element));
+      emit(`br label %${next}`);
+    }
+    startBlock(next);
+    const after = temp();
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    const r = temp();
+    emit(`${r} = load ${llvm(result)}, ptr ${out}`);
+    if (!types.has(e) && needsDrop(result)) pending.push({ v: r, type: result });
+    return r;
+  }
+
   // The size in bytes of `count` elements, as LLVM lays them out.
   function bytes(element: Type, count: string): string {
     const [end, size] = [temp(), temp()];
@@ -2069,6 +2162,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       appended(at, type.element, owned(e.args[0]!));
       return undefined;
     }
+    if (["includes", "indexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = unionType([type.element, "null"]);
     field(lengthAt, 1);

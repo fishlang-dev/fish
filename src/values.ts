@@ -13,7 +13,7 @@ import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { STD_BASE } from "./std.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, comparable, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -953,6 +953,7 @@ export function expressions(ctx: Context) {
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
+    if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
@@ -1000,6 +1001,39 @@ export function expressions(ctx: Context) {
     if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
     const type = name === "map" ? arrayType(gives) : name === "filter" ? array : name === "find" ? unionType([array.element, "null"]) : acc ?? "boolean";
     return { type, what: `'${name}'` };
+  }
+
+  // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
+  // `String(x)` would; `slice` gives clones of a range, its positions as JavaScript reads them.
+  function readingCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    const [most, takes] = name === "includes" ? [1, "a value to look for"] : name === "indexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
+    const least = name === "includes" || name === "indexOf" ? 1 : 0;
+    if (e.args.length < least || e.args.length > most) throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
+    const argument = (a: Expr, want: Type) => {
+      expect(a, want);
+      const t = value(a);
+      coerce(a, t, want, `argument of type '${show(t)}' is not assignable to parameter of type '${show(want)}'`);
+    };
+    if (name === "join") {
+      const element = lower(array.element);
+      if (!(isNumeric(element) || element === "boolean" || element === "string")) {
+        throw new CompileError(`'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${show(array.element)}'`, callee.start, callee.end);
+      }
+      if (e.args[0]) argument(e.args[0], "string");
+      return { type: "string", what: "'join'" };
+    }
+    if (name === "slice") {
+      for (const a of e.args) argument(a, "i64");
+      return { type: array, what: "'slice'" };
+    }
+    const [sought, from] = e.args as [Expr, Expr | undefined];
+    expect(sought, array.element);
+    const t = value(sought);
+    if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    if (!comparable(array.element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(array.element)}'`, sought.start, sought.end);
+    if (from) argument(from, "i64");
+    return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
   }
 
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
@@ -2822,7 +2856,9 @@ const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind ===
 // The methods an array has.
 // The methods that run a callback on each element.
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce"]);
-const ARRAY_METHODS = new Set(["push", "pop", ...CALLBACK_METHODS]);
+// The methods that read an array's elements by value.
+const READING_METHODS = new Set(["includes", "indexOf", "join", "slice"]);
+const ARRAY_METHODS = new Set(["push", "pop", ...CALLBACK_METHODS, ...READING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
 const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));
