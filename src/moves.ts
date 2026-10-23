@@ -35,7 +35,7 @@ type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 // The array methods that change their array.
-const ARRAY_CHANGES = new Set(["push", "pop", "sort"]);
+const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill"]);
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union";

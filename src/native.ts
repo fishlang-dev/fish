@@ -465,21 +465,53 @@ void fsh_rt_array_reserve(fsh_array *a, int64_t size) {
   a->capacity = capacity;
 }
 
+// Makes room for at least need elements of size bytes, doubling the buffer as it grows.
+static void fsh_array_room(fsh_array *a, int64_t need, int64_t size) {
+  if (need <= a->capacity) return;
+  int64_t capacity = a->capacity ? a->capacity : 4;
+  while (capacity < need) capacity *= 2;
+  char *data = fsh_rt_alloc(capacity * size);
+  if (a->length) memcpy(data, a->data, a->length * size);
+  fsh_rt_free(a->data);
+  a->data = data;
+  a->capacity = capacity;
+}
+
 // Moves every element of from onto the end of a, then frees from's buffer, whose elements
 // now belong to a.
 void fsh_rt_array_extend(fsh_array *a, fsh_array *from, int64_t size) {
-  if (a->length + from->length > a->capacity) {
-    int64_t capacity = a->capacity ? a->capacity : 4;
-    while (capacity < a->length + from->length) capacity *= 2;
-    char *data = fsh_rt_alloc(capacity * size);
-    if (a->length) memcpy(data, a->data, a->length * size);
-    fsh_rt_free(a->data);
-    a->data = data;
-    a->capacity = capacity;
-  }
+  fsh_array_room(a, a->length + from->length, size);
   if (from->length) memcpy(a->data + a->length * size, from->data, from->length * size);
   a->length += from->length;
   fsh_rt_free(from->data);
+}
+
+// Opens count slots at index at, moving the elements from there up; the caller fills them.
+void fsh_rt_array_open(fsh_array *a, int64_t at, int64_t count, int64_t size) {
+  fsh_array_room(a, a->length + count, size);
+  memmove(a->data + (at + count) * size, a->data + at * size, (a->length - at) * size);
+  a->length += count;
+}
+
+// Moves count elements at index at out into a new array at out, closing the gap.
+void fsh_rt_array_take(fsh_array *a, int64_t at, int64_t count, int64_t size, fsh_array *out) {
+  out->data = count ? fsh_rt_alloc(count * size) : NULL;
+  if (count) memcpy(out->data, a->data + at * size, count * size);
+  out->length = out->capacity = count;
+  memmove(a->data + at * size, a->data + (at + count) * size, (a->length - at - count) * size);
+  a->length -= count;
+}
+
+// Reverses the elements in place, a byte at a time.
+void fsh_rt_array_reverse(fsh_array *a, int64_t size) {
+  for (int64_t i = 0, j = a->length - 1; i < j; i++, j--) {
+    char *x = a->data + i * size, *y = a->data + j * size;
+    for (int64_t b = 0; b < size; b++) {
+      char t = x[b];
+      x[b] = y[b];
+      y[b] = t;
+    }
+  }
 }
 
 // A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a

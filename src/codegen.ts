@@ -2142,6 +2142,121 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
+  // `shift`, `unshift`, `splice`, `reverse` and `fill`. Elements move in and out bitwise, through
+  // the runtime's gap and take helpers; only `fill` makes copies, each stored before the element
+  // it replaces is dropped.
+  function changed(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+    const element = array.element;
+    const t = llvm(element);
+    const size = bytes(element, "1");
+    const args = e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? owned(a) : value(a)));
+    const [lengthAt, length] = [temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    // The values given, stored from index `from` on.
+    const placed = (values: string[], from: string) => {
+      const [dataAt, data] = [temp(), temp()];
+      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+      emit(`${data} = load ptr, ptr ${dataAt}`);
+      values.forEach((v, i) => {
+        const [index, slot] = [temp(), temp()];
+        emit(`${index} = add i64 ${from}, ${i}`);
+        emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
+        emit(`store ${t} ${v}, ptr ${slot}`);
+      });
+    };
+    if (method === "reverse") {
+      emit(`call void @fsh_rt_array_reverse(ptr ${at}, i64 ${size})`);
+      return undefined;
+    }
+    if (method === "unshift") {
+      if (args.length === 0) return undefined;
+      emit(`call void @fsh_rt_array_open(ptr ${at}, i64 0, i64 ${args.length}, i64 ${size})`);
+      placed(args, "0");
+      return undefined;
+    }
+    if (method === "shift") {
+      const option = unionType([element, "null"]);
+      const [empty, some, none, end] = [temp(), label(), label(), label()];
+      emit(`${empty} = icmp eq i64 ${length}, 0`);
+      emit(`br i1 ${empty}, label %${none}, label %${some}`);
+      startBlock(some);
+      const taken = alloca(ARRAY);
+      emit(`call void @fsh_rt_array_take(ptr ${at}, i64 0, i64 1, i64 ${size}, ptr ${taken})`);
+      const [dataAt, data, v] = [temp(), temp(), temp()];
+      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${taken}, i32 0, i32 0`);
+      emit(`${data} = load ptr, ptr ${dataAt}`);
+      emit(`${v} = load ${t}, ptr ${data}`);
+      emit(`call void @fsh_rt_free(ptr ${data})`);
+      const held = convert(v, element, option);
+      const someEnd = block;
+      emit(`br label %${end}`);
+      startBlock(none);
+      const nothing = convert("zeroinitializer", "null", option);
+      const noneEnd = block;
+      emit(`br label %${end}`);
+      startBlock(end);
+      const result = temp();
+      emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+      if (types.has(e)) return convert(result, option, types.get(e)!);
+      pending.push({ v: result, type: option });
+      return result;
+    }
+    if (method === "splice") {
+      const start = position(args[0]!, length);
+      const room = temp();
+      emit(`${room} = sub i64 ${length}, ${start}`);
+      let count = room;
+      if (args[1] !== undefined) {
+        // A count below zero removes nothing, and one past the end removes what is there.
+        const [negative, atLeast, over, kept] = [temp(), temp(), temp(), temp()];
+        emit(`${negative} = icmp slt i64 ${args[1]}, 0`);
+        emit(`${atLeast} = select i1 ${negative}, i64 0, i64 ${args[1]}`);
+        emit(`${over} = icmp sgt i64 ${atLeast}, ${room}`);
+        emit(`${kept} = select i1 ${over}, i64 ${room}, i64 ${atLeast}`);
+        count = kept;
+      }
+      const removed = alloca(ARRAY);
+      emit(`call void @fsh_rt_array_take(ptr ${at}, i64 ${start}, i64 ${count}, i64 ${size}, ptr ${removed})`);
+      const items = args.slice(2);
+      if (items.length > 0) {
+        emit(`call void @fsh_rt_array_open(ptr ${at}, i64 ${start}, i64 ${items.length}, i64 ${size})`);
+        placed(items, start);
+      }
+      const v = temp();
+      emit(`${v} = load ${ARRAY}, ptr ${removed}`);
+      if (!types.has(e)) pending.push({ v, type: array });
+      return v;
+    }
+    // `fill`: a copy of the value in each slot of the range, then the value itself dropped.
+    const given = args[0]!;
+    const from = args[1] !== undefined ? position(args[1], length) : "0";
+    const to = args[2] !== undefined ? position(args[2], length) : length;
+    const index = alloca("i64");
+    emit(`store i64 ${from}, ptr ${index}`);
+    const [head, body, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more, dataAt, data, slot, old, after] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${to}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const copy = copied(given, element);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    emit(`${old} = load ${t}, ptr ${slot}`);
+    emit(`store ${t} ${copy}, ptr ${slot}`);
+    dispose(old, element);
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    dispose(given, element);
+    return undefined;
+  }
+
   // Where `lastIndexOf` searches back from, as an end past it: a negative position counts from
   // the end, and one past the last element starts at the last.
   function lastFrom(v: string, length: string): string {
@@ -2362,6 +2477,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (callee.name === "sort") return sorted(e, type, at);
     if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
+    if (["shift", "unshift", "splice", "reverse", "fill"].includes(callee.name)) return changed(e, callee.name, type, at);
     if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = unionType([type.element, "null"]);

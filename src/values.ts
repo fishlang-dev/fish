@@ -955,6 +955,7 @@ export function expressions(ctx: Context) {
     if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
     if (callee.name === "sort") return sortCall(e, callee, array);
+    if (CHANGING_METHODS.has(callee.name)) return changingCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
@@ -1045,6 +1046,39 @@ export function expressions(ctx: Context) {
     if (!isNumeric(order)) {
       throw new CompileError(`a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${show(c.returns)}'`, compare.start, compare.end);
     }
+    return { type: "void", what };
+  }
+
+  // `shift` moves the first element out; `unshift` moves values in at the front; `splice`
+  // moves a run out and values in where it was; `reverse` and `fill` change the array in place.
+  // What they give, JavaScript's new length for `unshift` and the array itself for `reverse`
+  // and `fill`, they don't.
+  function changingCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    if (!place(callee.object)) throw new CompileError(`'${name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
+    changeable(callee.object, name);
+    const element = (a: Expr) => {
+      expect(a, array.element);
+      const t = value(a);
+      coerce(a, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+    };
+    const position = (a: Expr) => {
+      expect(a, "i64");
+      const t = value(a);
+      coerce(a, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
+    };
+    const counts: Record<string, [number, number, string]> = {
+      shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
+      splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
+    };
+    const [least, most, takes] = counts[name]!;
+    if (e.args.length < least || e.args.length > most) throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
+    if (name === "unshift") e.args.forEach(element);
+    if (name === "splice") e.args.forEach((a, i) => (i < 2 ? position(a) : element(a)));
+    if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
+    const what = `'${name}', which changes its array in place,`;
+    if (name === "shift") return { type: unionType([array.element, "null"]), what: "'shift'" };
+    if (name === "splice") return { type: array, what: "'splice'" };
     return { type: "void", what };
   }
 
@@ -2943,7 +2977,9 @@ const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "red
 const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS]);
+// The methods that change an array in place, beside push, pop and sort.
+const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill"]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
 const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));
