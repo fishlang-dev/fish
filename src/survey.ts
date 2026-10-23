@@ -47,7 +47,8 @@ const RULES: Rule[] = [
   { id: "parse", action: "unsupported", title: "files Fish's parser can't read", feature: "parser gaps" },
   { id: "unreadable", action: "unsupported", title: "files that couldn't be opened" },
   { id: "jsx", action: "unsupported", title: "JSX in .tsx files", feature: "JSX for server-side HTML" },
-  { id: "modules", action: "unsupported", title: "imports and exports between files (multi-file programs)", feature: "Multi-file programs" },
+  { id: "moduleForms", action: "unsupported", title: "namespace imports, 'import x = require()', 'export =' and dynamic import()", feature: "Namespace imports" },
+  { id: "pathAliases", action: "unsupported", title: "imports through path aliases such as '@/lib' or '~/lib'", feature: "Path aliases" },
   { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "unsupported", title: "destructuring in declarations and parameters", feature: "Destructuring" },
@@ -57,7 +58,8 @@ const RULES: Rule[] = [
   { id: "tuples", action: "unsupported", title: "tuple types", feature: "Tuples" },
   { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
   { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
-  { id: "arrayMethods", action: "unsupported", title: "array methods such as map, filter and reduce", feature: "Array methods" },
+  { id: "arrayMethods", action: "unsupported", title: "the array methods forEach and flatMap", feature: "forEach and flatMap" },
+  { id: "arrayMutation", action: "unsupported", title: "splice, shift, unshift, reverse, fill, flat and findIndex on arrays", feature: "Array mutation methods" },
   { id: "collections", action: "unsupported", title: "Map and Set", feature: "Map and Set" },
   { id: "regex", action: "unsupported", title: "regex literals", feature: "Regex" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
@@ -65,7 +67,7 @@ const RULES: Rule[] = [
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
   { id: "genericMethods", action: "unsupported", title: "type parameters on methods and arrow functions (generic methods, interfaces and arrows)", feature: "Generic methods, interfaces and arrows" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
-  { id: "tagged", action: "unsupported", title: "tagged templates", feature: "Comptime tagged templates" },
+  { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math, parseInt, parseFloat and Number() (number parsing and Math)", feature: "Number parsing and Math" },
   { id: "process", action: "unsupported", title: "process (process environment)", feature: "Process environment" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
@@ -83,7 +85,10 @@ const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupp
 // across them: a careful codebase scores near 5, a library leaning on `any` near 40, a DOM
 // implementation patching prototypes near 90.
 const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
-const ARRAY_METHODS = new Set(["map", "filter", "find", "findIndex", "some", "every", "reduce", "forEach", "flatMap", "sort", "splice"]);
+// Array methods Fish doesn't have yet, by name; `concat`, `lastIndexOf` and the like are left
+// out, since strings have them too.
+const ARRAY_METHODS = new Set(["forEach", "flatMap"]);
+const ARRAY_MUTATION = new Set(["splice", "shift", "unshift", "reverse", "fill", "flat", "findIndex"]);
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 const LOCAL_FORMS = new Set(["enum", "typeAlias", "interface"]);
 
@@ -339,10 +344,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
     case "let":
       letRules(n, ambient, head, push);
       break;
-    case "export":
-      // `export function` with a body is how Fish exports to C; other exports are between files.
-      if (!ambient && !(isNode(n.body) && n.body.kind === "function" && n.body.body !== undefined)) push("modules");
-      break;
     case "function":
       // A declaration carries `macro` and an expression a body; a function type has neither.
       if (!("macro" in n) && "body" in n) push("A9");
@@ -365,8 +366,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   const [first] = Array.isArray(n.args) ? n.args : [];
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
   const specifier = n.module ?? n.require ?? dynamic;
-  const rule = moduleRule(specifier);
-  if (MODULE_FORMS.has(n.kind)) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
+  const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
+  if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
@@ -375,11 +376,14 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   return found;
 }
 
-// What an import or re-export needs: another file of the program (a relative path, or a path
-// alias written as `~/`, `@/` or `#`), a Node built-in, or an npm package, told apart by how its
-// specifier is written.
-function moduleRule(specifier: unknown): string {
-  if (typeof specifier !== "string" || /^([./#~]|@\/)/.test(specifier)) return "modules";
+// What an import, export or re-export still needs, if anything: imports and exports between the
+// program's files work, except in the forms Fish refuses; a path alias (`~/`, `@/` or `#`), a
+// Node built-in or an npm package is told apart by how its specifier is written.
+function moduleRule(n: Node, specifier: unknown): string | undefined {
+  const form = n.kind === "importEquals" || n.kind === "exportAssign" || n.kind === "exportAsNamespace" || n.kind === "import" && (n.namespace !== undefined || !("module" in n)) || (n.kind === "exportAll" && n.alias !== undefined);
+  if (typeof specifier !== "string") return form ? "moduleForms" : undefined;
+  if (/^[#~]|^@\//.test(specifier)) return "pathAliases";
+  if (specifier.startsWith(".")) return form ? "moduleForms" : undefined;
   return specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
 }
 
@@ -412,6 +416,7 @@ function callRules(n: Node, push: (id: string) => void) {
   const [first] = n.args as Node[];
   if (name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) push("G10");
   if (ARRAY_METHODS.has(name)) push("arrayMethods");
+  if (ARRAY_MUTATION.has(name)) push("arrayMutation");
 }
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
