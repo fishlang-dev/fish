@@ -11,7 +11,8 @@ export type Access = "public" | "private" | "protected";
 export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" };
 
 // Fields are sorted by name, which is also their order in memory.
-export type ObjectType = { kind: "object"; fields: Field[] };
+// A tuple is an object whose fields are its positions, `0`, `1` and on, marked `tuple`.
+export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
@@ -639,6 +640,8 @@ export function isCopy(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
+  // A tuple copies when everything in it does, as a union does.
+  if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type));
   return t.kind === "union" && t.members.every(isCopy);
 }
 
@@ -788,6 +791,25 @@ export function keyOf(t: Type): string {
   return typeof t === "string" ? t : `{${keys.get(t)}}`;
 }
 
+// `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
+export function tupleType(elements: Type[]): ObjectType {
+  const key = `tuple ${elements.map(keyOf).join(",")}`;
+  let t = interned.get(key);
+  if (!t) {
+    t = { kind: "object", fields: objectType(elements.map((type, i) => ({ name: String(i), type }))).fields, tuple: true };
+    interned.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// A tuple's element types, in order.
+export function elementsOf(t: ObjectType): Type[] {
+  return t.fields.toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+}
+
+export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
+
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
@@ -901,6 +923,11 @@ export function fits(from: Type, to: Type): boolean {
       && sig.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
   }
   if (typeof from !== "string" && from.kind === "ref") return false;
+  // A tuple fits only a tuple of its length, element by element.
+  if (isTuple(from) || isTuple(to)) {
+    const [a, b] = [from as ObjectType, to as ObjectType];
+    return isTuple(from) && isTuple(to) && a.fields.length === b.fields.length && b.fields.every((f) => fits(field(a, f.name)!.type, f.type));
+  }
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
   // A type parameter fits through its bound's fields, as any instance of it would.
@@ -953,6 +980,7 @@ export function show(t: Type): string {
   if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
+  if (t.tuple) return `[${elementsOf(t).map(show).join(", ")}]`;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
   return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;

@@ -8,7 +8,6 @@ const TYPES: [string, string][] = [
   ["readonly i64", "'readonly' types"],
   ["unique symbol", "'unique' types"],
   ["typeof x.y", "'typeof' types other than of a top-level function or const"],
-  ["[i64, i64]", "tuple types"],
   ["<T>(x: T) => T", "generic function types"],
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],

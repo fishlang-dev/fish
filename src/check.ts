@@ -2,7 +2,7 @@ import { checkOverrides, declareClass, extend, isLifetime, type Body, type Class
 import { CompileError } from "./diag.ts";
 import { stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
-import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -15,7 +15,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { functionType, holdsPattern, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { functionType, holdsPattern, isTuple, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -755,6 +755,8 @@ export function check(written: Stmt[], library = false): Checked {
     // What the conditions guarding the code being checked prove, innermost last. A `let`
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
+    // The list being checked and the place in it, for a statement that becomes several.
+    let siblings: { list: Stmt[]; at: number } | undefined;
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
     // How many comptime blocks or expressions the code being checked is inside, and for each
@@ -945,12 +947,42 @@ export function check(written: Stmt[], library = false): Checked {
     // the statements after it.
     function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
       const before = facts.length;
-      for (const s of list) {
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i]!;
+        siblings = { list, at: i };
         const mark = changed.length;
         const after = each(s, statement);
         if (after) facts.push(current(after, mark));
       }
       facts.length = before;
+    }
+
+    // `const [a, b] = t` over a tuple: the tuple goes to a variable of its own, and each name
+    // becomes a `const` of its element after it, in the list being checked, so the names own
+    // the parts as Rust's `let` does.
+    function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" }>, place: { list: Stmt[]; at: number } | undefined): undefined {
+      if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
+      if (pattern.rest) throw unsupported("rest patterns", pattern.rest);
+      const names = pattern.elements.map((p) => {
+        if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
+        return p;
+      });
+      const held = `tuple.${s.start}`;
+      Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+      statement(s);
+      const type = locals.get(s)!.type;
+      const tuple = typeof type !== "string" && type.kind === "ref" ? type.to : type;
+      if (!isTuple(tuple)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(type)}'`, pattern.start, pattern.end);
+      const count = (tuple as ObjectType).fields.length;
+      if (names.length > count) throw new CompileError(`tuple type '${show(tuple)}' of length ${count} has no element at index ${count}`, pattern.start, pattern.end);
+      const lets: Stmt[] = names.flatMap((n, i): Stmt[] => {
+        if (!n) return [];
+        const at = { start: n.start, end: n.end };
+        const element: Expr = { kind: "index", object: { kind: "ident", name: held, ...at }, index: { kind: "int", value: BigInt(i), ...at }, optional: false, ...at };
+        return [{ kind: "let", keyword: s.keyword, declarations: [{ target: n, type: undefined, init: element, ...at }], ...at }];
+      });
+      place.list.splice(place.at + 1, 0, ...lets);
+      return undefined;
     }
 
     // A whole value written through a narrowed `Mut` may be another member, so from here to the
@@ -1107,6 +1139,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
           const d = s.declarations[0]!;
+          if (d.target.kind === "array") return destructured(s, d, d.target, siblings);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);

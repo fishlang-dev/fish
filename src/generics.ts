@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { elementsOf, field, fits, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -83,6 +83,12 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
+    return;
+  }
+  // `[A, B]` against a tuple of its length matches element by element.
+  if (node.kind === "tuple" && isTuple(arg) && (arg as ObjectType).fields.length === node.elements.length) {
+    const elements = elementsOf(arg as ObjectType);
+    node.elements.forEach((n, i) => infer(n.type, elements[i]!, names, bindings, at));
     return;
   }
   // `T[]` and `Array<T>` against an array match its element type.
@@ -385,7 +391,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       if (f.accessor && type.kind === "interface") {
         throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
       }
-      if (!f.accessor && (type.kind === "interface" || type.kind === "function" || (type.kind === "object" && concrete(type)))) {
+      // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
+      if (!f.accessor && (type.kind === "interface" || type.kind === "function" || (type.kind === "object" && !type.tuple && concrete(type)))) {
         found!.set(i, type);
         if (written !== type) borrows.set(i, written as RefType);
       }

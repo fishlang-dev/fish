@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -139,6 +139,10 @@ export const substituted = new WeakSet<Expr>();
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
 
+// The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
+// body's next instance checks again as tuples.
+const tupleLiterals = new WeakSet<Expr>();
+
 const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
 // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
@@ -165,6 +169,10 @@ export function expressions(ctx: Context) {
   const wanted = new Map<Expr, Type>();
   // Arrows checked to own what they capture, being stored.
   const owning = new WeakSet<Expr>();
+  // Array literals written where a tuple is expected, which are that tuple, and those passed where
+  // a generic function takes a tuple, which are a tuple of their own elements' types.
+  const tuples = new Map<Expr, ObjectType>();
+  const shaped = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
   const objects = new WeakSet<Expr>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -278,6 +286,12 @@ export function expressions(ctx: Context) {
     if (e.kind === "array" && isArray(t)) {
       wanted.set(e, t.element);
       for (const x of e.elements) if (x) expect(x, t.element);
+    }
+    // A literal where a tuple is expected is that tuple, each element expected to be its own.
+    if ((e.kind === "array" || tupleLiterals.has(e)) && isTuple(t)) {
+      tuples.set(e, t as ObjectType);
+      const elements = elementsOf(t as ObjectType);
+      tupleParts(e).forEach((x, i) => x && elements[i] !== undefined && expect(x, elements[i]!));
     }
     if (e.kind === "conditional") {
       expect(e.then, t);
@@ -889,6 +903,7 @@ export function expressions(ctx: Context) {
       }
       // A parameter of a function that isn't generic has its type before the call.
       if (a.kind !== "arrow" && known) expect(a, known[i]!);
+      if (!known && a.kind === "array" && target.params[i]?.type?.kind === "tuple") shaped.add(a);
     });
   }
 
@@ -1080,6 +1095,51 @@ export function expressions(ctx: Context) {
     if (name === "shift") return { type: unionType([array.element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
     return { type: "void", what };
+  }
+
+  // `[a, b]` written where a tuple is expected: each element checked against its own type, then
+  // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
+  function tupleLiteral(e: Expr, tuple: ObjectType): Type {
+    const elements = elementsOf(tuple);
+    const given = tupleParts(e) as Expr[];
+    if (given.length !== elements.length) {
+      throw new CompileError(`type '${show(tuple)}' has ${elements.length} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
+    }
+    const spread = given.find((x) => x.kind === "spread");
+    if (spread) throw unsupported("spread elements in tuple literals", spread);
+    given.forEach((x, i) => {
+      const t = value(x);
+      coerce(x, t, elements[i]!, `type '${show(t)}' is not assignable to type '${show(elements[i]!)}'`);
+    });
+    if (e.kind === "array") {
+      Object.assign(e, { kind: "object", props: given.map((value, i) => ({ kind: "property", key: String(i), value, start: value.start, end: value.end })) });
+      delete (e as { elements?: unknown }).elements;
+      tupleLiterals.add(e);
+    }
+    return tuple;
+  }
+
+  // `t[0]` on a tuple reads its field `0`: the index is a number written in place naming one of
+  // its elements, and the expression becomes that field's read.
+  function untuple(e: Expr): boolean {
+    if (e.kind !== "index") return false;
+    const through = value(e.object);
+    const object = isRefType(through) ? through.to : through;
+    if (!isTuple(object)) return false;
+    const count = (object as ObjectType).fields.length;
+    if (e.index.kind !== "int") throw new CompileError(`a tuple's element is named by a number written in place, like '[0]'; '${show(object)}' has no element for a computed index`, e.index.start, e.index.end);
+    const n = e.index.value;
+    if (n >= BigInt(count)) throw new CompileError(`tuple type '${show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
+    if (e.optional) throw unsupported("optional index expressions", e);
+    Object.assign(e, { kind: "member", name: String(n), optional: false });
+    delete (e as { index?: unknown }).index;
+    return true;
+  }
+
+  // A tuple literal's elements, as written or once it became an object.
+  function tupleParts(e: Expr): (Expr | undefined)[] {
+    if (e.kind === "array") return e.elements;
+    return e.kind === "object" ? e.props.map((p) => (p.kind === "property" ? p.value : undefined)) : [];
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -1819,6 +1879,7 @@ export function expressions(ctx: Context) {
         if (e.object.kind === "ident") objects.add(e.object);
         // An enum's reverse mapping, `Color[0]`, has no meaning yet.
         if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
+        if (untuple(e)) return typeOf(e);
         const through = value(e.object);
         const object = isRefType(through) ? through.to : through;
         const array = isArray(object);
@@ -1898,12 +1959,20 @@ export function expressions(ctx: Context) {
         if (!calls.has(e)) load();
         return linked(e) ? optional(found.type, e) : found.type;
       }
-      case "object":
+      case "object": {
+        const tuple = tuples.get(e);
+        if (tuple) return tupleLiteral(e, tuple);
         return objectType(fields(e.props.map(property), e.props));
+      }
       // An array literal holds its elements' types, each widened as a `let` widens; with none, a
       // declared type has to say what it holds.
       case "array": {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
+        const tuple = tuples.get(e);
+        if (tuple) return tupleLiteral(e, tuple);
+        if (shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
+          return tupleLiteral(e, tupleType((e.elements as Expr[]).map((x) => widenLet(value(x)))));
+        }
         const elements = e.elements as Expr[];
         const spread = elements.find((x) => x.kind === "spread");
         if (spread) throw unsupported("spread elements", spread);
@@ -2493,6 +2562,7 @@ export function expressions(ctx: Context) {
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
   function assignable(target: Expr, reads: boolean): Type {
+    untuple(target);
     if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(target, types);
