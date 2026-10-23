@@ -89,6 +89,89 @@ export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
 };
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
+
+// A template literal type with open holes, like `${number}px`: the strings that match it. Its
+// values are strings, so it is a checker type only, which `lower` makes `string`.
+export type PatternType = { kind: "pattern"; quasis: string[]; holes: Hole[]; fields: Field[] };
+export type Hole = "string" | Numeric;
+
+const patterns = new Map<string, PatternType>();
+export function patternType(quasis: string[], holes: Hole[]): Type {
+  // `${string}` alone is every string.
+  if (holes.length === 1 && holes[0] === "string" && quasis.every((q) => q === "")) return "string";
+  const key = JSON.stringify([quasis, holes]);
+  let t = patterns.get(key);
+  if (!t) {
+    t = { kind: "pattern", quasis, holes, fields: [] };
+    patterns.set(key, t);
+    keys.set(t, `pattern ${key}`);
+  }
+  return t;
+}
+
+// Whether a pattern is anywhere in `t`, where lowering it to `string` would lose what it asks.
+export function holdsPattern(t: Type): boolean {
+  if (typeof t === "string") return false;
+  let found = patterned.get(t);
+  if (found === undefined) {
+    patterned.set(t, false);
+    const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
+      : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete] : [];
+    found = t.kind === "pattern" || parts.some(holdsPattern);
+    patterned.set(t, found);
+  }
+  return found;
+}
+const patterned = new WeakMap<Exclude<Type, string>, boolean>();
+
+// Whether two types are one once lowered, except where `to` holds a pattern that lowering
+// would make a plain string: then fitting decides, part by part.
+export function sameLowered(from: Type, to: Type): boolean {
+  return lower(from) === lower(to) && (!holdsPattern(to) || holdsPattern(from) && shapeKey(from) === shapeKey(to));
+}
+
+// The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
+// text up to the next piece's first occurrence (one character before another hole), the last
+// takes what is left before the final piece.
+export function splitTemplate(s: string, quasis: string[]): string[] | undefined {
+  const last = quasis.length - 1;
+  const [head, tail] = [quasis[0]!, quasis[last]!];
+  if (!s.startsWith(head) || !s.endsWith(tail) || s.length < head.length + tail.length) return undefined;
+  const end = s.length - tail.length;
+  const parts: string[] = [];
+  let pos = head.length;
+  for (let i = 1; i < last; i++) {
+    const next = quasis[i]!;
+    const at = next === "" ? (pos < end ? pos + 1 : -1) : s.indexOf(next, pos);
+    if (at < 0 || at + next.length > end) return undefined;
+    parts.push(s.slice(pos, at));
+    pos = at + next.length;
+  }
+  parts.push(s.slice(pos, end));
+  return parts;
+}
+
+// Whether a hole of type `t` takes `text`: any text for a string, the text a number of that type
+// prints as for a number type, a literal's own text, or for a union, what any member takes.
+export function textFits(text: string, t: Type): boolean {
+  if (t === "string") return true;
+  if (t === "boolean") return text === "true" || text === "false";
+  if (isInteger(t)) {
+    if (!/^-?(0|[1-9]\d*)$/.test(text)) return false;
+    const { bits, signed } = INTEGERS[t];
+    const n = BigInt(text);
+    return signed ? n >= -(1n << BigInt(bits - 1)) && n < 1n << BigInt(bits - 1) : n >= 0n && n < 1n << BigInt(bits);
+  }
+  if (isFloat(t)) return text !== "" && text.trim() === text && !Number.isNaN(Number(text));
+  if (typeof t === "string") return false;
+  if (t.kind === "literal") return !t.owner && String(t.value) === text;
+  if (t.kind === "union") return t.members.some((m) => textFits(text, m));
+  if (t.kind === "pattern") {
+    const parts = splitTemplate(text, t.quasis);
+    return parts !== undefined && parts.every((p, i) => textFits(p, t.holes[i]!));
+  }
+  return false;
+}
 export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
 export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
 
@@ -105,7 +188,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -535,7 +618,7 @@ const variants = new Map<string, VariantType>();
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
 export function isCopy(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "ref" || t.kind === "pointer") return true;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   return t.kind === "union" && t.members.every(isCopy);
@@ -631,6 +714,7 @@ const wrappers = new Map<string, ParamType>();
 export function lower(t: Type): Type {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn") return t;
   if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
+  if (t.kind === "pattern") return "string";
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
   if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
@@ -757,8 +841,15 @@ export function derives(t: ClassType, base: ClassType): boolean {
 // Whether a value of `from` fits where `to` is declared: the same type, or an object or
 // instance with at least the fields of the object type `to`, each fitting in turn.
 export function fits(from: Type, to: Type): boolean {
+  // A string literal fits a pattern it matches; a pattern is a string. Both are strings once
+  // lowered, so this comes first.
+  const target = typeof to !== "string" && to.kind === "param" && to.concrete ? to.concrete : to;
+  if (from !== target && typeof target !== "string" && target.kind === "pattern") {
+    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, target));
+    return typeof from !== "string" && from.kind === "literal" && typeof from.value === "string" && !from.owner && textFits(from.value, target);
+  }
   // In an instance, a type parameter and the concrete type it stands for are one value.
-  if (from === to || lower(from) === lower(to) || from === "never" || sameCallable(from, to)) return true;
+  if (from === to || sameLowered(from, to) || from === "never" || sameCallable(from, to)) return true;
   // A future fits the `Promise<T>` describing it, as an async function's result.
   if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
   // A reference reads the value where it lives, so it fits only a reference to the same type;
@@ -776,6 +867,7 @@ export function fits(from: Type, to: Type): boolean {
   }
   // A union fits where every member it may hold does, as an enum fits an i64.
   if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
+  if (typeof from !== "string" && from.kind === "pattern") return to === "string";
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // A closure fits a function type taking the same parameters, or the first of them, and
   // returning what it returns, or anything when it returns nothing.
@@ -823,6 +915,7 @@ export function show(t: Type): string {
   if (typeof t === "string") return t;
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
+  if (t.kind === "pattern") return `\`${t.quasis.map((q, i) => (i === 0 ? q : `\${${show(t.holes[i - 1]!)}}${q}`)).join("")}\``;
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
   if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;

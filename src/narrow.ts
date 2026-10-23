@@ -16,6 +16,7 @@ export function category(t: Type): string {
   if (t === "null") return "undefined";
   if (typeof t === "string") return t;
   if (t.kind === "literal") return typeof t.value === "bigint" ? "number" : typeof t.value;
+  if (t.kind === "pattern") return "string";
   return "object";
 }
 

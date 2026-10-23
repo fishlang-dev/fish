@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, fits, isNumeric, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type ParamType, type Type } from "./typing.ts";
+import { allFields, fits, isNumeric, patternType, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Hole, type ParamType, type Type } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
@@ -153,21 +153,29 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
     return gives === undefined ? t : awaitedType([gives], at, []);
   };
 
-  // A template-literal type with holes of literals: the union of every string it spells. Each
-  // hole is a string, number or boolean literal, or a union of them, spelled as JavaScript would.
+  // A template literal type: the union of every string it spells, where each hole is a literal
+  // or a union of them, spelled as JavaScript would; a hole of `string` or a number type leaves a
+  // pattern, the strings matching it, and a pattern in a hole is spliced in.
   function templateType(quasis: string[], holes: Type[], at: Span, holeAt: Span[]): Type {
-    let spelled = [quasis[0]!];
+    let spelled: { quasis: string[]; holes: Hole[] }[] = [{ quasis: [quasis[0]!], holes: [] }];
     holes.forEach((hole, i) => {
       const members = typeof hole !== "string" && hole.kind === "union" ? hole.members : [hole];
-      const texts = members.map((m) => {
-        if (typeof m !== "string" && m.kind === "literal") return String(m.value);
-        throw new CompileError(`a template literal type's hole takes string, number or boolean literals, or unions of them, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
+      const pieces = members.map((m): { quasis: string[]; holes: Hole[] } => {
+        if (typeof m !== "string" && m.kind === "literal") return { quasis: [String(m.value)], holes: [] };
+        if (m === "string" || isNumeric(m)) return { quasis: ["", ""], holes: [m] };
+        if (typeof m !== "string" && m.kind === "pattern") return { quasis: m.quasis, holes: m.holes };
+        throw new CompileError(`a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
       });
-      if (spelled.length * texts.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
-      spelled = spelled.flatMap((s) => texts.map((t) => s + t + quasis[i + 1]!));
+      if (spelled.length * pieces.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
+      spelled = spelled.flatMap((s) => pieces.map((p) => join(join(s, p), { quasis: [quasis[i + 1]!], holes: [] })));
     });
-    return kept(spelled.map((s) => literalType(s)));
+    return kept(spelled.map((s) => (s.holes.length === 0 ? literalType(s.quasis[0]!) : patternType(s.quasis, s.holes))));
   }
+  // Two templates one after the other: the first's last piece and the second's first run together.
+  const join = (a: { quasis: string[]; holes: Hole[] }, b: { quasis: string[]; holes: Hole[] }) => ({
+    quasis: [...a.quasis.slice(0, -1), a.quasis.at(-1)! + b.quasis[0]!, ...b.quasis.slice(1)],
+    holes: [...a.holes, ...b.holes],
+  });
 
   // `Uppercase<S>` and its kin: each string literal of S changed as JavaScript changes it.
   const intrinsic = (what: string, change: (s: string) => string): Utility => ([s], at) => kept(membersOf(s!, `'${what}'`, at).map((m) => {

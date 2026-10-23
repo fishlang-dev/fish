@@ -113,7 +113,7 @@ const concreteVariants = new WeakMap<VariantType, boolean>();
 // answer is kept, since its fields never change: walking nested types afresh at every level
 // would take time exponential in their depth.
 export function concrete(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal") return true;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
   // An interface describes values without being one, so only a definition check holds one.
   if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));

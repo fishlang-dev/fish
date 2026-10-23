@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -35,7 +35,7 @@ export function isPrint(callee: Expr): boolean {
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 const printable = (t: Type): boolean =>
-  typeof t === "string" || t.kind === "literal" || (t.kind === "union" && t.members.every(printable));
+  typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || (t.kind === "union" && t.members.every(printable));
 
 // What expression checking needs from the program and the function it is in.
 export type Context = {
@@ -1325,7 +1325,7 @@ export function expressions(ctx: Context) {
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
   // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
   function copies(t: Type): boolean {
-    if (typeof t === "string" || t.kind === "literal") return true;
+    if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
     // A generator's frame may hold a view into what it iterates, which a copy would share.
     if (t.kind === "generator") return false;
     if (t.kind === "class") return !classOf(t).methods.has("clone");
@@ -2023,7 +2023,7 @@ export function expressions(ctx: Context) {
     }
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
-    if (type === to || lower(type) === lower(to) || sameCallable(type, to)) return;
+    if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
     if (type === to) return;
@@ -2692,6 +2692,11 @@ export function expressions(ctx: Context) {
 
   // An operand of an enum, a union of integer literals, works as an i64 too.
   function widen(e: Expr, type: Type): Type {
+    // A pattern's value is a string.
+    if (typeof type !== "string" && type.kind === "pattern") {
+      coercions.set(e, "string");
+      return "string";
+    }
     const literals = typeof type !== "string" && type.kind === "union" ? type.members : [type];
     const bases = new Set(literals.map((t) => (typeof t !== "string" && t.kind === "literal" ? baseOf(t) : undefined)));
     const base = bases.size === 1 ? [...bases][0] : undefined;
@@ -2712,7 +2717,7 @@ export function expressions(ctx: Context) {
 }
 
 // A string, or a string literal that isn't an enum's member.
-const isText = (t: Type) => t === "string" || (typeof t !== "string" && t.kind === "literal" && typeof t.value === "string" && !t.owner);
+const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind === "pattern" || (t.kind === "literal" && typeof t.value === "string" && !t.owner)));
 
 // What a string's length, index and methods work on: text, or a union of string literals.
 const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { field, fits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { field, fits, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -577,6 +577,25 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         return matches(member.type!, f.type, found);
       });
     }
+    // A template takes a string literal's text apart; each `infer` hole is its piece of text, as
+    // a literal of the type its bound asks for.
+    if (p.kind === "template") {
+      if (typeof t === "string" || t.kind !== "literal" || typeof t.value !== "string" || t.owner) return false;
+      const parts = splitTemplate(t.value, p.quasis);
+      return parts !== undefined && p.types.every((hole, i) => {
+        const text = parts[i]!;
+        if (hole.kind !== "infer") {
+          if (inferNames(hole).size > 0) throw unsupported("template literal holes holding 'infer' inside other types", hole);
+          return textFits(text, comparable(resolveType(hole), hole));
+        }
+        const bound = hole.constraint ? comparable(resolveType(hole.constraint), hole.constraint) : "string";
+        const value = isInteger(bound) && textFits(text, bound) ? literalType(BigInt(text)) : bound === "boolean" && textFits(text, "boolean") ? literalType(text === "true") : isFloat(bound) && textFits(text, bound) ? bound : literalType(text);
+        if (!fits(value, bound)) return false;
+        const prior = found.get(hole.name);
+        found.set(hole.name, prior ? unionType([prior, value]) : value);
+        return true;
+      });
+    }
     throw unsupported(p.kind === "union" ? "unions holding 'infer'" : `${TYPE_FORMS[p.kind as keyof typeof TYPE_FORMS] ?? "these types"} holding 'infer'`, p);
   }
 
@@ -640,7 +659,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values" };
+const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

@@ -171,7 +171,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }:
 // since a wider object fits an unrelated narrower type.
 export function objectsMeet(a: Type, b: Type): boolean {
   const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
-  const object = (t: Type) => typeof t !== "string" && t.kind !== "literal";
+  const object = (t: Type) => typeof t !== "string" && t.kind !== "literal" && t.kind !== "pattern";
   return members(a).some(object) && members(b).some(object);
 }
 
@@ -179,7 +179,7 @@ export function objectsMeet(a: Type, b: Type): boolean {
 // or two literals of one value, for any members of either when it is a union.
 export function comparable(a: Type, b: Type): boolean {
   const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
-  const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
+  const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : typeof t !== "string" && t.kind === "pattern" ? "string" : t);
   return members(a).some((x) => members(b).some((y) => {
     if (typeof x !== "string" && x.kind === "literal" && typeof y !== "string" && y.kind === "literal") return x.value === y.value;
     return base(x) === base(y) && typeof base(x) === "string";
