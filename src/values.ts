@@ -2489,6 +2489,7 @@ export function expressions(ctx: Context) {
     }
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
+      if (body.params.some((p) => p.comptime)) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
       const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
       if (body.self?.owned && !m.owned) throw refuse("takes its object over", "this: Own<this>");
       if (body.self?.mutable && !body.self.owned && !m.mutable && !m.owned) throw refuse("changes its object", "this: Mut<this>");

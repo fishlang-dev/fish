@@ -603,6 +603,11 @@ export function check(written: Stmt[], library = false): Checked {
   function checkInstance(instance: Instance, outer?: Outer) {
     const f = instance.body;
     if (f.foreign) return foreignSignature(instance);
+    // A comptime parameter's value is the instance's own; one called from C, or kept in an async
+    // function's or a generator's state, has no instance per value.
+    const fixedParam = f.params.find((p) => p.comptime);
+    if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
+    if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     // A closure returns the number type the function type it meets returns, so its literals

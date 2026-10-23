@@ -296,7 +296,10 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
     else sites.delete(at);
     const instance = instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
-    if (instance.depth > 64) throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    if (instance.depth > 64) {
+      const why = f.params.some((p) => p.comptime) ? "a different comptime value or larger type arguments" : "larger type arguments";
+      throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with ${why}`, at.start, at.end);
+    }
     return instance;
   }
 
