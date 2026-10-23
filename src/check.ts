@@ -199,6 +199,10 @@ const RUNTIME_NAMES = new Set([
   ...LOWERED,
 ]);
 
+// The names a loop's pattern binds, made as declarations of the parts; a generic body checked
+// again for another instance meets them already made.
+const loopParts = new WeakSet<Declarator>();
+
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(written: Stmt[], library = false): Checked {
   const program = [...stdFor(written), ...written];
@@ -757,8 +761,6 @@ export function check(written: Stmt[], library = false): Checked {
     const facts: Facts[] = [];
     // The list being checked and the place in it, for a statement that becomes several.
     let siblings: { list: Stmt[]; at: number } | undefined;
-    // The names a loop's pattern binds, made as `const`s of the parts.
-    const loopParts = new WeakSet<Declarator>();
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
     // How many comptime blocks or expressions the code being checked is inside, and for each
@@ -1012,10 +1014,12 @@ export function check(written: Stmt[], library = false): Checked {
         const at = { start: n.start, end: n.end };
         const declarator: Declarator = { target: n, type: undefined, init: part({ kind: "ident", name: held, ...at }), ...at };
         loopParts.add(declarator);
-        return { kind: "let", keyword: "const", declarations: [declarator], ...at };
+        return { kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
       });
       Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
-      s.body.unshift(...lets);
+      // The loop's own body is a block inside the parts' scope, so it may declare their names.
+      const body: Stmt = { kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
+      s.body = [...lets, body];
     }
 
     // A name a loop's pattern binds: its part of the element, borrowed when the element is.
@@ -1027,11 +1031,12 @@ export function check(written: Stmt[], library = false): Checked {
       if (init.kind === "index" && !isTuple(element)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(element)}'`, d.start, d.end);
       const type = value(init);
       const name = (d.target as Extract<Pattern, { kind: "ident" }>).name;
+      // A `let` part of its own may change; a borrowed one is read through.
       if (isRef(whole) && !isCopy(type)) {
         const lent = refType(type, false);
         coerce(init, type, lent, "");
         declare(name, lent, false, false, s);
-      } else declare(name, type, false, false, s);
+      } else declare(name, type, s.keyword === "let", false, s);
       return undefined;
     }
 
@@ -1265,12 +1270,12 @@ export function check(written: Stmt[], library = false): Checked {
           const d = left.declarations[0]!;
           if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) loopPattern(s, d, d.target);
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
-          if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type is the array's element type", d.type.start, d.type.end);
+          if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
           // A string gives each of its code points, as a string of its own.
           if (stringLike(object)) {
-            if (object !== "string") coercions.set(s.right, "string");
+            if (through !== "string") coercions.set(s.right, "string");
             scopes.push(new Map());
             declare(d.target.name, "string", left.keyword === "let", false, left);
             within({ stmt: s, kind: "loop" }, () => scoped(s.body));
@@ -1288,7 +1293,7 @@ export function check(written: Stmt[], library = false): Checked {
             scopes.pop();
             return;
           }
-          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array or a generator, not '${show(object)}'`, s.right.start, s.right.end);
+          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
           declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);

@@ -282,7 +282,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         expr(s.right);
         const place = key(s.right);
         const each = locals.get(s.left as Stmt)!;
-        if (place !== undefined && state) {
+        // A string's loop holds a reference of its own, so its variable stays free to change.
+        const text = (coercions.get(s.right) ?? types.get(s.right)) === "string";
+        if (place !== undefined && state && !text) {
           free(place, s.right, "lend");
           state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
           if (holdsRef(each.type)) state.loans.set(-s.start - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
@@ -296,7 +298,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (holdsRef(each.type)) inherit(each, s.right);
         }
         // Each pass may end the loop, like a condition that may be false.
-        loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => statements(s.body));
+        loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => {
+          // Each pass gives a string's variable a new string, which it owns.
+          if (text) revive(String(each.id));
+          statements(s.body);
+        });
         state?.loans.delete(s.right.start);
         return;
       }
