@@ -141,6 +141,8 @@ type Checker = {
   resolveType(t: TypeNode): Type;
   paramType(p: Param, property?: boolean): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
+  // Resolves a body's own signature, where its parameter names shadow top-level ones.
+  signing<T>(f: Body, run: () => T): T;
   members: Members;
   // The instance being checked, which new instantiations count their depth from.
   checking(): Instance | undefined;
@@ -157,7 +159,7 @@ export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
 
-export function instancing({ resolveType, paramType, withScope, members, checking, classParams, comptimeArgument }: Checker) {
+export function instancing({ resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, Bound>>();
   // Which implicit parameters are references to their type, and how.
@@ -179,6 +181,9 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // A body's written return type. A reference to the type a reference parameter borrows is
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
   function returnTypeOf(f: Body, scope: Map<string, Type>): Type | undefined {
+    return signing(f, () => writtenReturn(f, scope));
+  }
+  function writtenReturn(f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
     // as an async function's own result, which its `Promise<T>` describes.
@@ -200,7 +205,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   // type, which is what an interface's method signature is compared with.
   function declaredParams(f: Body): Type[] {
     const implicit = implicitOf(f);
-    return withScope(f.scope ?? new Map(), () => f.params.map((p, i) => lentAs(f, i, implicit.get(i)) ?? paramType(p, f.self?.constructor)));
+    return signing(f, () => withScope(f.scope ?? new Map(), () => f.params.map((p, i) => lentAs(f, i, implicit.get(i)) ?? paramType(p, f.self?.constructor))));
   }
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
@@ -328,8 +333,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   function paramTypes(instance: Instance, scope = instance.bindings): Type[] {
     const f = instance.body;
     const implicit = implicitOf(f);
-    return withScope(scope, () => f.params.map((p, i) =>
-      lentAs(f, i, scope.get(`#${i}`) ?? implicit.get(i)) ?? paramType(p, f.self?.constructor)));
+    return signing(f, () => withScope(scope, () => f.params.map((p, i) =>
+      lentAs(f, i, scope.get(`#${i}`) ?? implicit.get(i)) ?? paramType(p, f.self?.constructor))));
   }
 
   // What a concrete instance's body sees: each of its type parameters, and those of a generic

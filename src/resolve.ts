@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { field, fits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -44,14 +44,14 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span) => Type) {
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type) {
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
   const { keyofType, indexedType, UTILITIES } = typeFunctions((c) => {
     layouts.push(new Set(resolving));
     try {
-      return layout(c);
+      return withSight(undefined, () => layout(c));
     } finally {
       layouts.pop();
     }
@@ -65,11 +65,23 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   let scope = new Map<string, Type>();
   // Above zero while a generic alias is checked with placeholders, before any use.
   let deferring = 0;
-  // How many alias instances have been computed, against the budget.
+  // How many alias instances computing the outermost type has needed, against the budget.
   let computed = 0;
+  // Whether a name is a local or parameter where the type being resolved is written, which
+  // `typeof` can't name yet; unset where only top-level names are in sight.
+  let sight: ((name: string) => boolean) | undefined;
+  function withSight<T>(names: typeof sight, f: () => T): T {
+    const outer = sight;
+    sight = names;
+    try {
+      return f();
+    } finally {
+      sight = outer;
+    }
+  }
   // The data-carrying enums being made, to catch one that holds itself.
   const making = new Set<DataEnum>();
-  return { resolveType, paramType, withScope, enumInstance, validate };
+  return { resolveType, paramType, withScope, withSight, enumInstance, validate };
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
   // uses it. Run once classes are linked, since an alias may read a class's fields.
@@ -187,7 +199,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
-      return valueType(t.target.name, t);
+      return valueType(t.target.name, t, sight?.(t.target.name) === true);
     }
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
@@ -403,12 +415,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (resolving.has(key)) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
     // A type that branches as it recurses grows exponentially, so the whole program's type
     // evaluation has a budget, as TypeScript caps instantiations.
-    if (++computed > 20_000) throw new CompileError(`type '${a.name}' is one of more than 20000 alias instances computed while compiling; a type that branches as it recurses grows exponentially`, at.start, at.end);
+    if (resolving.size === 0) computed = 0;
+    if (++computed > 20_000) throw new CompileError(`computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
     if (resolving.size > 64) throw new CompileError(`type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
     resolving.add(key);
     let type: Type;
     try {
-      type = withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type));
+      // An alias's body sees the names where it is declared, not where it is used.
+      type = withSight(undefined, () => withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type)));
     } finally {
       resolving.delete(key);
     }
@@ -424,18 +438,27 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     let check = resolveType(t.check);
     if (typeof check !== "string" && check.kind === "param" && check.concrete) check = check.concrete;
     const held = standIn([check], "a conditional type", t.check, true, () => deferring > 0);
-    if (held) {
-      // Both branches are still checked, with each `infer` name standing for an unknown type.
-      const names = new Map([...inferNames(t.extends)].map((n): [string, Type] => [n, typeParameter(n, undefined)]));
-      withScope(new Map([...scope, ...names]), () => resolveType(t.then));
-      resolveType(t.else);
-      return held;
+    if (held) return branches(t, held);
+    try {
+      if (naked && check === "never") return "never";
+      if (naked && typeof check !== "string" && check.kind === "union") {
+        return unionType(check.members.map((m) => withScope(new Map([...scope, [naked, m]]), () => decide(t, m))));
+      }
+      return decide(t, check);
+    } catch (e) {
+      if (e instanceof Open) return branches(t, e.param);
+      throw e;
     }
-    if (naked && check === "never") return "never";
-    if (naked && typeof check !== "string" && check.kind === "union") {
-      return unionType(check.members.map((m) => withScope(new Map([...scope, [naked, m]]), () => decide(t, m))));
-    }
-    return decide(t, check);
+  }
+
+  // A conditional a generic alias's placeholder decides, while the alias is checked before any
+  // use: both branches are still checked, each `infer` name standing for an unknown type, and the
+  // placeholder stands in for the result.
+  function branches(t: Extract<TypeNode, { kind: "conditional" }>, held: Type): Type {
+    const names = new Map([...inferNames(t.extends)].map((n): [string, Type] => [n, typeParameter(n, undefined)]));
+    withScope(new Map([...scope, ...names]), () => resolveType(t.then));
+    resolveType(t.else);
+    return held;
   }
 
   // One check type's branch: the true one, with what each `infer` matched in scope, when the
@@ -454,6 +477,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // A type a conditional compares against, which can't hold a type parameter of generic code,
   // since fitting it would be decided once for every instance.
   function comparable(type: Type, at: Span): Type {
+    const open = openParam(type, true);
+    if (open && deferring > 0) throw new Open(open);
     standIn([type], "a conditional type", at, true, () => false);
     return type;
   }
@@ -521,6 +546,15 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // An object may leave out an optional property, which is then empty.
     const f = m.optional ? optionalField(m.name, unionMember(m.type)) : { name: m.name, type: resolveType(m.type) };
     return { ...f, type: storable(f.type, m), ...(m.readonly && { readonly: true }) };
+  }
+}
+
+// Thrown inside a conditional whose extends side holds a placeholder of the generic alias being
+// checked, and caught by that conditional, which then can't pick a branch.
+class Open {
+  readonly param: ParamType;
+  constructor(param: ParamType) {
+    this.param = param;
   }
 }
 

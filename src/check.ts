@@ -295,7 +295,7 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at) => valueTypeOf(name, at));
+  const { resolveType, paramType, withScope, withSight, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   // A class first made while lowering is reported at the function being checked.
@@ -319,30 +319,36 @@ export function check(written: Stmt[], library = false): Checked {
   let demanded = 0;
   const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
+    signing: (f, run) => withSight((n) => f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
   });
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
-  function valueTypeOf(name: string, at: Span): Type {
-    const local = [checking, ...inProgress].some((i) => i && [...new Set(i.locals.values())].some((l) => l.name === name));
-    if (local) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
+  function valueTypeOf(name: string, at: Span, shadowed: boolean): Type {
+    if (shadowed) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
     if (classes.has(name)) throw new CompileError(`'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
     const constant = byName.get(`const ${name}`);
     const f = constant ?? byName.get(name);
     if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
     if (querying.has(name)) throw new CompileError(`'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
-    // A result left to inference is checked from the body, which may need the class being laid out.
-    const [mid] = laying;
-    if (!f.returnType && mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
     querying.add(name);
     try {
-      return constant ? widenLet(returnOf(instanceOf(constant), at)) : functionTypeOf(f, at);
+      if (!constant) return functionTypeOf(f, at);
+      const declared = returnTypeOf(constant, new Map());
+      if (!declared || isInterface(declared)) unlaid(name, at);
+      return widenLet(returnOf(instanceOf(constant), at));
     } finally {
       querying.delete(name);
     }
   }
   const querying = new Set<string>();
+
+  // A result worked out from a body may need the class being laid out, whose fields aren't known.
+  function unlaid(name: string, at: Span) {
+    const [mid] = laying;
+    if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
+  }
 
   // A function's type for `typeof`: a parameter typed with an object type, an interface or a
   // function type makes it generic in Fish, but its declared type is what `typeof` names.
@@ -352,10 +358,23 @@ export function check(written: Stmt[], library = false): Checked {
       throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
     }
     if (f.generator) throw unsupported("generator functions in 'typeof' types", at);
-    const returns = returnOf(definition(f), at);
-    const result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
+    const def = definition(f);
+    // An async function's written `Promise<T>` is its type; any other interface result, or one
+    // left to inference, is worked out from the body.
+    const declared = returnTypeOf(f, def.bindings);
+    let result: Type;
+    if (declared && (f.async || !isInterface(declared))) result = declared;
+    else {
+      unlaid(f.name, at);
+      const returns = returnOf(def, at);
+      result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
+    }
     const open = openParam(result, true);
-    if (open) throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${open.name}'; write the return type`, at.start, at.end);
+    if (open) {
+      const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
+      const param = f.params[i]?.pattern;
+      throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
+    }
     return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? p.pattern.name : "_")), declaredParams(f), result);
   }
 
@@ -1060,7 +1079,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.
-          const annotated = (d.type && stored(resolveType(d.type))) || demands.get(s);
+          const annotated = (d.type && stored(withSight((n) => lookup(n) !== undefined, () => resolveType(d.type!)))) || demands.get(s);
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
