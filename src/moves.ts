@@ -232,6 +232,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const known = ends.find(([start]) => same(start, from));
           if (known) return known[1];
           state = from;
+          // Whichever way control left the try and its catch, their variables are gone.
+          dropped(new Set([...s.block.flatMap(scoped), ...(s.param && locals.get(s) ? [locals.get(s)!] : []), ...(s.handler ?? []).flatMap(scoped)]), (s.handler ?? s.block).at(-1)?.end ?? s.start);
           statements(s.finalizer!);
           ends.push([from, state]);
           return state;
@@ -372,8 +374,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (!bodyFirst) cond();
       body();
       state = join(state, nexts.get(s)!);
-      // However a pass ended, `continue` included, its body's variables are gone.
-      dropped(new Set(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s)), s.end);
+      // However a pass ended, `continue` included, its body's variables are gone, and a holder
+      // used anywhere in the loop is used again on the next pass.
+      dropped(new Set(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s)), s.end - 1);
       // References declared in the body are gone by the time the loop comes round or ends,
       // however it left the body; a `for` loop's initializer outlives every pass.
       for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(local);
@@ -597,7 +600,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             statement(arm.body);
             state = join(state, exits.get(arm.body)!);
             dropped(new Set([...scoped(arm.body), ...bound]), arm.body.end);
-          } else expr(arm.body, consume, discarded);
+          } else {
+            expr(arm.body, consume, discarded);
+            dropped(new Set(bound), arm.body.end);
+          }
           for (const holder of borrowing) release(holder);
           after = join(after, state);
         }

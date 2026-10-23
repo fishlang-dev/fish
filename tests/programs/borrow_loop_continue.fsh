@@ -1,27 +1,14 @@
-// A reference declared in a loop body is gone by the next pass, however the body is left.
-type P = { x: i64 }
-
+// error: 'x' doesn't live long enough
 function main() {
-  let p: P = { x: 0 }
-  let total = 0
-  let i = 0
-  while (i < 4) {
-    p.x = i
-    i++
-    const r: Ref<P> = p
-    if (r.x === 1) continue
-    if (r.x === 3) break
-    total = total + r.x
+  let outer: string[] = ["o"];
+  const o: Ref<string[]> = outer;
+  let h = { r: o };
+  for (let i = 0; i < 3; i++) {
+    let junk: string[] = [];
+    for (let j = 0; j < 50; j++) junk.push("junk" + j);
+    console.log(h.r.length, h.r[0]);
+    let x: string[] = ["a" + i, "b"];
+    h = { r: x };
+    continue;
   }
-  outer: for (let j = 0; j < 3; j++) {
-    while (true) {
-      p.x = j
-      const r: Ref<P> = p
-      if (r.x === 1) continue outer
-      total = total + 10
-      break
-    }
-  }
-  print(total, p.x)
 }
-// expect: 22 2
