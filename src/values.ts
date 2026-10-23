@@ -998,12 +998,17 @@ export function expressions(ctx: Context) {
     });
     const gives = c.returns;
     if (holdsFuture(gives)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
-    if (name !== "map" && !reducing && gives !== "boolean") {
+    if (PREDICATES.has(name) && gives !== "boolean") {
       throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
     }
     if (acc && !fits(gives, acc)) throw new CompileError(`'reduce''s callback gives the next accumulator, a '${show(acc)}', but this one gives '${show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
-    const type = name === "map" ? arrayType(gives) : name === "filter" ? array : name === "find" ? unionType([array.element, "null"]) : acc ?? "boolean";
+    const many = lower(gives);
+    if (name === "flatMap" && (typeof many === "string" || many.kind !== "array")) {
+      throw new CompileError(`'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${show(gives)}'`, callback.start, callback.end);
+    }
+    const type = name === "map" ? arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? unionType([array.element, "null"])
+      : name === "findIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
     return { type, what: `'${name}'` };
   }
 
@@ -2914,7 +2919,9 @@ const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${nam
 const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "future" || promiseElement(t) !== undefined);
 
 // The methods that run a callback on each element.
-const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce"]);
+const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+// The callback methods whose callback decides yes or no.
+const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "join", "slice"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS]);

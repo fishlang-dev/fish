@@ -465,6 +465,23 @@ void fsh_rt_array_reserve(fsh_array *a, int64_t size) {
   a->capacity = capacity;
 }
 
+// Moves every element of from onto the end of a, then frees from's buffer, whose elements
+// now belong to a.
+void fsh_rt_array_extend(fsh_array *a, fsh_array *from, int64_t size) {
+  if (a->length + from->length > a->capacity) {
+    int64_t capacity = a->capacity ? a->capacity : 4;
+    while (capacity < a->length + from->length) capacity *= 2;
+    char *data = fsh_rt_alloc(capacity * size);
+    if (a->length) memcpy(data, a->data, a->length * size);
+    fsh_rt_free(a->data);
+    a->data = data;
+    a->capacity = capacity;
+  }
+  if (from->length) memcpy(a->data + a->length * size, from->data, from->length * size);
+  a->length += from->length;
+  fsh_rt_free(from->data);
+}
+
 // A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a
 // buffer of n elements. Each pair of runs merges into the buffer and is copied back before the
 // next, so the array holds every element exactly once whenever a comparator runs, and a panic

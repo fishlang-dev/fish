@@ -1936,8 +1936,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(callback)!;
     const env = alloca(llvm(closure));
     emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
-    const result = types.get(e) ?? (method === "map" ? arrayType(closure.returns) : method === "filter" ? array : method === "find" ? unionType([element, "null"]) : method === "reduce" ? closure.params[0]! : "boolean");
-    const out = alloca(llvm(result));
+    const result = method === "forEach" ? "void" : types.get(e) ?? (method === "map" ? arrayType(closure.returns) : method === "flatMap" ? lower(closure.returns)
+      : method === "filter" ? array : method === "find" ? unionType([element, "null"]) : method === "findIndex" ? "i64" : method === "reduce" ? closure.params[0]! : "boolean");
+    const building = method === "map" || method === "filter" || method === "flatMap";
+    const out = result === "void" ? "" : alloca(llvm(result));
     const [lengthAt, dataAt, length, data, index] = [temp(), temp(), temp(), temp(), alloca("i64")];
     emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
@@ -1955,7 +1957,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     };
     const reducing = method === "reduce";
     let first = "0";
-    if (method === "map" || method === "filter") emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    if (building) emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    if (method === "findIndex") emit(`store i64 -1, ptr ${out}`);
     if (method === "find") emit(`store ${llvm(result)} ${convert("zeroinitializer", "null", result)}, ptr ${out}`);
     if (method === "some" || method === "every") emit(`store i1 ${method === "every"}, ptr ${out}`);
     if (reducing && init) emit(`store ${llvm(result)} ${convert(owned(init), types.get(init)!, result)}, ptr ${out}`);
@@ -1991,7 +1994,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     // A panic in the callback drops what the loop has built and what the callback captured.
     const unwound = () => {
-      if (method === "map" || method === "filter") {
+      if (building) {
         const built = temp();
         emit(`${built} = load ${llvm(result)}, ptr ${out}`);
         dispose(built, result);
@@ -2000,6 +2003,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     };
     const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound)!;
     if (method === "map") appended(out, closure.returns, gives);
+    else if (method === "forEach") {
+      // What the callback gives is dropped; JavaScript's forEach ignores it.
+      if (gives !== undefined && needsDrop(closure.returns)) dispose(gives, closure.returns);
+    } else if (method === "flatMap") {
+      const many = alloca(ARRAY);
+      emit(`store ${ARRAY} ${convert(gives, closure.returns, result)}, ptr ${many}`);
+      emit(`call void @fsh_rt_array_extend(ptr ${out}, ptr ${many}, i64 ${bytes((result as ArrayType).element, "1")})`);
+    }
     else if (reducing) emit(`store ${llvm(result)} ${convert(gives, closure.returns, result)}, ptr ${out}`);
     else {
       const [hit, miss] = [label(), next];
@@ -2012,11 +2023,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`br label %${next}`);
       } else {
         if (method === "find") emit(`store ${llvm(result)} ${convert(copied(load(slot), element), element, result)}, ptr ${out}`);
+        else if (method === "findIndex") emit(`store i64 ${i}, ptr ${out}`);
         else emit(`store i1 ${method === "some"}, ptr ${out}`);
         emit(`br label %${done}`);
       }
     }
-    if (method === "map" || reducing) emit(`br label %${next}`);
+    if (method === "map" || method === "flatMap" || method === "forEach" || reducing) emit(`br label %${next}`);
     startBlock(next);
     const after = temp();
     emit(`${after} = add i64 ${i}, 1`);
@@ -2025,6 +2037,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     startBlock(done);
     // What the callback left of its captures drops once, after the last call.
     if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    if (result === "void") return undefined;
     const v = temp();
     emit(`${v} = load ${llvm(result)}, ptr ${out}`);
     if (!types.has(e) && needsDrop(result)) pending.push({ v, type: result });
