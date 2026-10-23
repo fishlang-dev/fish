@@ -25,14 +25,23 @@ export function fileAt(offset: number): string {
 // Loads `entry`, given as `src` when it is already read, and every file it imports.
 export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   const modules: Module[] = [];
+  const sources: Source[] = [];
   const byPath = new Map<string, Module>();
   const visit = (path: string, text: string, file: string): Module => {
     const key = realpathSync(path);
     const known = byPath.get(key);
     if (known) return known;
     const base = modules.length * FILE_SPAN;
+    if (base > 0) sources.push({ base, src: text, file });
     if (text.length >= FILE_SPAN) throw new CompileError(`'${file}' is larger than the 16 MiB a source file may be`, base, base);
-    const statements = parse(text);
+    let statements: Stmt[];
+    try {
+      statements = parse(text);
+    } catch (e) {
+      // A parse error's position is in its own file's text.
+      if (e instanceof CompileError) shiftSpans(e, base);
+      throw e;
+    }
     if (base > 0) shiftSpans(statements, base);
     const module: Module = { path: key, file, base, src: text, statements, targets: new Map() };
     modules.push(module);
@@ -45,9 +54,14 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     }
     return module;
   };
-  visit(entry, src, entry);
+  try {
+    visit(entry, src, entry);
+  } catch (e) {
+    if (e instanceof CompileError) e.sources = sources;
+    throw e;
+  }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
-  return { modules, sources: modules.slice(1).map(({ base, src, file }) => ({ base, src, file })) };
+  return { modules, sources };
 }
 
 // The file a statement imports from, or re-exports from.
@@ -60,7 +74,7 @@ export function specifierOf(s: Stmt): string | undefined {
 // The file a relative specifier names, as TypeScript resolves one: the extension may be left out
 // or written as TypeScript's or JavaScript's, and a directory means its `index.fsh`.
 export function resolveSpecifier(from: string, specifier: string, at: Span): string {
-  if (!/^\.\.?\//.test(specifier)) {
+  if (!/^\.\.?(\/|$)/.test(specifier)) {
     throw new CompileError(`'${specifier}' isn't a path to a file; imports of packages aren't supported yet, so import another file with a relative path like './${specifier}'`, at.start, at.end);
   }
   const path = join(dirname(from), specifier);
@@ -72,11 +86,12 @@ export function resolveSpecifier(from: string, specifier: string, at: Span): str
   throw new CompileError(`can't find the file '${specifier}' imports from; looked for ${looked}`, at.start, at.end);
 }
 
-// A top-level declaration, under the name it has program-wide. A C function keeps its own name,
-// which two files may both declare.
-type Decl = { name: string; unique: string; foreign: boolean };
+// A top-level declaration, under the name it has program-wide. A `fixed` one keeps its name: a C
+// function, which two files may both declare, and the entry's `main` and exported functions.
+type Decl = { name: string; unique: string; fixed: boolean };
 type Linked = {
   module: Module;
+  index: number;
   // The file's declarations with exports unwrapped, imports and re-exports left out.
   body: Stmt[];
   own: Map<string, Decl>;
@@ -89,10 +104,10 @@ type Linked = {
 
 // The program the checker reads: every file's declarations, each file seeing only its own names
 // and what it imports. A top-level name keeps its spelling unless that would mean something else
-// in another file, when it takes a suffix naming its file (`helper·util`), which messages leave
+// in another file, when it takes a suffix telling the files apart (`helper-fsh2`), which messages leave
 // out. Only the entry file keeps `export function`, which a library makes a C function.
-export function flatten({ modules }: Loaded): Stmt[] {
-  const linked = new Map(modules.map((m, i) => [m, linkOf(m, i === 0)]));
+export function flatten({ modules }: Loaded, library = false): Stmt[] {
+  const linked = new Map(modules.map((m, i) => [m, linkOf(m, i, library)]));
   const exported = (m: Module, name: string, seen = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
     if (seen.has(key)) return undefined;
@@ -126,34 +141,41 @@ export function flatten({ modules }: Loaded): Stmt[] {
       // Another file using the name for something else, its own local or a std name, would
       // otherwise reach this declaration.
       const elsewhere = all.some((o) => o !== l && o.used.has(d.name) && local(o, d.name) !== d);
-      d.unique = l === all[0] || d.foreign || (!elsewhere && !taken.has(d.name)) ? d.name : `${d.name}·${stem(l.module.file)}`;
+      d.unique = d.fixed || (!elsewhere && !taken.has(d.name)) ? d.name : apart(d.name, l);
       taken.add(d.unique);
     }
   }
-  const foreign = new Set<string>();
+  const foreign = new Map<string, { signature: string; file: string }>();
   return all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
       const d = local(l, name);
       // A name another file declares, and this one neither declares nor imports, is this file's
       // own local or nothing at all here.
-      const unique = d ? d.unique : taken.has(name) ? `${name}·${stem(l.module.file)}` : name;
+      const unique = d ? d.unique : taken.has(name) ? apart(name, l) : name;
       if (unique !== name) to.set(name, unique);
     }
     renameIn(l.body, (name) => to.get(name));
     return l.body.filter((s) => {
       if (s.kind !== "declare" || s.body.kind !== "function") return true;
-      if (foreign.has(s.body.name)) return false;
-      foreign.add(s.body.name);
-      return true;
+      const f = s.body;
+      const text = (t: Span | undefined) => (t ? l.module.src.slice(t.start - l.module.base, t.end - l.module.base).replace(/\s+/g, "") : "");
+      const signature = `${f.params.map((p) => text(p.type)).join(",")}:${text(f.returnType)}`;
+      const known = foreign.get(f.name);
+      if (!known) foreign.set(f.name, { signature, file: l.module.file || "the entry file" });
+      else if (known.signature !== signature) throw new CompileError(`the C function '${f.name}' is declared in '${known.file}' with other types; declare it in one file and import it from there`, f.start, f.end);
+      return !known;
     });
   });
 }
 
-const stem = (file: string) => file.replace(/\.fsh$/, "").replace(/\W/g, "_");
+// A name told apart from another file's: `-` can't be written in a name, and messages leave the
+// suffix out.
+const apart = (name: string, l: Linked) => `${name}-fsh${l.index}`;
 
-function linkOf(module: Module, entry: boolean): Linked {
-  const l: Linked = { module, body: [], own: new Map(), imports: new Map(), exports: new Map(), stars: [], used: new Set() };
+function linkOf(module: Module, index: number, library: boolean): Linked {
+  const entry = index === 0;
+  const l: Linked = { module, index, body: [], own: new Map(), imports: new Map(), exports: new Map(), stars: [], used: new Set() };
   const bind = (alias: string, from: Module, name: string, at: Span) => {
     if (l.imports.has(alias)) throw new CompileError(`'${alias}' is already imported in this file`, at.start, at.end);
     l.imports.set(alias, { from, name, at });
@@ -161,16 +183,20 @@ function linkOf(module: Module, entry: boolean): Linked {
   const declare = (s: Stmt) => {
     l.body.push(s);
     const inner = s.kind === "export" || s.kind === "declare" ? s.body : s;
-    const foreign = s.kind === "declare" || (s.kind === "export" && s.body.kind === "declare");
+    const fixed = s.kind === "declare" || (s.kind === "export" && (s.body.kind === "declare" || (entry && s.body.kind === "function"))) || (entry && s.kind === "function" && s.name === "main");
     if (!entry && inner.kind === "function" && inner.name === "main") {
       throw new CompileError(`only the entry file's main() runs, so '${module.file}' can't declare one; rename it, or build '${module.file}' as a program of its own`, inner.start, inner.end);
     }
     for (const name of namesOf(inner.kind === "declare" ? inner.body : inner)) {
-      if (!l.own.has(name)) l.own.set(name, { name, unique: name, foreign });
+      if (!l.own.has(name)) l.own.set(name, { name, unique: name, fixed });
     }
   };
+  // A library gives C its entry file's exported functions, under their own names.
+  const listed: Specifier[] = [];
+  const cOnly = (at: Span) => new CompileError("a library's C functions are its entry file's exported functions, each under its own name; write 'export function' on the function itself", at.start, at.end);
   for (const s of module.statements) {
     const from = module.targets.get(s);
+    if (entry && library && (s.kind === "exportAll" || s.kind === "exportDefault" || (s.kind === "exportNamed" && from))) throw cOnly(s);
     if (s.kind === "import") {
       if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
       if (s.default !== undefined) bind(s.default, from!, "default", s);
@@ -182,6 +208,7 @@ function linkOf(module: Module, entry: boolean): Linked {
       l.stars.push(from!);
     } else if (s.kind === "exportNamed") {
       for (const sp of s.specifiers as Specifier[]) l.exports.set(sp.alias ?? sp.name, from ? { from, name: sp.name } : { local: sp.name });
+      if (entry && library) listed.push(...s.specifiers);
     } else if (s.kind === "export") {
       declare(entry && s.body.kind === "function" ? s : s.body);
       for (const name of namesOf(s.body.kind === "declare" ? s.body.body : s.body)) l.exports.set(name, { local: name });
@@ -196,6 +223,12 @@ function linkOf(module: Module, entry: boolean): Linked {
       declare(declaration);
       l.exports.set("default", { local: namesOf(declaration)[0] ?? "default" });
     } else declare(s);
+  }
+  for (const sp of listed) {
+    const at = l.body.findIndex((s) => s.kind === "function" && s.name === sp.name && s.body !== undefined);
+    if (at < 0 || (sp.alias !== undefined && sp.alias !== sp.name)) throw cOnly(sp);
+    l.body[at] = { kind: "export", body: l.body[at]!, start: l.body[at]!.start, end: l.body[at]!.end };
+    l.own.get(sp.name)!.fixed = true;
   }
   renameIn(l.body, (name) => void l.used.add(name));
   return l;

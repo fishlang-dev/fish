@@ -180,3 +180,12 @@ test("a library in several files gives C only its entry file's exports", () => {
   expect(clang.stderr.toString()).toBe("");
   expect(run(dir).stdout.toString()).toBe("12\n");
 });
+
+test("a library's export list names C functions, and a re-export in its entry is refused", () => {
+  const dir = mkdtempSync(join(tmp, "listed-"));
+  writeFileSync(join(dir, "api.fsh"), "function quad(n: i64): i64 { return n * 4; }\nexport { quad };\n");
+  buildLibrary(join(dir, "api.fsh"), join(dir, "api"), "static");
+  expect(readFileSync(join(dir, "api.h"), "utf8")).toContain("int64_t quad(int64_t n);");
+  writeFileSync(join(dir, "re.fsh"), 'export { quad } from "./api";\n');
+  expect(() => buildLibrary(join(dir, "re.fsh"), join(dir, "re"), "static")).toThrow("write 'export function' on the function itself");
+});
