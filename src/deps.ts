@@ -15,13 +15,14 @@ export type Dependencies = { counts: Record<Group, number>; list: Dependency[]; 
 // What replaces a package: Fish's std, or a planned feature named by its title.
 const IN_STD = (name: string) => ({ name, planned: false });
 const PLANNED = (title: string) => ({ name: title, planned: true });
-const EQUIVALENTS: Record<string, { name: string; planned: boolean }> = {
+const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.entries({
   ...Object.fromEntries(["express", "hono", "fastify", "koa", "polka", "restify", "@hono/node-server"].map((p) => [p, IN_STD("serve and Router")])),
-  "async-mutex": IN_STD("Lock"), "p-limit": IN_STD("Semaphore"), "abort-controller": IN_STD("AbortController"),
+  // async-mutex holds its lock across `await`, which a Semaphore's permit can and a Lock can't.
+  "async-mutex": IN_STD("Semaphore"), "p-limit": IN_STD("Semaphore"), "abort-controller": IN_STD("AbortController"),
   ...Object.fromEntries(["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"].map((p) => [p, PLANNED("HTTP client")])),
   ...Object.fromEntries(["commander", "yargs", "minimist", "meow", "cac"].map((p) => [p, PLANNED("Typed CLI arguments")])),
   ...Object.fromEntries(["dotenv", "env-var"].map((p) => [p, PLANNED("Typed configuration from the environment")])),
-  ...Object.fromEntries(["ws", "socket.io"].map((p) => [p, PLANNED("WebSockets")])),
+  ws: PLANNED("WebSockets"),
   ...Object.fromEntries(["uuid", "nanoid"].map((p) => [p, PLANNED("Randomness")])),
   ...Object.fromEntries(["dayjs", "date-fns", "moment", "luxon"].map((p) => [p, PLANNED("Date parsing and formatting")])),
   ...Object.fromEntries(["pino", "winston", "bunyan"].map((p) => [p, PLANNED("Structured logging")])),
@@ -29,7 +30,7 @@ const EQUIVALENTS: Record<string, { name: string; planned: boolean }> = {
   ...Object.fromEntries(["better-sqlite3", "sqlite3"].map((p) => [p, PLANNED("SQLite binding")])),
   ...Object.fromEntries(["ioredis", "redis"].map((p) => [p, PLANNED("Redis client")])),
   ...Object.fromEntries(["glob", "fast-glob", "globby"].map((p) => [p, PLANNED("Glob")])),
-  "fs-extra": PLANNED("Async file I/O"), chokidar: PLANNED("File watching"), tmp: PLANNED("Temporary files and directories"),
+  "fs-extra": PLANNED("Directory operations"), chokidar: PLANNED("File watching"), tmp: PLANNED("Temporary files and directories"),
   ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Process spawning")])),
   ...Object.fromEntries(["node-cron", "cron"].map((p) => [p, PLANNED("Scheduled jobs")])),
   cors: PLANNED("CORS middleware"), compression: PLANNED("Response compression"), "express-rate-limit": PLANNED("Rate-limiting middleware"),
@@ -40,12 +41,15 @@ const EQUIVALENTS: Record<string, { name: string; planned: boolean }> = {
   nodemailer: PLANNED("SMTP email client"), eventemitter3: PLANNED("EventTarget and EventEmitter"),
   ...Object.fromEntries(["inquirer", "prompts"].map((p) => [p, PLANNED("Interactive prompts")])),
   ...Object.fromEntries(["jest", "vitest", "mocha"].map((p) => [p, PLANNED("Test runner")])),
-  "@grpc/grpc-js": PLANNED("gRPC"), "@aws-sdk/client-s3": PLANNED("S3-compatible storage client"), bcryptjs: PLANNED("Hashing"),
-};
+  "@grpc/grpc-js": PLANNED("gRPC"), "@aws-sdk/client-s3": PLANNED("S3-compatible storage client"),
+  ...Object.fromEntries(["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"].map((p) => [p, PLANNED("Auth primitives")])),
+}));
 
 // Packages a native addon builds or loads its compiled code through.
 const NATIVE_HELPERS = new Set(["node-gyp-build", "bindings", "node-addon-api", "prebuild", "prebuild-install", "nan", "node-pre-gyp", "@mapbox/node-pre-gyp"]);
-const PLATFORMS = /(darwin|linux|win32|freebsd|android)/;
+// A prebuilt binary's package names its platform and then its processor, as in
+// `@esbuild/darwin-arm64`, `sharp-linux-x64` or `turbo-darwin-64`.
+const PLATFORMS = /(^|[-/@])(darwin|linux|win32|freebsd|android)-(x64|arm64|ia32|arm|64|universal|x86|ppc64|s390x|riscv64|loong64|mips64el)([-.]|$)/;
 
 // The project's dependencies, or nothing when it has no package.json.
 export function dependencies(dir: string): Dependencies | undefined {
@@ -54,23 +58,29 @@ export function dependencies(dir: string): Dependencies | undefined {
   const counts: Record<Group, number> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
   let manifest: Record<string, unknown>;
   try {
-    manifest = JSON.parse(readFileSync(path, "utf8"));
+    manifest = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
     if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) throw new Error("it isn't an object");
   } catch (e) {
     return { counts, list: [], problem: `package.json can't be read: ${e instanceof Error ? e.message : e}` };
   }
   const named = (field: string, dev: boolean) => {
     const deps = manifest[field];
-    return typeof deps === "object" && deps !== null ? Object.entries(deps).map(([name, version]) => ({ name, version: String(version), dev })) : [];
+    if (typeof deps !== "object" || deps === null || Array.isArray(deps)) return [];
+    return Object.entries(deps).filter(([, version]) => typeof version === "string").map(([name, version]) => ({ name, version: version as string, dev }));
   };
-  const list = [...named("dependencies", false), ...named("devDependencies", true)].map(({ name, version, dev }) => {
+  // A package in both lists counts once, as the dependency it is at run time.
+  const runtime = named("dependencies", false);
+  const dev = named("devDependencies", true).filter((d) => !runtime.some((r) => r.name === d.name));
+  const list = [...runtime, ...dev].map(({ name, version, dev }) => {
     const kind = kindOf(installed(dir, name));
-    const equivalent = EQUIVALENTS[name];
+    const equivalent = EQUIVALENTS.get(name);
     const group: Group = equivalent ? (equivalent.planned ? "planned" : "std") : kind;
     counts[group]++;
     return { name, version, dev, group, kind, ...(equivalent && { equivalent }) };
   });
-  return { counts, list };
+  // Yarn's Plug'n'Play keeps packages in zip archives, with no node_modules to read.
+  const pnp = existsSync(join(dir, ".pnp.cjs")) && !existsSync(join(dir, "node_modules"));
+  return { counts, list, ...(pnp && { problem: "this project installs with Yarn Plug'n'Play, whose packages Fish can't read, so they show as not installed" }) };
 }
 
 // Where a package is installed, found as Node finds it: in the project's node_modules or that of
@@ -86,13 +96,14 @@ function installed(dir: string, name: string): string {
 function kindOf(dir: string): "native" | "pure" | "unknown" {
   let pkg: Record<string, unknown>;
   try {
-    pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8").replace(/^\uFEFF/, ""));
   } catch {
     return "unknown";
   }
   const names = (field: string) => (typeof pkg[field] === "object" && pkg[field] !== null ? Object.keys(pkg[field] as object) : []);
   if (pkg.gypfile === true || existsSync(join(dir, "binding.gyp"))) return "native";
-  if ([...names("dependencies"), ...names("devDependencies")].some((d) => NATIVE_HELPERS.has(d))) return "native";
+  // Only what installs with it counts: an installed package's dev dependencies never do.
+  if ([...names("dependencies"), ...names("optionalDependencies")].some((d) => NATIVE_HELPERS.has(d))) return "native";
   // Prebuilt N-API packages list one package per platform as optional dependencies.
   if (names("optionalDependencies").some((d) => PLATFORMS.test(d))) return "native";
   return hasAddon(dir, 2) ? "native" : "pure";
@@ -112,11 +123,12 @@ function hasAddon(dir: string, depth: number): boolean {
 const GROUP_TITLES: Record<Group, string> = { std: "in std", planned: "planned", native: "native", pure: "pure", unknown: "not installed" };
 
 export function formatDependencies(d: Dependencies): string[] {
-  if (d.problem) return ["", "dependencies", `  ${d.problem}`];
+  if (d.problem && d.list.length === 0) return ["", "dependencies", `  ${d.problem}`];
   const dev = d.list.filter((x) => x.dev).length;
   return [
     "",
     `dependencies (${d.list.length}${dev ? `, ${dev} dev` : ""})`,
+    ...(d.problem ? [`  ${d.problem}`] : []),
     ...(Object.keys(GROUP_TITLES) as Group[]).filter((g) => d.counts[g] > 0).map((g) => {
       const members = d.list.filter((x) => x.group === g);
       const names = members.slice(0, 10).map((x) => (x.equivalent ? `${x.name} (${x.equivalent.name})` : x.name));

@@ -373,3 +373,33 @@ test("a project without package.json has no dependency section, and a broken one
     expect(formatReport(survey(dir))).toContain("package.json can't be read: it isn't an object");
   });
 });
+
+test("dependency classification ignores dev helpers, odd names and odd manifests", () => {
+  const pkg = (extra: object = {}) => JSON.stringify({ name: "p", version: "1.0.0", ...extra });
+  project({
+    "package.json": "﻿" + JSON.stringify({
+      dependencies: { constructor: "1", toString: "1", bench: "1", utils: "1", crypto: "1", shared: "1", "async-mutex": "1", bcryptjs: "1", odd: 1 },
+      devDependencies: { shared: "1", "socket.io": "1" },
+    }),
+    "a.ts": "const x = 1;\n",
+    "node_modules/bench/package.json": pkg({ devDependencies: { bindings: "1", nan: "1" } }),
+    "node_modules/utils/package.json": pkg({ optionalDependencies: { "linux-utils": "1", "@capacitor/android": "1" } }),
+    "node_modules/crypto/package.json": pkg({ optionalDependencies: { nan: "1" } }),
+    "node_modules/shared/package.json": pkg(),
+    "node_modules/socket.io/package.json": pkg(),
+  }, (dir) => {
+    const d = dependencies(dir)!;
+    expect(Object.fromEntries(d.list.map((x) => [x.name, [x.group, x.equivalent?.name, x.dev]]))).toEqual({
+      constructor: ["unknown", undefined, false], toString: ["unknown", undefined, false],
+      bench: ["pure", undefined, false], utils: ["pure", undefined, false], crypto: ["native", undefined, false], shared: ["pure", undefined, false],
+      "async-mutex": ["std", "Semaphore", false], bcryptjs: ["planned", "Auth primitives", false], "socket.io": ["pure", undefined, true],
+    });
+  });
+  project({ "package.json": JSON.stringify({ dependencies: ["express"] }), "a.ts": "const x = 1;\n" }, (dir) => {
+    expect(dependencies(dir)!.list).toEqual([]);
+  });
+  project({ "package.json": JSON.stringify({ dependencies: { lodash: "1" } }), ".pnp.cjs": "", "a.ts": "const x = 1;\n" }, (dir) => {
+    expect(formatReport(survey(dir))).toContain("Yarn Plug'n'Play");
+    expect(formatReport(survey(dir))).toContain("not installed:    1  lodash");
+  });
+});
