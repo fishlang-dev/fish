@@ -12,7 +12,6 @@ const TYPES: [string, string][] = [
   ["<T>(x: T) => T", "generic function types"],
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],
-  ["{ [K in A]: i64 }", "mapped types"],
   ["`a${B}`", "template literal types"],
 ];
 

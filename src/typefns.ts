@@ -172,5 +172,5 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   ];
   const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [number, Utility, string]] => [name, [count, (args, at, argAt) =>
     standIn(read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
-  return { keyofType, indexedType, UTILITIES };
+  return { keyofType, indexedType, fieldsOf, keysOf, UTILITIES };
 }

@@ -48,7 +48,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
-  const { keyofType, indexedType, UTILITIES } = typeFunctions((c) => {
+  const { keyofType, indexedType, fieldsOf, keysOf, UTILITIES } = typeFunctions((c) => {
     layouts.push(new Set(resolving));
     try {
       return withSight(undefined, () => layout(c));
@@ -188,6 +188,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
     if (t.kind === "conditional") return conditional(t);
+    if (t.kind === "mapped") return mapped(t);
     if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
@@ -431,6 +432,39 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     resolved.set(key, type);
     return type;
+  }
+
+  // `{ [K in C as N]: X }`: a field for each key C names, its type X with K bound to the key. Over
+  // `keyof T` it keeps T's optional and readonly fields unless a modifier says otherwise, and
+  // `as` renames each key, or drops one renamed to `never`.
+  function mapped(t: Extract<TypeNode, { kind: "mapped" }>): Type {
+    const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? resolveType(t.constraint.type) : undefined;
+    const keys = resolveType(t.constraint);
+    if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in K]: i64 }'`, t.start, t.end);
+    const held = standIn(homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => deferring > 0);
+    if (held) {
+      withScope(new Map([...scope, [t.name, held]]), () => (t.as && resolveType(t.as), resolveType(t.type!)));
+      return held;
+    }
+    const source = homomorphic ? fieldsOf(homomorphic, "a mapped type", t.constraint) : [];
+    const fields: Field[] = [];
+    for (const key of keys === "never" ? [] : keysOf(keys, "a mapped type", t.constraint)) {
+      const bound = new Map([...scope, [t.name, literalType(key)]]);
+      const renamed = t.as ? withScope(bound, () => resolveType(t.as!)) : literalType(key);
+      const names = renamed === "never" ? [] : keysOf(renamed, "a mapped type's 'as' clause", t.as ?? t);
+      const value = storable(withScope(bound, () => resolveType(t.type!)), t.type);
+      const from = source.find((f) => f.name === key);
+      const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
+      for (const name of names) {
+        if (fields.some((f) => f.name === name)) throw new CompileError(`two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
+        const field = t.optional === "+" ? optionalField(name, value)
+          : t.optional === "-" ? { name, type: from?.optional === "added" ? withoutNull(value) : value }
+          : from?.optional ? { name, type: unionType([value, "null"]), optional: from.optional }
+          : { name, type: value };
+        fields.push({ ...field, ...(readonly && { readonly: true }) });
+      }
+    }
+    return objectType(fields);
   }
 
   // `T extends U ? X : Y`: X when every value of T fits U. A check type that is a bare type
