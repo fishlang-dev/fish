@@ -6,7 +6,8 @@
 export type Access = "public" | "private" | "protected";
 
 // A readonly field can't be written after construction, at any depth.
-export type Field = { name: string; type: Type; access?: Access; readonly?: boolean };
+// `optional` marks a field written `name?: T`, whose type holds `null` for the value left out.
+export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: boolean };
 
 // Fields are sorted by name, which is also their order in memory.
 export type ObjectType = { kind: "object"; fields: Field[] };
@@ -677,7 +678,7 @@ export function keyOf(t: Type): string {
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
-  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${keyOf(f.type)}`).join(",");
+  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? "?" : ""}:${keyOf(f.type)}`).join(",");
   let t = interned.get(key);
   if (!t) {
     t = { kind: "object", fields: sorted };
@@ -702,6 +703,11 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
 }
 
 // Every field of an instance: its bases' first, then its own.
+// A type without the empty value an optional field adds.
+export function withoutNull(t: Type): Type {
+  return typeof t !== "string" && t.kind === "union" ? unionType(t.members.filter((m) => m !== "null")) : t;
+}
+
 export function allFields(t: ClassType): Field[] {
   return [...(t.base ? allFields(t.base) : []), ...t.fields];
 }
@@ -798,5 +804,5 @@ export function show(t: Type): string {
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
-  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}: ${show(f.type)}`).join("; ")} }`;
+  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional ? "?" : ""}: ${show(f.optional ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
 }

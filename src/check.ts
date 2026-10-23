@@ -294,7 +294,8 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope, enumInstance } = resolver(aliases, classNamed, interfaces, enums, slots);
+  const { resolveType, paramType, withScope, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)));
+  validate();
   // An enum with no type parameters is made now, so a payload naming no type is caught unused.
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
   // A generic enum's variant made with other type arguments, while lowering.

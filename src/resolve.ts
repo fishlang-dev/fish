@@ -4,6 +4,7 @@ import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
+import { typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -44,7 +45,8 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves every alias and interface up front, so an unused one is still checked. A generic
 // alias is checked with placeholders for its type parameters, and resolved again per set of
 // type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>) {
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => void) {
+  const { keyofType, indexedType, UTILITIES } = typeFunctions(layout);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -54,12 +56,17 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   let scope = new Map<string, Type>();
   // The data-carrying enums being made, to catch one that holds itself.
   const making = new Set<DataEnum>();
-  aliases.forEach((a) => {
-    const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
-    aliasType(a, [...scope.values()], a);
-  });
-  interfaces.forEach(interfaceOf);
-  return { resolveType, paramType, withScope, enumInstance };
+  return { resolveType, paramType, withScope, enumInstance, validate };
+
+  // Resolves every alias and interface once, so a mistake in one is reported even when nothing
+  // uses it. Run once the checker has the resolver, since an alias may lay out a class.
+  function validate() {
+    aliases.forEach((a) => {
+      const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
+      aliasType(a, [...scope.values()], a);
+    });
+    interfaces.forEach(interfaceOf);
+  }
 
   // A data-carrying enum made with these type arguments: a variant per member, its payload
   // types resolved with the type parameters bound, and the enum as their union. An enum
@@ -144,7 +151,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function resolveType(t: TypeNode): Type {
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
+    if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
+    if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
@@ -234,6 +243,13 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const trait = interfaces.get(t.name);
     if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);
+    // TypeScript's utility types, unless the program declares its own of the name.
+    const utility = UTILITIES[t.name];
+    if (utility) {
+      const [count, apply] = utility;
+      if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${t.name}<${count === 1 ? "User" : t.name === "Record" ? '"a" | "b", i64' : 'User, "id"'}>'`, t.start, t.end);
+      return apply(args, t);
+    }
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
 
@@ -364,7 +380,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty.
     const type = m.optional ? unionType([unionMember(m.type), "null"]) : resolveType(m.type);
-    return { name: m.name, type: storable(type, m), ...(m.readonly && { readonly: true }) };
+    return { name: m.name, type: storable(type, m), ...(m.readonly && { readonly: true }), ...(m.optional && { optional: true }) };
   }
 }
 

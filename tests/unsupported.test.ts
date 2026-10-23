@@ -5,10 +5,8 @@ import { parse } from "../src/parser.ts";
 // Each type form that parses but has no meaning yet, and the rejection it gets.
 const TYPES: [string, string][] = [
   ["ReadonlyArray<i64>", "'ReadonlyArray' types"],
-  ["keyof A", "'keyof' types"],
   ["readonly i64", "'readonly' types"],
   ["unique symbol", "'unique' types"],
-  ["A[K]", "indexed access types"],
   ["typeof x", "'typeof' types"],
   ["[i64, i64]", "tuple types"],
   ["<T>(x: T) => T", "generic function types"],
