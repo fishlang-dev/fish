@@ -422,3 +422,28 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "path", "http"]);
   });
 });
+
+test("the report lists each Node built-in with its files and what replaces it", () => {
+  project({
+    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
+    "b.ts": "import fs from \"node:fs\";\nimport http from \"node:http\";\n",
+    "c.ts": "import vm from \"vm\";\n",
+  }, (dir) => {
+    const r = survey(dir);
+    expect(r.builtins).toEqual([
+      { module: "fs", files: 2, equivalent: { name: "Async file I/O", planned: true } },
+      { module: "http", files: 1, equivalent: { name: "serve", planned: false } },
+      { module: "path", files: 1, equivalent: { name: "Path utilities", planned: true } },
+      { module: "vm", files: 1 },
+    ]);
+    const text = formatReport(r);
+    expect(text).toContain("  fs                  2 files  planned: Async file I/O");
+    expect(text).toContain("  http                1 file   in std: serve");
+    expect(text).toContain("  vm                  1 file   nothing planned");
+    expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(4);
+  });
+  project({ "a.ts": "import x from \"./x\";\n" }, (dir) => {
+    expect(survey(dir)).not.toHaveProperty("builtins");
+    expect(formatReport(survey(dir))).not.toContain("Node built-ins");
+  });
+});

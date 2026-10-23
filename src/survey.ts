@@ -21,7 +21,10 @@ export type Report = {
   counts: Record<Action, number>; rules: RuleCount[]; waiting: RuleCount[];
   // What the project's package.json depends on, when it has one.
   dependencies?: Dependencies;
+  // The Node built-ins the project imports, the most used first, when it imports any.
+  builtins?: Builtin[];
 };
+export type Builtin = { module: string; files: number; equivalent?: { name: string; planned: boolean } };
 
 const RULES: Rule[] = [
   { id: "R1", action: "reject", title: "eval and new Function: a native binary has no compiler to run code made at run time" },
@@ -189,7 +192,23 @@ export function survey(dir: string): Report {
   }
   const all = RULES.map((r) => ({ ...r, count: found.get(r.id)?.count ?? 0, examples: found.get(r.id)?.examples ?? [] }));
   const deps = dependencies(dir);
-  return { ...report(scans.length, lines, unread, all), ...(deps && { dependencies: deps }) };
+  const builtins = builtinsOf(scans);
+  return { ...report(scans.length, lines, unread, all), ...(deps && { dependencies: deps }), ...(builtins.length > 0 && { builtins }) };
+}
+
+// Each Node built-in imported, with how many files import it and what replaces it.
+function builtinsOf(scans: FileScan[]): Builtin[] {
+  const files = new Map<string, Set<string>>();
+  for (const f of scans) {
+    for (const [id, example] of f.findings) {
+      if (id !== "nodeBuiltins" || example.module === undefined) continue;
+      files.set(example.module, (files.get(example.module) ?? new Set()).add(f.file));
+    }
+  }
+  return [...files].map(([module, set]) => {
+    const equivalent = BUILTINS.get(module);
+    return { module, files: set.size, ...(equivalent && { equivalent }) };
+  }).sort((a, b) => b.files - a.files || (a.module < b.module ? -1 : 1));
 }
 
 // A report from its rules' counts: the counts by action, the score and the grade, so a saved
@@ -419,6 +438,10 @@ export function formatReport(r: Report): string {
     `  auto-fix: ${r.counts.auto}`,
     ...unread,
     ...(r.dependencies ? formatDependencies(r.dependencies) : []),
+    ...(r.builtins ? ["", "Node built-ins", ...r.builtins.map((b) => {
+      const by = b.equivalent ? (b.equivalent.planned ? `planned: ${b.equivalent.name}` : `in std: ${b.equivalent.name}`) : "nothing planned";
+      return `  ${b.module.padEnd(16)}${String(b.files).padStart(5)} file${b.files === 1 ? " " : "s"}  ${by}`;
+    })] : []),
     ...(rewrites.length ? ["", "top rewrites", ...rewrites] : []),
     ...(waiting.length ? ["", "waiting on Fish", ...waiting] : []),
   ].join("\n");
