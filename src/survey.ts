@@ -11,7 +11,8 @@ import { parse } from "./parser.ts";
 export type Action = "reject" | "unsupported" | "guided" | "auto";
 // `feature` names the planned Fish feature that lifts a rule Fish doesn't support yet.
 type Rule = { id: string; action: Action; title: string; feature?: string };
-type Example = { file: string; line: number; col: number; note?: string };
+// `module` names the Node built-in an import of one brings in.
+type Example = { file: string; line: number; col: number; note?: string; module?: string };
 export type RuleCount = Rule & { count: number; examples: Example[] };
 export type Report = {
   files: number; lines: number; unread: { files: number; lines: number }; score: number;
@@ -129,7 +130,7 @@ function scanFile(path: string, file: string): FileScan {
   const lines = src.split("\n").filter((l) => l.trim() !== "").length;
   const findings: [string, Example][] = [];
   try {
-    scan(parse(src), (id, offset) => findings.push([id, { file, ...position(src, offset) }]));
+    scan(parse(src), (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
   } catch (e) {
     // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
     // lines, so it can't flatter the score.
@@ -144,10 +145,33 @@ function scanFile(path: string, file: string): FileScan {
 // The planned Fish features a file waits on, by title; a file the parser can't read waits on
 // the parser.
 export function featuresOf(f: FileScan): string[] {
-  return [...new Set(f.findings.flatMap(([id]) => featureOf(id) ?? []))].sort();
+  return [...new Set(f.findings.flatMap(([id, example]) => featureOf(id, example.module) ?? []))].sort();
 }
 
-export const featureOf = (id: string) => FEATURES.get(id);
+// The feature a finding waits on: its rule's, or for a Node built-in, the planned feature that
+// replaces that module, none when std already does, and "Node built-ins" when nothing will.
+export function featureOf(id: string, module?: string): string | undefined {
+  if (id !== "nodeBuiltins" || module === undefined) return FEATURES.get(id);
+  const equivalent = BUILTINS.get(module);
+  return equivalent ? (equivalent.planned ? equivalent.name : undefined) : FEATURES.get(id);
+}
+
+// What replaces each Node built-in in Fish: std, or a planned feature by its title.
+const STD = (name: string) => ({ name, planned: false });
+const PLANNED = (title: string) => ({ name: title, planned: true });
+export const BUILTINS = new Map<string, { name: string; planned: boolean }>([
+  ["http", STD("serve")], ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn")],
+  ["string_decoder", STD("TextDecoder")], ["console", STD("console.log")],
+  ["fs", PLANNED("Async file I/O")], ["path", PLANNED("Path utilities")], ["crypto", PLANNED("Hashing")],
+  ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
+  ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
+  ["os", PLANNED("OS information")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
+  ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
+  ["readline", PLANNED("Interactive prompts")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
+  ["process", PLANNED("Process environment")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
+  ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
+  ["util", PLANNED("Printing objects and instances")],
+]);
 const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
 
 export function survey(dir: string): Report {
@@ -204,7 +228,7 @@ export function grade(score: number): string {
 
 // Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
 // counts the functions a node sits in, and `ambient` marks declarations under `declare`.
-function scan(program: unknown[], note: (id: string, offset: number) => void) {
+function scan(program: unknown[], note: (id: string, offset: number, module?: string) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
@@ -229,7 +253,7 @@ function scan(program: unknown[], note: (id: string, offset: number) => void) {
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
       if (o.kind === "object" && Array.isArray(o.props)) for (const p of o.props) if (isNode(p) && p.kind === "spread") inObjects.add(p);
-      for (const [id, at] of classify(o, depth, ambient, heads.has(o), inObjects.has(o))) note(id, at);
+      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inObjects.has(o))) note(id, at, module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note);
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -256,8 +280,8 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
-function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObject: boolean): [string, number][] {
-  const found: [string, number][] = [];
+function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObject: boolean): [string, number, string?][] {
+  const found: [string, number, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
   switch (n.kind) {
@@ -316,7 +340,9 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   // A dynamic `import("x")` names its module as its first argument.
   const [first] = Array.isArray(n.args) ? n.args : [];
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
-  if (MODULE_FORMS.has(n.kind)) push(moduleRule(n.module ?? n.require ?? dynamic));
+  const specifier = n.module ?? n.require ?? dynamic;
+  const rule = moduleRule(specifier);
+  if (MODULE_FORMS.has(n.kind)) found.push([rule, at, rule === "nodeBuiltins" ? String(specifier).replace(/^node:/, "").split("/")[0] : undefined]);
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");

@@ -221,7 +221,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
 
 test("imports wait on other files, npm packages or Node built-ins by how they are written", () => {
   project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import fs from \"node:fs\";\nimport path = require(\"path\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Multi-file programs"], ["npm interop"], ["Node built-ins"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Multi-file programs"], ["npm interop"], ["Async file I/O", "Path utilities"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["npm interop"], ["Multi-file programs"], ["npm interop"]]);
@@ -401,5 +401,24 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   project({ "package.json": JSON.stringify({ dependencies: { lodash: "1" } }), ".pnp.cjs": "", "a.ts": "const x = 1;\n" }, (dir) => {
     expect(formatReport(survey(dir))).toContain("Yarn Plug'n'Play");
     expect(formatReport(survey(dir))).toContain("not installed:    1  lodash");
+  });
+});
+
+test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
+  project({
+    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
+    "b.ts": "import http from \"node:http\";\n",
+    "c.ts": "import vm from \"vm\";\nimport fs = require(\"fs\");\n",
+    "plan.md": "- [ ] 1. **Async file I/O**\n- [ ] 2. **Path utilities**\n",
+  }, (dir) => {
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], [], ["Async file I/O", "Node built-ins"]]);
+    const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
+    expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
+      ["Async file I/O", ["nodeBuiltins"], { item: "1", done: false }],
+      // Each frees one 2-line file, so the tie goes by name.
+      ["Node built-ins", ["nodeBuiltins"], null],
+      ["Path utilities", ["nodeBuiltins"], { item: "2", done: false }],
+    ]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "path", "http"]);
   });
 });

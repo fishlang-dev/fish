@@ -28,7 +28,7 @@ export function rank(dirs: string[], self?: string, plan?: Plan): Ranking {
 }
 
 function unit(f: FileScan): Unit {
-  return { lines: f.lines, waits: new Set(featuresOf(f)), rules: f.findings.map(([id]) => [id, featureOf(id) ?? ""]) };
+  return { lines: f.lines, waits: new Set(featuresOf(f)), rules: f.findings.map(([id, example]) => [id, featureOf(id, example.module) ?? ""]) };
 }
 
 function curveOf(scans: FileScan[], plan?: Plan): Curve {
