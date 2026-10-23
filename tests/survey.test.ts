@@ -281,7 +281,7 @@ test("a comparison lists the rules that moved, the furthest first, a new rule fr
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("+2       array methods such as map, filter and reduce (1 -> 3)");
+    expect(text).toContain("  +2     array methods such as map, filter and reduce (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
     expect(formatComparison(compare(then, then))).toContain("no rule changed");
   });
