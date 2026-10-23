@@ -26,12 +26,11 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bool" | "st
 };
 
 // What each type form is called when the checker rejects it.
-export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal" | "union" | "array" | "indexed" | "conditional" | "infer" | "query" | "mapped">, string> = {
+export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal" | "union" | "array" | "indexed" | "conditional" | "infer" | "query" | "mapped" | "template">, string> = {
   tuple: "tuple types",
   intersection: "intersection types",
   predicate: "type predicates",
   import: "import types",
-  template: "template literal types",
 };
 
 // Declarations that parse but have no meaning yet, wherever they appear.

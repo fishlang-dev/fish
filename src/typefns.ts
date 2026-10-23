@@ -153,6 +153,28 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
     return gives === undefined ? t : awaitedType([gives], at, []);
   };
 
+  // A template-literal type with holes of literals: the union of every string it spells. Each
+  // hole is a string, number or boolean literal, or a union of them, spelled as JavaScript would.
+  function templateType(quasis: string[], holes: Type[], at: Span, holeAt: Span[]): Type {
+    let spelled = [quasis[0]!];
+    holes.forEach((hole, i) => {
+      const members = typeof hole !== "string" && hole.kind === "union" ? hole.members : [hole];
+      const texts = members.map((m) => {
+        if (typeof m !== "string" && m.kind === "literal") return String(m.value);
+        throw new CompileError(`a template literal type's hole takes string, number or boolean literals, or unions of them, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
+      });
+      if (spelled.length * texts.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
+      spelled = spelled.flatMap((s) => texts.map((t) => s + t + quasis[i + 1]!));
+    });
+    return kept(spelled.map((s) => literalType(s)));
+  }
+
+  // `Uppercase<S>` and its kin: each string literal of S changed as JavaScript changes it.
+  const intrinsic = (what: string, change: (s: string) => string): Utility => ([s], at) => kept(membersOf(s!, `'${what}'`, at).map((m) => {
+    if (typeof m !== "string" && m.kind === "literal" && typeof m.value === "string") return literalType(change(m.value));
+    throw new CompileError(`'${what}' takes string literals, like '${what}<"a" | "b">', not '${show(m)}'`, at.start, at.end);
+  }));
+
   // The utility types by name, and how many type arguments each takes.
   // Each takes its type argument count, the function, an example, which arguments it reads
   // inside, and whether it compares them by fitting, which a type parameter anywhere in them
@@ -169,8 +191,12 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
     ["NonNullable", 1, nonNullableType, "NonNullable<string | null>", [0], false],
     ["ReturnType", 1, returnType, "ReturnType<typeof f>", [0], false],
     ["Awaited", 1, awaitedType, "Awaited<Promise<i64>>", [0], false],
+    ["Uppercase", 1, intrinsic("Uppercase", (s) => s.toUpperCase()), 'Uppercase<"a">', [0], false],
+    ["Lowercase", 1, intrinsic("Lowercase", (s) => s.toLowerCase()), 'Lowercase<"A">', [0], false],
+    ["Capitalize", 1, intrinsic("Capitalize", (s) => s.charAt(0).toUpperCase() + s.slice(1)), 'Capitalize<"a">', [0], false],
+    ["Uncapitalize", 1, intrinsic("Uncapitalize", (s) => s.charAt(0).toLowerCase() + s.slice(1)), 'Uncapitalize<"A">', [0], false],
   ];
   const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [number, Utility, string]] => [name, [count, (args, at, argAt) =>
     standIn(read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
-  return { keyofType, indexedType, fieldsOf, keysOf, UTILITIES };
+  return { keyofType, indexedType, fieldsOf, keysOf, templateType, UTILITIES };
 }

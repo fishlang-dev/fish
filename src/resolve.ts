@@ -48,7 +48,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
-  const { keyofType, indexedType, fieldsOf, keysOf, UTILITIES } = typeFunctions((c) => {
+  const { keyofType, indexedType, fieldsOf, keysOf, templateType, UTILITIES } = typeFunctions((c) => {
     layouts.push(new Set(resolving));
     try {
       return withSight(undefined, () => layout(c));
@@ -189,6 +189,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
     if (t.kind === "conditional") return conditional(t);
     if (t.kind === "mapped") return mapped(t);
+    if (t.kind === "template") {
+      const holes = t.types.map(resolveType);
+      return standIn(holes, "a template literal type", t, false, () => deferring > 0) ?? templateType(t.quasis, holes, t, t.types);
+    }
     if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);

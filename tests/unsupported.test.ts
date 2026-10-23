@@ -12,7 +12,6 @@ const TYPES: [string, string][] = [
   ["<T>(x: T) => T", "generic function types"],
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],
-  ["`a${B}`", "template literal types"],
 ];
 
 for (const [type, what] of TYPES) {
