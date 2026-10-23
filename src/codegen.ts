@@ -2082,6 +2082,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return v;
   }
 
+  // `at(i)`: a clone of the element `i` names, counting back from the end when it is negative,
+  // or nothing outside the array.
+  function elementAt(e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): string {
+    const element = array.element;
+    const option = unionType([element, "null"]);
+    const i = value(e.args[0]!);
+    const [lengthAt, length, negative, fromEnd, k, low, high, outside] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${negative} = icmp slt i64 ${i}, 0`);
+    emit(`${fromEnd} = add i64 ${length}, ${i}`);
+    emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
+    emit(`${low} = icmp slt i64 ${k}, 0`);
+    emit(`${high} = icmp sge i64 ${k}, ${length}`);
+    emit(`${outside} = or i1 ${low}, ${high}`);
+    const [some, none, end] = [label(), label(), label()];
+    emit(`br i1 ${outside}, label %${none}, label %${some}`);
+    startBlock(some);
+    const [dataAt, data, slot, v] = [temp(), temp(), temp(), temp()];
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    emit(`${slot} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${k}`);
+    emit(`${v} = load ${llvm(element)}, ptr ${slot}`);
+    const held = convert(copied(v, element), element, option);
+    const someEnd = block;
+    emit(`br label %${end}`);
+    startBlock(none);
+    const nothing = convert("zeroinitializer", "null", option);
+    const noneEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    const result = temp();
+    emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+    if (types.has(e)) return convert(result, option, types.get(e)!);
+    pending.push({ v: result, type: option });
+    return result;
+  }
+
   // `sort`: the runtime's merge sort, comparing through a function that calls the comparator
   // with the two elements, or orders numbers and strings when there is none.
   function sorted(e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): undefined {
@@ -2519,6 +2557,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return undefined;
     }
     if (callee.name === "sort") return sorted(e, type, at);
+    if (callee.name === "at") return elementAt(e, type, at);
     if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
     if (["shift", "unshift", "splice", "reverse", "fill"].includes(callee.name)) return changed(e, callee.name, type, at);
     if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);

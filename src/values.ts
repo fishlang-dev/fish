@@ -980,6 +980,22 @@ export function expressions(ctx: Context) {
     if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
     if (callee.name === "sort") return sortCall(e, callee, array);
+    // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
+    // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
+    if (Object.hasOwn(ITERATORS, callee.name)) {
+      if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
+      return call(e);
+    }
+    // `at(i)`: a clone of the element at a position counted from either end, or nothing.
+    if (callee.name === "at") {
+      if (e.args.length !== 1) throw new CompileError("'at' takes a position, like 'at(-1)' for the last element", e.start, e.end);
+      const i = e.args[0]!;
+      expect(i, "i64");
+      const t = value(i);
+      coerce(i, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
+      return { type: unionType([array.element, "null"]), what: "'at'" };
+    }
     if (CHANGING_METHODS.has(callee.name)) return changingCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
@@ -3067,7 +3083,9 @@ const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+// The methods giving an iterator over an array, as generators in the prelude.
+const ITERATORS: Record<string, string> = { entries: "__arrayEntries", keys: "__arrayKeys", values: "__arrayValues" };
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
 const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));
