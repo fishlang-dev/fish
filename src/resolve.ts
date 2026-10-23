@@ -70,6 +70,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // Whether a name is a local or parameter where the type being resolved is written, which
   // `typeof` can't name yet; unset where only top-level names are in sight.
   let sight: ((name: string) => boolean) | undefined;
+  function setSight(names: typeof sight) {
+    sight = names;
+  }
   function withSight<T>(names: typeof sight, f: () => T): T {
     const outer = sight;
     sight = names;
@@ -81,7 +84,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
   // The data-carrying enums being made, to catch one that holds itself.
   const making = new Set<DataEnum>();
-  return { resolveType, paramType, withScope, withSight, enumInstance, validate };
+  return { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate };
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
   // uses it. Run once classes are linked, since an alias may read a class's fields.

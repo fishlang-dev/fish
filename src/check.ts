@@ -107,6 +107,8 @@ type Outer = {
   changesThis(path: string, action: string, target: Expr): void;
   // Whether a variable, followed through captures to where it is declared, can't change.
   constant(l: Local): boolean;
+  // Whether a name is a local or parameter in sight, without capturing it.
+  inSight(name: string): boolean;
 };
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
@@ -295,7 +297,7 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope, withSight, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed));
+  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   // A class first made while lowering is reported at the function being checked.
@@ -651,7 +653,8 @@ export function check(written: Stmt[], library = false): Checked {
       for (;;) {
         demanded = 0;
         try {
-          withScope(scopeOf(instance), () => checkInstance(instance));
+          // A body sees its own names, not those of a body whose check needed it.
+          withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
           inProgress.delete(instance);
           if (!(e instanceof CompileError) || demanded === 0) throw e;
@@ -723,6 +726,10 @@ export function check(written: Stmt[], library = false): Checked {
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
     const scopes: Map<string, Local>[] = [new Map()];
+    // Every type written from here on, in annotations, casts and closures, sees these names.
+    const named = (p: Param, name: string) => p.pattern.kind === "ident" && p.pattern.name === name;
+    const inSight = (name: string): boolean => scopes.some((s) => s.has(name)) || f.params.some((p) => named(p, name)) || (outer?.inSight(name) ?? false);
+    setSight(inSight);
     const targets: Target[] = [];
     // What the conditions guarding the code being checked prove, innermost last. A `let`
     // narrows only when nothing assigns to its name.
@@ -977,7 +984,7 @@ export function check(written: Stmt[], library = false): Checked {
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner);
-      checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant });
+      withSight(inSight, () => checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       // A shared value's `update` callback lends its parameter only through its fields.
@@ -1079,7 +1086,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.
-          const annotated = (d.type && stored(withSight((n) => lookup(n) !== undefined, () => resolveType(d.type!)))) || demands.get(s);
+          const annotated = (d.type && stored(resolveType(d.type))) || demands.get(s);
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
