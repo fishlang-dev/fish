@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, fits, isNumeric, patternType, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Hole, type ParamType, type Type } from "./typing.ts";
+import { allFields, isNumeric, patternType, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Hole, type ParamType, type Type } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
@@ -37,7 +37,8 @@ export function standIn(types: Type[], what: string, at: Span, deep: boolean, de
 // TypeScript's type-level functions, computed while compiling into ordinary types: `keyof`,
 // indexed access, and the utility types. A class's fields are known once it is laid out, which
 // `layout` does when first asked, saying whether they are known yet.
-export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () => boolean) {
+// `conforms` is whether a type fits another, an interface by shape, as `extends` asks.
+export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () => boolean, conforms: (from: Type, to: Type, at: Span) => boolean) {
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
@@ -129,10 +130,10 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   const kept = (members: Type[]): Type => (members.length === 0 ? "never" : unionType(members));
 
   // `Exclude<T, U>`: T's members that don't fit U.
-  const excludeType: Utility = ([t, u], at) => kept(membersOf(t!, "'Exclude'", at).filter((m) => !fits(m, u!)));
+  const excludeType: Utility = ([t, u], at) => kept(membersOf(t!, "'Exclude'", at).filter((m) => !conforms(m, u!, at)));
 
   // `Extract<T, U>`: T's members that fit U.
-  const extractType: Utility = ([t, u], at) => kept(membersOf(t!, "'Extract'", at).filter((m) => fits(m, u!)));
+  const extractType: Utility = ([t, u], at) => kept(membersOf(t!, "'Extract'", at).filter((m) => conforms(m, u!, at)));
 
   // `NonNullable<T>`: T without the empty value.
   const nonNullableType: Utility = ([t], at) => kept(membersOf(t!, "'NonNullable'", at).filter((m) => m !== "null"));

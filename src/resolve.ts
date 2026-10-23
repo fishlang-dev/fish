@@ -44,7 +44,8 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type) {
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
+  conforms: (from: Type, to: Type, at: Span) => boolean) {
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
@@ -55,7 +56,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     } finally {
       layouts.pop();
     }
-  }, () => deferring > 0);
+  }, () => deferring > 0, conforms);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   const traits = new Map<Interface, InterfaceType>();
@@ -521,7 +522,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // check type fits the extends type.
   function decide(t: Extract<TypeNode, { kind: "conditional" }>, check: Type): Type {
     const names = inferNames(t.extends);
-    if (names.size === 0) return resolveType(fits(check, comparable(resolveType(t.extends), t.extends)) ? t.then : t.else);
+    if (names.size === 0) return resolveType(conforms(check, comparable(resolveType(t.extends), t.extends), t.extends) ? t.then : t.else);
     const found = new Map<string, Type>();
     if (!matches(t.extends, check, found)) return resolveType(t.else);
     for (const name of names) {
@@ -543,11 +544,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // for; a name inferred twice stands for the union of both. The pattern's form is checked
   // before the type it is matched against, so a refused form is refused for every type.
   function matches(p: TypeNode, t: Type, found: Map<string, Type>): boolean {
-    if (inferNames(p).size === 0) return fits(t, comparable(resolveType(p), p));
+    if (inferNames(p).size === 0) return conforms(t, comparable(resolveType(p), p), p);
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return matches(p, t.concrete, found);
     const kind = typeof t === "string" ? t : t.kind;
     if (p.kind === "infer") {
-      if (p.constraint && !fits(t, comparable(resolveType(p.constraint), p.constraint))) return false;
+      if (p.constraint && !conforms(t, comparable(resolveType(p.constraint), p.constraint), p.constraint)) return false;
       const prior = found.get(p.name);
       found.set(p.name, prior ? unionType([prior, t]) : t);
       return true;

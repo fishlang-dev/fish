@@ -810,9 +810,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (p.kind === "property") hold(holder, p.value);
           else if (p.kind === "shorthand" && locals.get(p)) {
             const local = locals.get(p)!;
-            // A shorthand lent to a reference field lends its variable.
+            // A shorthand lent to a reference field lends its variable; a mutable reference copied
+            // lends itself mutably, as `{ m: m }` does, so only one of them is used at a time.
             if (isRef(field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type)) lend(String(local.id), false, p, holder);
-            else if (holdsRef(local.type)) inheritFrom(holder, local);
+            else if (holdsRef(local.type)) {
+              if (isRef(local.type) && local.type.mutable) lend(String(local.id), true, p, holder);
+              inheritFrom(holder, local);
+            }
           }
         }
       } else inherit(holder, e);

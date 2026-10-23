@@ -297,7 +297,9 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed));
+  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
+    // An interface is met by shape, as a conditional type's `extends` asks of it.
+    (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   // A class first made while lowering is reported at the function being checked.
