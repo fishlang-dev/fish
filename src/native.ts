@@ -465,29 +465,23 @@ void fsh_rt_array_reserve(fsh_array *a, int64_t size) {
   a->capacity = capacity;
 }
 
-// A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b). Each
-// pass moves every element once into the other buffer, so whichever buffer a pass reads from
-// holds each element exactly once, even when a comparator panics part way.
-void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, void *, void *), void *env) {
-  if (n < 2) return;
-  char *buffer = fsh_rt_alloc(n * size);
-  char *from = data, *to = buffer;
+// A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a
+// buffer of n elements. Each pair of runs merges into the buffer and is copied back before the
+// next, so the array holds every element exactly once whenever a comparator runs, and a panic
+// in one leaves it whole for its drop.
+void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, void *, void *), void *env, char *buffer) {
   for (int64_t width = 1; width < n; width *= 2) {
-    for (int64_t low = 0; low < n; low += 2 * width) {
-      int64_t mid = low + width < n ? low + width : n, high = low + 2 * width < n ? low + 2 * width : n;
+    for (int64_t low = 0; low + width < n; low += 2 * width) {
+      int64_t mid = low + width, high = low + 2 * width < n ? low + 2 * width : n;
       int64_t i = low, j = mid, k = low;
       // The right run's element goes first only when it orders strictly before, which keeps
       // equal elements in their order.
-      while (i < mid && j < high) memcpy(to + size * k++, from + size * (cmp(env, from + size * j, from + size * i) < 0 ? j++ : i++), size);
-      if (i < mid) memcpy(to + size * k, from + size * i, size * (mid - i)), k += mid - i;
-      if (j < high) memcpy(to + size * k, from + size * j, size * (high - j));
+      while (i < mid && j < high) memcpy(buffer + size * k++, data + size * (cmp(env, data + size * j, data + size * i) < 0 ? j++ : i++), size);
+      if (i < mid) memcpy(buffer + size * k, data + size * i, size * (mid - i)), k += mid - i;
+      if (j < high) memcpy(buffer + size * k, data + size * j, size * (high - j));
+      memcpy(data + size * low, buffer + size * low, size * (high - low));
     }
-    char *swap = from;
-    from = to;
-    to = swap;
   }
-  if (from != data) memcpy(data, from, n * size);
-  fsh_rt_free(buffer);
 }
 
 // An array's buffer for this many bytes, or none for no elements.

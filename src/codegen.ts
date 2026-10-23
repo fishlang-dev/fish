@@ -1989,7 +1989,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${acc} = load ${llvm(result)}, ptr ${out}`);
       passed.unshift(`${llvm(closure.params[0]!)} ${convert(acc, result, closure.params[0]!)}`);
     }
-    const gives = invoke(target, env, passed.slice(0, target.body.params.length), e)!;
+    // A panic in the callback drops what the loop has built and what the callback captured.
+    const unwound = () => {
+      if (method === "map" || method === "filter") {
+        const built = temp();
+        emit(`${built} = load ${llvm(result)}, ptr ${out}`);
+        dispose(built, result);
+      }
+      if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    };
+    const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound)!;
     if (method === "map") appended(out, closure.returns, gives);
     else if (reducing) emit(`store ${llvm(result)} ${convert(gives, closure.returns, result)}, ptr ${out}`);
     else {
@@ -2052,8 +2061,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
     emit(`${length} = load i64, ptr ${lengthAt}`);
     emit(`${data} = load ptr, ptr ${dataAt}`);
-    unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${bytes(element, "1")}, ptr ${through}, ptr ${env})`);
-    if (closure && needsDrop(closure)) dispose(unstash(env, closure), closure);
+    // The scratch buffer is codegen's, so a comparator's panic frees it too.
+    const [size, room, buffer] = [bytes(element, "1"), temp(), temp()];
+    emit(`${room} = mul i64 ${length}, ${size}`);
+    emit(`${buffer} = call ptr @fsh_rt_alloc(i64 ${room})`);
+    const leftovers = () => {
+      if (closure && needsDrop(closure)) dispose(unstash(env, closure), closure);
+    };
+    unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, () => {
+      emit(`call void @fsh_rt_free(ptr ${buffer})`);
+      leftovers();
+    });
+    emit(`call void @fsh_rt_free(ptr ${buffer})`);
+    leftovers();
     return undefined;
   }
 
@@ -2135,7 +2155,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${data} = load ptr, ptr ${dataAt}`);
     const args = e.args.map((a) => value(a));
     const searching = method === "includes" || method === "indexOf";
-    const start = method === "slice" || method === "indexOf" ? (args[method === "slice" ? 0 : 1] ? position(args[method === "slice" ? 0 : 1]!, length) : "0") : "0";
+    const from = method === "slice" ? args[0] : args[1];
+    const start = method !== "join" && from ? position(from, length) : "0";
     const end = method === "slice" && args[1] ? position(args[1], length) : length;
     const result: Type = searching ? (method === "includes" ? "boolean" : "i64") : method === "join" ? "string" : array;
     const out = alloca(llvm(result));
@@ -2157,7 +2178,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${v} = load ${t}, ptr ${slot}`);
     if (searching) {
       const hit = label();
-      emit(`br i1 ${equals(v, element, args[0]!, types.get(e.args[0]!)!)}, label %${hit}, label %${next}`);
+      let same = equals(v, element, args[0]!, types.get(e.args[0]!)!);
+      // `includes` finds NaN, as JavaScript's SameValueZero does; `indexOf` never does.
+      if (method === "includes" && isFloat(lower(element)) && isFloat(lower(types.get(e.args[0]!)!))) {
+        const [here, there, both, either] = [temp(), temp(), temp(), temp()];
+        emit(`${here} = fcmp uno ${t} ${v}, ${v}`);
+        emit(`${there} = fcmp uno ${llvm(lower(types.get(e.args[0]!)!))} ${args[0]}, ${args[0]}`);
+        emit(`${both} = and i1 ${here}, ${there}`);
+        emit(`${either} = or i1 ${same}, ${both}`);
+        same = either;
+      }
+      emit(`br i1 ${same}, label %${hit}, label %${next}`);
       startBlock(hit);
       emit(`store ${llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
       emit(`br label %${done}`);
@@ -2895,19 +2926,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // Calls a function with its arguments' values, after the instance when it is a method.
   // `after` runs once the call returns, and before an error it raises goes on.
-  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void): string | undefined {
+  // `after` runs once the call is over, however it ended; `unwound` only when it panicked.
+  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void, unwound?: () => void): string | undefined {
+    const cleanup = after || unwound ? () => (after?.(), unwound?.()) : undefined;
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
     const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
     const call = `call ${target.body.foreign ? crossed(type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
-      unwinding(call, undefined, after);
+      unwinding(call, undefined, cleanup);
       after?.();
       return undefined;
     }
     const result = temp();
-    unwinding(call, result, after);
+    unwinding(call, result, cleanup);
     if (!target.throws) {
       after?.();
       return result;

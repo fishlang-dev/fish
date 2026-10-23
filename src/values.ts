@@ -991,10 +991,13 @@ export function expressions(ctx: Context) {
     if (c.params.length > params.length) {
       throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.start, callback.end);
     }
+    runsOften(c, name, "its callback once per element", callback);
     c.params.forEach((p, i) => {
-      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback a '${show(params[i]!)}' here, not a '${show(p)}'`, callback.start, callback.end);
+      const at = callback.params[i] ?? callback;
+      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback ${article(show(params[i]!))} here, not ${article(show(p))}`, at.start, at.end);
     });
     const gives = c.returns;
+    if (holdsFuture(gives)) throw new CompileError(`'${name}' over async callbacks isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
     if (name !== "map" && !reducing && gives !== "boolean") {
       throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
     }
@@ -1026,20 +1029,31 @@ export function expressions(ctx: Context) {
     expect(compare, functionType(["a", "b"], [element, element], "void"));
     const c = value(compare);
     if (typeof c === "string" || c.kind !== "closure") throw new CompileError("'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
+    runsOften(c, "sort", "its comparator many times", compare);
     c.params.forEach((p) => {
       if (!fits(element, p)) throw new CompileError(`'sort' passes its comparator a '${show(element)}' here, not a '${show(p)}'`, compare.start, compare.end);
     });
-    if (!isNumeric(lower(c.returns))) {
+    const order = lower(c.returns);
+    if (isInteger(order) && !INTEGERS[order].signed) {
+      throw new CompileError(`a comparator's number has to be able to be negative, and '${show(c.returns)}' can't; convert with 'as i64', or compare: 'a < b ? -1 : a > b ? 1 : 0'`, compare.start, compare.end);
+    }
+    if (!isNumeric(order)) {
       throw new CompileError(`a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${show(c.returns)}'`, compare.start, compare.end);
     }
     return { type: "void", what };
+  }
+
+  // A closure that moves a capture out of itself can run only once, which a method calling it
+  // again and again can't allow.
+  function runsOften(c: ClosureType, name: string, calls: string, at: Span) {
+    if (c.once) throw new CompileError(`'${name}' calls ${calls}, but this closure moves '${c.once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
   // `String(x)` would; `slice` gives clones of a range, its positions as JavaScript reads them.
   function readingCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
-    const [most, takes] = name === "includes" ? [1, "a value to look for"] : name === "indexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
+    const [most, takes] = name === "includes" || name === "indexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
     const least = name === "includes" || name === "indexOf" ? 1 : 0;
     if (e.args.length < least || e.args.length > most) throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
     const argument = (a: Expr, want: Type) => {
@@ -2886,6 +2900,12 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
 
 // The methods an array has.
+// A type's name with its article, as `an 'i64'` or `a 'string'`.
+const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${name}'`;
+
+// Whether a value holds a future, which an array element or a sort's order can't be.
+const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "future" || promiseElement(t) !== undefined);
+
 // The methods that run a callback on each element.
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce"]);
 // The methods that read an array's elements by value.
