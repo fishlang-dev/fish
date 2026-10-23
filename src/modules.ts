@@ -183,7 +183,7 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
   const declare = (s: Stmt) => {
     l.body.push(s);
     const inner = s.kind === "export" || s.kind === "declare" ? s.body : s;
-    const fixed = s.kind === "declare" || (s.kind === "export" && (s.body.kind === "declare" || (entry && s.body.kind === "function"))) || (entry && s.kind === "function" && s.name === "main");
+    const fixed = s.kind === "declare" || (s.kind === "export" && (s.body.kind === "declare" || (entry && library && s.body.kind === "function"))) || (entry && s.kind === "function" && s.name === "main");
     if (!entry && inner.kind === "function" && inner.name === "main") {
       throw new CompileError(`only the entry file's main() runs, so '${module.file}' can't declare one; rename it, or build '${module.file}' as a program of its own`, inner.start, inner.end);
     }
@@ -225,6 +225,8 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     } else declare(s);
   }
   for (const sp of listed) {
+    // Only functions cross to C; a listed class, type or const stays a module export.
+    if (!l.body.some((s) => s.kind === "function" && s.name === sp.name)) continue;
     const at = l.body.findIndex((s) => s.kind === "function" && s.name === sp.name && s.body !== undefined);
     if (at < 0 || (sp.alias !== undefined && sp.alias !== sp.name)) throw cOnly(sp);
     l.body[at] = { kind: "export", body: l.body[at]!, start: l.body[at]!.start, end: l.body[at]!.end };
