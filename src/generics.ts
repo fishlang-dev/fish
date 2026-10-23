@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { field, fits, holdsRef, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { field, fits, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -51,7 +51,7 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
     arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
-    if (earlier && lower(earlier) !== lower(arg)) {
+    if (earlier && !(sameLowered(earlier, arg) && sameLowered(arg, earlier))) {
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);
     }
     bindings.set(node.name, arg);
@@ -299,7 +299,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     }
     // Each value a comptime parameter is given makes an instance of its own.
     f.params.forEach((p, i) => p.comptime && own.set(comptimeName(p), comptimeArgument(args[i]!)));
-    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
+    // A type argument holding a pattern keeps it, so the instance's parameters still ask for it.
+    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, holdsPattern(t) ? t : lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
     else sites.delete(at);

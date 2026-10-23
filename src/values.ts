@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, fields, interior, shareable } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered } from "./typing.ts";
+import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -2105,7 +2105,7 @@ export function expressions(ctx: Context) {
       types.set(e, to);
       return;
     }
-    const exact = lower(type) === lower(to.to);
+    const exact = sameLowered(type, to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
     const unlocked = to.mutable ? unlocks(type, to.to) : undefined;
     if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(to.to)}', which could change it`, e.start, e.end);
@@ -2144,7 +2144,7 @@ export function expressions(ctx: Context) {
     // A field read through a type parameter may be stored as a different type by the concrete
     // type; at a definition, where nothing is concrete, each instance decides.
     if (e.kind === "member" && lower(stored(e)) !== lower(type)) return false;
-    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : lower(type) === lower(to.to);
+    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : sameLowered(type, to.to) && sameLowered(to.to, type);
   }
 
   // Without lifetimes, a reference variable can only be pointed at something that lives as long
@@ -2349,7 +2349,11 @@ export function expressions(ctx: Context) {
     if (typeof object !== "string" && object.kind === "union") {
       throw new CompileError(`can't assign to '${target.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
-    return (typeof object !== "string" && field(object, target.name)?.type) || types.get(target)!;
+    const found = typeof object !== "string" && field(object, target.name)?.type;
+    // A pattern the field was declared with is what a write must match, though lowering made it a string.
+    const declared = types.get(target)!;
+    if (found && holdsPattern(declared) && lower(declared) === lower(found)) return declared;
+    return found || declared;
   }
 
   // The setter an assignment to a class member runs, if it is an accessor. A getter alone
@@ -2692,8 +2696,8 @@ export function expressions(ctx: Context) {
 
   // An operand of an enum, a union of integer literals, works as an i64 too.
   function widen(e: Expr, type: Type): Type {
-    // A pattern's value is a string.
-    if (typeof type !== "string" && type.kind === "pattern") {
+    // A pattern's value is a string, as is a union of patterns and string literals.
+    if (holdsPattern(type) && lower(type) === "string") {
       coercions.set(e, "string");
       return "string";
     }

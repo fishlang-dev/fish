@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unionType } from "./typing.ts";
+import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unionType , lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
@@ -157,7 +157,8 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }:
   const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members.filter(isNumeric) : []);
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
-  const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union";
+  // A union of strings and patterns is a string once lowered, compared as one.
+  const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union" && lower(t) !== "string";
   if (!isUnion(left) && !isUnion(right)) return undefined;
   if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);
   if (!comparable(left, right)) {

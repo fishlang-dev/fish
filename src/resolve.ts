@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { field, fits, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { field, fits, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -197,7 +197,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
-      return functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
+      const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
+      if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
+      return fn;
     }
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind === "literal") return literal(t.value);
@@ -259,7 +261,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.name === "Promise") {
       if (t.args.length !== 1) throw new CompileError("'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
-      return promiseInterface(resolveType(t.args[0]!));
+      const gives = resolveType(t.args[0]!);
+      if (holdsPattern(gives)) throw unsupported("template literal pattern types in promises", t);
+      return promiseInterface(gives);
     }
     if (t.name === "Generator") {
       if (t.args.length !== 1) throw new CompileError("'Generator' takes the type it yields, like 'Generator<i64>'", t.start, t.end);
@@ -395,9 +399,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
         const params = (self ? m.params.slice(1) : m.params).map((p) => paramType(p));
         const method: Method = { name: m.name, params, returns: resolveType(m.returns), mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
+        if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);
       } else {
         const f = member(m);
+        if (holdsPattern(f.type)) throw unsupported("template literal pattern types in interface fields", m);
         add(f.name, m);
         t.fields.push(f);
       }
@@ -444,7 +450,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function mapped(t: Extract<TypeNode, { kind: "mapped" }>): Type {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? resolveType(t.constraint.type) : undefined;
     const keys = resolveType(t.constraint);
-    if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in K]: i64 }'`, t.start, t.end);
+    if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
     const held = standIn(homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => deferring > 0);
     if (held) {
       withScope(new Map([...scope, [t.name, held]]), () => (t.as && resolveType(t.as), resolveType(t.type!)));
@@ -463,12 +469,19 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         if (fields.some((f) => f.name === name)) throw new CompileError(`two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
         const field = t.optional === "+" ? optionalField(name, value)
           : t.optional === "-" ? { name, type: from?.optional === "added" ? withoutNull(value) : value }
-          : from?.optional ? { name, type: unionType([value, "null"]), optional: from.optional }
+          : from?.optional ? kept(name, value, from.optional)
           : { name, type: value };
         fields.push({ ...field, ...(readonly && { readonly: true }) });
       }
     }
     return objectType(fields);
+  }
+
+  // A field a homomorphic mapped type keeps optional: its null is the one `?` added unless the
+  // new type held one of its own as the old did.
+  function kept(name: string, value: Type, was: "added" | "held"): Field {
+    const own = value === "null" || (typeof value !== "string" && value.kind === "union" && value.members.includes("null"));
+    return { name, type: own ? value : unionType([value, "null"]), optional: was === "held" && own ? "held" : "added" };
   }
 
   // `T extends U ? X : Y`: X when every value of T fits U. A check type that is a bare type
@@ -577,6 +590,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         return matches(member.type!, f.type, found);
       });
     }
+    if (p.kind === "template" && typeof t !== "string" && t.kind === "pattern") throw unsupported("'infer' patterns matched against template literal pattern types", p);
     // A template takes a string literal's text apart; each `infer` hole is its piece of text, as
     // a literal of the type its bound asks for.
     if (p.kind === "template") {
@@ -589,8 +603,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
           return textFits(text, comparable(resolveType(hole), hole));
         }
         const bound = hole.constraint ? comparable(resolveType(hole.constraint), hole.constraint) : "string";
-        const value = isInteger(bound) && textFits(text, bound) ? literalType(BigInt(text)) : bound === "boolean" && textFits(text, "boolean") ? literalType(text === "true") : isFloat(bound) && textFits(text, bound) ? bound : literalType(text);
-        if (!fits(value, bound)) return false;
+        const value = inferredText(text, bound);
+        if (value === undefined) return false;
         const prior = found.get(hole.name);
         found.set(hole.name, prior ? unionType([prior, value]) : value);
         return true;
@@ -616,6 +630,21 @@ class Open {
   constructor(param: ParamType) {
     this.param = param;
   }
+}
+
+// The literal an `infer` hole's text stands for under its bound: an i64 literal or another
+// integer type for an integer's text, a boolean literal, a float type, or the text itself, the
+// first of these the bound takes; or nothing when the bound takes none.
+function inferredText(text: string, bound: Type): Type | undefined {
+  const members = typeof bound !== "string" && bound.kind === "union" ? bound.members : [bound];
+  const candidates: Type[] = [];
+  for (const m of members) {
+    if (m === "i64" && textFits(text, m)) candidates.push(literalType(BigInt(text)));
+    else if ((isInteger(m) || isFloat(m)) && textFits(text, m)) candidates.push(m);
+    else if (m === "boolean" && textFits(text, m)) candidates.push(literalType(text === "true"));
+  }
+  candidates.push(literalType(text));
+  return candidates.find((c) => fits(c, bound));
 }
 
 // The names a type pattern declares with `infer`.

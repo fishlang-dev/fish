@@ -15,7 +15,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { functionType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { functionType, holdsPattern, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -890,6 +890,10 @@ export function check(written: Stmt[], library = false): Checked {
       generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
     }
     const gives = declared ?? inferred ?? "void";
+    // A closure's signature and an async result are kept as written, so a pattern in one would
+    // reach the binary.
+    if (holdsPattern(gives) && (future || f.closure)) throw unsupported(`template literal pattern types in ${future ? "async results" : "closure results"}`, f.returnType ?? f);
+    if (f.closure && params.some(holdsPattern)) throw unsupported("template literal pattern types in closure parameters", f);
     if (future) {
       if (holdsRef(gives)) throw unsupported("async functions giving references", f.returnType ?? f);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);

@@ -158,8 +158,10 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // pattern, the strings matching it, and a pattern in a hole is spliced in.
   function templateType(quasis: string[], holes: Type[], at: Span, holeAt: Span[]): Type {
     let spelled: { quasis: string[]; holes: Hole[] }[] = [{ quasis: [quasis[0]!], holes: [] }];
+    // A hole of `never` spells nothing, and `boolean` is `true | false`.
+    if (holes.includes("never")) return "never";
     holes.forEach((hole, i) => {
-      const members = typeof hole !== "string" && hole.kind === "union" ? hole.members : [hole];
+      const members = hole === "boolean" ? [literalType(true), literalType(false)] : typeof hole !== "string" && hole.kind === "union" ? hole.members : [hole];
       const pieces = members.map((m): { quasis: string[]; holes: Hole[] } => {
         if (typeof m !== "string" && m.kind === "literal") return { quasis: [String(m.value)], holes: [] };
         if (m === "string" || isNumeric(m)) return { quasis: ["", ""], holes: [m] };
@@ -168,6 +170,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
       });
       if (spelled.length * pieces.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
       spelled = spelled.flatMap((s) => pieces.map((p) => join(join(s, p), { quasis: [quasis[i + 1]!], holes: [] })));
+      if (spelled.some((s) => s.quasis.some((q) => q.length > 100_000))) throw new CompileError("this template literal type spells a string longer than 100000 characters", at.start, at.end);
     });
     return kept(spelled.map((s) => (s.holes.length === 0 ? literalType(s.quasis[0]!) : patternType(s.quasis, s.holes))));
   }

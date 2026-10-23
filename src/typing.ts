@@ -156,13 +156,15 @@ export function splitTemplate(s: string, quasis: string[]): string[] | undefined
 export function textFits(text: string, t: Type): boolean {
   if (t === "string") return true;
   if (t === "boolean") return text === "true" || text === "false";
+  // A number's text must be what that number prints as, so `-0` and `01` aren't integers.
   if (isInteger(t)) {
-    if (!/^-?(0|[1-9]\d*)$/.test(text)) return false;
+    if (!/^-?(0|[1-9]\d*)$/.test(text) || text === "-0") return false;
     const { bits, signed } = INTEGERS[t];
     const n = BigInt(text);
     return signed ? n >= -(1n << BigInt(bits - 1)) && n < 1n << BigInt(bits - 1) : n >= 0n && n < 1n << BigInt(bits);
   }
-  if (isFloat(t)) return text !== "" && text.trim() === text && !Number.isNaN(Number(text));
+  // As TypeScript's `${number}`: any text JavaScript reads as a finite number.
+  if (isFloat(t)) return text.trim() !== "" && Number.isFinite(Number(text));
   if (typeof t === "string") return false;
   if (t.kind === "literal") return !t.owner && String(t.value) === text;
   if (t.kind === "union") return t.members.some((m) => textFits(text, m));
@@ -525,7 +527,7 @@ export function unionType(parts: Type[], name?: string): Type {
   // as whichever sorts first.
   const seen = new Set<string>();
   const members = [...new Set(flat)]
-    .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
+    .filter((t) => typeof t === "string" || (t.kind !== "literal" || !flat.includes(baseOf(t)!)) && (t.kind !== "pattern" || !flat.includes("string")))
     .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
     .filter((t) => {
       const shape = shapeKey(t);
@@ -915,7 +917,10 @@ export function show(t: Type): string {
   if (typeof t === "string") return t;
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
-  if (t.kind === "pattern") return `\`${t.quasis.map((q, i) => (i === 0 ? q : `\${${show(t.holes[i - 1]!)}}${q}`)).join("")}\``;
+  if (t.kind === "pattern") {
+    const text = (q: string) => q.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("${", "\\${");
+    return `\`${t.quasis.map((q, i) => (i === 0 ? text(q) : `\${${show(t.holes[i - 1]!)}}${text(q)}`)).join("")}\``;
+  }
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
   if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;

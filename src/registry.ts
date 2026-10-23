@@ -5,7 +5,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { fits, optionalField, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { fits, holdsPattern, optionalField, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -87,6 +87,10 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       checkBody(instance);
       return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
     });
+    // A class is laid out as written, so a pattern in a field would reach the binary; one coming
+    // from a generic class's type argument goes when the class is made from the lowered argument.
+    const patterned = c.type.fields.findIndex((f) => holdsPattern(f.type));
+    if (patterned >= 0 && !c.type.generic?.args.some(holdsPattern)) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
     laying.delete(c);
     return true;
   }
