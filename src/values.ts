@@ -954,6 +954,7 @@ export function expressions(ctx: Context) {
     if (isRefType(held)) coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
+    if (callee.name === "sort") return sortCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
@@ -1001,6 +1002,37 @@ export function expressions(ctx: Context) {
     if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
     const type = name === "map" ? arrayType(gives) : name === "filter" ? array : name === "find" ? unionType([array.element, "null"]) : acc ?? "boolean";
     return { type, what: `'${name}'` };
+  }
+
+  // `sort()` orders numbers numerically and strings by UTF-16 code units; `sort(compare)` by
+  // the sign of what the comparator gives for two elements. Stable, and in place, so it gives
+  // nothing.
+  function sortCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    if (e.args.length > 1) throw new CompileError("'sort' takes an optional comparator like '(a, b) => a - b'", e.start, e.end);
+    if (!place(callee.object)) throw new CompileError("'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
+    changeable(callee.object, "sort");
+    const what = "'sort', which sorts its array in place,";
+    const compare = e.args[0];
+    if (!compare) {
+      const element = lower(array.element);
+      if (!isNumeric(element) && element !== "string") {
+        throw new CompileError(`'sort()' without a comparator orders numbers and strings, not '${show(array.element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
+      }
+      return { type: "void", what };
+    }
+    if (compare.kind !== "arrow") throw unsupported("comparators passed to 'sort' by name; write the arrow function in place", compare);
+    if (compare.params.length > 2) throw new CompileError("'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
+    const element = isCopy(array.element) ? array.element : refType(array.element, false);
+    expect(compare, functionType(["a", "b"], [element, element], "void"));
+    const c = value(compare);
+    if (typeof c === "string" || c.kind !== "closure") throw new CompileError("'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
+    c.params.forEach((p) => {
+      if (!fits(element, p)) throw new CompileError(`'sort' passes its comparator a '${show(element)}' here, not a '${show(p)}'`, compare.start, compare.end);
+    });
+    if (!isNumeric(lower(c.returns))) {
+      throw new CompileError(`a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${show(c.returns)}'`, compare.start, compare.end);
+    }
+    return { type: "void", what };
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
@@ -2858,7 +2890,7 @@ const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind ===
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "join", "slice"]);
-const ARRAY_METHODS = new Set(["push", "pop", ...CALLBACK_METHODS, ...READING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
 const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));

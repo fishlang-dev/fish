@@ -121,6 +121,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   let uncopyable = false;
   const elementDrops = new Map<Type, string>();
   const vtables = new Map<string, string>();
+  // The functions `sort` compares through: one per comparator, and one per element type for the
+  // default order.
+  const orders = new Map<string, string>();
+  let comparators = 0;
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
@@ -2018,6 +2022,93 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return v;
   }
 
+  // `sort`: the runtime's merge sort, comparing through a function that calls the comparator
+  // with the two elements, or orders numbers and strings when there is none.
+  function sorted(e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): undefined {
+    const element = array.element;
+    const compare = e.args[0];
+    const closure = compare && (types.get(compare) as ClosureType);
+    let env = "null";
+    let through: string;
+    if (compare && closure) {
+      const target = calls.get(compare)!;
+      env = alloca(llvm(closure));
+      emit(`store ${llvm(closure)} ${owned(compare)}, ptr ${env}`);
+      through = `@"fsh.sort.compare.${comparators++}"`;
+      thunk(through, "i32", () => {
+        const arg = (p: string, given: Type | undefined): string[] => {
+          if (given === undefined) return [];
+          if (isRef(given)) return [`ptr ${p}`];
+          const v = temp();
+          emit(`${v} = load ${llvm(element)}, ptr ${p}`);
+          return [`${llvm(given)} ${convert(copied(v, element), element, given)}`];
+        };
+        const args = [...arg("%a", closure.params[0]), ...arg("%b", closure.params[1])];
+        emit(`ret i32 ${sign(invoke(target, "%p", args.slice(0, target.body.params.length))!, closure.returns)}`);
+      }, ["ptr %a", "ptr %b"]);
+    } else through = order(element);
+    const [lengthAt, dataAt, length, data] = [temp(), temp(), temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${bytes(element, "1")}, ptr ${through}, ptr ${env})`);
+    if (closure && needsDrop(closure)) dispose(unstash(env, closure), closure);
+    return undefined;
+  }
+
+  // -1, 0 or 1 for a comparator's number, as its sign; NaN is 0, keeping the order.
+  function sign(v: string, type: Type): string {
+    const t = lower(type);
+    const [less, more, some, result] = [temp(), temp(), temp(), temp()];
+    const ty = llvm(t);
+    if (isFloat(t)) {
+      emit(`${less} = fcmp olt ${ty} ${v}, 0.0`);
+      emit(`${more} = fcmp ogt ${ty} ${v}, 0.0`);
+    } else {
+      const signed = isInteger(t) && INTEGERS[t].signed;
+      emit(`${less} = icmp ${signed ? "slt" : "ult"} ${ty} ${v}, 0`);
+      emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${ty} ${v}, 0`);
+    }
+    emit(`${some} = select i1 ${more}, i32 1, i32 0`);
+    emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
+    return result;
+  }
+
+  // The default order for an element type: numbers by value, strings by UTF-16 code units.
+  function order(element: Type): string {
+    const t = lower(element);
+    const known = orders.get(keyOf(t));
+    if (known) return known;
+    const name = `@"fsh.sort.order.${orders.size}"`;
+    orders.set(keyOf(t), name);
+    thunk(name, "i32", () => {
+      const [a, b] = [temp(), temp()];
+      emit(`${a} = load ${llvm(t)}, ptr %a`);
+      emit(`${b} = load ${llvm(t)}, ptr %b`);
+      if (t === "string") {
+        const result = temp();
+        emit(`${result} = call i32 @fsh_rt_str_compare(ptr ${a}, ptr ${b})`);
+        emit(`ret i32 ${result}`);
+        return;
+      }
+      // A subtraction could overflow, so the two are compared instead.
+      const [less, more, some, result] = [temp(), temp(), temp(), temp()];
+      if (isFloat(t)) {
+        emit(`${less} = fcmp olt ${llvm(t)} ${a}, ${b}`);
+        emit(`${more} = fcmp ogt ${llvm(t)} ${a}, ${b}`);
+      } else {
+        const signed = isInteger(t) && INTEGERS[t].signed;
+        emit(`${less} = icmp ${signed ? "slt" : "ult"} ${llvm(t)} ${a}, ${b}`);
+        emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${llvm(t)} ${a}, ${b}`);
+      }
+      emit(`${some} = select i1 ${more}, i32 1, i32 0`);
+      emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
+      emit(`ret i32 ${result}`);
+    }, ["ptr %a", "ptr %b"]);
+    return name;
+  }
+
   // A position as JavaScript reads one against a length: a negative one counts from the end,
   // and either is kept between 0 and the length.
   function position(v: string, length: string): string {
@@ -2162,6 +2253,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       appended(at, type.element, owned(e.args[0]!));
       return undefined;
     }
+    if (callee.name === "sort") return sorted(e, type, at);
     if (["includes", "indexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = unionType([type.element, "null"]);
