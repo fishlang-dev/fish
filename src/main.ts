@@ -8,7 +8,7 @@ import { codegen } from "./codegen.ts";
 import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
-import { formatReport, sources, survey } from "./survey.ts";
+import { formatReport, survey } from "./survey.ts";
 import type { Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
@@ -120,21 +120,25 @@ if (import.meta.main) {
   });
   const [command, file] = positionals;
   if (command === "survey") {
-    if (!file || !existsSync(file) || !statSync(file).isDirectory()) {
-      console.error(file ? `fishc survey: '${file}' isn't a directory` : "usage: fishc survey <dir> [--json]");
+    if (!file) {
+      console.error("usage: fishc survey <dir> [--json]");
       process.exit(2);
     }
-    if (sources(file).length === 0) {
-      console.error(`fishc survey: '${file}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
+    if (!existsSync(file) || !statSync(file).isDirectory()) {
+      console.error(existsSync(file) ? `fishc survey: '${file}' is a file; give the directory of a TypeScript project` : `fishc survey: '${file}' doesn't exist`);
       process.exit(2);
     }
     const report = survey(file);
+    if (report.files === 0) {
+      console.error(`fishc survey: '${file}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
+      process.exit(2);
+    }
     console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
     process.exit(0);
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+  if (command !== "build" || !file || values.json || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
     console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]");
     process.exit(2);
   }
