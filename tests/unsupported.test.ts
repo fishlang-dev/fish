@@ -13,7 +13,6 @@ const TYPES: [string, string][] = [
   ["new () => i64", "constructor types"],
   ["import('m').A", "import types"],
   ["{ [K in A]: i64 }", "mapped types"],
-  ["infer U", "'infer' types"],
   ["`a${B}`", "template literal types"],
 ];
 

@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { fits, optionalField, shapeKey, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { field, fits, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { Deferred, opaque, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -173,6 +173,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
     if (t.kind === "conditional") return conditional(t);
+    if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
@@ -412,10 +413,68 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     opaque(check, "a conditional type", t.check, () => deferring > 0);
     if (naked && check === "never") return "never";
     if (naked && typeof check !== "string" && check.kind === "union") {
-      const each = check.members.map((m) => withScope(new Map([...scope, [naked, m]]), () => resolveType(fits(m, resolveType(t.extends)) ? t.then : t.else)));
-      return unionType(each);
+      return unionType(check.members.map((m) => withScope(new Map([...scope, [naked, m]]), () => decide(t, m))));
     }
-    return resolveType(fits(check, resolveType(t.extends)) ? t.then : t.else);
+    return decide(t, check);
+  }
+
+  // One check type's branch: the true one, with what each `infer` matched in scope, when the
+  // check type fits the extends type.
+  function decide(t: Extract<TypeNode, { kind: "conditional" }>, check: Type): Type {
+    if (!hasInfer(t.extends)) return resolveType(fits(check, resolveType(t.extends)) ? t.then : t.else);
+    const found = new Map<string, Type>();
+    if (!matches(t.extends, check, found)) return resolveType(t.else);
+    return withScope(new Map([...scope, ...found]), () => resolveType(t.then));
+  }
+
+  // Whether `t` fits the pattern `p`, recording in `found` the type each `infer` in it stands
+  // for; a name inferred twice stands for the union of both.
+  function matches(p: TypeNode, t: Type, found: Map<string, Type>): boolean {
+    if (!hasInfer(p)) return fits(t, resolveType(p));
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) return matches(p, t.concrete, found);
+    if (p.kind === "infer") {
+      if (p.constraint && !fits(t, resolveType(p.constraint))) return false;
+      const prior = found.get(p.name);
+      found.set(p.name, prior ? unionType([prior, t]) : t);
+      return true;
+    }
+    if (typeof t === "string") return false;
+    if (p.kind === "array" || (p.kind === "ref" && p.name === "Array" && p.args.length === 1)) {
+      return t.kind === "array" && matches(p.kind === "array" ? p.element : p.args[0]!, t.element, found);
+    }
+    if (p.kind === "ref" && p.name === "Promise" && p.args.length === 1) {
+      const gives = promiseElement(t) ?? (t.kind === "future" ? t.gives : undefined);
+      return gives !== undefined && matches(p.args[0]!, gives, found);
+    }
+    if (p.kind === "ref" && p.name === "Option" && p.args.length === 1) {
+      return t.kind === "union" && t.members.includes("null") && matches(p.args[0]!, withoutNull(t), found);
+    }
+    if (p.kind === "ref" && (p.name === "Ref" || p.name === "Mut") && p.args.length === 1) {
+      return t.kind === "ref" && t.mutable === (p.name === "Mut") && matches(p.args[0]!, t.to, found);
+    }
+    if (p.kind === "ref") {
+      const args = t.kind === "class" && t.generic?.name === p.name ? t.generic.args : undefined;
+      return args !== undefined && args.length === p.args.length && p.args.every((a, i) => matches(a, args[i]!, found));
+    }
+    if (p.kind === "function") {
+      if (t.kind !== "function" && t.kind !== "closure") return false;
+      const [rest] = p.params;
+      const any = p.params.length === 1 && rest!.rest && rest!.type?.kind === "array" && rest!.type.element.kind === "ref" && ["any", "unknown"].includes(rest!.type.element.name);
+      if (!any && (p.params.some((q) => q.rest) || p.params.length !== t.params.length)) return false;
+      // A parameter fits the other way round: the function must take what the pattern passes.
+      const params = any || p.params.every((q, i) => (q.type && hasInfer(q.type) ? matches(q.type, t.params[i]!, found) : fits(paramType(q), t.params[i]!)));
+      return params && matches(p.returns, t.returns, found);
+    }
+    if (p.kind === "object") {
+      if (t.kind !== "object" && t.kind !== "class") return false;
+      return p.members.every((m) => {
+        if (m.kind !== "property" || typeof m.name !== "string" || !m.type) throw unsupported("members other than properties in an 'infer' pattern", m);
+        const f = field(t, m.name);
+        if (!f || (f.access ?? "public") !== "public") return m.optional === true;
+        return matches(m.type, f.type, found);
+      });
+    }
+    throw unsupported(`'infer' inside ${p.kind === "union" ? "unions" : TYPE_FORMS[p.kind as keyof typeof TYPE_FORMS] ?? "this type"}`, p);
   }
 
   function member(m: TypeMember): Field {
@@ -426,6 +485,13 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const f = m.optional ? optionalField(m.name, unionMember(m.type)) : { name: m.name, type: resolveType(m.type) };
     return { ...f, type: storable(f.type, m), ...(m.readonly && { readonly: true }) };
   }
+}
+
+// Whether a type pattern declares any `infer` name.
+function hasInfer(n: unknown): boolean {
+  if (!n || typeof n !== "object") return false;
+  if (Array.isArray(n)) return n.some(hasInfer);
+  return (n as { kind?: string }).kind === "infer" || Object.values(n).some(hasInfer);
 }
 
 // A field both sides of `&` declare keeps its type, merging nested object types; other types

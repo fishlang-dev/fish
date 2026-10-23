@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, fits, isNumeric, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, fits, isNumeric, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Type } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
@@ -119,6 +119,24 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // `NonNullable<T>`: T without the empty value.
   const nonNullableType: Utility = ([t], at) => kept(membersOf(t!, "'NonNullable'", at).filter((m) => m !== "null"));
 
+  // `ReturnType<F>`: what a function of type F returns.
+  const returnType: Utility = ([given], at) => {
+    const f = given!;
+    if (typeof f !== "string" && f.kind === "param" && f.concrete) return returnType([f.concrete], at, []);
+    opaque(f, "'ReturnType'", at, deferring);
+    if (typeof f !== "string" && (f.kind === "function" || f.kind === "closure")) return f.returns;
+    throw new CompileError(`'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${show(f)}'`, at.start, at.end);
+  };
+
+  // `Awaited<T>`: what awaiting a T gives, through promises of promises; any other type is itself.
+  const awaitedType: Utility = ([given], at) => {
+    const t = given!;
+    if (typeof t !== "string" && t.kind === "param" && t.concrete) return awaitedType([t.concrete], at, []);
+    opaque(t, "'Awaited'", at, deferring);
+    const gives = promiseElement(t) ?? (typeof t !== "string" && t.kind === "future" ? t.gives : undefined);
+    return gives === undefined ? t : awaitedType([gives], at, []);
+  };
+
   // The utility types by name, and how many type arguments each takes.
   const UTILITIES = new Map<string, [number, Utility, string]>([
     ["Partial", [1, partialType, "Partial<User>"]],
@@ -130,6 +148,8 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
     ["Exclude", [2, excludeType, 'Exclude<"a" | "b", "a">']],
     ["Extract", [2, extractType, 'Extract<"a" | "b", "a">']],
     ["NonNullable", [1, nonNullableType, "NonNullable<string | null>"]],
+    ["ReturnType", [1, returnType, "ReturnType<typeof f>"]],
+    ["Awaited", [1, awaitedType, "Awaited<Promise<i64>>"]],
   ]);
   return { keyofType, indexedType, UTILITIES };
 }
