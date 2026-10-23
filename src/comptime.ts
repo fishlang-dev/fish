@@ -1,5 +1,6 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
+import { fileAt } from "./modules.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, field, fits, INTEGERS, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -129,7 +130,7 @@ export function comptimeChecks(check: (instance: Instance) => boolean) {
 // Each top-level const's value, once computed, and those being computed, which a const reading
 // itself would meet.
 const constants = new WeakMap<Instance, Value>();
-const computing = new WeakSet<Instance>();
+const computing = new Set<Instance>();
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 export function comptimeBody(instance: Instance): Value {
@@ -156,6 +157,8 @@ function guarded(site: Span, go: (run: Interpreter) => Value): Value {
   }
 }
 
+const constName = (c: Instance) => c.body.name.slice("const ".length);
+
 function interpreter() {
   let steps = 0;
   let depth = 0;
@@ -170,7 +173,7 @@ function interpreter() {
   // A const's value, computed once; one that reads itself never ends, so it is refused.
   function constant(c: Instance, at: Span): Value {
     if (constants.has(c)) return constants.get(c);
-    if (computing.has(c)) throw new Stop(`'${c.body.name.slice("const ".length)}' needs its own value to compute its value`, at, false);
+    if (computing.has(c)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${cycle([...computing].slice([...computing].indexOf(c)))}`, at, false);
     computing.add(c);
     try {
       const v = call(c, [], undefined, at);
@@ -179,6 +182,14 @@ function interpreter() {
     } finally {
       computing.delete(c);
     }
+  }
+
+  // How consts reading each other in a ring do it, naming their files when they are in several.
+  function cycle(ring: Instance[]): string {
+    if (ring.length < 2) return "";
+    const files = new Set(ring.map((c) => fileAt(c.body.start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${files.size > 1 ? ` in '${fileAt(c.body.start)}'` : ""}`);
+    return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
   function step(at: Span) {

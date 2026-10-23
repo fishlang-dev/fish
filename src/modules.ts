@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
 import { parse, shiftSpans, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
@@ -13,6 +13,14 @@ export const FILE_SPAN = 2 ** 24;
 // `targets` is the file each import and re-export names.
 export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module> };
 export type Loaded = { modules: Module[]; sources: Source[] };
+
+// The files of the program last loaded, for naming where a declaration is.
+let loadedFiles: { base: number; file: string }[] = [];
+
+// The file a source offset is in, as written relative to the entry's directory.
+export function fileAt(offset: number): string {
+  return loadedFiles.findLast((f) => offset >= f.base)?.file ?? "";
+}
 
 // Loads `entry`, given as `src` when it is already read, and every file it imports.
 export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
@@ -38,6 +46,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     return module;
   };
   visit(entry, src, entry);
+  loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
   return { modules, sources: modules.slice(1).map(({ base, src, file }) => ({ base, src, file })) };
 }
 
@@ -153,6 +162,9 @@ function linkOf(module: Module, entry: boolean): Linked {
     l.body.push(s);
     const inner = s.kind === "export" || s.kind === "declare" ? s.body : s;
     const foreign = s.kind === "declare" || (s.kind === "export" && s.body.kind === "declare");
+    if (!entry && inner.kind === "function" && inner.name === "main") {
+      throw new CompileError(`only the entry file's main() runs, so '${module.file}' can't declare one; rename it, or build '${module.file}' as a program of its own`, inner.start, inner.end);
+    }
     for (const name of namesOf(inner.kind === "declare" ? inner.body : inner)) {
       if (!l.own.has(name)) l.own.set(name, { name, unique: name, foreign });
     }
@@ -163,6 +175,8 @@ function linkOf(module: Module, entry: boolean): Linked {
       if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
       if (s.default !== undefined) bind(s.default, from!, "default", s);
       for (const sp of s.named ?? []) bind(sp.alias ?? sp.name, from!, sp.name, sp);
+    } else if (s.kind === "importEquals") {
+      throw new CompileError(`'import ${s.name} = ...' isn't supported yet; import what you use with 'import { a, b } from "./file"'`, s.start, s.end);
     } else if (s.kind === "exportAll") {
       if (s.alias !== undefined) throw unsupported("namespace re-exports ('export * as name from')", s);
       l.stars.push(from!);

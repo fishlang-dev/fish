@@ -166,3 +166,17 @@ test("a library may export names that only appear in the runtime's comments", ()
 test("outside a library an export is an ordinary function", () => {
   expect(() => check(parse("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }"))).not.toThrow();
 });
+
+test("a library in several files gives C only its entry file's exports", () => {
+  const dir = mkdtempSync(join(tmp, "files-"));
+  writeFileSync(join(dir, "api.fsh"), 'import { twice } from "./util";\nexport function quad(n: i64): i64 { return twice(twice(n)); }\n');
+  writeFileSync(join(dir, "util.fsh"), "export function twice(n: i64): i64 { return n * 2; }\n");
+  writeFileSync(join(dir, "main.c"), '#include <stdio.h>\n#include "api.h"\nint main(void) { printf("%lld\\n", (long long)quad(3)); return 0; }\n');
+  buildLibrary(join(dir, "api.fsh"), join(dir, "api"), "static");
+  const header = readFileSync(join(dir, "api.h"), "utf8");
+  expect(header).toContain("int64_t quad(int64_t n);");
+  expect(header).not.toContain("twice");
+  const clang = Bun.spawnSync(["clang", join(dir, "main.c"), join(dir, "libapi.a"), "-lm", "-o", join(dir, "prog")]);
+  expect(clang.stderr.toString()).toBe("");
+  expect(run(dir).stdout.toString()).toBe("12\n");
+});
