@@ -3027,7 +3027,7 @@ export function expressions(ctx: Context) {
 const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind === "pattern" || (t.kind === "literal" && typeof t.value === "string" && !t.owner)));
 
 // What a string's length, index and methods work on: text, or a union of string literals.
-const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
+export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {

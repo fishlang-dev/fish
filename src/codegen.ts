@@ -1022,6 +1022,42 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return resuming ? `%loop.${current.frame!.loops.get(s)! + i}` : alloca(type);
   }
 
+  // `for...of` over a string: each code point as a new string, until the runtime gives none. The
+  // loop holds a reference to the string, so changing the variable it came from changes nothing.
+  function stringLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>) {
+    const local = resolved(s.left as Stmt);
+    scopes.push([]);
+    const [held, offset] = [loopSlot(s, 0, "ptr"), loopSlot(s, 1, "i64")];
+    const text = fresh(s.right) ? owned(s.right) : copied(value(s.right), "string");
+    own(held, "string");
+    emit(`store ptr ${text}, ptr ${held}`);
+    settle();
+    emit(`store i64 0, ptr ${offset}`);
+    const [test, loop, next, end] = [label(), label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [string, point, done] = [temp(), temp(), temp()];
+    emit(`${string} = load ptr, ptr ${held}`);
+    emit(`${point} = call ptr @fsh_rt_str_next(ptr ${string}, ptr ${offset})`);
+    emit(`${done} = icmp eq ptr ${point}, null`);
+    emit(`br i1 ${done}, label %${end}, label %${loop}`);
+    startBlock(loop);
+    exits.set(s, { exit: end, next, depth: scopes.length });
+    scopes.push([]);
+    reserve(local);
+    own(slot(local), "string");
+    emit(`store ptr ${point}, ptr ${slot(local)}`);
+    s.body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
+    emit(`br label %${next}`);
+    startBlock(next);
+    emit(`br label %${test}`);
+    startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
+  }
+
   // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
   // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
   // it borrows through a `Mut` stays with its owner.
@@ -1200,6 +1236,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (typeof iterated !== "string" && (iterated.kind === "generator" || (iterated.kind === "ref" && typeof iterated.to !== "string" && iterated.to.kind === "generator"))) {
           return generatorLoop(s, iterated);
         }
+        if (lower(valueType(s.right)) === "string") return stringLoop(s);
         const type = valueType(s.right) as ArrayType;
         const local = resolved(s.left as Stmt);
         scopes.push([]);

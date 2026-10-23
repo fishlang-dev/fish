@@ -120,6 +120,17 @@ static int fsh_high_at(const unsigned char *p) { return p[0] == 0xED && p[1] >= 
 static int fsh_low_at(const unsigned char *p) { return p[0] == 0xED && p[1] >= 0xB0 && p[1] <= 0xBF; }
 static uint32_t fsh_three(const unsigned char *p) { return (p[0] & 0x0F) << 12 | (p[1] & 0x3F) << 6 | (p[2] & 0x3F); }
 
+// The code point at byte at in s, as a new string, moving at past it; NULL past the end. A
+// lone surrogate's 3-byte form is a code point of its own, as JavaScript's iterator gives one.
+fsh_str *fsh_rt_str_next(fsh_str *s, int64_t *at) {
+  if (*at >= s->length) return NULL;
+  const unsigned char *p = (const unsigned char *)s->bytes + *at;
+  int64_t n = p[0] < 0x80 ? 1 : p[0] < 0xE0 ? 2 : p[0] < 0xF0 ? 3 : 4;
+  if (*at + n > s->length) n = s->length - *at;
+  *at += n;
+  return fsh_str_of((const char *)p, n);
+}
+
 // Joins strings. Where a lone high surrogate meets a lone low one, the two become the pair's
 // 4-byte form, as joining them in JavaScript makes one character.
 fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {

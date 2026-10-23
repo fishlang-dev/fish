@@ -20,7 +20,7 @@ import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { expressions, substituted } from "./values.ts";
+import { expressions, substituted, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -1217,7 +1217,15 @@ export function check(written: Stmt[], library = false): Checked {
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type is the array's element type", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
-          if (object === "string" || (typeof object !== "string" && object.kind === "literal" && typeof object.value === "string")) throw unsupported("'for...of' loops over strings", s.right);
+          // A string gives each of its code points, as a string of its own.
+          if (stringLike(object)) {
+            if (object !== "string") coercions.set(s.right, "string");
+            scopes.push(new Map());
+            declare(d.target.name, "string", left.keyword === "let", false, left);
+            within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+            scopes.pop();
+            return;
+          }
           // A generator gives each value it yields, owned. Like JavaScript closing it when the
           // loop ends, the loop takes an owned generator over; one behind a `Mut` is lent.
           const yields = yieldsOf(object);
