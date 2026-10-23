@@ -48,7 +48,8 @@ export type Body = Span & {
 export const isLifetime = (p: TypeParam) => p.constraint?.kind === "ref" && p.constraint.name === "Lifetime" && p.constraint.args.length === 0;
 
 // A field as declared: its annotation, its initializer, or both give its type.
-export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean };
+// `written` is an optional field's type as written, before `?` made it nullable.
+export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean; written?: TypeNode };
 
 export type ClassInfo = {
   type: ClassType;
@@ -118,7 +119,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const at = { start: m.start, end: m.end };
     const type: TypeNode | undefined = m.optional && m.type ? { kind: "union", types: [m.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
     const init: Expr | undefined = m.optional ? (m.init ?? { kind: "null", ...at }) : m.init;
-    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end });
+    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }) });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
@@ -126,7 +127,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     // An optional parameter property is an Option, as the parameter is.
     const at = { start: p.start, end: p.end };
     const type: TypeNode | undefined = p.optional && p.type ? { kind: "union", types: [p.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
-    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end });
+    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }) });
   });
 
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {

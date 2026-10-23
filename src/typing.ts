@@ -6,8 +6,9 @@
 export type Access = "public" | "private" | "protected";
 
 // A readonly field can't be written after construction, at any depth.
-// `optional` marks a field written `name?: T`, whose type holds `null` for the value left out.
-export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: boolean };
+// `optional` marks a field written `name?: T`, whose type holds `null` for the value left out:
+// "added" when `?` added it, "held" when T already held it, so `Required` removes only the first.
+export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" };
 
 // Fields are sorted by name, which is also their order in memory.
 export type ObjectType = { kind: "object"; fields: Field[] };
@@ -437,8 +438,14 @@ export function literalType(value: string | bigint | boolean, owner?: LiteralTyp
 // An enum's union carries the enum's name, for messages.
 export function unionType(parts: Type[], name?: string): Type {
   const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
+  // `{ a?: T }` and `{ a: T | null }` are one value shape, so a union keeps the first spelling.
+  const shapes = new Set<Type>();
   const members = [...new Set(flat)]
     .filter((t) => typeof t === "string" || t.kind !== "literal" || !flat.includes(baseOf(t)!))
+    .filter((t) => {
+      const shape = typeof t !== "string" && t.kind === "object" ? objectType(t.fields.map(({ optional: _, ...f }) => f)) : t;
+      return !shapes.has(shape) && shapes.add(shape) !== undefined;
+    })
     .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
   if (members.length === 1) return members[0]!;
   const key = `union ${members.map(keyOf).join("|")}`;
@@ -631,7 +638,7 @@ export function lower(t: Type): Type {
     else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
     else if (t.kind === "array") found = arrayType(lower(t.element));
     else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
-    else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map((f) => ({ ...f, type: lower(f.type) })));
+    else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
   return found;
@@ -678,7 +685,7 @@ export function keyOf(t: Type): string {
 export function objectType(fields: Field[]): ObjectType {
   const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
-  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? "?" : ""}:${keyOf(f.type)}`).join(",");
+  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? `?${f.optional}` : ""}:${keyOf(f.type)}`).join(",");
   let t = interned.get(key);
   if (!t) {
     t = { kind: "object", fields: sorted };
@@ -702,12 +709,18 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
   return [0, ...fieldPath((t as ClassType).base!, name)];
 }
 
-// Every field of an instance: its bases' first, then its own.
 // A type without the empty value an optional field adds.
 export function withoutNull(t: Type): Type {
   return typeof t !== "string" && t.kind === "union" ? unionType(t.members.filter((m) => m !== "null")) : t;
 }
 
+// A field written `name?: T`: its type holds the empty value, and it remembers whether `?` added it.
+export function optionalField(name: string, written: Type): Field {
+  const held = written === "null" || (typeof written !== "string" && written.kind === "union" && written.members.includes("null"));
+  return { name, type: held ? written : unionType([written, "null"]), optional: held ? "held" : "added" };
+}
+
+// Every field of an instance: its bases' first, then its own.
 export function allFields(t: ClassType): Field[] {
   return [...(t.base ? allFields(t.base) : []), ...t.fields];
 }
@@ -804,5 +817,5 @@ export function show(t: Type): string {
   if (t.kind !== "object") return t.name;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
-  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional ? "?" : ""}: ${show(f.optional ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
+  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
 }

@@ -878,7 +878,8 @@ function retag(value: Value, from: Type | undefined, to: Type | undefined): Valu
   }
   const v = unwrap(value);
   if (v && typeof v === "object" && v.kind === "record" && typeof to !== "string" && (to.kind === "object" || to.kind === "class")) {
-    for (const f of to.fields) if (v.fields.has(f.name)) v.fields.set(f.name, retag(v.fields.get(f.name), field(v.type, f.name)?.type, f.type));
+    // A field the value leaves out is an optional one, which is empty.
+    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(v.fields.get(f.name), field(v.type, f.name)?.type, f.type) : retag(null, "null", f.type));
   }
   if (v && typeof v === "object" && v.kind === "array" && typeof to !== "string" && to.kind === "array") {
     const element = typeof from !== "string" && from?.kind === "array" ? from.element : undefined;

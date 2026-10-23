@@ -5,7 +5,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { fits, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { fits, optionalField, show, widenEnum, type ClassType, type Type } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -28,6 +28,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   const unsettled: ClassInfo[] = [];
   const linked = new Set<ClassInfo>();
   const laidOut = new Set<ClassInfo>();
+  const laying = new Set<ClassInfo>();
   const wrapped = new Set<ClassInfo>();
   return { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
@@ -63,13 +64,19 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
-  function layout(c: ClassInfo) {
-    if (laidOut.has(c)) return;
+  // Whether its fields are known, which they aren't yet while its own fields are being resolved.
+  function layout(c: ClassInfo): boolean {
+    if (laidOut.has(c)) return !laying.has(c) && (!c.base || layout(c.base));
     laidOut.add(c);
+    laying.add(c);
     if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
-      if (f.type) return { name: f.name, type: storable(withScope(c.scope, () => resolveType(f.type!)), f), access: f.access, ...readonly };
+      if (f.type) {
+        const type = storable(withScope(c.scope, () => resolveType(f.type!)), f);
+        const optional = f.written && optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional;
+        return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
+      }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = {
@@ -80,6 +87,8 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       checkBody(instance);
       return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
     });
+    laying.delete(c);
+    return true;
   }
 
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.

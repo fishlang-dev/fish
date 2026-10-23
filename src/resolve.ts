@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
+import { fits, optionalField, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -42,10 +42,9 @@ export function storable(written: Type, at: Span): Type {
 // The class a name and type arguments refer to; a generic one is instantiated on first use.
 type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefined;
 
-// Resolves every alias and interface up front, so an unused one is still checked. A generic
-// alias is checked with placeholders for its type parameters, and resolved again per set of
-// type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => void) {
+// Resolves type annotations and aliases. A generic alias is checked with placeholders for its
+// type parameters, and resolved again per set of type arguments.
+export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean) {
   const { keyofType, indexedType, UTILITIES } = typeFunctions(layout);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
@@ -59,7 +58,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   return { resolveType, paramType, withScope, enumInstance, validate };
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
-  // uses it. Run once the checker has the resolver, since an alias may lay out a class.
+  // uses it. Run once classes are linked, since an alias may read a class's fields.
   function validate() {
     aliases.forEach((a) => {
       const scope = placeholders(a.typeParams, (t, s) => withScope(s, () => resolveType(t)));
@@ -153,7 +152,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
     if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
-    if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t);
+    if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
@@ -167,7 +166,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (t.name in INTEGERS || ["boolean", "void", "number", "f32", "f64", "string"].includes(t.name)) {
+    if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
@@ -244,11 +243,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (trait && args.length > 0) throw unsupported("generic interfaces", t);
     if (trait) return interfaceOf(trait);
     // TypeScript's utility types, unless the program declares its own of the name.
-    const utility = UTILITIES[t.name];
+    const utility = UTILITIES.get(t.name);
     if (utility) {
       const [count, apply] = utility;
       if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${t.name}<${count === 1 ? "User" : t.name === "Record" ? '"a" | "b", i64' : 'User, "id"'}>'`, t.start, t.end);
-      return apply(args, t);
+      return apply(args, t, t.args);
     }
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
   }
@@ -379,8 +378,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty.
-    const type = m.optional ? unionType([unionMember(m.type), "null"]) : resolveType(m.type);
-    return { name: m.name, type: storable(type, m), ...(m.readonly && { readonly: true }), ...(m.optional && { optional: true }) };
+    const f = m.optional ? optionalField(m.name, unionMember(m.type)) : { name: m.name, type: resolveType(m.type) };
+    return { ...f, type: storable(f.type, m), ...(m.readonly && { readonly: true }) };
   }
 }
 
@@ -397,11 +396,20 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
       continue;
     }
     const both = typeof g.type !== "string" && g.type.kind === "object" && typeof f.type !== "string" && f.type.kind === "object";
+    // A side where the field is optional gives way to one where it's required, as in
+    // `Partial<T> & Pick<T, "id">`.
+    const required = g.optional && !f.optional ? f : f.optional && !g.optional ? g : undefined;
+    const other = required === f ? g : f;
+    if (required && fits(required.type, other.type)) {
+      const { readonly: _, ...kept } = required;
+      fields[i] = { ...kept, ...(g.readonly && f.readonly && { readonly: true }) };
+      continue;
+    }
     if (g.type !== f.type && !both) {
       throw new CompileError(`property '${f.name}' has type '${show(g.type)}' on one side of '&' and '${show(f.type)}' on the other`, from.start, to.end);
     }
     const type = both ? merged(g.type as ObjectType, f.type as ObjectType, from, to) : f.type;
-    fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }) };
+    fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }), ...(g.optional && f.optional && { optional: f.optional }) };
   }
   return objectType(fields);
 }
