@@ -2142,6 +2142,67 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
+  // Where `lastIndexOf` searches back from, as an end past it: a negative position counts from
+  // the end, and one past the last element starts at the last.
+  function lastFrom(v: string, length: string): string {
+    const [negative, fromEnd, k, last, past, kept, end] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${negative} = icmp slt i64 ${v}, 0`);
+    emit(`${fromEnd} = add i64 ${length}, ${v}`);
+    emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${v}`);
+    emit(`${last} = sub i64 ${length}, 1`);
+    emit(`${past} = icmp sgt i64 ${k}, ${last}`);
+    emit(`${kept} = select i1 ${past}, i64 ${last}, i64 ${k}`);
+    emit(`${end} = add i64 ${kept}, 1`);
+    return end;
+  }
+
+  // `concat` and `flat`: a new array of clones, of this array's elements then each argument's,
+  // or of the elements of each array this one holds.
+  function gathered(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
+    const result = types.get(e) ?? (method === "concat" ? array : lower(array.element));
+    const out = alloca(ARRAY);
+    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    // Each element of the array at `from`, cloned onto the end of the result.
+    const cloneAll = (from: string, element: Type, each?: (slot: string) => void) => {
+      const [lengthAt, dataAt, length, data, index] = [temp(), temp(), temp(), temp(), alloca("i64")];
+      emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 1`);
+      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 0`);
+      emit(`${length} = load i64, ptr ${lengthAt}`);
+      emit(`${data} = load ptr, ptr ${dataAt}`);
+      emit(`store i64 0, ptr ${index}`);
+      const [head, body, done] = [label(), label(), label()];
+      emit(`br label %${head}`);
+      startBlock(head);
+      const [i, more, slot, after] = [temp(), temp(), temp(), temp()];
+      emit(`${i} = load i64, ptr ${index}`);
+      emit(`${more} = icmp slt i64 ${i}, ${length}`);
+      emit(`br i1 ${more}, label %${body}, label %${done}`);
+      startBlock(body);
+      emit(`${slot} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
+      if (each) each(slot);
+      else {
+        const v = temp();
+        emit(`${v} = load ${llvm(element)}, ptr ${slot}`);
+        appended(out, element, copied(v, element));
+      }
+      emit(`${after} = add i64 ${i}, 1`);
+      emit(`store i64 ${after}, ptr ${index}`);
+      emit(`br label %${head}`);
+      startBlock(done);
+    };
+    if (method === "flat") {
+      const inner = array.element as ArrayType;
+      cloneAll(at, array.element, (slot) => cloneAll(slot, inner.element));
+    } else {
+      cloneAll(at, array.element);
+      for (const a of e.args) cloneAll(value(a), array.element);
+    }
+    const v = temp();
+    emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    if (!types.has(e)) pending.push({ v, type: result });
+    return v;
+  }
+
   // A position as JavaScript reads one against a length: a negative one counts from the end,
   // and either is kept between 0 and the length.
   function position(v: string, length: string): string {
@@ -2167,10 +2228,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${length} = load i64, ptr ${lengthAt}`);
     emit(`${data} = load ptr, ptr ${dataAt}`);
     const args = e.args.map((a) => value(a));
-    const searching = method === "includes" || method === "indexOf";
+    const searching = method === "includes" || method === "indexOf" || method === "lastIndexOf";
     const from = method === "slice" ? args[0] : args[1];
-    const start = method !== "join" && from ? position(from, length) : "0";
-    const end = method === "slice" && args[1] ? position(args[1], length) : length;
+    const start = method !== "join" && method !== "lastIndexOf" && from ? position(from, length) : "0";
+    // `lastIndexOf` looks at every element up to where it starts searching back from, and keeps
+    // the last it finds.
+    const end = method === "slice" && args[1] ? position(args[1], length) : method === "lastIndexOf" && from ? lastFrom(from, length) : length;
     const result: Type = searching ? (method === "includes" ? "boolean" : "i64") : method === "join" ? "string" : array;
     const out = alloca(llvm(result));
     if (searching) emit(`store ${llvm(result)} ${method === "includes" ? "false" : "-1"}, ptr ${out}`);
@@ -2204,7 +2267,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`br i1 ${same}, label %${hit}, label %${next}`);
       startBlock(hit);
       emit(`store ${llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
-      emit(`br label %${done}`);
+      emit(`br label %${method === "lastIndexOf" ? next : done}`);
     } else if (method === "join") {
       // ponytail: each element copies the text so far, quadratic in the result's length; an
       // in-place append of a uniquely owned string makes it linear.
@@ -2298,7 +2361,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return undefined;
     }
     if (callee.name === "sort") return sorted(e, type, at);
-    if (["includes", "indexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
+    if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
+    if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = unionType([type.element, "null"]);
     field(lengthAt, 1);

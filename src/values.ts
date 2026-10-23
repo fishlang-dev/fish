@@ -1058,8 +1058,27 @@ export function expressions(ctx: Context) {
   // `String(x)` would; `slice` gives clones of a range, its positions as JavaScript reads them.
   function readingCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
-    const [most, takes] = name === "includes" || name === "indexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
-    const least = name === "includes" || name === "indexOf" ? 1 : 0;
+    if (name === "concat") {
+      // Each array given is read, as this one is, and its elements cloned.
+      for (const a of e.args) {
+        expect(a, array);
+        const t = value(a);
+        const given = isRefType(t) ? t.to : t;
+        // An empty literal, `[]`, is an empty array of any element type.
+        if (a.kind === "array" && a.elements.length === 0) types.set(a, array);
+        else if (!fits(given, array)) throw new CompileError(`'concat' joins arrays of the same element type, '${show(array)}', not '${show(t)}'; to add single values, push them`, a.start, a.end);
+        coercions.set(a, refType(array, false));
+      }
+      return { type: array, what: "'concat'" };
+    }
+    if (name === "flat") {
+      if (e.args.length > 0) throw new CompileError("'flat' flattens one level so far, so it takes no depth", e.args[0]!.start, e.args[0]!.end);
+      const inner = lower(array.element);
+      if (typeof inner === "string" || inner.kind !== "array") throw new CompileError(`'flat' flattens an array of arrays, not '${show(array)}'`, callee.start, callee.end);
+      return { type: inner, what: "'flat'" };
+    }
+    const [most, takes] = name === "includes" || name === "indexOf" || name === "lastIndexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
+    const least = name === "includes" || name === "indexOf" || name === "lastIndexOf" ? 1 : 0;
     if (e.args.length < least || e.args.length > most) throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
     const argument = (a: Expr, want: Type) => {
       expect(a, want);
@@ -2923,7 +2942,7 @@ const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "red
 // The callback methods whose callback decides yes or no.
 const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
-const READING_METHODS = new Set(["includes", "indexOf", "join", "slice"]);
+const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", ...CALLBACK_METHODS, ...READING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
