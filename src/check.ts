@@ -757,6 +757,8 @@ export function check(written: Stmt[], library = false): Checked {
     const facts: Facts[] = [];
     // The list being checked and the place in it, for a statement that becomes several.
     let siblings: { list: Stmt[]; at: number } | undefined;
+    // The names a loop's pattern binds, made as `const`s of the parts.
+    const loopParts = new WeakSet<Declarator>();
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
     // How many comptime blocks or expressions the code being checked is inside, and for each
@@ -986,6 +988,53 @@ export function check(written: Stmt[], library = false): Checked {
       return undefined;
     }
 
+    // `for (const [k, v] of pairs)` and `for (const { x, y } of points)`: the element goes to a
+    // variable named for the pattern, and each name becomes a `const` of its part at the top of
+    // the body. A part of a borrowed element is borrowed, or copied when it copies.
+    function loopPattern(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>) {
+      if (pattern.rest) throw unsupported("rest patterns", pattern.rest);
+      const named = (p: Pattern | undefined): Extract<Pattern, { kind: "ident" }> | undefined => {
+        if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
+        return p;
+      };
+      const parts: [Extract<Pattern, { kind: "ident" }>, (from: Expr) => Expr][] = pattern.kind === "array"
+        ? pattern.elements.flatMap((p, i) => {
+          const n = named(p);
+          return n ? [[n, (from: Expr): Expr => ({ kind: "index", object: from, index: { kind: "int", value: BigInt(i), start: n.start, end: n.end }, optional: false, start: n.start, end: n.end })]] : [];
+        })
+        : pattern.props.map((p) => {
+          if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
+          const key = p.key;
+          return [named(p.value)!, (from: Expr): Expr => ({ kind: "member", object: from, name: key, optional: false, start: p.start, end: p.end })];
+        });
+      const held = pattern.kind === "array" ? `[${pattern.elements.map((p) => (p?.kind === "ident" ? p.name : "")).join(", ")}]` : `{ ${parts.map(([n]) => n.name).join(", ")} }`;
+      const lets: Stmt[] = parts.map(([n, part]) => {
+        const at = { start: n.start, end: n.end };
+        const declarator: Declarator = { target: n, type: undefined, init: part({ kind: "ident", name: held, ...at }), ...at };
+        loopParts.add(declarator);
+        return { kind: "let", keyword: "const", declarations: [declarator], ...at };
+      });
+      Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+      s.body.unshift(...lets);
+    }
+
+    // A name a loop's pattern binds: its part of the element, borrowed when the element is.
+    function loopPart(s: Extract<Stmt, { kind: "let" }>, d: Declarator): undefined {
+      const init = d.init!;
+      const object = init.kind === "index" || init.kind === "member" ? init.object : init;
+      const whole = value(object);
+      const element = isRef(whole) ? whole.to : whole;
+      if (init.kind === "index" && !isTuple(element)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(element)}'`, d.start, d.end);
+      const type = value(init);
+      const name = (d.target as Extract<Pattern, { kind: "ident" }>).name;
+      if (isRef(whole) && !isCopy(type)) {
+        const lent = refType(type, false);
+        coerce(init, type, lent, "");
+        declare(name, lent, false, false, s);
+      } else declare(name, type, false, false, s);
+      return undefined;
+    }
+
     // A whole value written through a narrowed `Mut` may be another member, so from here to the
     // end of each narrowing scope it is read as declared. A loop inside such a scope could come
     // back to reads already checked as narrowed.
@@ -1141,6 +1190,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
           const d = s.declarations[0]!;
           if (d.target.kind === "array") return destructured(s, d, d.target, siblings);
+          if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);
@@ -1213,6 +1263,7 @@ export function check(written: Stmt[], library = false): Checked {
           const left = s.left;
           if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
           const d = left.declarations[0]!;
+          if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) loopPattern(s, d, d.target);
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type is the array's element type", d.type.start, d.type.end);
           const through = value(s.right);
@@ -1458,7 +1509,7 @@ export function check(written: Stmt[], library = false): Checked {
     function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
       const scope = scopes[scopes.length - 1]!;
       // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
-      if (scope.has(name) && !name.startsWith("[")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
+      if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = { name, type, mutable, param, id: nextId++ };
       depths.set(local, scopes.length);
       scope.set(name, local);
