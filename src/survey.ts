@@ -58,7 +58,6 @@ const RULES: Rule[] = [
   { id: "tuples", action: "unsupported", title: "tuple types", feature: "Tuples" },
   { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
   { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
-  { id: "arrayMethods", action: "unsupported", title: "forEach, flatMap, splice, shift, unshift, reverse, fill, flat and findIndex on arrays", feature: "Array mutation methods" },
   { id: "collections", action: "unsupported", title: "Map and Set", feature: "Map and Set" },
   { id: "regex", action: "unsupported", title: "regex literals", feature: "Regex" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
@@ -84,9 +83,6 @@ const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupp
 // across them: a careful codebase scores near 5, a library leaning on `any` near 40, a DOM
 // implementation patching prototypes near 90.
 const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
-// Array methods Fish doesn't have yet, by name; `concat`, `lastIndexOf` and the like are left
-// out, since strings have them too.
-const ARRAY_METHODS = new Set(["forEach", "flatMap", "splice", "shift", "unshift", "reverse", "fill", "flat", "findIndex"]);
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 const LOCAL_FORMS = new Set(["enum", "typeAlias", "interface"]);
 
@@ -413,7 +409,6 @@ function callRules(n: Node, push: (id: string) => void) {
   if (["call", "apply", "bind"].includes(name)) push("G9");
   const [first] = n.args as Node[];
   if (name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) push("G10");
-  if (ARRAY_METHODS.has(name)) push("arrayMethods");
 }
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
