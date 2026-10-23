@@ -67,9 +67,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   let deferring = 0;
   // How many alias instances computing the outermost type has needed, against the budget.
   let computed = 0;
-  // Whether a name is a local or parameter where the type being resolved is written, which
-  // `typeof` can't name yet; unset where only top-level names are in sight.
-  let sight: ((name: string) => boolean) | undefined;
+  // Whether a name is a local or parameter where a type written at `at` sits, which `typeof`
+  // can't name yet; unset where only top-level names are in sight.
+  let sight: ((name: string, at: Span) => boolean) | undefined;
   function setSight(names: typeof sight) {
     sight = names;
   }
@@ -202,7 +202,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
-      return valueType(t.target.name, t, sight?.(t.target.name) === true);
+      return valueType(t.target.name, t, sight?.(t.target.name, t) === true);
     }
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);

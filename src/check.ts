@@ -107,8 +107,8 @@ type Outer = {
   changesThis(path: string, action: string, target: Expr): void;
   // Whether a variable, followed through captures to where it is declared, can't change.
   constant(l: Local): boolean;
-  // Whether a name is a local or parameter in sight, without capturing it.
-  inSight(name: string): boolean;
+  // Whether a name is a local or parameter in sight of a type written at `at`, without capturing it.
+  inSight(name: string, at: Span): boolean;
 };
 
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
@@ -321,7 +321,7 @@ export function check(written: Stmt[], library = false): Checked {
   let demanded = 0;
   const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
-    signing: (f, run) => withSight((n) => f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
+    signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
   });
@@ -345,6 +345,11 @@ export function check(written: Stmt[], library = false): Checked {
     }
   }
   const querying = new Set<string>();
+
+  // Whether a type written at `at` sits inside a body.
+  function writtenIn(f: Body, at: Span): boolean {
+    return at.start >= f.start && at.end <= f.end;
+  }
 
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
   function unlaid(name: string, at: Span) {
@@ -728,7 +733,9 @@ export function check(written: Stmt[], library = false): Checked {
     const scopes: Map<string, Local>[] = [new Map()];
     // Every type written from here on, in annotations, casts and closures, sees these names.
     const named = (p: Param, name: string) => p.pattern.kind === "ident" && p.pattern.name === name;
-    const inSight = (name: string): boolean => scopes.some((s) => s.has(name)) || f.params.some((p) => named(p, name)) || (outer?.inSight(name) ?? false);
+    // Only a type written inside the body sees them: one written elsewhere, a class's field or
+    // another signature, is resolved here only because the body needed it.
+    const inSight = (name: string, at: Span): boolean => writtenIn(f, at) && (scopes.some((s) => s.has(name)) || f.params.some((p) => named(p, name)) || (outer?.inSight(name, at) ?? false));
     setSight(inSight);
     const targets: Target[] = [];
     // What the conditions guarding the code being checked prove, innermost last. A `let`
