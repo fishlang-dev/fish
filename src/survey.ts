@@ -55,7 +55,7 @@ const RULES: Rule[] = [
   { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
   { id: "defaults", action: "unsupported", title: "default parameter values", feature: "Default parameter values" },
   { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
-  { id: "tuples", action: "unsupported", title: "tuple types", feature: "Tuples" },
+  { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
   { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
   { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
   { id: "collections", action: "unsupported", title: "Map and Set", feature: "Map and Set" },
@@ -352,8 +352,9 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
       break;
   }
   if (n.kind === "spread") push(inObject ? "objectSpread" : "spread");
-  const simple: Record<string, string> = { tuple: "tuples", destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
+  const simple: Record<string, string> = { destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
+  if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
   // A dynamic `import("x")` names its module as its first argument.

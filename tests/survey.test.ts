@@ -46,7 +46,7 @@ test("each rule counts what the sample shows", () => {
   const r = survey(sample);
   const got = Object.fromEntries([...r.rules, ...r.waiting].filter((x) => x.count > 0).map((x) => [x.id, x.count]));
   expect(got).toEqual({
-    parse: 1, R1: 1, R2: 1, R3: 1, destructuring: 1, defaults: 1, declarators: 1, tuples: 1,
+    parse: 1, R1: 1, R2: 1, R3: 1, destructuring: 1, defaults: 1, declarators: 1,
     spread: 1, collections: 1, regex: 1, forIn: 1, decorators: 1, genericMethods: 1,
     classForms: 1, math: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1, nestedFunctions: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
@@ -195,13 +195,13 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
 const big = "const xs = /a/.test(y);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  projects([{ "a.ts": big, "b.ts": "const o = { ...p };\n", "c.ts": "const t: [number, number] = [1, 2];\nconst o = { ...p };\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
+  projects([{ "a.ts": big, "b.ts": "const o = { ...p };\n", "c.ts": "const t: [number, number?] = [1, 2];\nconst o = { ...p };\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
       ["Regex", 1, 10, 78.5],
       ["Object spread", 1, 1, 85.7],
-      ["Tuples", 1, 2, 100],
+      ["Optional and rest tuple elements", 1, 2, 100],
     ]);
     expect(r.curve.steps[1]!).toMatchObject({ rules: ["objectSpread"], files: 2, lines: 3 });
     expect(r.repos.map((x) => x.files)).toEqual([3, 1]);
