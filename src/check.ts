@@ -13,7 +13,7 @@ import { comparable, objectsMeet } from "./unions.ts";
 import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
-import { addAlias, paramName, resolver, restParams, typeName } from "./resolve.ts";
+import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { functionType, holdsPattern, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
@@ -237,6 +237,8 @@ export function check(written: Stmt[], library = false): Checked {
     }
     // `declare function f(...): T;` names a C function, called inside `unsafe`.
     if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
+      const rest = s.body.params.find((p) => p.rest);
+      if (rest) throw unsupported("variadic C functions", rest);
       funcs.push(Object.assign({ ...s.body, body: [] }, { foreign: true }));
       continue;
     }
@@ -275,8 +277,8 @@ export function check(written: Stmt[], library = false): Checked {
   const byName = new Map<string, Func>();
   for (const f of funcs) {
     // Only a tag's values fill a rest parameter so far.
-    if (f.params.length === 2 && f.params[0]!.comptime && f.params[1]!.rest) restParams.add(f.params[1]!);
-    else if (f.params.length === 2 && f.params[1]!.rest && f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray") {
+    if (f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest) restParams.add(f.params[1]!);
+    else if (f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
       const strings = f.params[0]!;
       throw new CompileError(`'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
     } else if (f.params[0]?.comptime && f.params.at(-1)?.rest) {
@@ -1323,7 +1325,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
           if (declared && s.value) expect(s.value, declared);
           // An arrow's expression body may be a call returning nothing.
-          const type = !s.value ? "void" : s.value === f.closure?.value && s.value.kind === "call" ? result(s.value) : value(s.value);
+          const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? result(s.value) : value(s.value);
           // A closure returned is boxed into the callable the function declares.
           if (typeof type !== "string" && type.kind === "closure" && (typeof declared === "string" || declared?.kind !== "dyn")) throw unsupported("functions returned without a function return type", s.value!);
           const expected = declared ?? inferred;

@@ -521,6 +521,19 @@ export function literalType(value: string | bigint | boolean, owner?: LiteralTyp
   return t;
 }
 
+// A literal standing for a comptime value that isn't a string, number or boolean, such as a
+// tag's strings: interned by `key`, and never equal to an ordinary literal.
+export function standInLiteral(key: string): LiteralType {
+  const at = `stand-in ${key}`;
+  let t = literals.get(at);
+  if (!t) {
+    t = { kind: "literal", value: key, fields: [] };
+    literals.set(at, t);
+    keys.set(t, at);
+  }
+  return t;
+}
+
 // Members are flattened, deduplicated and kept in one order, so equal unions are one type,
 // and a literal whose base type is also a member adds nothing. A single member is itself.
 // An enum's union carries the enum's name, for messages.

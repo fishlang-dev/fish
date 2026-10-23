@@ -2,7 +2,7 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, field, fits, INTEGERS, literalType, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -97,11 +97,12 @@ export function comptimeArgument(instance: Instance, arg: Expr): Value {
 
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
 // A comptime string array's binding: a literal type standing for exactly that array, so equal
-// arrays share an instance.
+// arrays share an instance. It is never the interned literal of an ordinary string, which a
+// string parameter may be given with the same text.
 const stringArrays = new Map<LiteralType, string[]>();
 
 export function stringsType(items: string[]): LiteralType {
-  const t = literalType(`strings ${JSON.stringify(items)}`);
+  const t = standInLiteral(`strings ${JSON.stringify(items)}`);
   stringArrays.set(t, items);
   return t;
 }

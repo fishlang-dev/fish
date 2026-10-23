@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, fields, interior, shareable } from "./resolve.ts";
+import { channel, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
 import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
@@ -313,6 +313,7 @@ export function expressions(ctx: Context) {
 
   // A call's type, `void` included, or any other expression's.
   function result(e: Expr): Type {
+    if (e.kind === "tagged") untag(e);
     if (e.kind !== "call") return value(e);
     // A call returning a value records it, as reading any other value does.
     const { type } = call(e);
@@ -692,7 +693,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
-    if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name)) return sharedNew(e);
+    if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     // A field holding a stored callable, through an object-typed parameter's bound too.
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param" && receiver.bound?.kind === "object") {
       const stored = field(receiver.bound, callee.name);
@@ -856,9 +857,10 @@ export function expressions(ctx: Context) {
   function untag(e: Extract<Expr, { kind: "tagged" }>) {
     const { tag, template } = e;
     const target = tag.kind === "ident" && !lookup(tag.name) ? byName.get(tag.name) : undefined;
+    if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'`, tag.start, tag.end);
     if (!target || tag.kind !== "ident") throw new CompileError("a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
     const shape = `'comptime strings: TemplateStringsArray, ...values: T[]'`;
-    if (!target.params[0]?.comptime) {
+    if (!tagStrings(target.params[0])) {
       throw new CompileError(`'${tag.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, tag.start, tag.end);
     }
     if (target.params.length !== 2 || !target.params[1]!.rest) throw new CompileError(`'${tag.name}' can't be a tag: a tag takes ${shape}`, tag.start, tag.end);
