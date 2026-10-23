@@ -386,3 +386,68 @@ export function formatReport(r: Report): string {
     ...(waiting.length ? ["", "waiting on Fish", ...waiting] : []),
   ].join("\n");
 }
+
+// A summary of one survey, as a comparison shows it then and now.
+type Summary = Pick<Report, "files" | "lines" | "unread" | "score" | "grade" | "counts">;
+type Moved = { id: string; action: Action; title: string; then: number; now: number; change: number };
+export type Comparison = { then: Summary; now: Summary; rules: Moved[] };
+
+// A saved `fishc survey --json` report, checked enough to compare with; one saved before a field
+// existed gets that field empty.
+export function readReport(text: string): Report {
+  let r: Partial<Report>;
+  try {
+    r = JSON.parse(text);
+  } catch {
+    throw new Error("it isn't JSON");
+  }
+  const rule = (x: unknown) => typeof x === "object" && x !== null && typeof (x as RuleCount).id === "string" && typeof (x as RuleCount).count === "number";
+  if (typeof r !== "object" || r === null || !Array.isArray(r.rules) || !Array.isArray(r.waiting) || ![...r.rules, ...r.waiting].every(rule)) {
+    throw new Error("it isn't a 'fishc survey --json' report");
+  }
+  return {
+    files: r.files ?? 0, lines: r.lines ?? 0, unread: r.unread ?? { files: 0, lines: 0 }, score: r.score ?? 0, grade: r.grade ?? null,
+    counts: r.counts ?? { reject: 0, unsupported: 0, guided: 0, auto: 0 }, rules: r.rules, waiting: r.waiting,
+  };
+}
+
+// What changed between two surveys: the summaries, and every rule whose count moved, the
+// furthest first, a rule missing from either counting as none there.
+export function compare(then: Report, now: Report): Comparison {
+  const moved = new Map<string, Moved>();
+  const tally = (report: Report, side: "then" | "now") => {
+    for (const r of [...report.rules, ...report.waiting]) {
+      // The current report's action and title win, a rule's wording may have changed since.
+      const m = moved.get(r.id) ?? { id: r.id, action: r.action, title: r.title, then: 0, now: 0, change: 0 };
+      moved.set(r.id, { ...m, ...(side === "now" && { action: r.action, title: r.title }), [side]: r.count });
+    }
+  };
+  tally(then, "then");
+  tally(now, "now");
+  const rules = [...moved.values()].map((m) => ({ ...m, change: m.now - m.then })).filter((m) => m.change !== 0)
+    .sort((a, b) => Math.abs(b.change) - Math.abs(a.change) || (a.id < b.id ? -1 : 1));
+  const summary = ({ files, lines, unread, score, grade, counts }: Report): Summary => ({ files, lines, unread, score, grade, counts });
+  return { then: summary(then), now: summary(now), rules };
+}
+
+export function formatComparison(c: Comparison): string {
+  const { then, now } = c;
+  const delta = (a: number, b: number) => (b === a ? "" : ` (${b > a ? "+" : ""}${Math.round((b - a) * 10) / 10})`);
+  const pair = (label: string, a: number, b: number) => `  ${label.padEnd(10)}${a} -> ${b}${delta(a, b)}`;
+  const line = (m: Moved) => `  ${(m.change > 0 ? "+" : "") + m.change}`.padEnd(9) + `${m.title} (${m.then} -> ${m.now})`;
+  const porter = c.rules.filter((m) => m.action !== "unsupported");
+  const waiting = c.rules.filter((m) => m.action === "unsupported");
+  return [
+    `grade ${then.grade ?? "none"} -> ${now.grade ?? "none"}, score ${then.score} -> ${now.score}${delta(then.score, now.score)} per 1000 lines`,
+    pair("files", then.files, now.files),
+    pair("lines", then.lines, now.lines),
+    pair("unread", then.unread.lines, now.unread.lines),
+    pair("rejected", then.counts.reject, now.counts.reject),
+    pair("guided", then.counts.guided, now.counts.guided),
+    pair("auto-fix", then.counts.auto, now.counts.auto),
+    pair("waiting", then.counts.unsupported, now.counts.unsupported),
+    ...(c.rules.length === 0 ? ["", "no rule changed"] : []),
+    ...(porter.length ? ["", "rewrites that changed", ...porter.map(line)] : []),
+    ...(waiting.length ? ["", "waiting on Fish, changed", ...waiting.map(line)] : []),
+  ].join("\n");
+}

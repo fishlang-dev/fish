@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatRanking, rank, readPlan, stepsOf } from "../src/rank.ts";
-import { featuresOf, formatReport, grade, scanFiles, survey } from "../src/survey.ts";
+import { compare, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey } from "../src/survey.ts";
 
 const sample = join(import.meta.dir, "survey", "sample");
 const fishc = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), ...args]);
@@ -269,4 +269,29 @@ test("fishc survey --rank prints and gives JSON, and refuses what it can't read"
     expect(fishc("build", "x.fsh", "--rank").exitCode).toBe(2);
     expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString()).curve.steps[0]).not.toHaveProperty("plan");
   });
+});
+
+test("a comparison lists the rules that moved, the furthest first, a new rule from nothing", () => {
+  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = ys.map(f);\n" }, (dir) => {
+    const then = readReport(JSON.stringify(survey(dir)));
+    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = ys.map(f).filter(g).map(h);\ndelete o.k;\n");
+    const c = compare(then, survey(dir));
+    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["arrayMethods", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
+    expect(c.then.counts.reject).toBe(0);
+    expect(c.now.counts.reject).toBe(1);
+    const text = formatComparison(c);
+    expect(text).toContain("rejected  0 -> 1 (+1)");
+    expect(text).toContain("+2       array methods such as map, filter and reduce (1 -> 3)");
+    expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
+    expect(formatComparison(compare(then, then))).toContain("no rule changed");
+  });
+});
+
+test("a baseline must be a saved survey report", () => {
+  expect(() => readReport("not json")).toThrow("isn't JSON");
+  expect(() => readReport("{\"rules\": []}")).toThrow("isn't a 'fishc survey --json' report");
+  expect(() => readReport("{\"rules\": [{\"id\": 1}], \"waiting\": []}")).toThrow("isn't a 'fishc survey --json' report");
+  const old = readReport("{\"rules\": [{\"id\": \"A1\", \"count\": 4}], \"waiting\": []}");
+  expect(old.unread).toEqual({ files: 0, lines: 0 });
+  expect(old.grade).toBeNull();
 });
