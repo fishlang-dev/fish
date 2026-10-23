@@ -99,7 +99,6 @@ const SIGNATURES: [string, string, string][] = [
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
   ["(@inject x: i64)", "decorators", "@inject x: i64"],
-  ["(comptime n: i64)", "comptime parameters", "comptime n: i64"],
 ];
 
 for (const [signature, what, part] of SIGNATURES) {

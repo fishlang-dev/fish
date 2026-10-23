@@ -847,7 +847,7 @@ export function expressions(ctx: Context) {
   // An arrow passed where a function type is declared takes its parameter types from it.
   function expectFrom(target: Body, list: Expr[]) {
     const bounds = implicitOf(target);
-    const generic = (target.typeParams?.length ?? 0) > 0 || (target.scope?.size ?? 0) > 0 || bounds.size > 0;
+    const generic = (target.typeParams?.length ?? 0) > 0 || (target.scope?.size ?? 0) > 0 || bounds.size > 0 || target.params.some((p) => p.comptime);
     const known = generic ? undefined : paramTypes(instanceOf(target));
     list.forEach((a, i) => {
       const t = bounds.get(i);

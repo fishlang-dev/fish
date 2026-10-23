@@ -1,6 +1,6 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, Pattern, Span, Stmt } from "./parser.ts";
+import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, field, fits, INTEGERS, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
@@ -81,12 +81,38 @@ type Interpreter = ReturnType<typeof interpreter>;
 
 // The value of `comptime expr`, written in `instance`.
 export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  return guarded(site, (run) => run.expr({ instance, locals: new Map(), self: undefined }, site.expr));
+  return guarded(site, (run) => run.expr(seeded(instance), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
 export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
-  guarded(site, (run) => run.block({ instance, locals: new Map(), self: undefined }, site.body));
+  guarded(site, (run) => run.block(seeded(instance), site.body));
+}
+
+// A comptime parameter's argument at a call written in `instance`.
+export function comptimeArgument(instance: Instance, arg: Expr): Value {
+  return guarded(arg, (run) => run.expr(seeded(instance), arg));
+}
+
+// The value an instance's comptime parameter was given, from the literal type it is keyed by.
+export function comptimeParameter(instance: Instance, p: Param): Value {
+  const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
+  return typeof t !== "string" && t?.kind === "literal" ? t.value : undefined;
+}
+
+// A frame for comptime code in an instance, which knows the instance's comptime parameters.
+function seeded(instance: Instance): Frame {
+  const locals = new Map<number, Value>();
+  for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!.id, comptimeParameter(instance, p));
+  return { instance, locals, self: undefined };
+}
+
+// Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
+// function the checker hasn't reached yet.
+let ensureChecked: (instance: Instance) => void = () => {};
+
+export function comptimeChecks(check: (instance: Instance) => void) {
+  ensureChecked = check;
 }
 
 // Each top-level const's value, once computed, and those being computed, which a const reading
@@ -173,6 +199,7 @@ function interpreter() {
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the C function '${callee.body.name}'`, at);
+      ensureChecked(callee);
       const frame: Frame = { instance: callee, locals: new Map(), self };
       callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!.id, args[i] ?? null));
       statements(frame, callee.body.body ?? []);

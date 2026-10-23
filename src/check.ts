@@ -1,6 +1,7 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { stdFor } from "./std.ts";
+import { comptimeArgument, comptimeChecks } from "./comptime.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
@@ -13,7 +14,7 @@ import { genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
-import { closureType, field, fits, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -303,6 +304,10 @@ export function check(written: Stmt[], library = false): Checked {
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
+  // Comptime runs a function only once the checker has been through it.
+  comptimeChecks((i) => {
+    if (!inProgress.has(i)) checkBody(i);
+  });
   // Each concrete instance's return type as its own body saw it, before lowering.
   const views = new Map<Instance, Type>();
   // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
@@ -314,7 +319,18 @@ export function check(written: Stmt[], library = false): Checked {
   const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
+    comptimeArgument: (arg) => comptimeLiteral(arg),
   });
+  // A comptime parameter's argument: its value, computed in the calling instance, as a literal
+  // type. Inside a generic definition the caller's own values aren't known, so it stays open.
+  function comptimeLiteral(arg: Expr): Type {
+    if (!checking?.concrete) return typeParameter("comptime argument", undefined);
+    const given = checking.types.get(arg);
+    if (typeof given !== "string" && given?.kind === "literal" && given.owner) return given;
+    const v = comptimeArgument(checking, arg);
+    if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
+    throw new CompileError("a comptime parameter takes an integer, a boolean, a string or an enum member", arg.start, arg.end);
+  }
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -919,7 +935,8 @@ export function check(written: Stmt[], library = false): Checked {
         const n = expected.params.length;
         throw new CompileError(`'${show(expected)}' passes ${n} argument${n === 1 ? "" : "s"}, so this closure can't take '${paramName(p)}'`, p.start, p.end);
       }
-      const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && !p.comptime && paramName(p) !== "this";
+      if (p.comptime) throw unsupported("comptime parameters on closures", p);
+      const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && paramName(p) !== "this";
       const type = !p.type && given && plain ? given : paramType(p);
       const to = isRef(type) ? type.to : type;
       if (typeof to !== "string" && to.kind === "interface") throw unsupported("closure parameters of interface types", p);

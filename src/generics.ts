@@ -146,11 +146,18 @@ type Checker = {
   checking(): Instance | undefined;
   // The type parameters of the generic class a body belongs to, if any.
   classParams(f: Body): TypeParam[];
+  // A comptime parameter's argument, computed while compiling, as the literal type of its value.
+  comptimeArgument(arg: Expr): Type;
 };
 
 // The instances of every body: one for a plain function, and for a generic one, its
 // definition check plus one per set of type arguments its calls need.
-export function instancing({ resolveType, paramType, withScope, members, checking, classParams }: Checker) {
+// The binding a comptime parameter's value is kept under, beside the type parameters'.
+export function comptimeName(p: Param): string {
+  return `comptime ${paramName(p)}`;
+}
+
+export function instancing({ resolveType, paramType, withScope, members, checking, classParams, comptimeArgument }: Checker) {
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, Bound>>();
   // Which implicit parameters are references to their type, and how.
@@ -211,6 +218,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     if (found) return found;
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), bound));
+    // A comptime parameter's value is known only at each call; the definition has a placeholder.
+    for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), typeParameter(comptimeName(p), undefined));
     found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
     definitions.set(f, found);
     return found;
@@ -280,6 +289,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
         throw new CompileError(`'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${given.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
       }
     }
+    // Each value a comptime parameter is given makes an instance of its own.
+    f.params.forEach((p, i) => p.comptime && own.set(comptimeName(p), comptimeArgument(args[i]!)));
     const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
@@ -331,7 +342,7 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
   }
 
   function generic(f: Body): boolean {
-    return typeParamsOf(f).length > 0 || implicitOf(f).size > 0;
+    return typeParamsOf(f).length > 0 || implicitOf(f).size > 0 || f.params.some((p) => p.comptime);
   }
 
   function explicitPlaceholders(f: Body): Map<string, Type> {

@@ -114,13 +114,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (p.rest) throw unsupported("rest parameters", p);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
-    if (p.comptime) throw unsupported("comptime parameters", p);
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     // A call may leave out an optional parameter, which is then empty.
-    return p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
+    const type = p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
+    // A comptime parameter makes an instance per value, so its type is one whose values compare.
+    const keyed = (t: Type): boolean => isInteger(t) || t === "boolean" || t === "string" || (typeof t !== "string" && (t.kind === "literal" || (t.kind === "union" && t.members.every(keyed))));
+    if (p.comptime && (p.optional || !keyed(type))) throw new CompileError(`a comptime parameter takes an integer, a boolean, a string or an enum member, not '${show(type)}'`, p.type.start, p.type.end);
+    return type;
   }
 
   // An array of an element type. Arrays of references, and of functions, which would need their

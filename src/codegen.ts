@@ -3,7 +3,7 @@ import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf } from "./diag.ts";
-import { comptimeBlock, comptimeBody, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
+import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
@@ -189,13 +189,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       startBlock(resuming.start);
     }
     // Parameters are copied into slots like any other binding.
-    const params = f.params.map((p) => {
+    const params = f.params.flatMap((p) => {
       const local = resolved(p);
       reserve(local);
       own(slot(local), local.type);
-      if (resuming) return "";
+      if (resuming) return [""];
+      // A comptime parameter isn't passed: its instance knows its value.
+      if (p.comptime) return void emit(`store ${llvm(local.type)} ${bake(comptimeParameter(instance, p), local.type)}, ptr ${slot(local)}`), [];
       emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
-      return `${llvm(local.type)} %${local.name}.arg`;
+      return [`${llvm(local.type)} %${local.name}.arg`];
     });
     // A constructor or method works on its instance through a pointer, and a closure on what
     // it captured.
@@ -2347,7 +2349,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
   // Arguments past `taken` run for their effects only.
   function argValues(args: Expr[], target: Instance, taken = args.length): string[] {
-    const values = delivered((hand) => args.flatMap((a, i) => (i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
+    // A comptime parameter's argument was computed while compiling, and isn't passed.
+    const passed = (i: number) => !target.body.params[i]?.comptime;
+    const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
     for (const p of target.body.params.slice(args.length)) {
       const type = target.locals.get(p)!.type;
       values.push(`${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
