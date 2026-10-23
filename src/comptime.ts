@@ -97,21 +97,32 @@ export function comptimeArgument(instance: Instance, arg: Expr): Value {
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
 export function comptimeParameter(instance: Instance, p: Param): Value {
   const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
-  return typeof t !== "string" && t?.kind === "literal" ? t.value : undefined;
+  if (typeof t === "string" || t?.kind !== "literal") return undefined;
+  // An enum's member keeps which enum it is, as members of two enums may share a value.
+  return t.owner ? { kind: "member", type: t, value: t.value } : t.value;
 }
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
 function seeded(instance: Instance): Frame {
+  return { instance, locals: known(instance), self: undefined };
+}
+
+// The comptime parameters an instance can read, by local: its own, and in a closure, those of
+// the functions it is written in, through what it captures.
+function known(instance: Instance): Map<number, Value> {
+  const parent = instance.body.closure?.parent;
+  const outer = parent ? known(parent) : new Map<number, Value>();
   const locals = new Map<number, Value>();
   for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!.id, comptimeParameter(instance, p));
-  return { instance, locals, self: undefined };
+  for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from.id)) locals.set(alias.id, outer.get(from.id));
+  return locals;
 }
 
 // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
 // function the checker hasn't reached yet.
-let ensureChecked: (instance: Instance) => void = () => {};
+let ensureChecked: (instance: Instance) => boolean = () => true;
 
-export function comptimeChecks(check: (instance: Instance) => void) {
+export function comptimeChecks(check: (instance: Instance) => boolean) {
   ensureChecked = check;
 }
 
@@ -199,7 +210,7 @@ function interpreter() {
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the C function '${callee.body.name}'`, at);
-      ensureChecked(callee);
+      if (!ensureChecked(callee)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };
       callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!.id, args[i] ?? null));
       statements(frame, callee.body.body ?? []);
@@ -890,6 +901,8 @@ function memberType(v: Value, t: Type | undefined): Type | undefined {
 // value it holds.
 function equal(a: Value, ta: Type | undefined, b: Value, tb: Type | undefined): boolean {
   const [ma, mb] = [memberType(a, ta), memberType(b, tb)];
+  // A literal stands for its base type: members of two enums that share a value are equal, as
+  // they are at run time.
   const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (baseOf(t) ?? t) : t);
   if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
   return same(a, b);

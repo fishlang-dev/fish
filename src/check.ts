@@ -1,7 +1,7 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { stdFor } from "./std.ts";
-import { comptimeArgument, comptimeChecks } from "./comptime.ts";
+import { comptimeArgument, comptimeChecks, untagged } from "./comptime.ts";
 import type { ClassNode, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
@@ -10,7 +10,7 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { genericClasses, instancing } from "./generics.ts";
+import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
@@ -306,7 +306,9 @@ export function check(written: Stmt[], library = false): Checked {
   const done = new Set<Instance>();
   // Comptime runs a function only once the checker has been through it.
   comptimeChecks((i) => {
-    if (!inProgress.has(i)) checkBody(i);
+    if (inProgress.has(i)) return false;
+    checkBody(i);
+    return true;
   });
   // Each concrete instance's return type as its own body saw it, before lowering.
   const views = new Map<Instance, Type>();
@@ -324,13 +326,29 @@ export function check(written: Stmt[], library = false): Checked {
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
   // type. Inside a generic definition the caller's own values aren't known, so it stays open.
   function comptimeLiteral(arg: Expr): Type {
-    if (!checking?.concrete) return typeParameter("comptime argument", undefined);
-    const given = checking.types.get(arg);
+    // The caller's own comptime parameter passed on: the same value, or in a definition the same
+    // placeholder, so a call passing it on shares the caller's instance.
+    const local = arg.kind === "ident" ? checking?.locals.get(arg) : undefined;
+    const own = local && checking?.body.params.find((p) => p.comptime && checking!.locals.get(p) === local);
+    if (own && checking) return checking.bindings.get(comptimeName(own))!;
+    if (!checking?.concrete) {
+      let open = placeholders.get(arg);
+      if (!open) placeholders.set(arg, open = typeParameter("comptime argument", undefined));
+      return open;
+    }
+    // The argument was checked in the innermost body being checked, a closure's perhaps.
+    const site = [...inProgress].reverse().find((i) => i.types.has(arg)) ?? checking;
+    const given = site.types.get(arg);
     if (typeof given !== "string" && given?.kind === "literal" && given.owner) return given;
-    const v = comptimeArgument(checking, arg);
+    const tagged = comptimeArgument(site, arg);
+    const tag = tagged && typeof tagged === "object" && tagged.kind === "member" ? tagged.type : undefined;
+    if (typeof tag !== "string" && tag?.kind === "literal") return tag;
+    const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
     throw new CompileError("a comptime parameter takes an integer, a boolean, a string or an enum member", arg.start, arg.end);
   }
+  // A generic definition's placeholder for each comptime argument, one per argument.
+  const placeholders = new WeakMap<Expr, Type>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new Set<Stmt>();
   const continued = new Set<Stmt>();
@@ -602,10 +620,12 @@ export function check(written: Stmt[], library = false): Checked {
 
   function checkInstance(instance: Instance, outer?: Outer) {
     const f = instance.body;
-    if (f.foreign) return foreignSignature(instance);
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
-    // function's or a generator's state, has no instance per value.
+    // function's or a generator's state, or given to an accessor, has no instance per value.
     const fixedParam = f.params.find((p) => p.comptime);
+    if (fixedParam && f.foreign) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
+    if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
+    if (f.foreign) return foreignSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
     inProgress.add(instance);

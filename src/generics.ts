@@ -256,8 +256,11 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
       throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
     if (!generic(f)) return instanceOf(f);
-    if (args.length !== f.params.length) {
-      throw new CompileError(`expected ${f.params.length} argument${f.params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+    // Optional parameters may be left out at the end.
+    const required = f.params.filter((p) => !p.optional).length;
+    if (args.length < required || args.length > f.params.length) {
+      const expected = required === f.params.length ? `${required}` : `${required}-${f.params.length}`;
+      throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     const bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
@@ -297,7 +300,8 @@ export function instancing({ resolveType, paramType, withScope, members, checkin
     else sites.delete(at);
     const instance = instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
     if (instance.depth > 64) {
-      const why = f.params.some((p) => p.comptime) ? "a different comptime value or larger type arguments" : "larger type arguments";
+      const comptime = f.params.some((p) => p.comptime);
+      const why = comptime && typeParamsOf(f).length === 0 && implicitOf(f).size === 0 ? "a different comptime value" : comptime ? "a different comptime value or larger type arguments" : "larger type arguments";
       throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with ${why}`, at.start, at.end);
     }
     return instance;
