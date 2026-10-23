@@ -1,4 +1,4 @@
-import { parse, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -585,15 +585,15 @@ class Http1 {
 
 const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
-// The std source sits past every program's in offsets, so a position says which it is in.
-export const STD_BASE = 1 << 30;
+// The std source sits past every program's files in offsets, so a position says which it is in.
+export const STD_BASE = 2 ** 40;
 export const STD_SOURCE = PRELUDE + HTTP;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
 export function stdFor(written: Stmt[]): Stmt[] {
   const all = parse(STD_SOURCE);
-  shift(all);
+  shiftSpans(all, STD_BASE);
   const prelude = all.filter((s) => s.start - STD_BASE < PRELUDE.length);
   const http = all.filter((s) => s.start - STD_BASE >= PRELUDE.length);
   return usesHttp(written, http) ? all : prelude;
@@ -612,14 +612,4 @@ function usesHttp(written: Stmt[], http: Stmt[]): boolean {
     return named || Object.values(node).some(names);
   };
   return names(written);
-}
-
-function shift(v: unknown, seen = new Set<unknown>()) {
-  if (typeof v !== "object" || v === null || seen.has(v)) return;
-  seen.add(v);
-  if (Array.isArray(v)) return v.forEach((x) => shift(x, seen));
-  const node = v as Record<string, unknown>;
-  if (typeof node.start === "number") node.start += STD_BASE;
-  if (typeof node.end === "number") node.end += STD_BASE;
-  Object.values(node).forEach((x) => shift(x, seen));
 }

@@ -1,4 +1,3 @@
-import { locate, sourceOf } from "./diag.ts";
 import type { ArithmeticOp, BinaryOp, Span } from "./parser.ts";
 import { INTEGERS, range, type Integer } from "./typing.ts";
 
@@ -42,7 +41,8 @@ const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^":
 // Each overflow-checking intrinsic the lowered code calls, which the module declares.
 export type Intrinsics = Set<string>;
 
-export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPanic }: Builder, src: string, file: string, release: boolean, intrinsics: Intrinsics) {
+// `where` gives an expression's `file:line:col`, for panic messages.
+export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPanic }: Builder, where: (at: Span) => string, release: boolean, intrinsics: Intrinsics) {
   return { operate, arithmetic, panicIf };
 
   function operate(op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
@@ -162,11 +162,9 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
   function panicIf(condition: string, reason: string, at: Span) {
     const fail = label();
     const ok = label();
-    const place = sourceOf(src, file, at.start);
-    const { line, col } = locate(place.src, place.offset);
     emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${place.file}:${line}:${col}:\n${reason}\n`)})`);
+    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(at)}:\n${reason}\n`)})`);
     emit("unreachable");
     startBlock(ok);
   }

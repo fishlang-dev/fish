@@ -2,7 +2,7 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
-import { CompileError, locate, sourceOf } from "./diag.ts";
+import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
@@ -55,12 +55,13 @@ const crossing = (type: Type) => [llvm(type), extension(type)].filter(Boolean).j
 const crossed = (type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
 
 // A library has no C `main`; each export gets a C function under its own name instead.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean };
+// `sources` holds the program's files other than the entry, for panic locations.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[] };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic, library = false }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
   const out: string[] = [];
@@ -122,7 +123,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const vtables = new Map<string, string>();
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
-  const { operate, arithmetic, panicIf } = lowering(builder, src, file, release, intrinsics);
+  const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
 
   // The instance each generator type resumes, and each future type polls.
@@ -2437,7 +2438,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // `file:line:col` of an expression, in the program or the std library.
   function where(at: Span): string {
-    const place = sourceOf(src, file, at.start);
+    const place = sourceOf(src, file, at.start, sources);
     const { line, col } = locate(place.src, place.offset);
     return `${place.file}:${line}:${col}`;
   }

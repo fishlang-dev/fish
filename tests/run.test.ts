@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
@@ -16,14 +16,17 @@ import { parse } from "../src/parser.ts";
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
 //   // link: <name>     link the C library <name>, as `--link <name>` does
+// A program spanning several files is a directory holding `main.fsh`, whose comments say what
+// to expect, and the files it imports.
 const dir = join(import.meta.dir, "programs");
 const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
 
 // A server program may take 30 seconds, since some wait on real time, like closing an idle
 // connection; the rest keep bun's default, so a hang shows up quickly.
-for (const name of readdirSync(dir).filter((f) => f.endsWith(".fsh"))) {
+const programs = readdirSync(dir).filter((f) => f.endsWith(".fsh") || existsSync(join(dir, f, "main.fsh")));
+for (const name of programs) {
   test(name, () => {
-    const file = join(dir, name);
+    const file = name.endsWith(".fsh") ? join(dir, name) : join(dir, name, "main.fsh");
     const src = readFileSync(file, "utf8");
     const expected = [...src.matchAll(/\/\/ expect: (.*)/g)].map((m) => m[1] + "\n").join("");
     const errors = [...src.matchAll(/\/\/ error: (.*)/g)].map((m) => m[1]!);

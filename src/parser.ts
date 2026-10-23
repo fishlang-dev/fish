@@ -641,3 +641,14 @@ export function endStatement(c: Cursor) {
   if (c.eat(";")) return;
   if (!c.at("}") && !c.peek().newlineBefore && c.peek().kind !== "eof") throw c.error("expected ';'");
 }
+
+// Moves every span in a parsed tree by `by`, for a source placed past others in one program.
+export function shiftSpans(v: unknown, by: number, seen = new Set<unknown>()) {
+  if (typeof v !== "object" || v === null || seen.has(v)) return;
+  seen.add(v);
+  if (Array.isArray(v)) return v.forEach((x) => shiftSpans(x, by, seen));
+  const node = v as Record<string, unknown>;
+  if (typeof node.start === "number") node.start += by;
+  if (typeof node.end === "number") node.end += by;
+  Object.values(node).forEach((x) => shiftSpans(x, by, seen));
+}

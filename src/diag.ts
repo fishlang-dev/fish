@@ -3,11 +3,16 @@ import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
 
-// A user-facing compile error pointing at a [start, end) source range.
+// A file of a program other than the one an error is rendered against, from `base` on.
+export type Source = { base: number; src: string; file: string };
+
+// A user-facing compile error pointing at a [start, end) source range. `sources` holds the
+// program's other files, when it spans several.
 export class CompileError extends Error {
   start: number;
   end: number;
   note: Note | undefined;
+  sources: Source[] = [];
 
   constructor(message: string, start: number, end = start + 1, note?: Note) {
     super(message);
@@ -17,9 +22,12 @@ export class CompileError extends Error {
   }
 }
 
-// Which source an offset is in, the program's or the std library's, which sits past it.
-export function sourceOf(src: string, file: string, offset: number): { src: string; file: string; offset: number } {
-  return offset >= STD_BASE ? { src: STD_SOURCE, file: STD_FILE, offset: offset - STD_BASE } : { src, file, offset };
+// Which source an offset is in: the entry file's, another file's from `sources`, or the std
+// library's, which sits past them all.
+export function sourceOf(src: string, file: string, offset: number, sources: Source[] = []): { src: string; file: string; offset: number } {
+  if (offset >= STD_BASE) return { src: STD_SOURCE, file: STD_FILE, offset: offset - STD_BASE };
+  const other = sources.findLast((s) => offset >= s.base);
+  return other ? { src: other.src, file: other.file, offset: offset - other.base } : { src, file, offset };
 }
 
 // 1-based line and column of a source offset, plus the bounds of its line.
@@ -35,7 +43,7 @@ export function locate(src: string, offset: number) {
 // then the same for its note.
 export function formatError(e: CompileError, path: string, program: string): string {
   const lines = (kind: string, note: Note) => {
-    const { src, file, offset: start } = sourceOf(program, path, note.start);
+    const { src, file, offset: start } = sourceOf(program, path, note.start, e.sources);
     const { message } = note;
     const end = note.end - (note.start - start);
     const { line, col, lineStart, lineEnd } = locate(src, start);
