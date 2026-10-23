@@ -1,5 +1,9 @@
 import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 
+// How a message reads: without the suffix a top-level name takes to tell it apart from another
+// file's (`helper·util`).
+const shown = (text: string) => text.replace(/·\w+/g, "");
+
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
 
@@ -50,7 +54,7 @@ export function formatError(e: CompileError, path: string, program: string): str
     const width = Math.max(1, Math.min(end, lineEnd) - start);
     const pad = " ".repeat(String(line).length);
     return [
-      `${file}:${line}:${col}: ${kind}: ${message}`,
+      `${file}:${line}:${col}: ${kind}: ${shown(message)}`,
       ` ${line} | ${src.slice(lineStart, lineEnd)}`,
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];
