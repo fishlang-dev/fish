@@ -30,7 +30,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   const laidOut = new Set<ClassInfo>();
   const laying = new Set<ClassInfo>();
   const wrapped = new Set<ClassInfo>();
-  return { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
+  return { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
     infoOf.set(c.type, c);

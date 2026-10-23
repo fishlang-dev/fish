@@ -1,20 +1,37 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, fits, isNumeric, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Type } from "./typing.ts";
+import { allFields, fits, isNumeric, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type ParamType, type Type } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
-// Thrown by a type function given a generic alias's own type parameter while that alias is
-// checked before any use: its result waits for the alias's type arguments.
-export class Deferred {}
+// The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
+export function openParam(t: Type, deep: boolean): ParamType | undefined {
+  if (typeof t === "string") return undefined;
+  if (t.kind === "param") return t.concrete ? openParam(t.concrete, deep) : t;
+  if (!deep) return undefined;
+  const promised = promiseElement(t);
+  const parts = promised ? [promised] : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
+    : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? [])
+    : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns] : [];
+  for (const part of parts) {
+    const open = openParam(part, deep);
+    if (open) return open;
+  }
+  return undefined;
+}
 
 // A type function can't look inside a type parameter: the type it stands for is known only per
-// instance. A generic alias being checked waits; generic function code is refused.
-export function opaque(t: Type, what: string, at: Span, deferring: () => boolean): void {
-  if (typeof t === "string" || t.kind !== "param" || t.concrete) return;
-  if (deferring()) throw new Deferred();
-  throw new CompileError(`${what} of the type parameter '${t.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+// instance. While a generic alias is checked before any use, the parameter stands in for the
+// result, so the rest of the alias is still checked; generic function code is refused.
+export function standIn(types: Type[], what: string, at: Span, deep: boolean, deferring: () => boolean): Type | undefined {
+  for (const t of types) {
+    const open = openParam(t, deep);
+    if (!open) continue;
+    if (deferring()) return open;
+    throw new CompileError(`${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+  }
+  return undefined;
 }
 
 // TypeScript's type-level functions, computed while compiling into ordinary types: `keyof`,
@@ -30,7 +47,6 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
       return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return fieldsOf(t.concrete, what, at);
-    opaque(t, what, at, deferring);
     if (typeof t !== "string" && t.kind === "interface") {
       throw new CompileError(`${what} takes an object type or a class, not the interface '${show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
     }
@@ -40,7 +56,6 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // The keys a type names: a string literal, or a union of them.
   function keysOf(k: Type, what: string, at: Span): string[] {
     if (typeof k !== "string" && k.kind === "param" && k.concrete) return keysOf(k.concrete, what, at);
-    opaque(k, what, at, deferring);
     const members = typeof k !== "string" && k.kind === "union" ? k.members : [k];
     if (members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string")) {
       return members.map((m) => (m as { value: string }).value);
@@ -50,6 +65,8 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
 
   // `keyof T`: the union of T's field names.
   function keyofType(t: Type, at: Span): Type {
+    const held = standIn([t], "'keyof'", at, false, deferring);
+    if (held) return held;
     const fields = fieldsOf(t, "'keyof'", at);
     if (fields.length === 0) throw new CompileError(`'${show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
     return unionType(fields.map((f) => literalType(f.name)));
@@ -58,6 +75,8 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // `T[K]`: the type of the field K names, or the union of those a union of keys names; an array's
   // `T[number]` is its element type.
   function indexedType(t: Type, k: Type, at: Span, keyAt: Span): Type {
+    const held = standIn([t, k], "an indexed access type", at, false, deferring);
+    if (held) return held;
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return indexedType(t.concrete, k, at, keyAt);
     if (typeof t !== "string" && t.kind === "array") {
       if (isNumeric(k)) return t.element;
@@ -105,7 +124,6 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // The members of a union, or the one type that isn't one.
   const membersOf = (t: Type, what: string, at: Span): Type[] => {
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return membersOf(t.concrete, what, at);
-    opaque(t, what, at, deferring);
     return typeof t !== "string" && t.kind === "union" ? t.members : [t];
   };
   const kept = (members: Type[]): Type => (members.length === 0 ? "never" : unionType(members));
@@ -123,7 +141,6 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   const returnType: Utility = ([given], at) => {
     const f = given!;
     if (typeof f !== "string" && f.kind === "param" && f.concrete) return returnType([f.concrete], at, []);
-    opaque(f, "'ReturnType'", at, deferring);
     if (typeof f !== "string" && (f.kind === "function" || f.kind === "closure")) return f.returns;
     throw new CompileError(`'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${show(f)}'`, at.start, at.end);
   };
@@ -132,24 +149,28 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   const awaitedType: Utility = ([given], at) => {
     const t = given!;
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return awaitedType([t.concrete], at, []);
-    opaque(t, "'Awaited'", at, deferring);
     const gives = promiseElement(t) ?? (typeof t !== "string" && t.kind === "future" ? t.gives : undefined);
     return gives === undefined ? t : awaitedType([gives], at, []);
   };
 
   // The utility types by name, and how many type arguments each takes.
-  const UTILITIES = new Map<string, [number, Utility, string]>([
-    ["Partial", [1, partialType, "Partial<User>"]],
-    ["Required", [1, requiredType, "Required<User>"]],
-    ["Readonly", [1, readonlyType, "Readonly<User>"]],
-    ["Pick", [2, pickType, 'Pick<User, "id">']],
-    ["Omit", [2, omitType, 'Omit<User, "id">']],
-    ["Record", [2, recordType, 'Record<"a" | "b", i64>']],
-    ["Exclude", [2, excludeType, 'Exclude<"a" | "b", "a">']],
-    ["Extract", [2, extractType, 'Extract<"a" | "b", "a">']],
-    ["NonNullable", [1, nonNullableType, "NonNullable<string | null>"]],
-    ["ReturnType", [1, returnType, "ReturnType<typeof f>"]],
-    ["Awaited", [1, awaitedType, "Awaited<Promise<i64>>"]],
-  ]);
+  // Each takes its type argument count, the function, an example, which arguments it reads
+  // inside, and whether it compares them by fitting, which a type parameter anywhere in them
+  // would decide wrongly.
+  const entries: [string, number, Utility, string, number[], boolean][] = [
+    ["Partial", 1, partialType, "Partial<User>", [0], false],
+    ["Required", 1, requiredType, "Required<User>", [0], false],
+    ["Readonly", 1, readonlyType, "Readonly<User>", [0], false],
+    ["Pick", 2, pickType, 'Pick<User, "id">', [0, 1], false],
+    ["Omit", 2, omitType, 'Omit<User, "id">', [0, 1], false],
+    ["Record", 2, recordType, 'Record<"a" | "b", i64>', [0], false],
+    ["Exclude", 2, excludeType, 'Exclude<"a" | "b", "a">', [0, 1], true],
+    ["Extract", 2, extractType, 'Extract<"a" | "b", "a">', [0, 1], true],
+    ["NonNullable", 1, nonNullableType, "NonNullable<string | null>", [0], false],
+    ["ReturnType", 1, returnType, "ReturnType<typeof f>", [0], false],
+    ["Awaited", 1, awaitedType, "Awaited<Promise<i64>>", [0], false],
+  ];
+  const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [number, Utility, string]] => [name, [count, (args, at, argAt) =>
+    standIn(read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
   return { keyofType, indexedType, UTILITIES };
 }

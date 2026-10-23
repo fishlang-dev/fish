@@ -14,6 +14,7 @@ import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, typeName } from "./resolve.ts";
+import { openParam } from "./typefns.ts";
 import { functionType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
@@ -286,7 +287,7 @@ export function check(written: Stmt[], library = false): Checked {
     returnOf: (b, at) => returnOf(definition(b), at),
     paramTypesOf: (b) => declaredParams(b),
   };
-  const { register, settle, link, layout, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
+  const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
   });
@@ -324,17 +325,37 @@ export function check(written: Stmt[], library = false): Checked {
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
   function valueTypeOf(name: string, at: Span): Type {
+    const local = [checking, ...inProgress].some((i) => i && [...new Set(i.locals.values())].some((l) => l.name === name));
+    if (local) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
+    if (classes.has(name)) throw new CompileError(`'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
     const constant = byName.get(`const ${name}`);
-    if (constant) return returnOf(instanceOf(constant), at);
-    const f = byName.get(name);
+    const f = constant ?? byName.get(name);
     if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
-    if (f.typeParams.length > 0 || implicitOf(f).size > 0 || f.params.some((p) => p.comptime)) {
-      throw new CompileError(`'typeof' of the generic function '${name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
+    if (querying.has(name)) throw new CompileError(`'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
+    // A result left to inference is checked from the body, which may need the class being laid out.
+    const [mid] = laying;
+    if (!f.returnType && mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
+    querying.add(name);
+    try {
+      return constant ? widenLet(returnOf(instanceOf(constant), at)) : functionTypeOf(f, at);
+    } finally {
+      querying.delete(name);
     }
-    if (f.generator) throw unsupported("'typeof' of generator functions", at);
-    const instance = instanceOf(f);
-    const returns = returnOf(instance, at);
+  }
+  const querying = new Set<string>();
+
+  // A function's type for `typeof`: a parameter typed with an object type, an interface or a
+  // function type makes it generic in Fish, but its declared type is what `typeof` names.
+  function functionTypeOf(f: Func, at: Span): Type {
+    const explicit = f.typeParams.filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
+    if (explicit.length > 0 || f.params.some((p) => p.comptime)) {
+      throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
+    }
+    if (f.generator) throw unsupported("generator functions in 'typeof' types", at);
+    const returns = returnOf(definition(f), at);
     const result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
+    const open = openParam(result, true);
+    if (open) throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${open.name}'; write the return type`, at.start, at.end);
     return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? p.pattern.name : "_")), declaredParams(f), result);
   }
 
