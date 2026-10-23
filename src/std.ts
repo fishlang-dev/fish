@@ -5,6 +5,19 @@ import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 const PRELUDE = `
 type TemplateStringsArray = string[];
+function* __arrayEntries<T>(xs: Ref<T[]>): Generator<[i64, T]> {
+  let i = 0;
+  for (const x of xs) {
+    yield [i, x.clone()];
+    i++;
+  }
+}
+function* __arrayKeys<T>(xs: Ref<T[]>): Generator<i64> {
+  for (let i = 0; i < (xs.length as i64); i++) yield i;
+}
+function* __arrayValues<T>(xs: Ref<T[]>): Generator<T> {
+  for (const x of xs) yield x.clone();
+}
 class AbortError { message: string = "This operation was aborted"; }
 class IoError { message: string; constructor(message: string) { this.message = message; } }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
