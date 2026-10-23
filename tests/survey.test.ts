@@ -281,20 +281,30 @@ test("a comparison lists the rules that moved, the furthest first, a new rule fr
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("  +2     array methods such as map, filter and reduce (1 -> 3)");
+    expect(text).toContain("      +2  array methods such as map, filter and reduce (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
-    expect(formatComparison(compare(then, then))).toContain("no rule changed");
+    expect(formatComparison(compare(then, then))).toContain("no rule's count changed");
   });
 });
 
-test("a baseline must be a saved survey report", () => {
+test("a baseline must be a saved survey report, and is scored again by today's rules", () => {
+  const rule = (extra: object) => JSON.stringify({ files: 1, lines: 3, rules: [{ id: "A1", action: "auto", title: "var", count: 4, ...extra }] });
   expect(() => readReport("not json")).toThrow("isn't JSON");
-  expect(() => readReport("{\"rules\": []}")).toThrow("isn't a 'fishc survey --json' report");
-  expect(() => readReport("{\"rules\": [{\"id\": 1}], \"waiting\": []}")).toThrow("isn't a 'fishc survey --json' report");
-  const old = readReport("{\"rules\": [{\"id\": \"A1\", \"count\": 4}], \"waiting\": []}");
+  for (const text of ["null", "[]", "5", "{}", "{\"rules\": []}", rule({ count: 1e999 }), rule({ count: -2.5 }), rule({ count: "4" }), rule({ title: undefined }), rule({ action: "maybe" }),
+    JSON.stringify({ files: 1, lines: 3, rules: [{ id: "A1", action: "auto", title: "var", count: 1 }, { id: "A1", action: "auto", title: "var", count: 2 }] }),
+    JSON.stringify({ files: "1", lines: 3, rules: [] }), JSON.stringify({ files: 1, lines: 3, unread: 1, rules: [] })]) {
+    expect(() => readReport(text)).toThrow("isn't a 'fishc survey --json' report");
+  }
+  // A report saved before `waiting` and `unread` existed, with a score made by older rules.
+  const old = readReport(JSON.stringify({ files: 1, lines: 36, score: 1628.6, grade: "F", counts: {}, rules: [
+    { id: "R3", action: "reject", title: "delete", count: 1 }, { id: "arrayMethods", action: "unsupported", title: "array methods", count: 3 },
+  ] }));
   expect(old.unread).toEqual({ files: 0, lines: 0 });
-  expect(old.grade).toBeNull();
+  expect([old.score, old.grade, old.counts.unsupported, old.waiting.map((r) => r.id)]).toEqual([10, "B", 3, ["arrayMethods"]]);
+  const text = formatComparison(compare(old, { ...old, rules: old.rules.map((r) => ({ ...r, count: r.count + 100000 })) }));
+  expect(text).toContain("+100000  delete (1 -> 100001)");
 });
+
 
 test("fishc survey --compare shows what changed since a saved report, and refuses bad baselines", () => {
   project({ "app/a.ts": "var a = 1;\n", "old.json": "", "bad.json": "{}", "text.txt": "nope" }, (dir) => {
@@ -303,14 +313,15 @@ test("fishc survey --compare shows what changed since a saved report, and refuse
     writeFileSync(join(app, "a.ts"), "var a = 1;\nvar b = 2;\n");
     const run = fishc("survey", app, "--compare", join(dir, "old.json"));
     expect(run.exitCode).toBe(0);
-    expect(run.stdout.toString()).toContain("+1     var: const or let (1 -> 2)");
+    expect(run.stdout.toString()).toContain("      +1  var: const or let (1 -> 2)");
     const json = JSON.parse(fishc("survey", app, "--compare", join(dir, "old.json"), "--json").stdout.toString());
     expect(Object.keys(json)).toEqual(["then", "now", "rules"]);
     expect(json.rules).toEqual([{ id: "A1", action: "auto", title: "var: const or let", then: 1, now: 2, change: 1 }]);
     expect(fishc("survey", app, "--compare", join(dir, "bad.json")).stderr.toString()).toContain("isn't a 'fishc survey --json' report");
     expect(fishc("survey", app, "--compare", join(dir, "text.txt")).stderr.toString()).toContain("isn't JSON");
-    expect(fishc("survey", app, "--compare", join(dir, "missing.json")).exitCode).toBe(2);
-    expect(fishc("survey", "--rank", app, "--compare", join(dir, "old.json")).exitCode).toBe(2);
+    expect(fishc("survey", app, "--compare", join(dir, "missing.json")).stderr.toString()).toContain("can't be compared: it doesn't exist");
+    expect(fishc("survey", app, "--compare", dir).stderr.toString()).toContain("it isn't a file");
+    expect(fishc("survey", "--rank", app, "--compare", join(dir, "old.json")).stderr.toString()).toContain("rankings can't be compared yet");
     expect(fishc("build", "x.fsh", "--compare", "old.json").exitCode).toBe(2);
   });
 });

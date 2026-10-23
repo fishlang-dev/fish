@@ -161,6 +161,12 @@ export function survey(dir: string): Report {
     for (const [id, example] of f.findings) add(found, id, example);
   }
   const all = RULES.map((r) => ({ ...r, count: found.get(r.id)?.count ?? 0, examples: found.get(r.id)?.examples ?? [] }));
+  return report(scans.length, lines, unread, all);
+}
+
+// A report from its rules' counts: the counts by action, the score and the grade, so a saved
+// report read back is scored by the same rules as a fresh one.
+function report(files: number, lines: number, unread: { files: number; lines: number }, all: RuleCount[]): Report {
   const counts: Record<Action, number> = { reject: 0, unsupported: 0, guided: 0, auto: 0 };
   for (const r of all) counts[r.action] += r.count;
   const weighted = all.reduce((sum, r) => sum + WEIGHTS[r.action] * r.count, 0);
@@ -169,7 +175,7 @@ export function survey(dir: string): Report {
   const graded = lines > 0 && lines >= unread.lines;
   const byCount = (a: RuleCount, b: RuleCount) => WEIGHTS[b.action] - WEIGHTS[a.action] || b.count - a.count;
   return {
-    files: scans.length, lines, unread, score, grade: graded ? grade(score) : null, counts,
+    files, lines, unread, score, grade: graded ? grade(score) : null, counts,
     rules: all.filter((r) => r.action !== "unsupported").sort(byCount),
     waiting: all.filter((r) => r.action === "unsupported").sort(byCount),
   };
@@ -392,23 +398,32 @@ type Summary = Pick<Report, "files" | "lines" | "unread" | "score" | "grade" | "
 type Moved = { id: string; action: Action; title: string; then: number; now: number; change: number };
 export type Comparison = { then: Summary; now: Summary; rules: Moved[] };
 
-// A saved `fishc survey --json` report, checked enough to compare with; one saved before a field
-// existed gets that field empty.
+// A saved `fishc survey --json` report, checked enough to compare with, and scored again by
+// today's rules, so a change in how scores are made isn't mistaken for a change in the project.
+// A report saved before `waiting` or `unread` existed lists every rule in `rules`, and had none
+// unread.
 export function readReport(text: string): Report {
-  let r: Partial<Report>;
+  let r: unknown;
   try {
     r = JSON.parse(text);
   } catch {
     throw new Error("it isn't JSON");
   }
-  const rule = (x: unknown) => typeof x === "object" && x !== null && typeof (x as RuleCount).id === "string" && typeof (x as RuleCount).count === "number";
-  if (typeof r !== "object" || r === null || !Array.isArray(r.rules) || !Array.isArray(r.waiting) || ![...r.rules, ...r.waiting].every(rule)) {
-    throw new Error("it isn't a 'fishc survey --json' report");
+  const bad = new Error("it isn't a 'fishc survey --json' report");
+  const count = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 0;
+  const o = r as Partial<Record<keyof Report, unknown>> | null;
+  if (typeof o !== "object" || o === null || Array.isArray(o) || !Array.isArray(o.rules) || (o.waiting !== undefined && !Array.isArray(o.waiting))) throw bad;
+  const all = [...o.rules, ...((o.waiting as unknown[] | undefined) ?? [])];
+  const ids = new Set<string>();
+  for (const x of all) {
+    const rule = x as Partial<RuleCount> | null;
+    if (typeof rule !== "object" || rule === null || typeof rule.id !== "string" || typeof rule.title !== "string" || !count(rule.count)) throw bad;
+    if (!["reject", "unsupported", "guided", "auto"].includes(rule.action as string) || ids.has(rule.id)) throw bad;
+    ids.add(rule.id);
   }
-  return {
-    files: r.files ?? 0, lines: r.lines ?? 0, unread: r.unread ?? { files: 0, lines: 0 }, score: r.score ?? 0, grade: r.grade ?? null,
-    counts: r.counts ?? { reject: 0, unsupported: 0, guided: 0, auto: 0 }, rules: r.rules, waiting: r.waiting,
-  };
+  const unread = (o.unread ?? { files: 0, lines: 0 }) as { files: unknown; lines: unknown };
+  if (!count(o.files) || !count(o.lines) || typeof unread !== "object" || unread === null || !count(unread.files) || !count(unread.lines)) throw bad;
+  return report(o.files as number, o.lines as number, unread as { files: number; lines: number }, all as RuleCount[]);
 }
 
 // What changed between two surveys: the summaries, and every rule whose count moved, the
@@ -432,9 +447,12 @@ export function compare(then: Report, now: Report): Comparison {
 
 export function formatComparison(c: Comparison): string {
   const { then, now } = c;
-  const delta = (a: number, b: number) => (b === a ? "" : ` (${b > a ? "+" : ""}${Math.round((b - a) * 10) / 10})`);
+  const delta = (a: number, b: number) => {
+    const d = Math.round((b - a) * 10) / 10;
+    return d === 0 ? "" : ` (${d > 0 ? "+" : ""}${d})`;
+  };
   const pair = (label: string, a: number, b: number) => `  ${label.padEnd(10)}${a} -> ${b}${delta(a, b)}`;
-  const line = (m: Moved) => `  ${(m.change > 0 ? "+" : "") + m.change}`.padEnd(9) + `${m.title} (${m.then} -> ${m.now})`;
+  const line = (m: Moved) => `  ${((m.change > 0 ? "+" : "") + m.change).padStart(6)}  ${m.title} (${m.then} -> ${m.now})`;
   const porter = c.rules.filter((m) => m.action !== "unsupported");
   const waiting = c.rules.filter((m) => m.action === "unsupported");
   return [
@@ -446,7 +464,7 @@ export function formatComparison(c: Comparison): string {
     pair("guided", then.counts.guided, now.counts.guided),
     pair("auto-fix", then.counts.auto, now.counts.auto),
     pair("waiting", then.counts.unsupported, now.counts.unsupported),
-    ...(c.rules.length === 0 ? ["", "no rule changed"] : []),
+    ...(c.rules.length === 0 ? ["", "no rule's count changed"] : []),
     ...(porter.length ? ["", "rewrites that changed", ...porter.map(line)] : []),
     ...(waiting.length ? ["", "waiting on Fish, changed", ...waiting.map(line)] : []),
   ].join("\n");

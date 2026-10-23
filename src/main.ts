@@ -151,7 +151,8 @@ if (import.meta.main) {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
     const extra = values.self !== undefined || values.plan !== undefined;
-    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra)) || (values.rank && values.compare !== undefined)) fail(usage);
+    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra))) fail(usage);
+    if (values.rank && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
     for (const dir of [...dirs, ...(values.self !== undefined ? [values.self] : [])]) checkProject(dir);
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
@@ -169,6 +170,10 @@ if (import.meta.main) {
     } else if (values.compare !== undefined) {
       let then;
       try {
+        if (!existsSync(values.compare)) throw new Error("it doesn't exist");
+        if (!statSync(values.compare).isFile()) throw new Error("it isn't a file");
+        // A saved report is kilobytes; anything far larger isn't one.
+        if (statSync(values.compare).size > 64 * 1024 * 1024) throw new Error("it is too large to be a saved survey");
         then = readReport(readFileSync(values.compare, "utf8"));
       } catch (e) {
         fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${e instanceof Error ? e.message : e}`);
