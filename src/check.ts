@@ -250,6 +250,7 @@ export function check(written: Stmt[], library = false): Checked {
     if (s.kind === "let" && s.keyword === "const") {
       for (const d of s.declarations) {
         if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
+        if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError(`'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
         if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
         const giving: Stmt = { kind: "return", value: d.init, start: d.init.start, end: d.init.end };
         funcs.push(Object.assign({ ...made, name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
@@ -623,8 +624,10 @@ export function check(written: Stmt[], library = false): Checked {
     const facts: Facts[] = [];
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
-    // How many comptime blocks the statement being checked is inside.
+    // How many comptime blocks or expressions the code being checked is inside, and for each
+    // block, how many targets were open when it began, which nothing inside may jump to.
     let comptimeDepth = 0;
+    const floors: number[] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
     const changed: Local[] = [];
     // The expression an expression statement being checked consists of.
@@ -687,6 +690,14 @@ export function check(written: Stmt[], library = false): Checked {
       narrowed,
       captured: (l) => captures?.has(l) ?? false,
       raise,
+      comptime: <T>(check: () => T): T => {
+        comptimeDepth++;
+        try {
+          return check();
+        } finally {
+          comptimeDepth--;
+        }
+      },
       errorOf,
       thrown,
       noteThis,
@@ -998,7 +1009,9 @@ export function check(written: Stmt[], library = false): Checked {
         // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":
           comptimeDepth++;
+          floors.push(targets.length);
           scoped(s.body);
+          floors.pop();
           comptimeDepth--;
           return;
         case "block":
@@ -1107,6 +1120,9 @@ export function check(written: Stmt[], library = false): Checked {
         case "break":
         case "continue": {
           const target = jumpTarget(s);
+          if (floors.length > 0 && targets.findIndex((t) => t.stmt === target) < floors.at(-1)!) {
+            throw new CompileError(`'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
+          }
           jumps.set(s, target);
           (s.kind === "break" ? broken : continued).add(target);
           return;
@@ -1149,6 +1165,9 @@ export function check(written: Stmt[], library = false): Checked {
         case "return": {
           // A `return` in a match arm gives the arm its value, and never leaves the function.
           const arm = targets.findLast((t) => t.kind === "arm");
+          if (floors.length > 0 && (!arm || targets.indexOf(arm) < floors.at(-1)!)) {
+            throw new CompileError("'return' can't leave a comptime block, which runs while compiling; give a value with a 'comptime' expression instead", s.start, s.end);
+          }
           if (arm) {
             jumps.set(s, arm.stmt);
             if (arm.wanted && !s.value) throw new CompileError("this match gives a value, so a 'return' in its arm needs one", s.start, s.end);

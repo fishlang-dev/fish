@@ -59,17 +59,16 @@ void fsh_rt_free(void *p) {
   free(p);
 }
 
-// Top-level consts are filled before main, into memory that lives as long as the program: what
-// they take is no leak, so it stops being counted.
-int64_t fsh_rt_live(void) {
-  return __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
-}
+// What drops the program's top-level consts at exit, which the leak check runs first, unless tasks
+// were left running, which may still read them.
+static void (*fsh_constants_drop)(void) = NULL;
 
-void fsh_rt_keep_since(int64_t before) {
-  __atomic_store_n(&fsh_live, before, __ATOMIC_RELAXED);
+void fsh_rt_constants(void (*drop)(void)) {
+  fsh_constants_drop = drop;
 }
 
 __attribute__((destructor)) static void fsh_leaks(void) {
+  if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   const char *check = getenv("FISH_LEAKS");
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   if (check && check[0] == '1' && live != 0 && !fsh_abandoned) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);

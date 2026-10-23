@@ -91,6 +91,8 @@ export type Context = {
   reachable(l: Local): boolean;
   // Records an error a call raises, and what the instance called may throw.
   raise(at: Expr, type: Type, what: string): void;
+  // Checks comptime code, which may throw any error: one it doesn't catch is a compile error.
+  comptime<T>(check: () => T): T;
   // Checks what a `throw` raises.
   thrown(at: Expr, value: Expr): void;
   errorOf(instance: Instance): Type | undefined;
@@ -1779,7 +1781,7 @@ export function expressions(ctx: Context) {
         return unsafely(() => value(e.expr));
       // Checked as the code it is; it runs while compiling, and codegen bakes its value.
       case "comptime":
-        return value(e.expr);
+        return ctx.comptime(() => value(e.expr));
       case "yield":
         if (ctx.generator) throw unsupported("'yield' inside expressions", e);
         throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
@@ -2288,6 +2290,12 @@ export function expressions(ctx: Context) {
     }
     if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
+    }
+    // A top-level const, or a part of one, was computed while compiling and never changes.
+    let root = target;
+    while (root.kind === "member" || root.kind === "index") root = root.object;
+    if (root.kind === "ident" && !lookup(root.name) && byName.has(`const ${root.name}`)) {
+      throw new CompileError(`'${root.name}' is a top-level const, computed while compiling, so it never changes; a global that changes is a const holding an Atomic or a Lock`, target.start, target.end);
     }
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {

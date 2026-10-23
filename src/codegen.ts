@@ -2,13 +2,13 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
-import { locate, sourceOf } from "./diag.ts";
-import { comptimeBlock, comptimeBody, comptimeValue, memberOf, type Value } from "./comptime.ts";
+import { CompileError, locate, sourceOf } from "./diag.ts";
+import { comptimeBlock, comptimeBody, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -133,7 +133,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // Top-level consts and comptime blocks run while compiling, every one of them, so one that
   // fails is reported even when nothing reads it; none is compiled.
-  for (const instance of instances) if (instance.body.comptime && instance.concrete) comptimeBody(instance);
+  for (const instance of instances) {
+    if (!instance.body.comptime || !instance.concrete) continue;
+    if (instance.body.comptime === "const") bakeable(instance.returns, instance.body, true);
+    comptimeBody(instance);
+  }
 
   for (const instance of instances) {
     if (instance.body.comptime) continue;
@@ -265,17 +269,49 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
+  // The globals are filled before main; the runtime drops them at exit, before its leak check.
   function fillConstants(): string[] {
     if (constantGlobals.size === 0) return [];
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    emit("%before = call i64 @fsh_rt_live()");
-    for (const [c, name] of constantGlobals) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(c), c.returns)}, ptr ${name}`);
-    emit("call void @fsh_rt_keep_since(i64 %before)");
-    emit("ret void");
-    const filler = ['define internal void @"fsh.constants"() {', "entry:", ...allocas, ...body, "}", "", '@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @"fsh.constants", ptr null }]'];
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
-    return filler;
+    const made = (name: string, fill: () => void) => {
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      fill();
+      emit("ret void");
+      const lines = [`define internal void ${name}() {`, "entry:", ...allocas, ...body, "}", ""];
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      return lines;
+    };
+    const filler = made('@"fsh.constants"', () => {
+      for (const [c, name] of constantGlobals) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(c), c.returns)}, ptr ${name}`);
+      emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
+    });
+    const dropper = made('@"fsh.constants.drop"', () => {
+      for (const [c, name] of constantGlobals) {
+        const v = temp();
+        emit(`${v} = load ${llvm(c.returns)}, ptr ${name}`);
+        dispose(v, c.returns);
+      }
+    });
+    return [...filler, ...dropper, '@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @"fsh.constants", ptr null }]'];
+  }
+
+  // Comptime gives what can be built into the program: numbers, booleans, strings, and arrays,
+  // objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
+  // a Lock.
+  function bakeable(type: Type, at: Span, constant = false) {
+    const fine = (t: Type): boolean => {
+      if (typeof t === "string") return t !== "void";
+      if (t.kind === "literal") return true;
+      if (t.kind === "union") return t.members.every(fine);
+      if (t.kind === "array") return fine(t.element);
+      if (t.kind === "object" || t.kind === "variant") return t.fields.every((f) => fine(f.type));
+      if (t.kind === "class") return (!t.base || fine(t.base)) && t.fields.every((f) => fine(f.type));
+      if (t.kind === "interior") return constant && t.which !== "Cell" && fine(t.of);
+      return false;
+    };
+    if (fine(type)) return;
+    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `a '${show(type)}' can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
+    throw new CompileError(what, at.start, at.end);
   }
 
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
@@ -3192,6 +3228,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "bool":
         return String(e.value);
       case "comptime":
+        bakeable(types.get(e)!, e);
         return bake(comptimeValue(current, e), types.get(e)!);
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
@@ -3608,11 +3645,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A value computed while compiling, built as a value of its type: scalars and strings as
   // constants, aggregates assembled from their baked parts.
-  function bake(v: Value, type: Type): string {
+  function bake(tagged: Value, type: Type): string {
     if (typeof type !== "string" && type.kind === "union") {
-      const member = memberOf(v, type);
-      return convert(bake(v, member), member, type);
+      const member = memberOf(tagged, type);
+      return convert(bake(untagged(tagged), member), member, type);
     }
+    const v = untagged(tagged);
     // A literal type, or the empty value, takes no space.
     if ((typeof type !== "string" && type.kind === "literal") || v === null) return "zeroinitializer";
     if (typeof v === "string") return text(v);
@@ -3632,6 +3670,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const n = String(v.items.length);
       const [data, t] = [temp(), llvm(type.element)];
       emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, n)})`);
+      // Numbers are copied from constant data, so a large table is one copy, not a store each.
+      if (v.items.length > 0 && (isInteger(type.element) || isFloat(type.element))) {
+        const table = `@.table.${globals.length}`;
+        const element = type.element;
+        const items = v.items.map((x) => `${t} ${typeof untagged(x) === "number" ? floatConstant(untagged(x) as number, element as "f32" | "f64") : String(untagged(x))}`);
+        globals.push(`${table} = private unnamed_addr constant [${n} x ${t}] [${items.join(", ")}]`);
+        intrinsics.add("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+        emit(`call void @llvm.memcpy.p0.p0.i64(ptr ${data}, ptr ${table}, i64 ${bytes(element, n)}, i1 false)`);
+        return built(data, n, n);
+      }
       v.items.forEach((item, i) => {
         const at = temp();
         emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
