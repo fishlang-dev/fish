@@ -1,4 +1,5 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { builtinModules } from "node:module";
 import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { parse } from "./parser.ts";
@@ -41,6 +42,8 @@ const RULES: Rule[] = [
   { id: "unreadable", action: "unsupported", title: "files that couldn't be opened" },
   { id: "jsx", action: "unsupported", title: "JSX in .tsx files", feature: "JSX for server-side HTML" },
   { id: "modules", action: "unsupported", title: "imports and exports between files (multi-file programs)", feature: "Multi-file programs" },
+  { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
+  { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "unsupported", title: "destructuring in declarations and parameters", feature: "Destructuring" },
   { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
   { id: "defaults", action: "unsupported", title: "default parameter values", feature: "Default parameter values" },
@@ -301,13 +304,20 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   if (simple[n.kind]) push(simple[n.kind]!);
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
-  if (MODULE_FORMS.has(n.kind)) push("modules");
+  if (MODULE_FORMS.has(n.kind)) push(moduleRule(n.module ?? n.require));
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
   if (n.kind === "class" && depth > 0 && n.name !== undefined) push("localDeclarations");
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
+}
+
+// What an import or re-export needs: another file of the program, a Node built-in, or an npm
+// package, told apart by how its specifier is written.
+function moduleRule(specifier: unknown): string {
+  if (typeof specifier !== "string" || /^[./]/.test(specifier)) return "modules";
+  return specifier.startsWith("node:") || builtinModules.includes(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
 }
 
 function callRules(n: Node, push: (id: string) => void) {

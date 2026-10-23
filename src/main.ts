@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
@@ -123,32 +123,43 @@ function checkProject(dir: string) {
 
 if (import.meta.main) {
   // A bare `--lib` builds the default kind, a static library.
-  const { values, positionals } = parseArgs({
-    args: Bun.argv.slice(2).map((a) => (a === "--lib" ? "--lib=static" : a)),
-    allowPositionals: true,
-    options: {
-      out: { type: "string", short: "o" },
-      "emit-llvm": { type: "boolean" },
-      release: { type: "boolean" },
-      panic: { type: "string", default: "unwind" },
-      link: { type: "string", multiple: true },
-      lib: { type: "string" },
-      json: { type: "boolean" },
-      rank: { type: "boolean" },
-      self: { type: "string" },
-      plan: { type: "string" },
-    },
-  });
+  const { values, positionals } = (() => {
+    try {
+      return parseArgs({
+        args: Bun.argv.slice(2).map((a) => (a === "--lib" ? "--lib=static" : a)),
+        allowPositionals: true,
+        options: {
+          out: { type: "string", short: "o" },
+          "emit-llvm": { type: "boolean" },
+          release: { type: "boolean" },
+          panic: { type: "string", default: "unwind" },
+          link: { type: "string", multiple: true },
+          lib: { type: "string" },
+          json: { type: "boolean" },
+          rank: { type: "boolean" },
+          self: { type: "string" },
+          plan: { type: "string" },
+        },
+      });
+    } catch (e) {
+      return fail(`fishc: ${e instanceof Error ? e.message : e}`);
+    }
+  })();
   const [command, file] = positionals;
   if (command === "survey") {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
-    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || values.self || values.plan))) fail(usage);
-    for (const dir of [...dirs, ...(values.self ? [values.self] : [])]) checkProject(dir);
+    const extra = values.self !== undefined || values.plan !== undefined;
+    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra))) fail(usage);
+    for (const dir of [...dirs, ...(values.self !== undefined ? [values.self] : [])]) checkProject(dir);
+    // A directory given twice, or inside another given, would count its files twice.
+    const real = dirs.map((d) => realpathSync(d));
+    const nested = real.findIndex((d, k) => real.some((e, l) => l !== k && (d === e ? l < k : d.startsWith(e + sep))));
+    if (nested >= 0) fail(`fishc survey: '${dirs[nested]}' is already surveyed as part of another directory given`);
     if (values.rank) {
       let plan;
       try {
-        plan = values.plan ? readPlan(values.plan) : undefined;
+        plan = values.plan !== undefined ? readPlan(values.plan) : undefined;
       } catch (e) {
         fail(`fishc survey: the plan '${values.plan}' can't be read: ${e instanceof Error ? e.message : e}`);
       }
@@ -162,7 +173,7 @@ if (import.meta.main) {
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || values.json || values.rank || values.self || values.plan || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+  if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
     console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }

@@ -153,7 +153,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(46);
+  expect(r.rules.length + r.waiting.length).toBe(48);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -198,7 +198,7 @@ test("the curve picks the feature freeing the most lines first, and frees a file
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
-      ["Array methods", 1, 10, 78.6],
+      ["Array methods", 1, 10, 78.5],
       ["Object spread", 1, 1, 85.7],
       ["Tuples", 1, 2, 100],
     ]);
@@ -207,12 +207,28 @@ test("the curve picks the feature freeing the most lines first, and frees a file
   });
 });
 
-test("unread files are left out of the curve, and the self curve stands alone", () => {
-  projects([{ "a.ts": big, "bad.ts": "const = ;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
+test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
+  projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
-    expect(r.repos[0]!.unread).toEqual({ files: 1, lines: 1 });
-    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Array methods"]);
+    expect(r.repos[0]!.unread).toEqual({ files: 2, lines: 3 });
+    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["Array methods", 76.9]]);
+    expect(r.curve.unread).toEqual([{ feature: "JSX for server-side HTML", files: 1, lines: 2 }, { feature: "parser gaps", files: 1, lines: 1 }]);
+    expect(formatRanking(r)).toContain("also waiting, in files Fish couldn't read");
     expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
+  });
+});
+
+test("imports wait on other files, npm packages or Node built-ins by how they are written", () => {
+  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import fs from \"node:fs\";\nimport path = require(\"path\");\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Multi-file programs"], ["npm interop"], ["Node built-ins"]]);
+  });
+});
+
+test("ties go to the feature carrying most of what waits, then to the name, despite float noise", () => {
+  const files: Record<string, string> = { "z.ts": "const t: [number, number] = [1, 2];\nfor (const k in o) {}\n" };
+  for (let i = 0; i < 10; i++) files[`f${i}.ts`] = "const xs = ys.map(f);\n" + ["const o = { ...p };", "const r = /a/;", "const s = Math.max(1, 2);", "let a, b;", "process.exit(1);", "fetch(u);", "setTimeout(f, 1);", "Date.now();", "Promise.all([]);"].filter((_, k) => k !== i % 9).join("\n") + "\n";
+  project(files, (dir) => {
+    expect(rank([dir]).curve.steps[0]!.feature).toBe("Array methods");
   });
 });
 
@@ -223,6 +239,13 @@ test("a plan names each feature's item and whether it is done", () => {
       "Array methods": { item: "7", done: false }, "Object spread": { item: "9b", done: true }, "for...in": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
+  });
+  project({ "plan.md": "- [ ] 1. **`for...in`** - keys\r\n- [x]  2.  **Array methods**\r\n- [ ] 3. **Array methods**\r\n" }, (dir) => {
+    const plan = readPlan(join(dir, "plan.md"));
+    expect([plan.get("for...in"), plan.get("array methods")]).toEqual([{ item: "1", done: false }, { item: "2", done: true }]);
+  });
+  project({ "readme.md": "# Hello\n" }, (dir) => {
+    expect(() => readPlan(join(dir, "readme.md"))).toThrow("no '- [ ] N. **Title**' items");
   });
 });
 
@@ -235,5 +258,12 @@ test("fishc survey --rank prints and gives JSON, and refuses what it can't read"
     expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
     expect(fishc("survey", "--rank", a!, join(a!, "nope")).exitCode).toBe(2);
     expect(fishc("survey", a!, s!).exitCode).toBe(2);
+    expect(fishc("survey", a!, "--self", s!).exitCode).toBe(2);
+    expect(fishc("survey", "--rank").exitCode).toBe(2);
+    expect(fishc("survey", "--rank", a!, "--self", "").exitCode).toBe(2);
+    expect(fishc("survey", "--rank", a!, "--self").stderr.toString()).toContain("fishc:");
+    expect(fishc("survey", "--rank", a!, a!).stderr.toString()).toContain("already surveyed");
+    expect(fishc("build", "x.fsh", "--rank").exitCode).toBe(2);
+    expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString()).curve.steps[0]).not.toHaveProperty("plan");
   });
 });
