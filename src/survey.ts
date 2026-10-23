@@ -12,7 +12,9 @@ type Rule = { id: string; action: Action; title: string };
 type Example = { file: string; line: number; col: number; note?: string };
 export type RuleCount = Rule & { count: number; examples: Example[] };
 export type Report = {
-  files: number; lines: number; unread: { files: number; lines: number }; score: number; grade: string;
+  files: number; lines: number; unread: { files: number; lines: number }; score: number;
+  // None when less than half the lines could be read, since the score wouldn't speak for them.
+  grade: string | null;
   counts: Record<Action, number>; rules: RuleCount[]; waiting: RuleCount[];
 };
 
@@ -35,6 +37,7 @@ const RULES: Rule[] = [
   { id: "A8", action: "auto", title: "JSON.parse(s) as T: JSON.parse<T>(s)" },
   { id: "A9", action: "auto", title: "function expressions: arrow functions" },
   { id: "parse", action: "unsupported", title: "files Fish's parser can't read" },
+  { id: "unreadable", action: "unsupported", title: "files that couldn't be opened" },
   { id: "jsx", action: "unsupported", title: "JSX in .tsx files" },
   { id: "modules", action: "unsupported", title: "imports and exports between files (multi-file programs)" },
   { id: "destructuring", action: "unsupported", title: "destructuring patterns (destructuring)" },
@@ -111,7 +114,7 @@ export function survey(dir: string): Report {
     try {
       src = readFileSync(path, "utf8").replace(/^﻿/, "");
     } catch (e) {
-      add(found, "parse", { file, line: 1, col: 1, note: e instanceof Error ? e.message : String(e) });
+      add(found, "unreadable", { file, line: 1, col: 1, note: e instanceof Error ? e.message : String(e) });
       unread.files++;
       continue;
     }
@@ -124,7 +127,7 @@ export function survey(dir: string): Report {
       // lines, so it can't flatter the score.
       const at = e instanceof CompileError ? position(src, e.start) : { line: 1, col: 1 };
       const note = e instanceof RangeError ? "too deeply nested to read" : e instanceof Error ? e.message : String(e);
-      add(found, path.endsWith(".tsx") ? "jsx" : "parse", { file, ...at, note });
+      add(found, path.endsWith(".tsx") && /<[A-Za-z>]/.test(src) ? "jsx" : "parse", { file, ...at, note });
       unread.files++;
       unread.lines += size;
       continue;
@@ -138,10 +141,12 @@ export function survey(dir: string): Report {
   const counts: Record<Action, number> = { reject: 0, unsupported: 0, guided: 0, auto: 0 };
   for (const r of all) counts[r.action] += r.count;
   const weighted = all.reduce((sum, r) => sum + WEIGHTS[r.action] * r.count, 0);
-  const score = lines === 0 ? 0 : Math.round((weighted * 1000) / lines * 10) / 10;
+  // Per 1000 lines, and never per fewer, so one finding in a small script doesn't swing the grade.
+  const score = Math.round((weighted * 1000) / Math.max(lines, 1000) * 10) / 10;
+  const graded = lines > 0 && lines >= unread.lines;
   const byCount = (a: RuleCount, b: RuleCount) => WEIGHTS[b.action] - WEIGHTS[a.action] || b.count - a.count;
   return {
-    files: files.length, lines, unread, score, grade: grade(score), counts,
+    files: files.length, lines, unread, score, grade: graded ? grade(score) : null, counts,
     rules: all.filter((r) => r.action !== "unsupported").sort(byCount),
     waiting: all.filter((r) => r.action === "unsupported").sort(byCount),
   };
@@ -170,7 +175,7 @@ function scan(program: unknown[], note: (id: string, offset: number) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
-    if (top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string")) note("G7", top.start);
+    if (top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) note("G7", top.start);
     if (top.kind === "let" && top.keyword === "let" && !(isNode(s) && s.kind === "declare")) note("A4", top.start);
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
@@ -195,6 +200,13 @@ function scan(program: unknown[], note: (id: string, offset: number) => void) {
     }
     for (const [key, child] of Object.entries(o)) if (key !== "start" && key !== "end" && typeof child === "object") stack.push([child, inner, under]);
   }
+}
+
+// `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.
+function callsMain(e: unknown): boolean {
+  if (!isNode(e) || e.kind !== "call") return false;
+  if (named(e.callee, "main")) return true;
+  return isNode(e.callee) && e.callee.kind === "member" && ["catch", "then"].includes(e.callee.name as string) && callsMain(e.callee.object);
 }
 
 function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void) {
@@ -245,7 +257,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean): [str
       break;
     case "export":
       // `export function` with a body is how Fish exports to C; other exports are between files.
-      if (!(isNode(n.body) && n.body.kind === "function" && n.body.body !== undefined)) push("modules");
+      if (!ambient && !(isNode(n.body) && n.body.kind === "function" && n.body.body !== undefined)) push("modules");
       break;
     case "function":
       // A declaration carries `macro` and an expression a body; a function type has neither.
@@ -268,7 +280,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean): [str
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
-  if (n.kind === "class" && depth > 0 && n.name !== undefined && !("callee" in n)) push("localDeclarations");
+  if (n.kind === "class" && depth > 0 && n.name !== undefined) push("localDeclarations");
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
 }
@@ -294,7 +306,7 @@ function callRules(n: Node, push: (id: string) => void) {
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; init: unknown }[];
-  if (n.keyword === "var") push("A1");
+  if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (declarations.length > 1 || (!head && !ambient && declarations.some((d) => !d.init))) push("declarators");
   if (declarations.some((d) => d.target.kind !== "ident")) push("destructuring");
@@ -314,10 +326,14 @@ export function formatReport(r: Report): string {
     .map((x) => `  ${String(x.count).padStart(5)}  ${x.title}\n         e.g. ${example(x.examples[0]!)}`);
   const rewrites = top(r.rules.filter((x) => x.action !== "auto"));
   const waiting = top(r.waiting);
-  const unread = r.unread.files > 0 ? [`  unread:   ${r.unread.files} file${r.unread.files === 1 ? "" : "s"} (${r.unread.lines} lines), not in the score`] : [];
+  const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+  const unread = r.unread.files > 0 ? [`  unread:   ${plural(r.unread.files, "file")} (${plural(r.unread.lines, "line")}), not in the score`] : [];
+  const share = r.lines + r.unread.lines === 0 ? 0 : Math.round((r.lines * 100) / (r.lines + r.unread.lines));
+  const verdict = r.grade ? `grade ${r.grade} (score ${r.score} per 1000 lines${share < 100 ? `, from ${share}% of the lines` : ""})`
+    : `no grade: only ${share}% of the lines could be read`;
   return [
-    `fishc survey: ${r.files} file${r.files === 1 ? "" : "s"}, ${r.lines} line${r.lines === 1 ? "" : "s"} read`,
-    `grade ${r.grade} (score ${r.score} per 1000 lines)`,
+    `fishc survey: ${plural(r.files, "file")}, ${plural(r.lines, "line")} read`,
+    verdict,
     `  rejected: ${r.counts.reject}`,
     `  guided:   ${r.counts.guided}`,
     `  auto-fix: ${r.counts.auto}`,

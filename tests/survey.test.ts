@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatReport, grade, survey } from "../src/survey.ts";
@@ -18,6 +18,15 @@ function project(files: Record<string, string>, run: (dir: string) => void) {
     run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function readable(path: string): boolean {
+  try {
+    readdirSync(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -46,11 +55,16 @@ test("forms that look alike are told apart", () => {
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2, modules: 1 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({ modules: 2 });
-  expect(counts("\"use strict\";\nmain();\n")).toEqual({ G7: 1 });
+  expect(counts("\"use strict\";\nsetup();\n")).toEqual({ G7: 1 });
   expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({ localDeclarations: 2 });
   expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\n")).toEqual({ G9: 1, promiseAll: 1 });
   expect(counts("class A { #x = 1; get #g() { return 1; } m() { return this.#x; } }\n")).toEqual({ classForms: 3 });
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
+  expect(counts("function f(a?: string) { return () => class {}; }\n")).toEqual({ A2: 1 });
+  expect(counts("const a = Number.parseInt(s);\nconst f = Function(\"x\");\n")).toEqual({ math: 1, R1: 1 });
+  expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
+  expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
+  expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
 });
 
 test("a member call points at its method, and each rule keeps its first three examples", () => {
@@ -81,7 +95,16 @@ test("a file that can't be read adds its own blocker, not its lines", () => {
     expect(r.unread).toEqual({ files: 2, lines: 3 });
     expect(r.waiting.find((x) => x.id === "parse")!.examples[0]!.note).toContain("expected");
     expect(r.waiting.find((x) => x.id === "jsx")!.count).toBe(1);
-    expect(r.score).toBe(13000);
+    // Graded per 1000 lines at least; with most lines unread, no grade at all.
+    expect(r.score).toBe(13);
+    expect(r.grade).toBeNull();
+    expect(formatReport(r)).toContain("no grade: only 25% of the lines could be read");
+  });
+  project({ "a.tsx": "delete globalThis.x;\nconst v = <div/>;\n" }, (dir) => {
+    expect(survey(dir).grade).toBeNull();
+  });
+  project({ "a.tsx": "let x!: number;\n" }, (dir) => {
+    expect(survey(dir).waiting.find((x) => x.id === "parse")!.count).toBe(1);
   });
 });
 
@@ -90,8 +113,10 @@ test("an unreadable file or directory is skipped, and a deeply nested file is un
     chmodSync(join(dir, "secret"), 0o000);
     try {
       const r = survey(dir);
-      expect(r.files).toBe(2);
+      // As root a mode of 000 doesn't stop reading, so the directory is surveyed after all.
+      expect(r.files).toBe(readable(join(dir, "secret")) ? 3 : 2);
       expect(r.unread.files).toBe(1);
+      expect(r.waiting.find((x) => x.id === "parse")!.examples[0]!.note).toBe("too deeply nested to read");
     } finally {
       chmodSync(join(dir, "secret"), 0o755);
     }
@@ -101,7 +126,7 @@ test("an unreadable file or directory is skipped, and a deeply nested file is un
 test("the grade counts rejected constructs and guided rewrites per 1000 lines", () => {
   expect([0, 5, 5.1, 15, 15.1, 40, 40.1, 100, 100.1].map(grade)).toEqual(["A", "A", "B", "B", "C", "C", "D", "D", "F"]);
   const r = survey(sample);
-  expect(r.score).toBe(Math.round(((10 * r.counts.reject + 3 * r.counts.guided) * 1000) / r.lines * 10) / 10);
+  expect(r.score).toBe(Math.round(((10 * r.counts.reject + 3 * r.counts.guided) * 1000) / Math.max(r.lines, 1000) * 10) / 10);
   project({ "main.ts": "function main(): void {\n  const x: number = 1;\n  console.log(x.toString());\n}\n" }, (dir) => {
     expect(formatReport(survey(dir))).toContain("grade A (score 0 per 1000 lines)");
   });
@@ -111,7 +136,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(43);
+  expect(r.rules.length + r.waiting.length).toBe(44);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -119,7 +144,7 @@ test("fishc survey prints the grade, the rewrites and what Fish still needs, wit
   const out = run.stdout.toString();
   expect(run.exitCode).toBe(0);
   expect(out).toContain("fishc survey: 3 files");
-  expect(out).toMatch(/grade [A-F] \(score [\d.]+ per 1000 lines\)/);
+  expect(out).toMatch(/grade [A-F] \(score [\d.]+ per 1000 lines, from \d+% of the lines\)/);
   expect(out).toContain("top rewrites");
   expect(out).toContain("waiting on Fish");
   expect(out).toMatch(/e\.g\. src\/broken\.ts:1:7 \(expected/);

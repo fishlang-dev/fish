@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -126,6 +126,12 @@ if (import.meta.main) {
     }
     if (!existsSync(file) || !statSync(file).isDirectory()) {
       console.error(existsSync(file) ? `fishc survey: '${file}' is a file; give the directory of a TypeScript project` : `fishc survey: '${file}' doesn't exist`);
+      process.exit(2);
+    }
+    try {
+      readdirSync(file);
+    } catch (e) {
+      console.error(`fishc survey: '${file}' can't be read: ${e instanceof Error ? e.message : e}`);
       process.exit(2);
     }
     const report = survey(file);
