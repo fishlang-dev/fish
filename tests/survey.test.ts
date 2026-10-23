@@ -295,3 +295,22 @@ test("a baseline must be a saved survey report", () => {
   expect(old.unread).toEqual({ files: 0, lines: 0 });
   expect(old.grade).toBeNull();
 });
+
+test("fishc survey --compare shows what changed since a saved report, and refuses bad baselines", () => {
+  project({ "app/a.ts": "var a = 1;\n", "old.json": "", "bad.json": "{}", "text.txt": "nope" }, (dir) => {
+    const app = join(dir, "app");
+    writeFileSync(join(dir, "old.json"), fishc("survey", app, "--json").stdout.toString());
+    writeFileSync(join(app, "a.ts"), "var a = 1;\nvar b = 2;\n");
+    const run = fishc("survey", app, "--compare", join(dir, "old.json"));
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout.toString()).toContain("+1     var: const or let (1 -> 2)");
+    const json = JSON.parse(fishc("survey", app, "--compare", join(dir, "old.json"), "--json").stdout.toString());
+    expect(Object.keys(json)).toEqual(["then", "now", "rules"]);
+    expect(json.rules).toEqual([{ id: "A1", action: "auto", title: "var: const or let", then: 1, now: 2, change: 1 }]);
+    expect(fishc("survey", app, "--compare", join(dir, "bad.json")).stderr.toString()).toContain("isn't a 'fishc survey --json' report");
+    expect(fishc("survey", app, "--compare", join(dir, "text.txt")).stderr.toString()).toContain("isn't JSON");
+    expect(fishc("survey", app, "--compare", join(dir, "missing.json")).exitCode).toBe(2);
+    expect(fishc("survey", "--rank", app, "--compare", join(dir, "old.json")).exitCode).toBe(2);
+    expect(fishc("build", "x.fsh", "--compare", "old.json").exitCode).toBe(2);
+  });
+});

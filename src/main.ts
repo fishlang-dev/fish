@@ -9,7 +9,7 @@ import { CompileError, formatError } from "./diag.ts";
 import { NATIVE } from "./native.ts";
 import { parse } from "./parser.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
-import { formatReport, sources, survey } from "./survey.ts";
+import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import type { Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
@@ -139,6 +139,7 @@ if (import.meta.main) {
           rank: { type: "boolean" },
           self: { type: "string" },
           plan: { type: "string" },
+          compare: { type: "string" },
         },
       });
     } catch (e) {
@@ -148,9 +149,9 @@ if (import.meta.main) {
   const [command, file] = positionals;
   if (command === "survey") {
     const dirs = positionals.slice(1);
-    const usage = "usage: fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
+    const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
     const extra = values.self !== undefined || values.plan !== undefined;
-    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra))) fail(usage);
+    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra)) || (values.rank && values.compare !== undefined)) fail(usage);
     for (const dir of [...dirs, ...(values.self !== undefined ? [values.self] : [])]) checkProject(dir);
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
@@ -165,6 +166,15 @@ if (import.meta.main) {
       }
       const ranking = rank(dirs, values.self, plan);
       console.log(values.json ? JSON.stringify(ranking, null, 2) : formatRanking(ranking));
+    } else if (values.compare !== undefined) {
+      let then;
+      try {
+        then = readReport(readFileSync(values.compare, "utf8"));
+      } catch (e) {
+        fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${e instanceof Error ? e.message : e}`);
+      }
+      const c = compare(then, survey(file!));
+      console.log(values.json ? JSON.stringify(c, null, 2) : formatComparison(c));
     } else {
       const report = survey(file!);
       console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
@@ -173,8 +183,8 @@ if (import.meta.main) {
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+  if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {
