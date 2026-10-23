@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { formatReport, grade, survey } from "../src/survey.ts";
+import { featuresOf, formatReport, grade, scanFiles, survey } from "../src/survey.ts";
 
 const sample = join(import.meta.dir, "survey", "sample");
 const fishc = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), ...args]);
@@ -65,6 +65,22 @@ test("forms that look alike are told apart", () => {
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
+});
+
+test("each file names the planned features it waits on", () => {
+  project({
+    "a.ts": "const o = { ...base, port: 1 };\nconst xs = [...ys].map(f);\n",
+    "b.ts": "let a, b;\n[a, b] = [1, 2];\nconst { x } = p;\n",
+    "c.ts": "const = ;\n",
+    "d.ts": "function main(): void {}\n",
+  }, (dir) => {
+    expect(Object.fromEntries(scanFiles(dir).map((f) => [f.file, featuresOf(f)]))).toEqual({
+      "a.ts": ["Array methods", "Object spread", "Rest parameters and array spread"],
+      "b.ts": ["Destructuring", "Destructuring assignment", "Several declarators and deferred initialization"],
+      "c.ts": ["parser gaps"],
+      "d.ts": [],
+    });
+  });
 });
 
 test("a member call points at its method, and each rule keeps its first three examples", () => {
@@ -136,7 +152,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(44);
+  expect(r.rules.length + r.waiting.length).toBe(46);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {

@@ -8,7 +8,8 @@ import { parse } from "./parser.ts";
 // rewrites; constructs Fish doesn't support yet are listed apart, as what Fish itself still needs.
 
 export type Action = "reject" | "unsupported" | "guided" | "auto";
-type Rule = { id: string; action: Action; title: string };
+// `feature` names the planned Fish feature that lifts a rule Fish doesn't support yet.
+type Rule = { id: string; action: Action; title: string; feature?: string };
 type Example = { file: string; line: number; col: number; note?: string };
 export type RuleCount = Rule & { count: number; examples: Example[] };
 export type Report = {
@@ -36,33 +37,35 @@ const RULES: Rule[] = [
   { id: "A4", action: "auto", title: "a top-level let: a const holding an Atomic" },
   { id: "A8", action: "auto", title: "JSON.parse(s) as T: JSON.parse<T>(s)" },
   { id: "A9", action: "auto", title: "function expressions: arrow functions" },
-  { id: "parse", action: "unsupported", title: "files Fish's parser can't read" },
+  { id: "parse", action: "unsupported", title: "files Fish's parser can't read", feature: "parser gaps" },
   { id: "unreadable", action: "unsupported", title: "files that couldn't be opened" },
-  { id: "jsx", action: "unsupported", title: "JSX in .tsx files" },
-  { id: "modules", action: "unsupported", title: "imports and exports between files (multi-file programs)" },
-  { id: "destructuring", action: "unsupported", title: "destructuring patterns (destructuring)" },
-  { id: "defaults", action: "unsupported", title: "default parameter values" },
-  { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later" },
-  { id: "tuples", action: "unsupported", title: "tuple types" },
-  { id: "spread", action: "unsupported", title: "rest parameters and spread (rest parameters and array spread, object spread)" },
-  { id: "arrayMethods", action: "unsupported", title: "array methods such as map, filter and reduce" },
-  { id: "collections", action: "unsupported", title: "Map and Set" },
-  { id: "regex", action: "unsupported", title: "regex literals" },
-  { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys" },
-  { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)" },
-  { id: "namespaces", action: "unsupported", title: "namespaces and module declarations" },
-  { id: "genericMethods", action: "unsupported", title: "type parameters on methods and arrow functions (generic methods, interfaces and arrows)" },
-  { id: "classForms", action: "unsupported", title: "#private names and abstract classes" },
-  { id: "tagged", action: "unsupported", title: "tagged templates" },
-  { id: "math", action: "unsupported", title: "Math, parseInt, parseFloat and Number() (number parsing and Math)" },
-  { id: "process", action: "unsupported", title: "process (process environment)" },
-  { id: "fetch", action: "unsupported", title: "fetch (HTTP client)" },
-  { id: "timers", action: "unsupported", title: "setTimeout and setInterval" },
-  { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)" },
-  { id: "json", action: "unsupported", title: "JSON.parse and JSON.stringify (derive for Json)" },
-  { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race" },
-  { id: "localDeclarations", action: "unsupported", title: "types, interfaces, enums and classes declared inside a function" },
-  { id: "nestedFunctions", action: "unsupported", title: "function declarations inside a function (nested functions)" },
+  { id: "jsx", action: "unsupported", title: "JSX in .tsx files", feature: "JSX for server-side HTML" },
+  { id: "modules", action: "unsupported", title: "imports and exports between files (multi-file programs)", feature: "Multi-file programs" },
+  { id: "destructuring", action: "unsupported", title: "destructuring in declarations and parameters", feature: "Destructuring" },
+  { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
+  { id: "defaults", action: "unsupported", title: "default parameter values", feature: "Default parameter values" },
+  { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
+  { id: "tuples", action: "unsupported", title: "tuple types", feature: "Tuples" },
+  { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
+  { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
+  { id: "arrayMethods", action: "unsupported", title: "array methods such as map, filter and reduce", feature: "Array methods" },
+  { id: "collections", action: "unsupported", title: "Map and Set", feature: "Map and Set" },
+  { id: "regex", action: "unsupported", title: "regex literals", feature: "Regex" },
+  { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
+  { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
+  { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
+  { id: "genericMethods", action: "unsupported", title: "type parameters on methods and arrow functions (generic methods, interfaces and arrows)", feature: "Generic methods, interfaces and arrows" },
+  { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
+  { id: "tagged", action: "unsupported", title: "tagged templates", feature: "Comptime tagged templates" },
+  { id: "math", action: "unsupported", title: "Math, parseInt, parseFloat and Number() (number parsing and Math)", feature: "Number parsing and Math" },
+  { id: "process", action: "unsupported", title: "process (process environment)", feature: "Process environment" },
+  { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
+  { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
+  { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
+  { id: "json", action: "unsupported", title: "JSON.parse and JSON.stringify (derive for Json)", feature: "Macros, decorators and derive" },
+  { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
+  { id: "localDeclarations", action: "unsupported", title: "types, interfaces, enums and classes declared inside a function", feature: "Local declarations" },
+  { id: "nestedFunctions", action: "unsupported", title: "function declarations inside a function (nested functions)", feature: "Nested functions" },
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
@@ -103,39 +106,55 @@ export function sources(dir: string): string[] {
   });
 }
 
+// One file as surveyed: its non-blank lines, whether it could be read, and what it shows, in
+// source order.
+export type FileScan = { file: string; lines: number; read: boolean; findings: [string, Example][] };
+
+export function scanFiles(dir: string): FileScan[] {
+  return sources(dir).sort().map((path) => scanFile(path, relative(dir, path)));
+}
+
+function scanFile(path: string, file: string): FileScan {
+  let src: string;
+  try {
+    src = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+  } catch (e) {
+    return { file, lines: 0, read: false, findings: [["unreadable", { file, line: 1, col: 1, note: e instanceof Error ? e.message : String(e) }]] };
+  }
+  const lines = src.split("\n").filter((l) => l.trim() !== "").length;
+  const findings: [string, Example][] = [];
+  try {
+    scan(parse(src), (id, offset) => findings.push([id, { file, ...position(src, offset) }]));
+  } catch (e) {
+    // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
+    // lines, so it can't flatter the score.
+    const at = e instanceof CompileError ? position(src, e.start) : { line: 1, col: 1 };
+    const note = e instanceof RangeError ? "too deeply nested to read" : e instanceof Error ? e.message : String(e);
+    return { file, lines, read: false, findings: [[path.endsWith(".tsx") && /<[A-Za-z>]/.test(src) ? "jsx" : "parse", { file, ...at, note }]] };
+  }
+  findings.sort(([, a], [, b]) => a.line - b.line || a.col - b.col);
+  return { file, lines, read: true, findings };
+}
+
+// The planned Fish features a file waits on, by title; a file the parser can't read waits on
+// the parser.
+export function featuresOf(f: FileScan): string[] {
+  return [...new Set(f.findings.flatMap(([id]) => FEATURES.get(id) ?? []))].sort();
+}
+const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
+
 export function survey(dir: string): Report {
-  const files = sources(dir).sort();
+  const scans = scanFiles(dir);
   const found = new Map<string, { count: number; examples: Example[] }>();
   let lines = 0;
   const unread = { files: 0, lines: 0 };
-  for (const path of files) {
-    const file = relative(dir, path);
-    let src: string;
-    try {
-      src = readFileSync(path, "utf8").replace(/^﻿/, "");
-    } catch (e) {
-      add(found, "unreadable", { file, line: 1, col: 1, note: e instanceof Error ? e.message : String(e) });
+  for (const f of scans) {
+    if (f.read) lines += f.lines;
+    else {
       unread.files++;
-      continue;
+      unread.lines += f.lines;
     }
-    const size = src.split("\n").filter((l) => l.trim() !== "").length;
-    const local: [string, Example][] = [];
-    try {
-      scan(parse(src), (id, offset) => local.push([id, { file, ...position(src, offset) }]));
-    } catch (e) {
-      // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
-      // lines, so it can't flatter the score.
-      const at = e instanceof CompileError ? position(src, e.start) : { line: 1, col: 1 };
-      const note = e instanceof RangeError ? "too deeply nested to read" : e instanceof Error ? e.message : String(e);
-      add(found, path.endsWith(".tsx") && /<[A-Za-z>]/.test(src) ? "jsx" : "parse", { file, ...at, note });
-      unread.files++;
-      unread.lines += size;
-      continue;
-    }
-    lines += size;
-    // In source order, so the examples kept are each rule's first.
-    local.sort(([, a], [, b]) => a.line - b.line || a.col - b.col);
-    for (const [id, example] of local) add(found, id, example);
+    for (const [id, example] of f.findings) add(found, id, example);
   }
   const all = RULES.map((r) => ({ ...r, count: found.get(r.id)?.count ?? 0, examples: found.get(r.id)?.examples ?? [] }));
   const counts: Record<Action, number> = { reject: 0, unsupported: 0, guided: 0, auto: 0 };
@@ -146,7 +165,7 @@ export function survey(dir: string): Report {
   const graded = lines > 0 && lines >= unread.lines;
   const byCount = (a: RuleCount, b: RuleCount) => WEIGHTS[b.action] - WEIGHTS[a.action] || b.count - a.count;
   return {
-    files: files.length, lines, unread, score, grade: graded ? grade(score) : null, counts,
+    files: scans.length, lines, unread, score, grade: graded ? grade(score) : null, counts,
     rules: all.filter((r) => r.action !== "unsupported").sort(byCount),
     waiting: all.filter((r) => r.action === "unsupported").sort(byCount),
   };
@@ -180,6 +199,8 @@ function scan(program: unknown[], note: (id: string, offset: number) => void) {
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
   const heads = new WeakSet<object>();
+  // Spreads written in an object literal, which a different feature lifts than array spread.
+  const inObjects = new WeakSet<object>();
   while (stack.length > 0) {
     const [value, depth, ambient] = stack.pop()!;
     if (Array.isArray(value)) {
@@ -193,7 +214,8 @@ function scan(program: unknown[], note: (id: string, offset: number) => void) {
     let under = ambient;
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
-      for (const [id, at] of classify(o, depth, ambient, heads.has(o))) note(id, at);
+      if (o.kind === "object" && Array.isArray(o.props)) for (const p of o.props) if (isNode(p) && p.kind === "spread") inObjects.add(p);
+      for (const [id, at] of classify(o, depth, ambient, heads.has(o), inObjects.has(o))) note(id, at);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note);
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -220,7 +242,7 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
-function classify(n: Node, depth: number, ambient: boolean, head: boolean): [string, number][] {
+function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObject: boolean): [string, number][] {
   const found: [string, number][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -272,7 +294,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean): [str
       memberRules(n, push);
       break;
   }
-  const simple: Record<string, string> = { tuple: "tuples", destructure: "destructuring", spread: "spread", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
+  if (n.kind === "spread") push(inObject ? "objectSpread" : "spread");
+  const simple: Record<string, string> = { tuple: "tuples", destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (simple[n.kind]) push(simple[n.kind]!);
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
