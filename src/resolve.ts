@@ -123,6 +123,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
           // A held reference would need its enum tracked as a borrower.
           // Said where the enum is used when its type argument brought the reference.
           if (holdsRef(type)) throw unsupported("enum members holding references", args.some((a) => holdsRef(a)) ? at : t);
+          // An enum is laid out as written; one made from a pattern type argument is remade from its lowered argument.
+          if (holdsPattern(type) && !args.some(holdsPattern)) throw unsupported("template literal pattern types in enum members", t);
           return type;
         }));
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
@@ -637,6 +639,8 @@ class Open {
 // first of these the bound takes; or nothing when the bound takes none.
 function inferredText(text: string, bound: Type): Type | undefined {
   const members = typeof bound !== "string" && bound.kind === "union" ? bound.members : [bound];
+  // A bound taking any string keeps the text as written, as TypeScript does.
+  if (members.includes("string")) return literalType(text);
   const candidates: Type[] = [];
   for (const m of members) {
     if (m === "i64" && textFits(text, m)) candidates.push(literalType(BigInt(text)));
@@ -700,6 +704,8 @@ export function interior(which: InteriorType["which"], of: Type, at: Span): Inte
     throw new CompileError(`'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
   if (holdsRef(of)) throw new CompileError(`'${which}' can't hold a reference yet ('${show(of)}')`, at.start, at.end);
+  // Its methods take and give its value as lowered, which would let a plain string in.
+  if (holdsPattern(of)) throw unsupported(`template literal pattern types in '${which}' values`, at);
   abstractless(of, `'${which}'`, at);
   return interiorType(which, of);
 }
@@ -740,6 +746,7 @@ export function channel(of: Type, at: Span): BlockType {
     throw new CompileError(`a 'Channel' can't carry '${show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(held)} }>'`, at.start, at.end);
   }
   abstractless(of, "a 'Channel'", at);
+  if (holdsPattern(of)) throw unsupported("template literal pattern types in channels", at);
   let blocker: Type | undefined;
   holdsPart(lower(of), (u) => {
     if (typeof u === "string" || !(u.kind === "ref" || u.kind === "pointer" || (u.kind === "interior" && u.which === "Cell"))) return false;

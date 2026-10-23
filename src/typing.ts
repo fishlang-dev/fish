@@ -115,8 +115,11 @@ export function holdsPattern(t: Type): boolean {
   let found = patterned.get(t);
   if (found === undefined) {
     patterned.set(t, false);
-    const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
-      : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete] : [];
+    const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
+      : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete]
+      : t.kind === "interior" || t.kind === "shared" || t.kind === "block" ? [t.of] : t.kind === "handle" ? [t.gives, ...(t.throws ? [t.throws] : [])]
+      : t.kind === "variant" ? [...t.args, ...t.fields.map((f) => f.type)] : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns]
+      : t.kind === "future" ? [t.gives] : t.kind === "generator" ? [t.yields] : t.kind === "dyn" ? t.of.methods.flatMap((m) => [...m.params, m.returns]) : [];
     found = t.kind === "pattern" || parts.some(holdsPattern);
     patterned.set(t, found);
   }
