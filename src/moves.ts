@@ -117,17 +117,56 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the list, and used after it, would point at a dropped value.
   function ended(list: Stmt[]) {
     const tail = list.at(-1);
-    if (!state || !tail) return;
-    const own = new Set(list.flatMap((s) => (s.kind === "let" ? [String(locals.get(s)!.id)] : [])));
+    if (tail) dropped(new Set(list.flatMap((s) => (s.kind === "let" ? [locals.get(s)!] : []))), tail.end);
+  }
+
+  // Checks that no borrow of a variable that has gone out of scope by `end` is still held by a
+  // variable from outside, and used after. A variable that is itself a reference only copies a
+  // pointer to what it borrows, whose own loans are checked where that ends.
+  function dropped(gone: Set<Local>, end: number) {
+    if (!state || gone.size === 0) return;
+    const ids = new Map([...gone].map((l) => [String(l.id), l]));
     for (const loan of state.loans.values()) {
-      if (!own.has(loan.place.split(".")[0]!)) continue;
-      const outside = [...loan.holders].filter((h) => !own.has(String(h.id)) && (last.get(h) ?? -1) > tail.end);
+      const root = ids.get(loan.place.split(".")[0]!);
+      if (!root || isRef(root.type)) continue;
+      const outside = [...loan.holders].filter((h) => !gone.has(h) && (last.get(h) ?? -1) > end);
       if (outside.length === 0) continue;
       const lent = pathOf(loan.place);
       throw new CompileError(`'${lent}' doesn't live long enough: ${named(outside).join(" and ")} still ${outside.length > 1 ? "borrow" : "borrows"} it after its block ends`, loan.start, loan.end, {
-        message: `'${lent.split(".")[0]}' is dropped here, at the end of its block; declare it outside the block, or give ${named(outside).join(" and ")} an owned value`,
-        start: tail.end, end: tail.end,
+        message: `'${root.name}' is dropped here, at the end of its block; declare it outside the block, or give ${named(outside).join(" and ")} an owned value`,
+        start: end, end,
       });
+    }
+  }
+
+  // Every variable a statement declares, at any depth, which are gone once it has run, however
+  // control left it: `let`s, a loop's own variables and a catch's parameter.
+  function scoped(s: Stmt): Local[] {
+    switch (s.kind) {
+      case "let":
+        return [locals.get(s)!];
+      case "if":
+        return [...s.then, ...(s.else ?? [])].flatMap(scoped);
+      case "block":
+      case "comptime":
+      case "unsafe":
+      case "while":
+      case "doWhile":
+        return s.body.flatMap(scoped);
+      case "for":
+        return [...(s.init ? [s.init] : []), ...s.body].flatMap(scoped);
+      case "forOf":
+        return [locals.get(s.left as Stmt)!, ...s.body.flatMap(scoped)];
+      case "labeled":
+        return scoped(s.body);
+      case "switch":
+        return s.cases.flatMap((c) => c.body.flatMap(scoped));
+      case "try": {
+        const caught = s.param && locals.get(s);
+        return [...s.block.flatMap(scoped), ...(caught ? [caught] : []), ...(s.handler ?? []).flatMap(scoped), ...(s.finalizer ?? []).flatMap(scoped)];
+      }
+      default:
+        return [];
     }
   }
 
@@ -175,9 +214,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           frames.pop();
           const after = state;
           state = handler.acc;
+          // A raise left the block wherever it was, its variables gone by the catch.
+          dropped(new Set(s.block.flatMap(scoped)), s.block.at(-1)?.end ?? s.start);
           const caught = s.param && locals.get(s);
           if (caught) revive(String(caught.id));
           statements(s.handler);
+          if (caught) dropped(new Set([caught]), s.handler.at(-1)?.end ?? s.start);
           state = join(after, state);
         } else statements(s.block);
         if (!fin) return;
@@ -258,6 +300,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         exits.set(s, null);
         statement(s.body);
         state = join(state, exits.get(s)!);
+        dropped(new Set(scoped(s.body)), s.end);
         return;
       }
       case "switch": {
@@ -272,6 +315,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           falling = state;
         }
         state = join(join(falling, exits.get(s)!), s.cases.some((c) => !c.test) ? null : entry);
+        dropped(new Set(scoped(s)), s.end);
         return;
       }
       case "break":
@@ -328,6 +372,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (!bodyFirst) cond();
       body();
       state = join(state, nexts.get(s)!);
+      // However a pass ended, `continue` included, its body's variables are gone.
+      dropped(new Set(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s)), s.end);
       // References declared in the body are gone by the time the loop comes round or ends,
       // however it left the body; a `for` loop's initializer outlives every pass.
       for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(local);
@@ -336,6 +382,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       leaving = join(leaving, exits.get(s)!);
       const after = state;
       state = leaving;
+      // However the loop ended, `break` included, its variables are gone.
+      dropped(new Set(scoped(s)), s.end);
       for (const local of inside(s)) release(local);
       leaving = state;
       state = after;
@@ -548,6 +596,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             exits.set(arm.body, null);
             statement(arm.body);
             state = join(state, exits.get(arm.body)!);
+            dropped(new Set([...scoped(arm.body), ...bound]), arm.body.end);
           } else expr(arm.body, consume, discarded);
           for (const holder of borrowing) release(holder);
           after = join(after, state);
