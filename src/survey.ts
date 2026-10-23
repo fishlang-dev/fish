@@ -159,18 +159,23 @@ export function featureOf(id: string, module?: string): string | undefined {
   return equivalent ? (equivalent.planned ? equivalent.name : undefined) : FEATURES.get(id);
 }
 
-// What replaces each Node built-in in Fish: std, or a planned feature by its title.
+// What replaces each Node built-in in Fish: std, only where std covers what the module is used
+// for, or a planned feature by its title. A subpath is looked up before its module.
 const STD = (name: string) => ({ name, planned: false });
 const PLANNED = (title: string) => ({ name: title, planned: true });
-export const BUILTINS = new Map<string, { name: string; planned: boolean }>([
-  ["http", STD("serve")], ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn")],
-  ["string_decoder", STD("TextDecoder")], ["console", STD("console.log")],
+const BUILTINS = new Map<string, { name: string; planned: boolean }>([
+  // `net` is TCP here; a socket path (Unix domain sockets) isn't told apart from an address.
+  ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn")], ["string_decoder", STD("TextDecoder")],
+  ["timers/promises", STD("sleep")],
+  // `http` is a client as well as a server, and Fish has only the server so far.
+  ["http", PLANNED("HTTP client")], ["console", PLANNED("Logging to stderr and clocks")],
+  ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")], ["sys", PLANNED("Printing objects and instances")],
   ["fs", PLANNED("Async file I/O")], ["path", PLANNED("Path utilities")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", PLANNED("OS information")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
-  ["readline", PLANNED("Interactive prompts")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
+  ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
   ["process", PLANNED("Process environment")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
   ["util", PLANNED("Printing objects and instances")],
@@ -353,7 +358,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   }
   if (n.kind === "spread") push(inObject ? "objectSpread" : "spread");
   const simple: Record<string, string> = { tuple: "tuples", destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
-  if (simple[n.kind]) push(simple[n.kind]!);
+  if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
   // A dynamic `import("x")` names its module as its first argument.
@@ -361,7 +366,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
   const specifier = n.module ?? n.require ?? dynamic;
   const rule = moduleRule(specifier);
-  if (MODULE_FORMS.has(n.kind)) found.push([rule, at, rule === "nodeBuiltins" ? String(specifier).replace(/^node:/, "").split("/")[0] : undefined]);
+  if (MODULE_FORMS.has(n.kind)) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
   if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
@@ -376,6 +381,12 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
 function moduleRule(specifier: unknown): string {
   if (typeof specifier !== "string" || /^([./#~]|@\/)/.test(specifier)) return "modules";
   return specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
+}
+
+// The built-in an import names: its subpath when that has its own equivalent, else its module.
+function builtinModule(specifier: string): string {
+  const path = specifier.replace(/^node:/, "").replace(/\/$/, "");
+  return BUILTINS.has(path) ? path : path.split("/")[0]!;
 }
 
 // Node's own modules, fixed so the answer doesn't depend on the runtime running the survey.

@@ -407,10 +407,11 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
     "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
-    "b.ts": "import http from \"node:http\";\n",
+    "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
     "c.ts": "import vm from \"vm\";\nimport fs = require(\"fs\");\n",
     "plan.md": "- [ ] 1. **Async file I/O**\n- [ ] 2. **Path utilities**\n",
   }, (dir) => {
+    // `timers/promises` is std's sleep, so b.ts waits on nothing.
     expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], [], ["Async file I/O", "Node built-ins"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
@@ -419,7 +420,15 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
       ["Node built-ins", ["nodeBuiltins"], null],
       ["Path utilities", ["nodeBuiltins"], { item: "2", done: false }],
     ]);
-    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "path", "http"]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "path", "timers/promises"]);
+  });
+  project({
+    "a.ts": "export * from \"path/posix\";\nexport { readFile } from \"node:fs/promises\";\n",
+    "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
+    "c.ts": "class A { constructor() {} }\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], ["HTTP client", "Logging to stderr and clocks", "Test runner"], []]);
+    expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
 });
 
@@ -427,20 +436,22 @@ test("the report lists each Node built-in with its files and what replaces it", 
   project({
     "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
     "b.ts": "import fs from \"node:fs\";\nimport http from \"node:http\";\n",
-    "c.ts": "import vm from \"vm\";\n",
+    "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\n",
   }, (dir) => {
     const r = survey(dir);
     expect(r.builtins).toEqual([
       { module: "fs", files: 2, equivalent: { name: "Async file I/O", planned: true } },
-      { module: "http", files: 1, equivalent: { name: "serve", planned: false } },
+      { module: "http", files: 1, equivalent: { name: "HTTP client", planned: true } },
+      { module: "net", files: 1, equivalent: { name: "TcpListener and TcpStream", planned: false } },
       { module: "path", files: 1, equivalent: { name: "Path utilities", planned: true } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
     expect(text).toContain("  fs                  2 files  planned: Async file I/O");
-    expect(text).toContain("  http                1 file   in std: serve");
+    expect(text).toContain("  http                1 file   planned: HTTP client");
     expect(text).toContain("  vm                  1 file   nothing planned");
-    expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(4);
+    expect(text).toContain("  net                 1 file   in std: TcpListener and TcpStream");
+    expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(5);
   });
   project({ "a.ts": "import x from \"./x\";\n" }, (dir) => {
     expect(survey(dir)).not.toHaveProperty("builtins");
