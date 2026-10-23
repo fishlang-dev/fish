@@ -997,7 +997,7 @@ export function expressions(ctx: Context) {
       if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback ${article(show(params[i]!))} here, not ${article(show(p))}`, at.start, at.end);
     });
     const gives = c.returns;
-    if (holdsFuture(gives)) throw new CompileError(`'${name}' over async callbacks isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
+    if (holdsFuture(gives)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
     if (name !== "map" && !reducing && gives !== "boolean") {
       throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
     }
@@ -1076,6 +1076,13 @@ export function expressions(ctx: Context) {
     const [sought, from] = e.args as [Expr, Expr | undefined];
     expect(sought, array.element);
     const t = value(sought);
+    if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    // A value that fits the element type, a literal of a sized number too, is one.
+    if (fits(t, array.element) || (isNumeric(widenLet(t)) && isNumeric(array.element) && isFloat(widenLet(t)) === isFloat(array.element))) {
+      if (from) argument(from, "i64");
+      coerce(sought, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+      return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
+    }
     if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
     if (!comparable(array.element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(array.element)}'`, sought.start, sought.end);
     if (from) argument(from, "i64");

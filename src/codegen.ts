@@ -2064,7 +2064,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // The scratch buffer is codegen's, so a comparator's panic frees it too.
     const [size, room, buffer] = [bytes(element, "1"), temp(), temp()];
     emit(`${room} = mul i64 ${length}, ${size}`);
-    emit(`${buffer} = call ptr @fsh_rt_alloc(i64 ${room})`);
+    emit(`${buffer} = call ptr @fsh_rt_array_alloc(i64 ${room})`);
     const leftovers = () => {
       if (closure && needsDrop(closure)) dispose(unstash(env, closure), closure);
     };
