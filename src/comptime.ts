@@ -1,7 +1,7 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Pattern, Span, Stmt } from "./parser.ts";
-import { fits, INTEGERS, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, field, fits, INTEGERS, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -21,10 +21,10 @@ export type Member = { kind: "member"; type: Type; value: Value };
 // A value while compiling: an integer as a bigint, a float as a number, a boolean, a string,
 // null for an empty Option, or an aggregate. Objects are values in Fish, moved rather than shared,
 // so a JS reference stands for one.
-export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant | Interior | Member;
+export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant | Interior | Member | Place;
 
-// Where a value lives, as a `Mut` parameter is given it: reading and writing go through to it.
-type Place = { kind: "place"; get(): Value; set(v: Value): void };
+// Where a value lives, as a `Mut` holds it: reading and writing go through to it.
+export type Place = { kind: "place"; get(): Value; set(v: Value): void };
 
 // The most steps one evaluation may take, the deepest its calls may nest, and the longest
 // string it may make.
@@ -75,7 +75,7 @@ class Thrown {
   }
 }
 
-type Frame = { instance: Instance; locals: Map<number, Value | Place>; self: Record | undefined };
+type Frame = { instance: Instance; locals: Map<number, Value>; self: Record | undefined };
 
 type Interpreter = ReturnType<typeof interpreter>;
 
@@ -167,7 +167,7 @@ function interpreter() {
   }
 
   // Calls a function, a `Mut` parameter given the place its argument names.
-  function call(callee: Instance, args: (Value | Place)[], self: Record | undefined, at: Span): Value {
+  function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
       if (callee.body.async) refuse("an async function", at);
@@ -186,12 +186,8 @@ function interpreter() {
   }
 
   // The arguments of a call: a `Mut` parameter takes its argument's place, the rest values.
-  function args(f: Frame, callee: Instance, list: Expr[]): (Value | Place)[] {
-    return list.map((a, i) => {
-      const param = callee.body.params[i];
-      const type = param ? callee.locals.get(param)?.type : undefined;
-      return typeof type !== "string" && type?.kind === "ref" && type.mutable ? place(f, a) : expr(f, a);
-    });
+  function args(f: Frame, callee: Instance, list: Expr[]): Value[] {
+    return list.map((a) => expr(f, a));
   }
 
   function statements(f: Frame, list: Stmt[]) {
@@ -250,7 +246,8 @@ function interpreter() {
       }
       case "switch": {
         const v = expr(f, s.discriminant);
-        let at = s.cases.findIndex((c) => c.test !== undefined && same(v, expr(f, c.test)));
+        const subject = f.instance.types.get(s.discriminant);
+        let at = s.cases.findIndex((c) => c.test !== undefined && equal(v, subject, expr(f, c.test), f.instance.types.get(c.test)));
         if (at < 0) at = s.cases.findIndex((c) => c.test === undefined);
         if (at < 0) return;
         try {
@@ -324,23 +321,24 @@ function interpreter() {
   // gives SHORT, which ends the chain as an empty Option.
   function link(f: Frame, e: Expr): Value | typeof SHORT {
     step(e);
+    // A place lent to a `Mut`: the place itself, which reads and writes go through.
+    const [own, target] = [f.instance.types.get(e), f.instance.coercions.get(e) ?? f.instance.types.get(e)];
+    if (mutable(target) && !mutable(own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return place(f, e);
     const v = raw(f, e);
     return isShort(v) ? v : typed(f, e, v);
   }
 
-  // A value as the type it meets: a float where a literal meets one, a union's member tagged
-  // with which member it is, a member out of its union where a check narrowed it.
-  function typed(f: Frame, e: Expr, v: Value): Value {
+  // A value as the type it meets: a `Mut` stays a place, anything else reads through one; a float
+  // where a literal meets one; a union's value tagged with the member its type says, in fields and
+  // elements too; a member out of its union where a check narrowed it.
+  function typed(f: Frame, e: Expr, value: Value): Value {
     const own = f.instance.types.get(e);
-    const to = deref(f.instance.coercions.get(e) ?? own);
+    const target = f.instance.coercions.get(e) ?? own;
+    if (isPlace(value) && mutable(target)) return value;
+    const v = isPlace(value) ? value.get() : value;
+    const to = deref(target);
     if (typeof v === "bigint" && to !== undefined && isFloat(to)) return fit(Number(v), to);
-    if (typeof to !== "string" && to?.kind === "union") {
-      if (v && typeof v === "object" && v.kind === "member") return v;
-      const from = deref(own);
-      const member = from !== undefined && to.members.includes(from) ? from : from !== undefined && typeof from !== "string" && from.kind === "union" ? memberOf(v, from) : from !== undefined ? membersFor(from, to)[0] ?? memberOf(v, to) : memberOf(v, to);
-      return { kind: "member", type: member, value: v };
-    }
-    return unwrap(v);
+    return retag(v, deref(own), to);
   }
 
   function raw(f: Frame, e: Expr): Value | typeof SHORT {
@@ -371,8 +369,7 @@ function interpreter() {
         const local = f.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
         if (!local || !f.locals.has(local.id)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
-        const held = f.locals.get(local.id);
-        return isPlace(held) ? held.get() : held;
+        return f.locals.get(local.id);
       }
       case "this":
         return f.self ?? unsupported("'this'", e);
@@ -409,7 +406,7 @@ function interpreter() {
             const local = f.instance.locals.get(p)!;
             if (!f.locals.has(local.id)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
             const held = f.locals.get(local.id);
-            fields.set(p.name, isPlace(held) ? held.get() : held);
+            fields.set(p.name, isPlace(held) ? unwrap(held.get()) : held);
           } else return unsupported("this property", p);
         }
         return { kind: "record", type: type as ObjectType, fields };
@@ -584,9 +581,9 @@ function interpreter() {
     const [a, b] = [expr(f, e.left), expr(f, e.right)];
     switch (e.op) {
       case "===":
-        return same(a, b);
+        return equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right));
       case "!==":
-        return !same(a, b);
+        return !equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right));
       case "<":
         return (unwrap(a) as number) < (unwrap(b) as number);
       case "<=":
@@ -627,6 +624,7 @@ function interpreter() {
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
   function place(f: Frame, target: Expr, object?: Value): Place {
+    if (target.kind === "this") return { kind: "place", get: () => f.self, set: () => unsupported("replacing 'this'", target) };
     if (target.kind === "ident") {
       const local = f.instance.locals.get(target);
       if (!local || !f.locals.has(local.id)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't use it here`, target, false);
@@ -641,7 +639,11 @@ function interpreter() {
     }
     if (target.kind === "member") {
       const holder = unwrap(expr(f, target.object));
-      if (holder && typeof holder === "object" && holder.kind === "record") return { kind: "place", get: () => holder.fields.get(target.name), set: (v) => void holder.fields.set(target.name, v) };
+      if (holder && typeof holder === "object" && holder.kind === "record") {
+        const held = holder.fields.get(target.name);
+        if (isPlace(held)) return held;
+        return { kind: "place", get: () => holder.fields.get(target.name), set: (v) => void holder.fields.set(target.name, v) };
+      }
     }
     if (target.kind === "index") {
       const held = unwrap(object ?? expr(f, target.object));
@@ -650,6 +652,8 @@ function interpreter() {
       const inside = () => {
         if (i < 0n || i >= BigInt(length)) panic(`index out of bounds: the len is ${length} but the index is ${i}`, target);
       };
+      // The bounds are checked where the place is taken, as a borrow of an element checks them.
+      inside();
       if (typeof held === "string") return { kind: "place", get: () => (inside(), held[Number(i)]), set: () => unsupported("changing a string's character", target) };
       const array = held as Items;
       return { kind: "place", get: () => (inside(), array.items[Number(i)]), set: (v) => (inside(), void (array.items[Number(i)] = v)) };
@@ -809,9 +813,57 @@ function deref(t: Type | undefined): Type | undefined {
   return typeof t !== "string" && t?.kind === "ref" ? t.to : t;
 }
 
-// A union's value without its tag.
+// A value without a union's tag, read through a `Mut`'s place.
 function unwrap(v: Value): Value {
+  if (isPlace(v)) return unwrap(v.get());
   return v && typeof v === "object" && v.kind === "member" ? unwrap(v.value) : v;
+}
+
+function mutable(t: Type | undefined): boolean {
+  return typeof t !== "string" && t?.kind === "ref" && t.mutable;
+}
+
+// A value of type `from` as one of type `to`: entering a union it is tagged with the member its
+// type is, and a union's fields and elements are tagged the same way, so each is baked as the
+// member the program would hold.
+function retag(value: Value, from: Type | undefined, to: Type | undefined): Value {
+  if (to === undefined || from === to) return typeof to !== "string" && to?.kind === "union" ? value : unwrap(value);
+  if (typeof to !== "string" && to.kind === "union") {
+    const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
+    if (tag !== undefined && to.members.includes(tag)) return value;
+    const v = unwrap(value);
+    const own = tag ?? from;
+    const member = own !== undefined && to.members.includes(own) ? own : own !== undefined && typeof own !== "string" && own.kind === "union" ? memberOf(v, own) : own !== undefined ? (membersFor(own, to)[0] ?? memberOf(v, to)) : memberOf(v, to);
+    return { kind: "member", type: member, value: retag(v, own, member) };
+  }
+  const v = unwrap(value);
+  if (v && typeof v === "object" && v.kind === "record" && typeof to !== "string" && (to.kind === "object" || to.kind === "class")) {
+    for (const f of to.fields) if (v.fields.has(f.name)) v.fields.set(f.name, retag(v.fields.get(f.name), field(v.type, f.name)?.type, f.type));
+  }
+  if (v && typeof v === "object" && v.kind === "array" && typeof to !== "string" && to.kind === "array") {
+    const element = typeof from !== "string" && from?.kind === "array" ? from.element : undefined;
+    v.items = v.items.map((x) => retag(x, element, to.element));
+  }
+  return v;
+}
+
+// Which member of its union a value is: its tag, or else the type it is written as, a literal
+// standing for its base type.
+function memberType(v: Value, t: Type | undefined): Type | undefined {
+  if (v && typeof v === "object" && v.kind === "member") return memberType(v.value, v.type);
+  const own = deref(t);
+  if (typeof own !== "string" && own?.kind === "union") return memberOf(v, own);
+  if (typeof own !== "string" && own?.kind === "literal") return baseOf(own) ?? own;
+  return own;
+}
+
+// `===` on two values of the types they are written as: a union compares its member, then the
+// value it holds.
+function equal(a: Value, ta: Type | undefined, b: Value, tb: Type | undefined): boolean {
+  const [ma, mb] = [memberType(a, ta), memberType(b, tb)];
+  const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (baseOf(t) ?? t) : t);
+  if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
+  return same(a, b);
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
@@ -843,6 +895,7 @@ function typeofValue(v: Value): string {
 // A copy owning all its parts, as `.clone()` makes.
 function cloned(v: Value): Value {
   if (!v || typeof v !== "object" || v.kind === "interior") return v;
+  if (v.kind === "place") return cloned(v.get());
   if (v.kind === "member") return { kind: "member", type: v.type, value: cloned(v.value) };
   if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
@@ -912,7 +965,7 @@ export function memberOf(value: Value, union: UnionType): Type {
   if (v && typeof v === "object") {
     if (v.kind === "array") return m.find((t) => typeof t !== "string" && t.kind === "array")!;
     if (v.kind === "interior") return m.find((t) => typeof t !== "string" && t.kind === "interior")!;
-    if (v.kind === "member") return memberOf(v.value, union);
+    if (v.kind === "member" || v.kind === "place") return memberOf(unwrap(v), union);
     return m.find((t) => t === v.type) ?? m.find((t) => fits(v.type, t))!;
   }
   const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);

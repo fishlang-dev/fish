@@ -299,18 +299,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
   // a Lock.
   function bakeable(type: Type, at: Span, constant = false) {
-    const fine = (t: Type): boolean => {
-      if (typeof t === "string") return t !== "void";
-      if (t.kind === "literal") return true;
-      if (t.kind === "union") return t.members.every(fine);
-      if (t.kind === "array") return fine(t.element);
-      if (t.kind === "object" || t.kind === "variant") return t.fields.every((f) => fine(f.type));
-      if (t.kind === "class") return (!t.base || fine(t.base)) && t.fields.every((f) => fine(f.type));
-      if (t.kind === "interior") return constant && t.which !== "Cell" && fine(t.of);
-      return false;
+    // The first part of a type comptime can't make, or undefined.
+    const fault = (t: Type): Type | undefined => {
+      if (typeof t === "string") return t === "void" ? t : undefined;
+      if (t.kind === "literal") return undefined;
+      const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "object" || t.kind === "variant" ? t.fields.map((f) => f.type)
+        : t.kind === "class" ? [...(t.base ? [t.base] : []), ...t.fields.map((f) => f.type)] : t.kind === "interior" && constant && t.which !== "Cell" ? [t.of] : undefined;
+      if (!parts) return t;
+      for (const p of parts) {
+        const found = fault(p);
+        if (found) return found;
+      }
+      return undefined;
     };
-    if (fine(type)) return;
-    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `a '${show(type)}' can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
+    const part = fault(type);
+    if (!part) return;
+    const inside = part === type ? "" : ` (in '${show(type)}')`;
+    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
     throw new CompileError(what, at.start, at.end);
   }
 
