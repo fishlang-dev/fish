@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { dependencies } from "../src/deps.ts";
 import { formatRanking, rank, readPlan, stepsOf } from "../src/rank.ts";
 import { compare, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey } from "../src/survey.ts";
 
@@ -323,5 +324,52 @@ test("fishc survey --compare shows what changed since a saved report, and refuse
     expect(fishc("survey", app, "--compare", dir).stderr.toString()).toContain("it isn't a file");
     expect(fishc("survey", "--rank", app, "--compare", join(dir, "old.json")).stderr.toString()).toContain("rankings can't be compared yet");
     expect(fishc("build", "x.fsh", "--compare", "old.json").exitCode).toBe(2);
+  });
+});
+
+test("dependencies are sorted into std, planned, native, pure and not installed", () => {
+  const pkg = (extra: object = {}) => JSON.stringify({ name: "p", version: "1.0.0", ...extra });
+  project({
+    "app/package.json": JSON.stringify({
+      dependencies: { express: "^4", gyp: "1", flagged: "1", built: "1", prebuilt: "1", compiled: "1", plain: "1", "@scope/plain": "1", hoisted: "1", missing: "1" },
+      devDependencies: { vitest: "^1" },
+    }),
+    "app/a.ts": "const x = 1;\n",
+    "app/node_modules/express/package.json": pkg(),
+    "app/node_modules/gyp/package.json": pkg(), "app/node_modules/gyp/binding.gyp": "{}",
+    "app/node_modules/flagged/package.json": pkg({ gypfile: true }),
+    "app/node_modules/built/package.json": pkg({ dependencies: { "node-gyp-build": "^4" } }),
+    "app/node_modules/prebuilt/package.json": pkg({ optionalDependencies: { "prebuilt-darwin-arm64": "1" } }),
+    "app/node_modules/compiled/package.json": pkg(), "app/node_modules/compiled/build/Release/c.node": "",
+    "app/node_modules/plain/package.json": pkg(),
+    "app/node_modules/@scope/plain/package.json": pkg(),
+    "node_modules/hoisted/package.json": pkg(),
+  }, (dir) => {
+    const d = dependencies(join(dir, "app"))!;
+    expect(Object.fromEntries(d.list.map((x) => [x.name, x.group]))).toEqual({
+      express: "std", gyp: "native", flagged: "native", built: "native", prebuilt: "native", compiled: "native",
+      plain: "pure", "@scope/plain": "pure", hoisted: "pure", missing: "unknown", vitest: "planned",
+    });
+    expect(d.counts).toEqual({ std: 1, planned: 1, native: 5, pure: 3, unknown: 1 });
+    expect(d.list.find((x) => x.name === "vitest")).toMatchObject({ dev: true, kind: "unknown", equivalent: { name: "Test runner", planned: true } });
+    const r = survey(join(dir, "app"));
+    expect(r.dependencies).toEqual(d);
+    const text = formatReport(r);
+    expect(text).toContain("dependencies (11, 1 dev)");
+    expect(text).toContain("express (serve and Router)");
+    expect(text).toMatch(/native:\s+5  gyp, flagged, built, prebuilt, compiled/);
+    const plain = JSON.parse(fishc("survey", join(dir, "app"), "--json").stdout.toString());
+    expect(plain.dependencies.counts.native).toBe(5);
+    expect(plain.grade).toBe(survey(join(dir, "app")).grade);
+  });
+});
+
+test("a project without package.json has no dependency section, and a broken one is noted", () => {
+  project({ "a.ts": "const x = 1;\n" }, (dir) => {
+    expect(dependencies(dir)).toBeUndefined();
+    expect(formatReport(survey(dir))).not.toContain("dependencies");
+  });
+  project({ "a.ts": "const x = 1;\n", "package.json": "[1, 2]" }, (dir) => {
+    expect(formatReport(survey(dir))).toContain("package.json can't be read: it isn't an object");
   });
 });

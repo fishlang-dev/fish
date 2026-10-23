@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
+import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { parse } from "./parser.ts";
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
@@ -17,6 +18,8 @@ export type Report = {
   // None when less than half the lines could be read, since the score wouldn't speak for them.
   grade: string | null;
   counts: Record<Action, number>; rules: RuleCount[]; waiting: RuleCount[];
+  // What the project's package.json depends on, when it has one.
+  dependencies?: Dependencies;
 };
 
 const RULES: Rule[] = [
@@ -161,7 +164,8 @@ export function survey(dir: string): Report {
     for (const [id, example] of f.findings) add(found, id, example);
   }
   const all = RULES.map((r) => ({ ...r, count: found.get(r.id)?.count ?? 0, examples: found.get(r.id)?.examples ?? [] }));
-  return report(scans.length, lines, unread, all);
+  const deps = dependencies(dir);
+  return { ...report(scans.length, lines, unread, all), ...(deps && { dependencies: deps }) };
 }
 
 // A report from its rules' counts: the counts by action, the score and the grade, so a saved
@@ -388,6 +392,7 @@ export function formatReport(r: Report): string {
     `  guided:   ${r.counts.guided}`,
     `  auto-fix: ${r.counts.auto}`,
     ...unread,
+    ...(r.dependencies ? formatDependencies(r.dependencies) : []),
     ...(rewrites.length ? ["", "top rewrites", ...rewrites] : []),
     ...(waiting.length ? ["", "waiting on Fish", ...waiting] : []),
   ].join("\n");
