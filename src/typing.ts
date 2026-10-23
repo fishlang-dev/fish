@@ -641,7 +641,8 @@ export function isCopy(t: Type): boolean {
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   // A tuple copies when everything in it does, as a union does.
-  if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type));
+  // A copy of a mutable reference would be a second one, so a tuple holding one moves.
+  if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   return t.kind === "union" && t.members.every(isCopy);
 }
 
@@ -747,6 +748,7 @@ export function lower(t: Type): Type {
     else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
     else if (t.kind === "array") found = arrayType(lower(t.element));
     else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
+    else if (t.kind === "object" && t.tuple) found = tupleType(elementsOf(t).map(lower));
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
   }
@@ -770,6 +772,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
   }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
+  if (t.kind === "object" && t.tuple) return tupleType(elementsOf(t).map((e) => replaced(e, swap)));
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
 
@@ -843,7 +846,8 @@ export function shapeKey(t: Type): string {
   if (typeof t === "string") return t;
   let found = shapeKeys.get(t);
   if (found === undefined) {
-    if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
+    if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}]`;
+    else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
     else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
     else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
     else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;

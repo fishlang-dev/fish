@@ -967,7 +967,8 @@ export function check(written: Stmt[], library = false): Checked {
         if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
         return p;
       });
-      const held = `tuple.${s.start}`;
+      // The tuple's variable is named for the pattern, as messages about it show it.
+      const held = `[${names.map((n) => n?.name ?? "").join(", ")}]`;
       Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
       statement(s);
       const type = locals.get(s)!.type;

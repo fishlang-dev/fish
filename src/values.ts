@@ -173,6 +173,8 @@ export function expressions(ctx: Context) {
   // a generic function takes a tuple, which are a tuple of their own elements' types.
   const tuples = new Map<Expr, ObjectType>();
   const shaped = new WeakSet<Expr>();
+  // Objects of index expressions already checked, which their next read takes as checked.
+  const once = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
   const objects = new WeakSet<Expr>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -287,7 +289,9 @@ export function expressions(ctx: Context) {
       wanted.set(e, t.element);
       for (const x of e.elements) if (x) expect(x, t.element);
     }
-    // A literal where a tuple is expected is that tuple, each element expected to be its own.
+    // A literal where a tuple is expected is that tuple, each element expected to be its own; an
+    // Option or union holding one tuple expects that tuple.
+    if ((e.kind === "array" || tupleLiterals.has(e)) && typeof t !== "string" && t.kind === "union" && t.members.filter(isTuple).length === 1) t = t.members.find(isTuple)!;
     if ((e.kind === "array" || tupleLiterals.has(e)) && isTuple(t)) {
       tuples.set(e, t as ObjectType);
       const elements = elementsOf(t as ObjectType);
@@ -631,6 +635,7 @@ export function expressions(ctx: Context) {
         if (p.rest) throw unsupported("rest patterns", p.rest);
         if (p.elements.some((x) => x === undefined)) throw unsupported("holes in array patterns", p);
         const array = members.find(isArray);
+        if (members.some(isTuple)) throw unsupported("array patterns over tuples in 'match'; take the tuple apart first, as in 'const [a, b] = t',", p);
         if (!array || members.length > 1) throw never();
         const items = p.elements as Pattern[];
         for (const item of items) pattern(item, array.element, borrowing);
@@ -667,6 +672,8 @@ export function expressions(ctx: Context) {
   }
 
   function callee(e: Call): { type: Type; what: string } {
+    // `t[0](x)` calls a tuple's element, as a field holding a callable is called.
+    untuple(e.callee);
     const { callee } = e;
     if (e.optional) throw unsupported("optional calls", e);
     if (callee.kind === "super") {
@@ -903,7 +910,7 @@ export function expressions(ctx: Context) {
       }
       // A parameter of a function that isn't generic has its type before the call.
       if (a.kind !== "arrow" && known) expect(a, known[i]!);
-      if (!known && a.kind === "array" && target.params[i]?.type?.kind === "tuple") shaped.add(a);
+      if (!known && (a.kind === "array" || tupleLiterals.has(a)) && target.params[i]?.type?.kind === "tuple") shaped.add(a);
     });
   }
 
@@ -933,7 +940,10 @@ export function expressions(ctx: Context) {
     else if (e.args.length !== type.params.length) {
       throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     }
-    e.args.forEach((a, i) => coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`));
+    e.args.forEach((a, i) => {
+      if (a.kind !== "arrow") expect(a, type.params[i]!);
+      coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`);
+    });
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
@@ -1124,7 +1134,11 @@ export function expressions(ctx: Context) {
   function untuple(e: Expr): boolean {
     if (e.kind !== "index") return false;
     const through = value(e.object);
-    const object = isRefType(through) ? through.to : through;
+    // Whatever reads the object next, the index's check or the field's, takes this type, so a
+    // chain of indexes is checked once, not once per level and again for each.
+    once.add(e.object);
+    const held = isRefType(through) ? through.to : through;
+    const object = typeof held !== "string" && held.kind === "shared" ? lower(held.of) : held;
     if (!isTuple(object)) return false;
     const count = (object as ObjectType).fields.length;
     if (e.index.kind !== "int") throw new CompileError(`a tuple's element is named by a number written in place, like '[0]'; '${show(object)}' has no element for a computed index`, e.index.start, e.index.end);
@@ -1815,6 +1829,7 @@ export function expressions(ctx: Context) {
   }
 
   function value(e: Expr): Type {
+    if (once.delete(e)) return types.get(e)!;
     const type = typeOf(e);
     types.set(e, type);
     return type;
@@ -1962,6 +1977,7 @@ export function expressions(ctx: Context) {
       case "object": {
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
+        if (shaped.has(e) && tupleLiterals.has(e)) return tupleLiteral(e, tupleType(tupleParts(e).map((x) => widenLet(value(x!)))));
         return objectType(fields(e.props.map(property), e.props));
       }
       // An array literal holds its elements' types, each widened as a `let` widens; with none, a

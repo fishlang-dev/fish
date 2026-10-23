@@ -201,8 +201,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (resuming) return [""];
       // A comptime parameter isn't passed: its instance knows its value.
       if (p.comptime) return void emit(`store ${llvm(local.type)} ${bake(comptimeParameter(instance, p), local.type)}, ptr ${slot(local)}`), [];
-      emit(`store ${llvm(local.type)} %${local.name}.arg, ptr ${slot(local)}`);
-      return [`${llvm(local.type)} %${local.name}.arg`];
+      emit(`store ${llvm(local.type)} %"${local.name}.arg", ptr ${slot(local)}`);
+      return [`${llvm(local.type)} %"${local.name}.arg"`];
     });
     // A constructor or method works on its instance through a pointer, and a closure on what
     // it captured.
@@ -1108,7 +1108,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function slot(local: Local): string {
-    return captured.get(local) ?? `%${local.name === "%" ? "topic" : local.name}.${local.id}`;
+    // Quoted, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
+    return captured.get(local) ?? `%"${local.name === "%" ? "topic" : local.name}.${local.id}"`;
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {

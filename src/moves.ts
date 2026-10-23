@@ -1267,7 +1267,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // How a place reads in a message.
   function text(e: Named): string {
-    if (e.kind === "member") return `${text(e.object)}.${e.name}`;
+    // A tuple's element reads as it is written, `t[0]`.
+    if (e.kind === "member") return /^\d+$/.test(e.name) ? `${text(e.object)}[${e.name}]` : `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
     if (e.kind === "nonNull") return `${text(e.expr)}!`;
     return e.kind === "ident" || e.kind === "shorthand" ? e.name : e.kind === "this" || e.kind === "super" ? "this" : "(...)";
@@ -1277,7 +1278,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function pathOf(place: string): string {
     const [id, ...fields] = place.split(".");
     const local = [...locals.values()].find((l) => String(l.id) === id);
-    return [local?.name ?? id, ...fields].join(".").replaceAll(".[]", "[...]");
+    return [local?.name ?? id, ...fields].join(".").replaceAll(".[]", "[...]").replace(/\.(\d+)(?=\.|$)/g, "[$1]");
   }
 }
 

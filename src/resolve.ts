@@ -225,7 +225,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "tuple") {
       const odd = t.elements.find((e) => e.optional || e.rest);
       if (odd) throw unsupported(odd.rest ? "rest elements in tuple types" : "optional elements in tuple types", odd);
-      return tupleType(t.elements.map((e) => resolveType(e.type)));
+      return tupleType(t.elements.map((e) => storable(resolveType(e.type), e)));
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
