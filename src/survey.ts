@@ -57,7 +57,6 @@ const RULES: Rule[] = [
   { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
   { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
-  { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
@@ -264,9 +263,7 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
   const heads = new WeakSet<object>();
-  // Spreads written in an object literal, which a different feature lifts than array spread, and
-  // those written as call arguments, which fill only a rest parameter.
-  const inObjects = new WeakSet<object>();
+  // Spreads written as call arguments, which fill only a rest parameter.
   const inCalls = new WeakSet<object>();
   while (stack.length > 0) {
     const [value, depth, ambient] = stack.pop()!;
@@ -281,9 +278,8 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     let under = ambient;
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
-      if (o.kind === "object" && Array.isArray(o.props)) for (const p of o.props) if (isNode(p) && p.kind === "spread") inObjects.add(p);
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
-      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inObjects.has(o) ? "object" : inCalls.has(o) ? "call" : "array")) note(id, at, module);
+      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -321,7 +317,7 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
-function classify(n: Node, depth: number, ambient: boolean, head: boolean, within: "object" | "call" | "array"): [string, number, string?][] {
+function classify(n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
   const found: [string, number, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -373,7 +369,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, withi
       memberRules(n, push);
       break;
   }
-  if (n.kind === "spread" && within !== "array") push(within === "object" ? "objectSpread" : "spread");
+  if (n.kind === "spread" && argument) push("spread");
   const simple: Record<string, string> = { destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");

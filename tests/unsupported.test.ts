@@ -131,10 +131,9 @@ for (const [expr, what] of EXPRESSIONS) {
   });
 }
 
-// Object literal properties besides `key: value` and shorthand: the rejected part is the
+// Object literal properties besides `key: value`, shorthand and spread: the rejected part is the
 // second column.
 const PROPERTIES: [string, string, string][] = [
-  ["{ ...a }", "spread elements", "...a"],
   ["{ f() {} }", "methods in object literals", "f() {}"],
   ["{ get x() { return 1 } }", "accessors in object literals", "get x() { return 1 }"],
   ["{ [k]: 1 }", "computed property names", "k"],

@@ -8,7 +8,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -4579,6 +4579,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "object": {
         const type = types.get(e) as ObjectType;
+        if (e.props.some((p) => p.kind === "spread")) return spreadObject(e, type);
         // Properties run in source order, then fill the fields in their sorted order.
         const values = delivered((hand) => new Map(e.props.map((p) => {
           const [name, v] = property(p, type);
@@ -4722,6 +4723,57 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A property's name and value.
   // A shorthand's variable may be narrowed, or an enum member the field widens, so its value
   // is converted to the field's type.
+  // An object literal with spreads: its parts run in order, and each field comes from the last
+  // part naming it. A spread's source is cloned field by field, or, made for the literal, taken
+  // apart, with the fields a later part replaces dropped.
+  function spreadObject(e: Extract<Expr, { kind: "object" }>, type: ObjectType): string {
+    type Part = { spread?: ObjectType | ClassType; v: string; taken?: boolean; name?: string };
+    const parts = delivered((hand) => e.props.map((p): Part => {
+      if (p.kind !== "spread") {
+        const [name, v] = property(p, type);
+        return { name, v: hand(v, field(type, name)!.type) };
+      }
+      const src = p.value;
+      // The source's own type in this instance, its fields laid out as this instance has them.
+      const held = types.get(src)!;
+      const source = lower(isRef(held) ? held.to : held) as ObjectType | ClassType;
+      const taken = fresh(src);
+      let v = taken ? hand(owned(src), source) : value(src);
+      if (isRef(types.get(src)!)) {
+        const read = temp();
+        emit(`${read} = load ${llvm(source)}, ptr ${v}`);
+        v = read;
+      }
+      return { spread: source, v, taken };
+    }));
+    const from = (name: string) => parts.findLastIndex((part) => (part.spread ? field(part.spread, name) !== undefined : part.name === name));
+    const read = (part: Part, name: string) => {
+      const t = field(part.spread!, name)!.type;
+      const v = temp();
+      emit(`${v} = extractvalue ${llvm(part.spread!)} ${part.v}, ${fieldPath(part.spread!, name).join(", ")}`);
+      return [v, t] as const;
+    };
+    let result = "undef";
+    type.fields.forEach((f, i) => {
+      const part = parts[from(f.name)]!;
+      let v = part.v;
+      if (part.spread) {
+        const [got, t] = read(part, f.name);
+        v = convert(part.taken ? got : copied(got, t), t, f.type);
+      }
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${v}, ${i}`);
+      result = next;
+    });
+    // What a taken source held and the result doesn't keep is dropped.
+    parts.forEach((part, at) => {
+      if (!part.spread || !part.taken) return;
+      const kept = (name: string) => from(name) === at && field(type, name) !== undefined;
+      for (const f of part.spread.kind === "class" ? allFields(part.spread) : part.spread.fields) if (!kept(f.name)) dispose(read(part, f.name)[0], f.type);
+    });
+    return result;
+  }
+
   function property(p: ObjectProp, object: ObjectType): [string, string] {
     if (p.kind === "property") return [p.key as string, owned(p.value)];
     if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");

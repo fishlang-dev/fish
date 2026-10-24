@@ -196,3 +196,53 @@ function main() {
 // expect: 7
 // expect: 8 9
 // expect: 4 4
+// case: object_spread
+// expect: d1 8080 99 1 8000 true
+// expect: over 1 7
+// expect: h1 9
+// expect: x2 2 1
+// Spreads of named objects (cloned), temporaries (taken over), instances (their public fields)
+// and nested literals, mixed with properties in any order, a later one winning.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+class C { host: string = "h" + 1; port: i64 = 80; #secret: i64 = 1; }
+type Opts = { host: string; port: i64; p: P };
+function make(): Opts { return { host: "m" + 1, port: 1, p: new P(7) }; }
+function main() {
+  const d: Opts = { host: "d" + 1, port: 8000, p: new P(1) };
+  let o = { ...d, port: 8080 };
+  const q = { port: 1, ...d, extra: true };
+  o.p.n = 99;
+  console.log(o.host, o.port, o.p.n, d.p.n, q.port, q.extra);
+  const t = { ...make(), host: "over" };
+  console.log(t.host, t.port, t.p.n);
+  const c = { ...new C(), port: 9 };
+  console.log(c.host, c.port);
+  const two = { ...d, ...{ port: 2, host: "x" + 2 } };
+  console.log(two.host, two.port, two.p.n);
+}
+// case: object_spread_borrowed
+// expect: x12 x1
+// expect: w2
+// A spread of a borrowed object reads its fields through the borrow, in each instance its own way.
+type T = { a: string; b: i64 };
+function f(t: Ref<T>): string { const o = { ...t, b: 2 }; return `${o.a}${o.b}`; }
+function main() {
+  const t: T = { a: "x" + 1, b: 1 };
+  console.log(f(t), t.a);
+  const w = { a: "w", b: 5, c: true };
+  console.log(f(w));
+}
+// case: object_spread_class
+// expect: 2
+// A literal with a spread can still make a class instance where one is expected.
+class K { a: i64 = 1; }
+function main() { const k: K = { ...{ a: 2 } }; console.log(k.a); }
+// case: object_spread_array
+// error: '...' in an object literal spreads an object or an instance, not 'i64[]'
+function main() { const xs = [1]; const o = { ...xs }; }
+// case: object_spread_option
+// error: '...' in an object literal spreads an object or an instance, not 'null | { a: i64 }'
+function main() { const o: { a: i64 } | null = null; const p = { ...o }; }
+// case: object_spread_duplicate
+// error: duplicate property 'a'
+function main() { const d = { a: 1 }; const o = { a: 2, a: 3, ...d }; }

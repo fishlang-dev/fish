@@ -2371,6 +2371,7 @@ export function expressions(ctx: Context) {
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
         if ((shaped.has(e) || pairs.has(e)) && tupleLiterals.has(e)) return tupleLiteral(e, tupleType(tupleParts(e).map((x) => widenLet(value(x!)))));
+        if (e.props.some((p) => p.kind === "spread")) return objectSpread(e);
         return objectType(fields(e.props.map(property), e.props));
       }
       // An array literal holds its elements' types, each widened as a `let` widens; with none, a
@@ -2987,6 +2988,8 @@ export function expressions(ctx: Context) {
   function excess(e: Expr, to: Type) {
     if (e.kind !== "object" || typeof to === "string") return;
     for (const p of e.props) {
+      // A spread's fields aren't checked as excess, as in TypeScript.
+      if (p.kind === "spread") continue;
       const name = p.kind === "shorthand" ? p.name : (p as { key: string }).key;
       const found = field(to, name);
       if (!found) {
@@ -2997,6 +3000,37 @@ export function expressions(ctx: Context) {
   }
 
   // Properties are checked in source order, which is the order they run in.
+  // `{ ...a, x: 1, ...b }`: the fields of each part in order, a later one replacing an earlier one
+  // of its name. A spread takes an object's fields, or an instance's public ones.
+  function objectSpread(e: Extract<Expr, { kind: "object" }>): Type {
+    const merged = new Map<string, Field>();
+    const written = new Set<string>();
+    for (const p of e.props) {
+      if (p.kind !== "spread") {
+        const f = property(p);
+        if (written.has(f.name)) throw new CompileError(`duplicate property '${f.name}'`, p.start, p.end);
+        written.add(f.name);
+        merged.delete(f.name);
+        merged.set(f.name, f);
+        continue;
+      }
+      const t = value(p.value);
+      const low = lower(isRefType(t) ? t.to : t);
+      // An object-typed parameter stands for any type with its fields, which its bound names.
+      const held = typeof low !== "string" && low.kind === "param" && low.bound?.kind === "object" ? low.bound : low;
+      if (typeof held === "string" || (held.kind !== "object" && held.kind !== "class") || isTuple(held)) {
+        throw new CompileError(`'...' in an object literal spreads an object or an instance, not '${show(t)}'`, p.start, p.end);
+      }
+      if (holdsRef(held)) throw unsupported("spreads of values holding references", p);
+      const parts = held.kind === "class" ? allFields(held).filter((f) => (f.access ?? "public") === "public") : held.fields;
+      for (const f of parts) {
+        merged.delete(f.name);
+        merged.set(f.name, { name: f.name, type: f.type });
+      }
+    }
+    return objectType([...merged.values()]);
+  }
+
   function property(p: ObjectProp): Field {
     const field = propertyField(p);
     // An arrow written for a field the object's type stores a callable in is boxed into it.

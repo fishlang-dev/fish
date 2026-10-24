@@ -78,7 +78,7 @@ test("each file names the planned features it waits on", () => {
     "d.ts": "function main(): void {}\n",
   }, (dir) => {
     expect(Object.fromEntries(scanFiles(dir).map((f) => [f.file, featuresOf(f)]))).toEqual({
-      "a.ts": ["Object spread"],
+      "a.ts": [],
       "b.ts": ["Destructuring assignment", "Several declarators and deferred initialization"],
       "c.ts": ["parser gaps"],
       "d.ts": [],
@@ -155,7 +155,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(50);
+  expect(r.rules.length + r.waiting.length).toBe(49);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -196,15 +196,15 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
 const big = "const xs = /a/.test(y);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  projects([{ "a.ts": big, "b.ts": "const o = { ...p };\n", "c.ts": "const t: [number, number?] = [1, 2];\nconst o = { ...p };\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
+  projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "const t: [number, number?] = [1, 2];\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
       ["Regex", 1, 10, 78.5],
-      ["Object spread", 1, 1, 85.7],
+      ["for...in", 1, 1, 85.7],
       ["Optional and rest tuple elements", 1, 2, 100],
     ]);
-    expect(r.curve.steps[1]!).toMatchObject({ rules: ["objectSpread"], files: 2, lines: 3 });
+    expect(r.curve.steps[1]!).toMatchObject({ rules: ["forIn"], files: 2, lines: 3 });
     expect(r.repos.map((x) => x.files)).toEqual([3, 1]);
   });
 });
@@ -238,10 +238,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "const o = { ...p };\nfor (const k in o) {}\n", "plan.md": "## Plan\n\n- [ ] 7. **Regex** - literals\n  - [x] 9b. **object spread** - copies\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nconst t: [number, number?] = [1, 2];\n", "plan.md": "## Plan\n\n- [ ] 7. **Regex** - literals\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "Regex": { item: "7", done: false }, "Object spread": { item: "9b", done: true }, "for...in": null,
+      "Regex": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Optional and rest tuple elements": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });

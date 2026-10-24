@@ -457,6 +457,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         for (const p of e.props) {
           const into = (place: string) => `'${place}' moved here into the new object; use '${place}.clone()' to keep a copy`;
           if (p.kind === "property") expr(p.value, into);
+          // A spread of a place reads it, cloning its fields; one made for the literal is taken over.
+          else if (p.kind === "spread") expr(p.value);
           // A shorthand holds its variable as narrowed there.
           else if (p.kind === "shorthand") use(p, into, field(types.get(e) as Exclude<Type, string>, p.name)!.type);
         }
