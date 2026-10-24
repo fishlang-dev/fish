@@ -68,7 +68,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({ math: 1 });
   expect(counts("const a = /x+/.test(s) && /(y)/.exec(s);\nconst b = new RegExp(\"z\", \"i\");\nconst c = new RegExp(`w`);\n")).toEqual({});
   expect(counts("const a = /x+/g.test(s);\nconst i = re.lastIndex;\n")).toEqual({ regexState: 2 });
-  expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\");\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1, regex: 1 });
+  expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
@@ -159,7 +159,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(51);
+  expect(r.rules.length + r.waiting.length).toBe(50);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -197,14 +197,14 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
   next(0);
 }
 
-const big = "const xs = y.replace(/a/, \"\");\n".repeat(10);
+const big = "const xs = setTimeout(f, 1);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
   projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "const t: [number, number?] = [1, 2];\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
-      ["Regex string methods", 1, 10, 78.5],
+      ["setTimeout and setInterval", 1, 10, 78.5],
       ["for...in", 1, 1, 85.7],
       ["Optional and rest tuple elements", 1, 2, 100],
     ]);
@@ -217,7 +217,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
   projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
     expect(r.repos[0]!.unread).toEqual({ files: 2, lines: 3 });
-    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["Regex string methods", 76.9]]);
+    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["setTimeout and setInterval", 76.9]]);
     expect(r.curve.unread).toEqual([{ feature: "JSX for server-side HTML", files: 1, lines: 2 }, { feature: "parser gaps", files: 1, lines: 1 }]);
     expect(formatRanking(r)).toContain("also waiting, in files Fish couldn't read");
     expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
@@ -242,10 +242,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "for (const k in o) {}\nconst t: [number, number?] = [1, 2];\n", "plan.md": "## Plan\n\n- [ ] 7. **Regex string methods** - replace and split\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nconst t: [number, number?] = [1, 2];\n", "plan.md": "## Plan\n\n- [ ] 7. **setTimeout and setInterval** - timers\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "Regex string methods": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Optional and rest tuple elements": null,
+      "setTimeout and setInterval": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Optional and rest tuple elements": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
@@ -261,7 +261,7 @@ test("a plan names each feature's item and whether it is done", () => {
 test("fishc survey --rank prints and gives JSON, and refuses what it can't read", () => {
   projects([{ "a.ts": big }, { "s.ts": "const o = { ...p };\n" }], ([a, s]) => {
     const text = fishc("survey", "--rank", a!, "--self", s!).stdout.toString();
-    expect(text).toContain("1. Regex string methods");
+    expect(text).toContain("1. setTimeout and setInterval");
     expect(text).toContain(`self-hosting (${s})`);
     expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString())).toEqual(JSON.parse(JSON.stringify(rank([a!]))));
     expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
@@ -278,16 +278,16 @@ test("fishc survey --rank prints and gives JSON, and refuses what it can't read"
 });
 
 test("a comparison lists the rules that moved, the furthest first, a new rule from nothing", () => {
-  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = y.split(/a/);\n" }, (dir) => {
+  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = setTimeout(f, 1);\n" }, (dir) => {
     const then = readReport(JSON.stringify(survey(dir)));
-    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = y.split(/a/) && y.match(/b/) && y.search(/c/);\ndelete o.k;\n");
+    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = setTimeout(f, 1) && setTimeout(g, 2) && setInterval(h, 3);\ndelete o.k;\n");
     const c = compare(then, survey(dir));
-    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["regex", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
+    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["timers", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
     expect(c.then.counts.reject).toBe(0);
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("      +2  string methods taking a regex: replace, replaceAll, split, match, matchAll and search (1 -> 3)");
+    expect(text).toContain("      +2  setTimeout and setInterval (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
     expect(formatComparison(compare(then, then))).toContain("no rule's count changed");
   });

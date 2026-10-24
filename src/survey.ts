@@ -60,7 +60,6 @@ const RULES: Rule[] = [
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
-  { id: "regex", action: "unsupported", title: "string methods taking a regex: replace, replaceAll, split, match, matchAll and search", feature: "Regex string methods" },
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
@@ -372,11 +371,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       break;
   }
   if (n.kind === "spread" && argument) push("spread");
-  // A regex literal ports; a string method taking one waits, and one built at run time can't.
-  if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" && ["replace", "replaceAll", "split", "match", "matchAll", "search"].includes(n.callee.name as string)) {
-    const [first] = n.args as Node[];
-    if (isNode(first) && (first.kind === "regex" || (first.kind === "new" && named(first.callee, "RegExp")))) push("regex");
-  }
+  // A regex literal ports; one built while the program runs can't.
   const literal = (a: unknown) => isNode(a) && (a.kind === "string" || (a.kind === "template" && (a.exprs as unknown[]).length === 0));
   if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every(literal)) push("dynamicRegex");
   if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" && (n.callee.name === "exec" || n.callee.name === "test") && isNode(n.callee.object) && n.callee.object.kind === "regex" && /[gy]/.test(n.callee.object.flags as string)) push("regexState");
