@@ -16,7 +16,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { allFields, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -118,6 +118,19 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 // `loop` is the loop it labels, if any. A match arm's block is where its `return`s go, with
 // whether the match gives a value and what they gave.
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: number; wanted?: boolean; gives?: [Expr, Type][] };
+
+// A pattern as written, roughly, naming the variable that holds the value it destructures.
+function patternText(p: Pattern): string {
+  const rest = (r: Pattern | undefined) => (r ? [`...${patternText(r)}`] : []);
+  if (p.kind === "ident") return p.name;
+  if (p.kind === "default") return patternText(p.target);
+  if (p.kind === "object") {
+    const props = p.props.map((q) => (q.value.kind === "ident" && q.value.name === q.key ? q.value.name : `${String(q.key)}: ${patternText(q.value)}`));
+    return `{ ${[...props, ...rest(p.rest)].join(", ")} }`;
+  }
+  if (p.kind === "array") return `[${[...p.elements.map((e) => (e ? patternText(e) : "")), ...rest(p.rest)].join(", ")}]`;
+  return "_";
+}
 
 // What a loop keeps of what it iterates over. An array it borrows is kept as a view with the
 // array's layout that owns nothing, so dropping the frame leaves the array to its owner, and
@@ -985,30 +998,93 @@ export function check(written: Stmt[], library = false): Checked {
       facts.length = before;
     }
 
-    // `const [a, b] = t` over a tuple: the tuple goes to a variable of its own, and each name
-    // becomes a `const` of its element after it, in the list being checked, so the names own
-    // the parts as Rust's `let` does.
-    function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" }>, place: { list: Stmt[]; at: number } | undefined): undefined {
+    // `const { a, b: c = 1, ...rest } = v` and `const [x, , y = 0] = v`: the value goes to a
+    // variable named for the pattern, and each name becomes a declaration of its part after it,
+    // in the list being checked, so the names own the parts as Rust's `let` does. A nested
+    // pattern is a declaration of its own, destructured in turn. A default is taken when its
+    // part is null.
+    function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: number } | undefined): undefined {
       if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
-      if (pattern.rest) throw unsupported("rest patterns", pattern.rest);
-      const names = pattern.elements.map((p) => {
-        if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
-        return p;
-      });
-      // The tuple's variable is named for the pattern, as messages about it show it.
-      const held = `[${names.map((n) => n?.name ?? "").join(", ")}]`;
-      Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
-      statement(s);
-      const type = locals.get(s)!.type;
-      const tuple = typeof type !== "string" && type.kind === "ref" ? type.to : type;
-      if (!isTuple(tuple)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(type)}'`, pattern.start, pattern.end);
-      const count = (tuple as ObjectType).fields.length;
-      if (names.length > count) throw new CompileError(`tuple type '${show(tuple)}' of length ${count} has no element at index ${count}`, pattern.start, pattern.end);
-      const lets: Stmt[] = names.flatMap((n, i): Stmt[] => {
-        if (!n) return [];
-        const at = { start: n.start, end: n.end };
-        const element: Expr = { kind: "index", object: { kind: "ident", name: held, ...at }, index: { kind: "int", value: BigInt(i), ...at }, optional: false, ...at };
-        return [{ kind: "let", keyword: s.keyword, declarations: [{ target: n, type: undefined, init: element, ...at }], ...at }];
+      // A place is read part by part where it is, so only the parts named move out of it, as in
+      // Rust; any other value goes to a variable named for the pattern, as messages show it.
+      const init = d.init!;
+      const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || (e.kind === "member" && !e.optional && read(e.object));
+      let type: Type;
+      let from: (at: Span) => Expr;
+      if (read(init) && !d.type) {
+        type = value(init);
+        if (init.kind === "member" && calls.has(init)) throw unsupported("destructuring a getter's result", init);
+        const copy = (e: Expr, at: Span): Expr => (e.kind === "member" ? { ...e, object: copy(e.object, at), start: at.start, end: at.end } : { ...e, start: at.start, end: at.end });
+        from = (at) => copy(init, at);
+        Object.assign(s, { kind: "empty" });
+      } else {
+        const held = patternText(pattern);
+        Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+        statement(s);
+        type = locals.get(s)!.type;
+        from = (at) => ({ kind: "ident", name: held, start: at.start, end: at.end });
+      }
+      const borrowed = isRef(type);
+      const lowered = lower(isRef(type) ? type.to : type);
+      // An object-typed parameter stands for any type with its fields, which its bound names.
+      const whole = typeof lowered !== "string" && lowered.kind === "param" && lowered.bound?.kind === "object" ? lowered.bound : lowered;
+      const parts: [Pattern, Expr, Type][] = [];
+      // A part with a default: what the part holds, or the default when it is null.
+      const part = (target: Pattern, read: Expr, t: Type) => {
+        if (target.kind !== "default") return parts.push([target, read, t]);
+        const empty = t === "null" || (typeof t !== "string" && t.kind === "union" && t.members.includes("null"));
+        parts.push([target.target, empty ? { kind: "binary", op: "??", left: read, right: target.value, start: target.start, end: target.end } : read, t]);
+      };
+      if (pattern.kind === "object") {
+        if (typeof whole === "string" || (whole.kind !== "object" && whole.kind !== "class")) {
+          throw new CompileError(`'{ ... }' destructures an object or an instance, not '${show(type)}'`, pattern.start, pattern.end);
+        }
+        const taken = new Set<string>();
+        for (const p of pattern.props) {
+          if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
+          const f = field(whole, p.key);
+          if (!f) throw new CompileError(`property '${p.key}' does not exist on type '${show(whole)}'`, p.start, p.end);
+          taken.add(p.key);
+          part(p.value, { kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, f.type);
+        }
+        // The rest is an object of the fields the pattern didn't name, taken over.
+        if (pattern.rest) {
+          const fields = whole.kind === "class" ? allFields(whole) : whole.fields;
+          const props = fields.filter((f) => !taken.has(f.name) && !f.access).map((f): ObjectProp => ({ kind: "property", key: f.name, value: { kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
+          parts.push([pattern.rest, { kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
+        }
+      } else if (isTuple(whole)) {
+        const elements = elementsOf(whole as ObjectType);
+        if (pattern.elements.length > elements.length) throw new CompileError(`tuple type '${show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
+        if (pattern.rest) throw unsupported("rest elements in tuple patterns", pattern.rest);
+        pattern.elements.forEach((p, i) => {
+          if (p) part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), start: p.start, end: p.end }, optional: false, start: p.start, end: p.end }, elements[i]!);
+        });
+      } else if (typeof whole !== "string" && whole.kind === "array") {
+        // An array's elements are read as `xs[i]`, which a value that moves would leave a hole in.
+        if (!isCopy(whole.element)) throw new CompileError(`an array pattern reads each element as 'xs[i]', and a '${show(whole.element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);
+        pattern.elements.forEach((p, i) => {
+          if (!p) return;
+          const at = { start: p.start, end: p.end };
+          const index: Expr = { kind: "int", value: BigInt(i), ...at };
+          // With a default, a missing element is the default rather than a panic.
+          const read: Expr = p.kind === "default"
+            ? { kind: "binary", op: "??", left: { kind: "call", callee: { kind: "member", object: from(p), name: "at", optional: false, ...at }, args: [index], typeArgs: [], optional: false, ...at }, right: p.value, ...at }
+            : { kind: "index", object: from(p), index, optional: false, ...at };
+          parts.push([p.kind === "default" ? p.target : p, read, whole.element]);
+        });
+        if (pattern.rest) {
+          const at = { start: pattern.rest.start, end: pattern.rest.end };
+          const slice: Expr = { kind: "call", callee: { kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
+          parts.push([pattern.rest, slice, whole]);
+        }
+      } else throw new CompileError(`'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(type)}'`, pattern.start, pattern.end);
+      const lets: Stmt[] = parts.map(([target, init]): Stmt => {
+        const at = { start: target.start, end: target.end };
+        const declarator: Declarator = { target, type: undefined, init, ...at };
+        // A part of a borrowed value is borrowed too, as a loop's pattern's parts are.
+        if (borrowed && target.kind === "ident" && (init.kind === "member" || init.kind === "index")) loopParts.add(declarator);
+        return { kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
       });
       place.list.splice(place.at + 1, 0, ...lets);
       return undefined;
@@ -1143,7 +1219,7 @@ export function check(written: Stmt[], library = false): Checked {
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
-      const type = closureType(e.params.map((p) => (defaulted.has(p) ? writtenName(p) : paramName(p))), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      const type = closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {
@@ -1220,7 +1296,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
           const d = s.declarations[0]!;
-          if (d.target.kind === "array") return destructured(s, d, d.target, siblings);
+          if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init) throw unsupported("declarations without an initializer", d);

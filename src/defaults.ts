@@ -14,7 +14,10 @@ export const defaulted = new WeakMap<Param, { name: string; empty: boolean }>();
 export const fallbacks = new WeakMap<Expr, TypeNode>();
 // Each lowered parameter's declared type, resolved where the function is written.
 export const declaredTypes = new WeakMap<Param, Type>();
-// The statements binding defaults, which come before a derived constructor's `super(...)`.
+// Parameters renamed for the body, with the name shown for them in function types.
+const renamed = new WeakMap<Param, string>();
+// The statements binding defaults and destructured parameters, which come before a derived
+// constructor's `super(...)`.
 export const prologues = new WeakSet<Stmt>();
 
 export function lowerDefaults(node: unknown) {
@@ -32,12 +35,23 @@ function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
     if (p.rest && i !== f.params.length - 1) throw new CompileError("a rest parameter has to be the last one, since it takes every argument after those before it", p.start, p.end);
+    // A destructured parameter is a plain one under a hidden name, destructured as the body starts.
+    if ((p.pattern.kind === "object" || p.pattern.kind === "array") && !p.default && !p.rest) {
+      const at = { start: p.pattern.start, end: p.pattern.end };
+      const hidden = `argument ${i}`;
+      const binding: Stmt = { kind: "let", keyword: "const", declarations: [{ target: p.pattern, type: undefined, init: { kind: "ident", name: hidden, ...at }, ...at }], ...at };
+      prologues.add(binding);
+      firsts.push(binding);
+      renamed.set(p, "_");
+      Object.assign(p, { pattern: { kind: "ident", name: hidden, ...at } });
+      return;
+    }
     if (!p.default) return;
+    if (p.pattern.kind !== "ident") throw new CompileError("a destructured parameter can't have a default yet; give the default to the parts, as in '{ a = 1 }: T'", p.start, p.end);
     const later = f.params.slice(i + 1).find((q) => !q.default && !q.optional && !q.rest);
     if (later) throw new CompileError("a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments", p.start, p.end);
     if (p.optional) throw new CompileError("a parameter can't be both optional and have a default; the default already lets callers leave it out", p.start, p.end);
     if (f.kind === "set") throw new CompileError("a setter's parameter can't have a default; an assignment always gives it a value", p.start, p.end);
-    if (p.pattern.kind !== "ident") throw new CompileError("defaults on destructured parameters are not supported yet", p.start, p.end);
     if (p.modifiers.length > 0) throw new CompileError("defaults on parameter properties are not supported yet", p.start, p.end);
     if (p.rest) throw new CompileError("a rest parameter can't have a default; it is an empty array when nothing is passed", p.start, p.end);
     if (p.comptime) throw new CompileError("comptime parameters can't have defaults yet", p.start, p.end);
@@ -77,7 +91,7 @@ function literalType(e: Expr): TypeNode | undefined {
 
 // A parameter's name as its source wrote it.
 export function writtenName(p: Param): string {
-  return defaulted.get(p)?.name ?? (p.pattern as { name: string }).name;
+  return defaulted.get(p)?.name ?? renamed.get(p) ?? (p.pattern as { name: string }).name;
 }
 
 // Whether a type is `null` or an Option, which a call may pass in place of a default.

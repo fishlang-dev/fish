@@ -51,7 +51,7 @@ const RULES: Rule[] = [
   { id: "pathAliases", action: "unsupported", title: "imports through path aliases such as '@/lib' or '~/lib'", feature: "Path aliases" },
   { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
-  { id: "destructuring", action: "unsupported", title: "destructuring in declarations and parameters", feature: "Destructuring" },
+  { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
   { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
@@ -314,7 +314,7 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
   for (const [i, p] of list.entries()) {
     if (isNode(p.default) && !takesDefault(p, list.slice(i + 1))) note("defaults", p.default.start);
     if (p.rest && arrow) note("spread", p.start as number);
-    if (isNode(p.pattern) && p.pattern.kind !== "ident") note("destructuring", p.pattern.start);
+    if (isNode(p.pattern) && p.pattern.kind !== "ident" && (isNode(p.default) || !fishPattern(p.pattern))) note("destructuring", p.pattern.start);
     if (p.optional) note("A2", p.start as number);
   }
 }
@@ -440,13 +440,23 @@ function plainPattern(p: Node): boolean {
   return p.kind === "object" && !p.rest && (p.props as Node[]).every((q) => typeof q.key === "string" && name(q.value));
 }
 
+// A pattern Fish destructures in a declaration or a parameter: names, renames, defaults, holes,
+// nesting and rest, with keys written as names.
+function fishPattern(p: Node): boolean {
+  const part = (x: unknown) => x === undefined || x === null || (isNode(x) && fishPattern(x));
+  if (p.kind === "ident") return true;
+  if (p.kind === "default") return isNode(p.target) && fishPattern(p.target);
+  if (p.kind === "array") return (p.elements as unknown[]).every(part) && part(p.rest);
+  return p.kind === "object" && (p.props as Node[]).every((q) => typeof q.key === "string" && part(q.value)) && part(p.rest);
+}
+
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; init: unknown }[];
   if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (declarations.length > 1 || (!head && !ambient && declarations.some((d) => !d.init))) push("declarators");
   // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.
-  if (declarations.some((d) => d.target.kind !== "ident" && !(head && plainPattern(d.target)))) push("destructuring");
+  if (declarations.some((d) => d.target.kind !== "ident" && !(head ? plainPattern(d.target) : fishPattern(d.target)))) push("destructuring");
 }
 
 function memberRules(n: Node, push: (id: string) => void) {
