@@ -171,7 +171,8 @@ export type Builder<V> = {
   none: V;
 };
 
-export function built<V>(q: Quote, types: Record<Category, Type>, at: Span, b: Builder<V>): V {
+// Without `at`, every node keeps its own span, as a declaration a macro takes does.
+export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>): V {
   const make = (node: unknown, type: Type): V => {
     const t = unfolded(type);
     if (typeof t !== "string" && t.kind === "union") {
@@ -183,14 +184,14 @@ export function built<V>(q: Quote, types: Record<Category, Type>, at: Span, b: B
       return b.member(make(node, member), t, member);
     }
     if (node === null || node === undefined || t === "null") return b.none;
-    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), at)) : (node as V);
+    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), at ?? { start: 0, end: 0 })) : (node as V);
     if (t.kind === "literal") return t.value as V;
     if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element)));
     if (t.kind !== "object") throw new Error(`internal error: an Ast field of type '${t.kind}'`);
     const n = node as Record<string, unknown>;
     const fields = new Map<string, V>();
     for (const f of t.fields) {
-      if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(f.name === "start" ? at.start : at.end)));
+      if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(at ? at[f.name] : (n[f.name] as number))));
       else fields.set(f.name, make(n[f.name], f.type));
     }
     return b.record(t, fields);

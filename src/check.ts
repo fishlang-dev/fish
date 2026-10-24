@@ -19,6 +19,7 @@ import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts"
 import { ANY_REGEX, allFields, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
+import { expandMacros } from "./macros.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
@@ -319,11 +320,13 @@ function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at
 export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
-export function check(written: Stmt[], library = false): Checked {
-  // A macro applied to a declaration other than a class has no meaning yet.
+// With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
+export function check(written: Stmt[], library = false, macros = false): Checked {
+  written = expandMacros(written, (program) => check(program, false, true));
+  // A macro applies only to a top-level declaration.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
-    if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw unsupported("decorators on functions, type aliases, interfaces and enums", decorators[0]!);
+    if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
     return false;
   });
   written = [...written, ...hoistLocals(written)];
@@ -408,7 +411,6 @@ export function check(written: Stmt[], library = false): Checked {
     if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
-    if (s.macro) throw unsupported("macros", s);
     if (!hasBody(s)) throw unsupported("functions without a body", s);
     funcs.push(s);
   }
@@ -429,7 +431,7 @@ export function check(written: Stmt[], library = false): Checked {
     byName.set(f.name, f);
   }
   const main = byName.get("main");
-  if (!main && !library) throw new CompileError("no main() function; execution starts there", 0, 0);
+  if (!main && !library && !macros) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
   // which need each other, it reaches what is set up below lazily.

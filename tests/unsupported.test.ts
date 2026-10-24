@@ -221,10 +221,3 @@ for (const decl of ["export const x = 1", "export default 1", "export * from 'm'
     }));
   });
 }
-
-test("macro function", () => {
-  const decl = "macro function m(input: Ast): Ast { return input }";
-  expect(() => check(parse(`${decl}\nfunction main() {}`))).toThrow(expect.objectContaining({
-    message: "macros are not supported yet", start: 0, end: decl.length,
-  }));
-});
