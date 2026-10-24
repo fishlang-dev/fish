@@ -423,3 +423,14 @@ function main() {
   const t: T = { kids: [{ kids: null, v: 2 }], v: 1 };
   console.log(u.kind === "opt" ? "ok" : "no", t.v);
 }
+// case: recursive_union_generic
+// expect: leaf node
+type Tree = { kind: "leaf"; v: i64 } | { kind: "node"; kids: Tree[] };
+function id<T>(x: T): T {
+  return x;
+}
+function main() {
+  const t: Tree = { kind: "leaf", v: 1 };
+  const n: Tree = { kind: "node", kids: [{ kind: "leaf", v: 2 }] };
+  console.log(id(t).kind, id(n).kind);
+}

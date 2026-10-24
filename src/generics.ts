@@ -197,6 +197,9 @@ export function concrete(t: Type): boolean {
   // An interface describes values without being one, so only a definition check holds one.
   if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
   if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+  // A type holding itself through an array is as concrete as the type arguments it was made with.
+  const tied = tiedBy(t);
+  if (tied) return tied.args.every(concrete);
   if (t.kind === "union") return t.members.every(concrete);
   if (t.kind === "ref" || t.kind === "pointer") return concrete(t.to);
   if (t.kind === "handle") return concrete(t.gives) && (!t.throws || concrete(t.throws));
@@ -206,8 +209,6 @@ export function concrete(t: Type): boolean {
   if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
   if (t.kind === "map") return concrete(t.key) && concrete(t.value);
   if (t.kind === "recursive") return t.args.every(concrete);
-  const tied = tiedBy(t);
-  if (tied) return tied.args.every(concrete);
   if (t.kind === "variant") {
     let known = concreteVariants.get(t);
     if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));
