@@ -2760,6 +2760,7 @@ export function expressions(ctx: Context) {
     if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(to.to)}', which could change it`, e.start, e.end);
     const through = to.mutable ? copied(e) : undefined;
     if (through) throw new CompileError(`can't lend this mutably through '${through}', which would lend a copy; check '!== null' first and lend the variable`, e.start, e.end);
+    if (to.mutable && readCopy(e)) throw new CompileError("this is part of a value read through a Dyn, which gives a copy, so lending it mutably would change only the copy; change it through a method", e.start, e.end);
     // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
     // that isn't a temporary must reach the place.
     if (to.mutable && rooted(e)) {
