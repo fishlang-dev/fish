@@ -124,18 +124,24 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 function iterated(instance: Instance, e: Expr): Type {
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
   // A fixed array it borrows is kept as a pointer to where it lives.
-  if (typeof type !== "string" && type.kind === "fixed" && borrowed(instance, e) && !throughShared(instance, e)) return refType(type, false);
+  if (typeof type !== "string" && type.kind === "fixed" && plainPlace(instance, e)) return refType(type, false);
   if (typeof type === "string" || type.kind !== "array" || !borrowed(instance, e)) return type;
   return objectType([{ name: "a", type: refType(type.element, false) }, { name: "b", type: "i64" }, { name: "c", type: "i64" }]);
 }
 
-// Whether a place is read through a shared value, whose fields are copied out under its lock
-// rather than borrowed where they live.
-function throughShared(instance: Instance, e: Expr): boolean {
+// Whether a value lives where codegen can point at it for as long as a loop runs: a variable,
+// `this`, a reference, or a field of an object or instance, or an element, of one. A field read
+// through a shared value or a Dyn, or out of an Option, is a copy of its own.
+function plainPlace(instance: Instance, e: Expr): boolean {
+  const held = instance.types.get(e);
+  if (typeof held !== "string" && held?.kind === "ref") return true;
+  if (e.kind === "ident" || e.kind === "this") return true;
   if (e.kind !== "member" && e.kind !== "index") return false;
-  const held = instance.types.get(e.object);
-  const object = typeof held !== "string" && held?.kind === "ref" ? held.to : held;
-  return (typeof object !== "string" && object?.kind === "shared") || throughShared(instance, e.object);
+  if (e.kind === "member" && instance.calls.has(e)) return false;
+  const outer = instance.types.get(e.object);
+  const object = typeof outer !== "string" && outer?.kind === "ref" ? outer.to : outer;
+  const holds = typeof object !== "string" && (e.kind === "member" ? object?.kind === "object" || object?.kind === "class" : object?.kind === "array" || object?.kind === "fixed");
+  return holds && plainPlace(instance, e.object);
 }
 
 // Whether an expression reads a value where it lives rather than making one.
@@ -1285,6 +1291,13 @@ export function check(written: Stmt[], library = false): Checked {
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
+          // A loop borrows what it reads from as long as it runs, so it can't read a part of a
+          // value made for the statement, which is gone before the first pass.
+          let root = s.right;
+          while ((root.kind === "member" && !calls.has(root)) || root.kind === "index" || root.kind === "nonNull") root = root.kind === "nonNull" ? root.expr : root.object;
+          if (root !== s.right && root.kind !== "ident" && root.kind !== "this" && !(root.kind === "member" && calls.has(root)) && !stringLike(object)) {
+            throw new CompileError("this loop would read a part of a value made just for it, which is gone before the loop's first pass; give the value a name first, as in 'const xs = ...;'", s.right.start, s.right.end);
+          }
           // A string gives each of its code points, as a string of its own.
           if (stringLike(object)) {
             if (through !== "string") coercions.set(s.right, "string");

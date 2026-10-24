@@ -1035,7 +1035,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     scopes.push([]);
     // Where the array lives is kept in the loop's slot, and read again each pass, as a
     // generator's or an async function's loop may be resumed in a later call.
-    const lent = isRef(types.get(s.right)!) || lendable(s.right);
+    // In a resumable body the frame decides: its slot is a pointer exactly when the source is a
+    // place to point at.
+    const kept = resuming && resuming.type.frame[current.frame!.loops.get(s)!]!.type;
+    const lent = kept ? isRef(kept) : isRef(types.get(s.right)!) || lendable(s.right);
     const held = loopSlot(s, 0, lent ? "ptr" : llvm(type));
     if (lent) emit(`store ptr ${isRef(types.get(s.right)!) ? evaluate(s.right) : address(s.right)}, ptr ${held}`);
     else {
