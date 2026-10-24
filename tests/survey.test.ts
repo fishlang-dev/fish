@@ -68,6 +68,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({ math: 1 });
   expect(counts("const a = /x+/.test(s) && /(y)/.exec(s);\nconst b = new RegExp(\"z\", \"i\");\nconst c = new RegExp(`w`);\n")).toEqual({});
   expect(counts("const a = /x+/g.test(s);\nconst i = re.lastIndex;\n")).toEqual({ regexState: 2 });
+  expect(counts("function f() { [a, b] = [b, a]; g([c] = [1]); }\n")).toEqual({ destructuringAssignment: 1 });
   expect(counts("const id = <T>(x: T) => x;\nconst g = f(<T>(x: T) => x);\ntype F = <T>(x: T) => T;\ninterface I { m<T>(x: T): T }\nclass C { m<T>(x: T): T { return x; } }\n")).toEqual({ genericMethods: 3 });
   expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3, replaceAllString: 1 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
@@ -85,7 +86,7 @@ test("each file names the planned features it waits on", () => {
   }, (dir) => {
     expect(Object.fromEntries(scanFiles(dir).map((f) => [f.file, featuresOf(f)]))).toEqual({
       "a.ts": [],
-      "b.ts": ["Destructuring assignment"],
+      "b.ts": [],
       "c.ts": ["parser gaps"],
       "d.ts": [],
     });

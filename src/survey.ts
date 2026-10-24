@@ -52,7 +52,7 @@ const RULES: Rule[] = [
   { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
-  { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
+  { id: "destructuringAssignment", action: "guided", title: "a destructuring assignment used as a value or as a for update: write it as a statement of its own" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "guided", title: "a let with neither a type nor a value: write its type, as in 'let x: string', since Fish doesn't work it out from later assignments" },
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
@@ -323,6 +323,7 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 // Generic arrows a const holds, which Fish declares as generic functions, and the members of
 // interfaces, whose generic methods Fish doesn't have.
 const heldArrows = new WeakSet<object>();
+const statementDestructures = new WeakSet<object>();
 const interfaceMembers = new WeakSet<object>();
 
 function classify(n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
@@ -391,7 +392,10 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every(literal)) push("dynamicRegex");
   if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" && (n.callee.name === "exec" || n.callee.name === "test") && isNode(n.callee.object) && n.callee.object.kind === "regex" && /[gy]/.test(n.callee.object.flags as string)) push("regexState");
   if (n.kind === "member" && n.name === "lastIndex") push("regexState");
-  const simple: Record<string, string> = { destructure: "destructuringAssignment", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
+  // A destructuring assignment ports as a statement of its own.
+  if (n.kind === "expr" && isNode(n.expr) && n.expr.kind === "destructure") statementDestructures.add(n.expr);
+  if (n.kind === "destructure" && !statementDestructures.has(n)) push("destructuringAssignment");
+  const simple: Record<string, string> = { tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
