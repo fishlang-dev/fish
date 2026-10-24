@@ -67,6 +67,9 @@ export type ArrayType = { kind: "array"; element: Type; fields: Field[] };
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
 export type FixedType = { kind: "fixed"; element: Type; size: number; fields: Field[] };
+// `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
+// runtime, its entries kept in insertion order.
+export type MapType = { kind: "map"; key: Type; value: Type; set: boolean; fields: Field[] };
 
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
@@ -120,7 +123,7 @@ export function holdsPattern(t: Type): boolean {
   let found = patterned.get(t);
   if (found === undefined) {
     patterned.set(t, false);
-    const parts = t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
+    const parts = t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
       : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete]
       : t.kind === "interior" || t.kind === "shared" || t.kind === "block" ? [t.of] : t.kind === "handle" ? [t.gives, ...(t.throws ? [t.throws] : [])]
       : t.kind === "variant" ? [...t.args, ...t.fields.map((f) => f.type)] : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns]
@@ -198,7 +201,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -287,6 +290,7 @@ export function stored(t: Type): Type {
   if (t.kind === "interface" && promised.has(t)) return dynType(t);
   if (t.kind === "array") return arrayType(stored(t.element));
   if (t.kind === "fixed") return fixedType(stored(t.element), t.size);
+  if (t.kind === "map") return mapType(t.key, stored(t.value), t.set);
   return t;
 }
 
@@ -634,6 +638,19 @@ export function arrayType(element: Type): ArrayType {
 
 const arrays = new Map<string, ArrayType>();
 
+export function mapType(key: Type, value: Type, set = false): MapType {
+  const id = `${set ? "Set" : "Map"}<${keyOf(key)},${keyOf(value)}>`;
+  let t = maps.get(id);
+  if (!t) {
+    t = { kind: "map", key, value, set, fields: [] };
+    maps.set(id, t);
+    keys.set(t, id);
+  }
+  return t;
+}
+
+const maps = new Map<string, MapType>();
+
 // The variant `member` of an enum declaration (by its unique id) with these type arguments.
 export function variantType(enumName: string, id: number, member: string, args: Type[], payload: Type[]): VariantType {
   const key = `variant ${id} ${member} <${args.map(keyOf).join(",")}>`;
@@ -672,6 +689,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
   if (t.kind === "array" || t.kind === "fixed") return holdsMut(t.element);
+  if (t.kind === "map") return holdsMut(t.value);
   if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
   if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsMut(f.type));
@@ -689,6 +707,7 @@ export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
   if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
   if (t.kind === "union") return t.members.some(holds);
   if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
+  if (t.kind === "map") return holds(t.value);
   if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   // A generator borrows what its parameters do; its frame's own references point into itself.
@@ -706,6 +725,7 @@ export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = fa
   if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
   if (t.kind === "union") return t.members.some(holds);
   if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
+  if (t.kind === "map") return holds(t.key) || holds(t.value);
   if (t.kind === "interior") return holds(t.of);
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
@@ -761,6 +781,7 @@ export function lower(t: Type): Type {
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
   if (t.kind === "shared") return sharedType(lower(t.of));
   if (t.kind === "block") return blockType(t.which, lower(t.of));
+  if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -788,6 +809,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
+  if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), replaced(t.value, swap), t.set);
   if (typeof t !== "string" && t.kind === "variant") {
     const args = t.args.map((a) => replaced(a, swap));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
@@ -871,6 +893,7 @@ export function shapeKey(t: Type): string {
     else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
     else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
     else if (t.kind === "fixed") found = `FixedArray<${shapeKey(t.element)},${t.size}>`;
+    else if (t.kind === "map") found = t.set ? `Set<${shapeKey(t.key)}>` : `Map<${shapeKey(t.key)},${shapeKey(t.value)}>`;
     else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
     else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;
     // A type parameter standing for a concrete type has that type's shape.
@@ -999,6 +1022,7 @@ export function show(t: Type): string {
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
   if (t.kind === "fixed") return `FixedArray<${show(t.element)}, ${t.size}>`;
+  if (t.kind === "map") return t.set ? `Set<${show(t.key)}>` : `Map<${show(t.key)}, ${show(t.value)}>`;
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;

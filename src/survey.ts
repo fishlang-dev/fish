@@ -58,7 +58,9 @@ const RULES: Rule[] = [
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
   { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
   { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
-  { id: "collections", action: "unsupported", title: "Map and Set", feature: "Map and Set" },
+  { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
+  { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
+  { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
   { id: "regex", action: "unsupported", title: "regex literals", feature: "Regex" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
@@ -89,6 +91,8 @@ const LOCAL_FORMS = new Set(["enum", "typeAlias", "interface"]);
 type Node = { kind: string; start: number; end: number; [key: string]: unknown };
 const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
 const named = (n: unknown, name: string) => isNode(n) && n.kind === "ident" && n.name === name;
+// Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
+const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
 const isPrivate = (name: unknown) => typeof name === "string" && name.startsWith("#");
 
@@ -313,7 +317,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
       break;
     case "new":
       if (named(n.callee, "Function")) push("R1");
-      if (["Map", "Set", "WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
+      if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
+      if (["Map", "Set"].some((name) => named(n.callee, name)) && numberKey(n.typeArgs)) push("numberKeys");
       break;
     case "member":
       if (n.name === "prototype") push("R2");
@@ -333,7 +338,9 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
     case "ref":
       if (n.name === "any") push("G1");
       if (n.name === "null" || n.name === "undefined") push("A2");
-      if (["Map", "Set", "ReadonlyMap", "ReadonlySet"].includes(n.name as string)) push("collections");
+      if (["WeakMap", "WeakSet"].includes(n.name as string)) push("collections");
+      if (["ReadonlyMap", "ReadonlySet"].includes(n.name as string)) push("readonlyCollections");
+      if (["Map", "Set"].includes(n.name as string) && numberKey(n.args)) push("numberKeys");
       break;
     case "let":
       letRules(n, ambient, head, push);

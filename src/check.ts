@@ -15,7 +15,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { functionType, holdsPattern, isTuple, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -125,6 +125,8 @@ function iterated(instance: Instance, e: Expr): Type {
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
   // A fixed array it borrows is kept as a pointer to where it lives.
   if (typeof type !== "string" && type.kind === "fixed" && plainPlace(instance, e)) return refType(type, false);
+  // A Map or a Set it borrows is kept as its table's pointer, owning nothing.
+  if (typeof type !== "string" && type.kind === "map") return borrowed(instance, e) || type !== instance.types.get(e) ? refType(type, false) : type;
   if (typeof type === "string" || type.kind !== "array" || !borrowed(instance, e)) return type;
   return objectType([{ name: "a", type: refType(type.element, false) }, { name: "b", type: "i64" }, { name: "c", type: "i64" }]);
 }
@@ -1329,7 +1331,18 @@ export function check(written: Stmt[], library = false): Checked {
             scopes.pop();
             return;
           }
-          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
+          // A Map gives each entry as a `[key, value]` pair, and a Set each member, in insertion
+          // order: each part borrowed, or a copy when it copies.
+          if (typeof object !== "string" && object.kind === "map") {
+            if (object !== through) coercions.set(s.right, object);
+            const lend = (u: Type) => (isCopy(u) ? u : refType(u, false));
+            scopes.push(new Map());
+            declare(d.target.name, object.set ? lend(object.key) : tupleType([lend(object.key), lend(object.value)]), left.keyword === "let", false, left);
+            within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+            scopes.pop();
+            return;
+          }
+          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a Map, a Set, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
           declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);

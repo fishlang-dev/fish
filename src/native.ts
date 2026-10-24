@@ -26,6 +26,7 @@ export const NATIVE = String.raw`
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/random.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -576,6 +577,188 @@ void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, voi
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
+}
+
+// A Map or a Set: its entries in insertion order, each a state word (0 never used, 1 live, 2
+// removed), the key's hash, the key's bits, then the key and value as the program lays them out,
+// and an open-addressing index of entry numbers plus one. A key's bits are a sized integer
+// widened to 64 bits, a union's member index, or with strings set a string's pointer, whose
+// bytes are hashed and compared. Removed entries stay in place, keeping the order, until the
+// entries grow and the live ones are moved together.
+typedef struct {
+  int64_t state, hash, bits;
+} fsh_entry;
+
+typedef struct {
+  uint8_t *entries;
+  int64_t used, live, cap;
+  int64_t *index;
+  int64_t slots;
+  int64_t size, key_at, value_at;
+  int32_t strings;
+  void (*drop_key)(void *);
+  void (*drop_value)(void *);
+} fsh_map;
+
+static uint64_t fsh_map_seed = 0;
+
+// ponytail: a seeded multiplicative hash, not SipHash; use SipHash-1-3 if hash flooding matters
+static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
+  uint64_t h = fsh_map_seed;
+  if (m->strings) {
+    fsh_str *s = (fsh_str *)(intptr_t)bits;
+    h ^= 0xcbf29ce484222325ull;
+    for (int64_t i = 0; i < s->length; i++) h = (h ^ (unsigned char)s->bytes[i]) * 0x100000001b3ull;
+  } else {
+    h ^= (uint64_t)bits;
+  }
+  h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ull;
+  h = (h ^ (h >> 27)) * 0x94d049bb133111ebull;
+  return h ^ (h >> 31);
+}
+
+static int fsh_map_same(fsh_map *m, int64_t a, int64_t b) {
+  if (!m->strings) return a == b;
+  fsh_str *x = (fsh_str *)(intptr_t)a, *y = (fsh_str *)(intptr_t)b;
+  return x->length == y->length && memcmp(x->bytes, y->bytes, x->length) == 0;
+}
+
+static fsh_entry *fsh_map_entry(fsh_map *m, int64_t i) {
+  return (fsh_entry *)(m->entries + i * m->size);
+}
+
+static void fsh_map_reindex(fsh_map *m) {
+  fsh_rt_free(m->index);
+  m->slots = 8;
+  while (m->slots < m->cap * 2) m->slots *= 2;
+  m->index = fsh_rt_alloc(m->slots * sizeof(int64_t));
+  memset(m->index, 0, m->slots * sizeof(int64_t));
+  for (int64_t i = 0; i < m->used; i++) {
+    fsh_entry *e = fsh_map_entry(m, i);
+    if (e->state != 1) continue;
+    uint64_t at = (uint64_t)e->hash & (m->slots - 1);
+    while (m->index[at]) at = (at + 1) & (m->slots - 1);
+    m->index[at] = i + 1;
+  }
+}
+
+fsh_map *fsh_rt_map_new(int64_t size, int64_t key_at, int64_t value_at, int32_t strings, void (*drop_key)(void *), void (*drop_value)(void *)) {
+  if (!fsh_map_seed && getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
+  fsh_map *m = fsh_rt_alloc(sizeof(fsh_map));
+  *m = (fsh_map){NULL, 0, 0, 0, NULL, 0, size, key_at, value_at, strings, drop_key, drop_value};
+  return m;
+}
+
+// The entry holding a key, or -1.
+int64_t fsh_rt_map_find(fsh_map *m, int64_t bits) {
+  if (m->live == 0) return -1;
+  uint64_t h = fsh_map_hash(m, bits);
+  for (uint64_t at = h & (m->slots - 1); m->index[at]; at = (at + 1) & (m->slots - 1)) {
+    fsh_entry *e = fsh_map_entry(m, m->index[at] - 1);
+    if (e->state == 1 && e->hash == (int64_t)h && fsh_map_same(m, e->bits, bits)) return m->index[at] - 1;
+  }
+  return -1;
+}
+
+// The entry for a key, made at the end when the key is new; *found says whether it was there.
+void *fsh_rt_map_insert(fsh_map *m, int64_t bits, int32_t *found) {
+  int64_t i = fsh_rt_map_find(m, bits);
+  *found = i >= 0;
+  if (i >= 0) return fsh_map_entry(m, i);
+  if (m->used == m->cap) {
+    if (m->live <= m->used / 2 && m->used > 0) {
+      int64_t to = 0;
+      for (int64_t from = 0; from < m->used; from++) {
+        if (fsh_map_entry(m, from)->state != 1) continue;
+        if (to != from) memcpy(fsh_map_entry(m, to), fsh_map_entry(m, from), m->size);
+        to++;
+      }
+      m->used = to;
+    } else {
+      m->cap = m->cap ? m->cap * 2 : 4;
+      uint8_t *grown = fsh_rt_alloc(m->cap * m->size);
+      if (m->used) memcpy(grown, m->entries, m->used * m->size);
+      fsh_rt_free(m->entries);
+      m->entries = grown;
+    }
+    fsh_map_reindex(m);
+  }
+  fsh_entry *e = fsh_map_entry(m, m->used);
+  *e = (fsh_entry){1, (int64_t)fsh_map_hash(m, bits), bits};
+  uint64_t at = (uint64_t)e->hash & (m->slots - 1);
+  while (m->index[at]) at = (at + 1) & (m->slots - 1);
+  m->index[at] = ++m->used;
+  m->live++;
+  return e;
+}
+
+// The entry a key was in, marked removed for the caller to drop its key and value, or NULL.
+void *fsh_rt_map_remove(fsh_map *m, int64_t bits) {
+  int64_t i = fsh_rt_map_find(m, bits);
+  if (i < 0) return NULL;
+  fsh_entry *e = fsh_map_entry(m, i);
+  e->state = 2;
+  m->live--;
+  return e;
+}
+
+// Entry i, live or removed, for i below the number used.
+void *fsh_rt_map_at(fsh_map *m, int64_t i) {
+  return fsh_map_entry(m, i);
+}
+
+int64_t fsh_rt_map_used(fsh_map *m) {
+  return m->used;
+}
+
+int64_t fsh_rt_map_size(fsh_map *m) {
+  return m->live;
+}
+
+void fsh_rt_map_clear(fsh_map *m) {
+  int64_t used = m->used;
+  m->used = m->live = 0;
+  for (int64_t i = 0; i < used; i++) {
+    uint8_t *e = m->entries + i * m->size;
+    if (((fsh_entry *)e)->state != 1) continue;
+    if (m->drop_key) m->drop_key(e + m->key_at);
+    if (m->drop_value) m->drop_value(e + m->value_at);
+  }
+  if (m->index) memset(m->index, 0, m->slots * sizeof(int64_t));
+}
+
+void fsh_rt_map_free(fsh_map *m) {
+  if (!m) return;
+  fsh_rt_map_clear(m);
+  fsh_rt_free(m->entries);
+  fsh_rt_free(m->index);
+  fsh_rt_free(m);
+}
+
+// A copy of the table with its keys and values as bits, for the caller to copy each live one in
+// place; until it does, the copy holds no live entry.
+fsh_map *fsh_rt_map_copy(fsh_map *m) {
+  fsh_map *c = fsh_rt_alloc(sizeof(fsh_map));
+  *c = *m;
+  c->entries = NULL;
+  c->index = NULL;
+  c->live = 0;
+  if (m->cap) {
+    c->entries = fsh_rt_alloc(m->cap * m->size);
+    memcpy(c->entries, m->entries, m->used * m->size);
+    c->index = fsh_rt_alloc(m->slots * sizeof(int64_t));
+    memcpy(c->index, m->index, m->slots * sizeof(int64_t));
+  }
+  for (int64_t i = 0; i < c->used; i++) if (fsh_map_entry(c, i)->state == 1) fsh_map_entry(c, i)->state = 3;
+  return c;
+}
+
+// Marks a copied entry live once its key and value are copied in.
+void fsh_rt_map_copied(fsh_map *m, int64_t i, int64_t bits) {
+  fsh_entry *e = fsh_map_entry(m, i);
+  e->state = 1;
+  e->bits = bits;
+  m->live++;
 }
 
 static void fsh_add(fsh_array *out, fsh_str *s) {

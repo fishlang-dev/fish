@@ -4,10 +4,10 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, fields, interior, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
-import type { Access, ArrayType, FixedType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { STD_BASE } from "./std.ts";
@@ -141,6 +141,8 @@ const ofElements = new WeakMap<Expr, TypeNode>();
 // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
 const fills = new WeakSet<Expr>();
 const filling = new WeakSet<Expr>();
+// The pairs of a `new Map([[k, v]])` given no types, each a tuple of what it holds.
+const pairs = new WeakSet<Expr>();
 
 // The `FixedArray.filled` calls, by the fixed array each makes.
 export const fixedFills = new WeakSet<Expr>();
@@ -327,7 +329,7 @@ export function expressions(ctx: Context) {
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
-    if (e.kind === "new" && typeof t !== "string" && (t.kind === "interior" || t.kind === "block")) wanted.set(e, t);
+    if (e.kind === "new" && typeof t !== "string" && (t.kind === "interior" || t.kind === "block" || t.kind === "map")) wanted.set(e, t);
     if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
@@ -712,6 +714,7 @@ export function expressions(ctx: Context) {
         if (printable(type)) continue;
         throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
           : isArray(type) ? "printing an array is not supported yet; print its elements"
+          : typeof type !== "string" && type.kind === "map" ? `printing a '${type.set ? "Set" : "Map"}' is not supported yet; print its ${type.set ? "members" : "entries"}`
           : holdsVariant(type) ? "printing an enum that holds data is not supported yet"
           : "printing an object is not supported yet; print its fields", a.start, a.end);
       }
@@ -765,6 +768,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
@@ -1483,6 +1487,101 @@ export function expressions(ctx: Context) {
     return channel(of, e);
   }
 
+  // A Map's and a Set's methods. Those changing it need it in a place that may change, or a
+  // `Mut` borrow of it, which `set` and `add` give for chaining. What they give out are clones.
+  function mapCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
+    const name = callee.name;
+    const kind = t.set ? "Set" : "Map";
+    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported(`optional chains calling '${kind}' methods`, callee);
+    if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
+    const count = MAP_ARGUMENTS[name]!;
+    if (e.args.length !== count) throw new CompileError(`'${name}' takes ${count === 0 ? "no arguments" : count === 1 ? "1 argument" : `${count} arguments`}`, e.start, e.end);
+    const held = types.get(callee.object)!;
+    if (isRefType(held)) coercions.set(callee.object, t);
+    if (MAP_CHANGES.has(name)) {
+      const lent = isRefType(held) && held.mutable;
+      if (!place(callee.object) && !lent) throw new CompileError(`'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
+      if (!lent) changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
+    }
+    const argument = (x: Expr, to: Type) => {
+      expect(x, to);
+      const got = value(x);
+      coerce(x, got, to, `argument of type '${show(got)}' is not assignable to parameter of type '${show(to)}'`);
+    };
+    if (count > 0 && name !== "forEach") argument(e.args[0]!, t.key);
+    switch (name) {
+      case "set":
+      case "add":
+        if (name === "set") argument(e.args[1]!, t.value);
+        borrowsFrom.set(e, [callee.object]);
+        return { type: refType(t, true), what: `'${name}'` };
+      case "get":
+        clonable(t.value, callee);
+        return { type: unionType([t.value, "null"]), what: "'get'" };
+      case "has":
+      case "delete":
+        return { type: "boolean", what: `'${name}'` };
+      case "clear":
+        return { type: "void", what: "'clear'" };
+      case "keys":
+        return { type: arrayType(t.key), what: "'keys'" };
+      case "values":
+        if (t.set) return { type: arrayType(t.key), what: "'values'" };
+        clonable(t.value, callee);
+        return { type: arrayType(t.value), what: "'values'" };
+      case "entries":
+        clonable(t.value, callee);
+        return { type: arrayType(tupleType(t.set ? [t.key, t.key] : [t.key, t.value])), what: "'entries'" };
+    }
+    // `update(k, f)` and `forEach(f)` call an arrow written in place: `update`'s gets the value
+    // to change, once, and `forEach`'s each value and its key in turn, borrowed or copied.
+    const callback = e.args[name === "update" ? 1 : 0]!;
+    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place; passing a function by name isn't supported yet`, callback.start, callback.end);
+    const lend = (u: Type) => (isCopy(u) ? u : refType(u, false));
+    const params = name === "update" ? [refType(t.value, true)] : t.set ? [lend(t.key)] : [lend(t.value), lend(t.key)];
+    const passes = name === "update" ? "the value to change" : t.set ? "each member" : "each value and its key";
+    expect(callback, functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void"));
+    const c = value(callback);
+    if (typeof c === "string" || c.kind !== "closure" || c.params.length > params.length) {
+      throw new CompileError(`'${name}' passes its callback ${passes}${name === "forEach" ? "; JavaScript's last argument, the collection, isn't passed, since it is already borrowed" : ""}`, callback.start, callback.end);
+    }
+    if (name === "forEach") runsOften(c, name, "its callback once per entry", callback);
+    c.params.forEach((p, i) => {
+      const at = callback.params[i] ?? callback;
+      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback ${article(show(params[i]!))} here, not ${article(show(p))}`, at.start, at.end);
+    });
+    if (holdsFuture(c.returns)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet`, callback.start, callback.end);
+    return { type: name === "update" ? "boolean" : "void", what: `'${name}'` };
+  }
+
+  // `new Map<K, V>()` and `new Set<T>()`, their types written or taken from where they're expected.
+  function mapNew(e: Extract<Expr, { kind: "new" }>, set: boolean, list: Expr[]): Type {
+    const name = set ? "Set" : "Map";
+    const shape = set ? "an array of members, as in 'new Set([\"a\", \"b\"])'" : "an array of key and value pairs, as in 'new Map([[\"a\", 1]])'";
+    if (list.length > 1) throw new CompileError(`'new ${name}' takes ${shape}, or nothing`, e.start, e.end);
+    if (e.typeArgs.length > 0 && e.typeArgs.length !== (set ? 1 : 2)) throw new CompileError(set ? "'Set' takes the type of its members, like 'new Set<string>()'" : "'Map' takes its key and value types, like 'new Map<string, i64>()'", e.start, e.end);
+    const expected = wanted.get(e);
+    const made = e.typeArgs.length > 0 ? collection(resolveType(e.typeArgs[0]!), set ? "void" : resolveType(e.typeArgs[1]!), set, e)
+      : typeof expected !== "string" && expected?.kind === "map" && expected.set === set ? expected : undefined;
+    // The entries or members are moved in from an array, which gives the types when nothing else does.
+    const from = list[0];
+    if (from) {
+      if (made) expect(from, arrayType(set ? made.key : tupleType([made.key, made.value])));
+      else if (!set && from.kind === "array") for (const x of from.elements) if (x?.kind === "array" && x.elements.length === 2) pairs.add(x);
+      const t = value(from);
+      const element = isArray(t) ? lower(t.element) : undefined;
+      const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 ? elementsOf(element as ObjectType) : undefined;
+      if (element === undefined || (!set && !pair)) throw new CompileError(`'new ${name}' takes ${shape}, not '${show(t)}'`, from.start, from.end);
+      const result = made ?? collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
+      const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
+      coerce(from, t, wants, `argument of type '${show(t)}' is not assignable to parameter of type '${show(wants)}'`);
+      return result;
+    }
+    if (made) return made;
+    throw new CompileError(set ? "'new Set()' needs the type of its members, as in 'new Set<string>()'" : "'new Map()' needs its key and value types, as in 'new Map<string, i64>()'", e.start, e.end);
+  }
+
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
@@ -1674,7 +1773,7 @@ export function expressions(ctx: Context) {
     if (typeof t === "string") return undefined;
     if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
     const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
-      : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
+      : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
       const found = unsent(part);
       if (found) return found;
@@ -2105,6 +2204,13 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
+        // A Map's or a Set's one property is its size, the number of entries it holds.
+        if (typeof object !== "string" && object.kind === "map") {
+          if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
+          if (e.name !== "size") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          load();
+          return linked(e) ? optional("usize", e) : "usize";
+        }
         // A fixed array's one property is its length, known while compiling.
         if (isFixed(object)) {
           if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
@@ -2157,7 +2263,7 @@ export function expressions(ctx: Context) {
       case "object": {
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
-        if (shaped.has(e) && tupleLiterals.has(e)) return tupleLiteral(e, tupleType(tupleParts(e).map((x) => widenLet(value(x!)))));
+        if ((shaped.has(e) || pairs.has(e)) && tupleLiterals.has(e)) return tupleLiteral(e, tupleType(tupleParts(e).map((x) => widenLet(value(x!)))));
         return objectType(fields(e.props.map(property), e.props));
       }
       // An array literal holds its elements' types, each widened as a `let` widens; with none, a
@@ -2166,6 +2272,15 @@ export function expressions(ctx: Context) {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
+        // A pair in `new Map([[k, v]])` is a tuple of what it holds.
+        if (pairs.has(e)) {
+          const parts = (e.elements as Expr[]).map((x) => {
+            const t = widenLet(value(x));
+            once.add(x);
+            return t;
+          });
+          return tupleLiteral(e, tupleType(parts));
+        }
         // `Array.of<T>(...)`: an array of T, its elements checked against it.
         const written = ofElements.get(e);
         if (written) {
@@ -2252,6 +2367,7 @@ export function expressions(ctx: Context) {
         if (e.callee.kind === "ident" && (e.callee.name === "Semaphore" || e.callee.name === "Channel") && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           return blockNew(e, e.callee.name, list);
         }
+        if (e.callee.kind === "ident" && (e.callee.name === "Map" || e.callee.name === "Set") && !lookup(e.callee.name)) return mapNew(e, e.callee.name === "Set", list);
         if (e.callee.kind === "ident" && e.callee.name === "AbortController" && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("'AbortController' takes no arguments", e.start, e.end);
           return blockType("AbortController");
@@ -3281,6 +3397,11 @@ const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
+// A Map's and a Set's methods, how many arguments each takes, and those changing it.
+const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
+const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
+const MAP_ARGUMENTS: Record<string, number> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
+export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.

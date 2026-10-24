@@ -3,7 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
-import { computed, dynCalls, isPrint } from "./values.ts";
+import { computed, dynCalls, isPrint, MAP_CHANGES } from "./values.ts";
 import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -502,9 +502,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // while the arguments run, as a mutating method's object is, then changed, which nothing
           // borrowing it may see.
           const builtin = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone";
-          const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has((e.callee as { name: string }).name)));
-          // Any other array method reads it, lent shared while its callback runs.
-          const reads = builtin && !changes && array(object);
+          const method = (e.callee as { name: string }).name;
+          const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has(method)) || (mapped(object) && MAP_CHANGES.has(method)));
+          // Any other array, Map or Set method reads it, lent shared while its callback runs.
+          const reads = builtin && !changes && (array(object) || mapped(object));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           if (object && changes) {
@@ -1266,6 +1267,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const t = types.get(e);
     const held = t !== undefined && isRef(t) ? t.to : t;
     return held !== undefined && yieldsOf(held) !== undefined;
+  }
+
+  function mapped(e: Expr): boolean {
+    const t = types.get(e);
+    const held = t !== undefined && isRef(t) ? t.to : t;
+    return held !== undefined && typeof held !== "string" && held.kind === "map";
   }
 
   function array(e: Expr): boolean {

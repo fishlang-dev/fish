@@ -8,7 +8,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -597,6 +597,396 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     panicIf(large, "a channel's capacity is too large to allocate", e);
     emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${elementDrop(t.of)})`);
     return made;
+  }
+
+  // A map's entry: its state, hash and key bits for the runtime, then its key and value.
+  function entryType(t: MapType): string {
+    return `{ i64, i64, i64, ${llvm(t.key)}, ${t.set ? "{}" : llvm(t.value)} }`;
+  }
+
+  // The byte offset of part `i` of an LLVM struct type, or with no `i`, the type's size.
+  function offsetOf(type: string, i?: number): string {
+    const [at, n] = [temp(), temp()];
+    emit(i === undefined ? `${at} = getelementptr ${type}, ptr null, i64 1` : `${at} = getelementptr ${type}, ptr null, i64 0, i32 ${i}`);
+    emit(`${n} = ptrtoint ptr ${at} to i64`);
+    return n;
+  }
+
+  // A key as the runtime hashes and compares it: a string's pointer, an integer widened to 64
+  // bits, or a union's member index.
+  function keyBits(v: string, key: Type): string {
+    const k = lower(key);
+    if (k === "string") {
+      const bits = temp();
+      emit(`${bits} = ptrtoint ptr ${v} to i64`);
+      return bits;
+    }
+    if (isInteger(k)) {
+      if (INTEGERS[k].bits === 64) return v;
+      const bits = temp();
+      emit(`${bits} = ${INTEGERS[k].signed ? "sext" : "zext"} ${llvm(k)} ${v} to i64`);
+      return bits;
+    }
+    if (typeof k !== "string" && k.kind === "union") {
+      const [tag, bits] = [temp(), temp()];
+      emit(`${tag} = extractvalue ${llvm(k)} ${v}, 0`);
+      emit(`${bits} = zext i32 ${tag} to i64`);
+      return bits;
+    }
+    return "0";
+  }
+
+  // `new Map<K, V>()` and `new Set<T>()`: an empty table, told how to drop its keys and values.
+  // With `from`, the array whose pairs or members it takes over, a later key replacing an earlier.
+  function mapNew(t: MapType, from: Expr | undefined): string {
+    const entry = entryType(t);
+    const [size, keyAt, valueAt] = [offsetOf(entry), offsetOf(entry, 3), offsetOf(entry, 4)];
+    const drop = (part: Type) => (needsDrop(part) ? elementDrop(part) : "null");
+    const made = temp();
+    emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${lower(t.key) === "string" ? 1 : 0}, ptr ${drop(t.key)}, ptr ${t.set ? "null" : drop(t.value)})`);
+    if (!from) return made;
+    const array = types.get(from) as ArrayType;
+    const et = llvm(array.element);
+    const whole = owned(from);
+    const [data, length] = [temp(), temp()];
+    emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
+    emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
+    elements(array.element, data, length, (at) => {
+      const element = temp();
+      emit(`${element} = load ${et}, ptr ${at}`);
+      if (t.set) return inserted(t, made, element);
+      const [key, v] = [temp(), temp()];
+      emit(`${key} = extractvalue ${et} ${element}, 0`);
+      emit(`${v} = extractvalue ${et} ${element}, 1`);
+      inserted(t, made, key, v);
+    });
+    emit(`call void @fsh_rt_free(ptr ${data})`);
+    return made;
+  }
+
+  // Puts an owned key, and for a Map its owned value, into the table: a key already there keeps
+  // its first copy and its place in the order, as JavaScript's does, and its old value is dropped.
+  function inserted(t: MapType, map: string, key: string, v?: string) {
+    const entry = entryType(t);
+    const [kt, vt] = [llvm(t.key), llvm(t.value)];
+    const valueAt = (at: string) => {
+      const slot = temp();
+      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      return slot;
+    };
+    const [found, at, was, there, replace, fresh, done] = [alloca("i32"), temp(), temp(), temp(), label(), label(), label()];
+    emit(`${at} = call ptr @fsh_rt_map_insert(ptr ${map}, i64 ${keyBits(key, t.key)}, ptr ${found})`);
+    emit(`${was} = load i32, ptr ${found}`);
+    emit(`${there} = icmp ne i32 ${was}, 0`);
+    emit(`br i1 ${there}, label %${replace}, label %${fresh}`);
+    startBlock(replace);
+    dispose(key, t.key);
+    if (v !== undefined) {
+      const [slot, old] = [valueAt(at), temp()];
+      emit(`${old} = load ${vt}, ptr ${slot}`);
+      dispose(old, t.value);
+      emit(`store ${vt} ${v}, ptr ${slot}`);
+    }
+    emit(`br label %${done}`);
+    startBlock(fresh);
+    const keySlot = temp();
+    emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    emit(`store ${kt} ${key}, ptr ${keySlot}`);
+    if (v !== undefined) emit(`store ${vt} ${v}, ptr ${valueAt(at)}`);
+    emit(`br label %${done}`);
+    startBlock(done);
+  }
+
+  // A copy of the map in %v: the table copied whole, then each live entry's value and key copied
+  // in place. A value's copy may panic, and the copy so far goes with it.
+  function copyMap(t: MapType): string {
+    const entry = entryType(t);
+    const [copy, used, index] = [temp(), temp(), alloca("i64")];
+    emit(`${copy} = call ptr @fsh_rt_map_copy(ptr %v)`);
+    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${copy})`);
+    emit(`store i64 0, ptr ${index}`);
+    const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp ult i64 ${i}, ${used}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const [at, state, copying] = [temp(), temp(), temp()];
+    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${copy}, i64 ${i})`);
+    emit(`${state} = load i64, ptr ${at}`);
+    emit(`${copying} = icmp eq i64 ${state}, 3`);
+    emit(`br i1 ${copying}, label %${live}, label %${next}`);
+    startBlock(live);
+    if (!t.set && needsDrop(t.value)) {
+      const [slot, v, made] = [temp(), temp(), temp()];
+      const vt = llvm(t.value);
+      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      emit(`${v} = load ${vt}, ptr ${slot}`);
+      if (typeof t.value !== "string" && t.value.kind !== "handle" && t.value.kind !== "interior") {
+        unwinding(`call ${vt} ${helper("copy", t.value)}(${vt} ${v})`, made, () => emit(`call void @fsh_rt_map_free(ptr ${copy})`));
+        emit(`store ${vt} ${made}, ptr ${slot}`);
+      } else emit(`store ${vt} ${copied(v, t.value)}, ptr ${slot}`);
+    }
+    const [keySlot, k] = [temp(), temp()];
+    const kt = llvm(t.key);
+    emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    emit(`${k} = load ${kt}, ptr ${keySlot}`);
+    const key = copied(k, t.key);
+    emit(`store ${kt} ${key}, ptr ${keySlot}`);
+    emit(`call void @fsh_rt_map_copied(ptr ${copy}, i64 ${i}, i64 ${keyBits(key, t.key)})`);
+    emit(`br label %${next}`);
+    startBlock(next);
+    const after = temp();
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    return copy;
+  }
+
+  // A Map's or a Set's method on the table its receiver holds. `set` and `add` give the receiver
+  // back, a `Mut` borrow of where the table lives.
+  function mapCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = valueType(callee.object) as MapType;
+    const entry = entryType(t);
+    const at = receiver(callee.object);
+    const map = temp();
+    emit(`${map} = load ptr, ptr ${at}`);
+    const [kt, vt] = [llvm(t.key), t.set ? "{}" : llvm(t.value)];
+    const part = (e: string, i: 3 | 4) => {
+      const slot = temp();
+      emit(`${slot} = getelementptr ${entry}, ptr ${e}, i64 0, i32 ${i}`);
+      return slot;
+    };
+    const load = (type: string, slot: string) => {
+      const v = temp();
+      emit(`${v} = load ${type}, ptr ${slot}`);
+      return v;
+    };
+    const name = callee.name;
+    if (name === "clear") {
+      emit(`call void @fsh_rt_map_clear(ptr ${map})`);
+      return undefined;
+    }
+    if (name === "keys" || name === "values" || name === "entries") return listed(e, name, t, map);
+    if (name === "forEach") return eachEntry(e, t, map);
+    // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
+    const key = owned(e.args[0]!);
+    if (name === "set" || name === "add") {
+      inserted(t, map, key, name === "set" ? owned(e.args[1]!) : undefined);
+      return at;
+    }
+    const bits = keyBits(key, t.key);
+    if (name === "delete") {
+      const [gone, removed, drop, done] = [temp(), temp(), label(), label()];
+      emit(`${gone} = call ptr @fsh_rt_map_remove(ptr ${map}, i64 ${bits})`);
+      dispose(key, t.key);
+      emit(`${removed} = icmp ne ptr ${gone}, null`);
+      emit(`br i1 ${removed}, label %${drop}, label %${done}`);
+      startBlock(drop);
+      dispose(load(kt, part(gone, 3)), t.key);
+      if (!t.set) dispose(load(vt, part(gone, 4)), t.value);
+      emit(`br label %${done}`);
+      startBlock(done);
+      return removed;
+    }
+    const [i, there] = [temp(), temp()];
+    emit(`${i} = call i64 @fsh_rt_map_find(ptr ${map}, i64 ${bits})`);
+    dispose(key, t.key);
+    emit(`${there} = icmp sge i64 ${i}, 0`);
+    if (name === "has") return there;
+    const [hit, miss, done] = [label(), label(), label()];
+    // `update(k, f)`: the arrow called once with the value to change, when the key is there.
+    if (name === "update") {
+      const callback = e.args[1]!;
+      const closure = types.get(callback) as ClosureType;
+      const env = alloca(llvm(closure));
+      emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
+      const drop = () => needsDrop(closure) && dispose(unstash(env, closure), closure);
+      emit(`br i1 ${there}, label %${hit}, label %${done}`);
+      startBlock(hit);
+      const found = temp();
+      emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+      const target = calls.get(callback)!;
+      const gives = invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, target.body.params.length), e, undefined, drop);
+      if (gives !== undefined && needsDrop(closure.returns)) dispose(gives, closure.returns);
+      emit(`br label %${done}`);
+      startBlock(done);
+      drop();
+      return there;
+    }
+    // `get`: a clone of the value, or nothing.
+    const option = unionType([t.value, "null"]);
+    const out = alloca(llvm(option));
+    emit(`br i1 ${there}, label %${hit}, label %${miss}`);
+    startBlock(hit);
+    const found = temp();
+    emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`store ${llvm(option)} ${convert(copied(load(vt, part(found, 4)), t.value), t.value, option)}, ptr ${out}`);
+    emit(`br label %${done}`);
+    startBlock(miss);
+    emit(`store ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ptr ${out}`);
+    emit(`br label %${done}`);
+    startBlock(done);
+    const v = load(llvm(option), out);
+    if (!types.has(e) && needsDrop(option)) pending.push({ v, type: option });
+    return v;
+  }
+
+  // `for...of` over a Map's entries or a Set's members, in insertion order. The table's pointer
+  // and the entry reached live in slots, so a generator's loop may stop at a `yield`; the loop
+  // owns the table only when it was made for it.
+  function mapLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, t: MapType) {
+    const local = resolved(s.left as Stmt);
+    const entry = entryType(t);
+    scopes.push([]);
+    const [held, counter] = [loopSlot(s, 0, "ptr"), loopSlot(s, 1, "i64")];
+    const kept = resuming && resuming.type.frame[current.frame!.loops.get(s)!]!.type;
+    if (kept ? typeof kept !== "string" && kept.kind === "map" : fresh(s.right)) {
+      own(held, t);
+      emit(`store ptr ${owned(s.right)}, ptr ${held}`);
+    } else emit(`store ptr ${value(s.right)}, ptr ${held}`);
+    settle();
+    emit(`store i64 0, ptr ${counter}`);
+    const [test, live, loop, next, end] = [label(), label(), label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [i, map, used, more] = [temp(), temp(), temp(), temp()];
+    emit(`${i} = load i64, ptr ${counter}`);
+    emit(`${map} = load ptr, ptr ${held}`);
+    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    emit(`br i1 ${more}, label %${live}, label %${end}`);
+    startBlock(live);
+    const [at, state, alive] = [temp(), temp(), temp()];
+    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${state} = load i64, ptr ${at}`);
+    emit(`${alive} = icmp eq i64 ${state}, 1`);
+    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    startBlock(loop);
+    exits.set(s, { exit: end, next, depth: scopes.length });
+    scopes.push([]);
+    reserve(local);
+    own(slot(local), local.type);
+    // Each part is a pointer into the entry, or a copy when it copies.
+    const piece = (i: 3 | 4, type: Type, given: Type) => {
+      const part = temp();
+      emit(`${part} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+      if (isRef(given)) return part;
+      const v = temp();
+      emit(`${v} = load ${llvm(type)}, ptr ${part}`);
+      return copied(v, type);
+    };
+    if (t.set) emit(`store ${llvm(local.type)} ${piece(3, t.key, local.type)}, ptr ${slot(local)}`);
+    else {
+      const [k, v] = elementsOf(local.type as ObjectType);
+      const [first, pair] = [temp(), temp()];
+      emit(`${first} = insertvalue ${llvm(local.type)} undef, ${llvm(k!)} ${piece(3, t.key, k!)}, 0`);
+      emit(`${pair} = insertvalue ${llvm(local.type)} ${first}, ${llvm(v!)} ${piece(4, t.value, v!)}, 1`);
+      emit(`store ${llvm(local.type)} ${pair}, ptr ${slot(local)}`);
+    }
+    s.body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
+    emit(`br label %${next}`);
+    startBlock(next);
+    const [now, after] = [temp(), temp()];
+    emit(`${now} = load i64, ptr ${counter}`);
+    emit(`${after} = add i64 ${now}, 1`);
+    emit(`store i64 ${after}, ptr ${counter}`);
+    emit(`br label %${test}`);
+    startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
+  }
+
+  // Runs the body for each live entry of a map, in insertion order, with a pointer to it.
+  function entriesLoop(t: MapType, map: string, each: (entry: string) => void) {
+    const [used, index] = [temp(), alloca("i64")];
+    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    emit(`store i64 0, ptr ${index}`);
+    const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const [at, state, alive] = [temp(), temp(), temp()];
+    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${state} = load i64, ptr ${at}`);
+    emit(`${alive} = icmp eq i64 ${state}, 1`);
+    emit(`br i1 ${alive}, label %${live}, label %${next}`);
+    startBlock(live);
+    each(at);
+    emit(`br label %${next}`);
+    startBlock(next);
+    const after = temp();
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+  }
+
+  // `keys()`, `values()` and `entries()`: arrays of clones, in insertion order. A Set's values
+  // are its members, and its entries pair each member with itself, as JavaScript's do.
+  function listed(e: Extract<Expr, { kind: "call" }>, name: string, t: MapType, map: string): string {
+    const result = types.get(e) as ArrayType;
+    const out = alloca(ARRAY);
+    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    const entry = entryType(t);
+    const read = (at: string, i: 3 | 4, type: Type) => {
+      const [slot, v] = [temp(), temp()];
+      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+      emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
+      return copied(v, type);
+    };
+    entriesLoop(t, map, (at) => {
+      if (name === "keys" || (name === "values" && t.set)) return appended(out, t.key, read(at, 3, t.key));
+      if (name === "values") return appended(out, t.value, read(at, 4, t.value));
+      const pair = result.element;
+      const [k, v] = [read(at, 3, t.key), t.set ? read(at, 3, t.key) : read(at, 4, t.value)];
+      const [first, both] = [temp(), temp()];
+      emit(`${first} = insertvalue ${llvm(pair)} undef, ${llvm(t.key)} ${k}, 0`);
+      emit(`${both} = insertvalue ${llvm(pair)} ${first}, ${t.set ? llvm(t.key) : llvm(t.value)} ${v}, 1`);
+      appended(out, pair, both);
+    });
+    const v = temp();
+    emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    if (!types.has(e)) pending.push({ v, type: result });
+    return v;
+  }
+
+  // `forEach(f)`: the arrow called with each value and its key, or each member, borrowed or copied.
+  function eachEntry(e: Extract<Expr, { kind: "call" }>, t: MapType, map: string): undefined {
+    const entry = entryType(t);
+    const callback = e.args[0]!;
+    const closure = types.get(callback) as ClosureType;
+    const target = calls.get(callback)!;
+    const env = alloca(llvm(closure));
+    emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
+    const parts: [3 | 4, Type][] = t.set ? [[3, t.key]] : [[4, t.value], [3, t.key]];
+    entriesLoop(t, map, (at) => {
+      const passed = parts.slice(0, closure.params.length).map(([i, type], n) => {
+        const slot = temp();
+        emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+        const given = closure.params[n]!;
+        if (isRef(given)) return `ptr ${slot}`;
+        const v = temp();
+        emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
+        return `${llvm(given)} ${convert(copied(v, type), type, given)}`;
+      });
+      const unwound = () => {
+        if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+      };
+      const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound);
+      if (gives !== undefined && needsDrop(closure.returns)) dispose(gives, closure.returns);
+    });
+    if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    return undefined;
   }
 
   // A Semaphore's or Channel's method. Those that wait give a future holding a count on the
@@ -1305,6 +1695,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (lower(valueType(s.right)) === "string") return stringLoop(s);
         const inline = isRef(types.get(s.right)!) ? (types.get(s.right) as RefType).to : types.get(s.right)!;
         if (typeof inline !== "string" && inline.kind === "fixed") return fixedLoop(s, inline);
+        if (typeof inline !== "string" && inline.kind === "map") return mapLoop(s, inline);
         const type = valueType(s.right) as ArrayType;
         const local = resolved(s.left as Stmt);
         scopes.push([]);
@@ -1842,7 +2233,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
-    if (type.kind === "array" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn") return true;
+    if (type.kind === "array" || type.kind === "map" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn") return true;
     if (type.kind === "fixed") return type.size > 0 && needsDrop(type.element);
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
@@ -1906,6 +2297,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     let result = "%v";
     if (type.kind === "array") {
       result = kind === "drop" ? dropArray(type) : copyArray(type);
+    } else if (type.kind === "map") {
+      // A map moved out of its place left it empty, which the runtime's free skips.
+      if (kind === "drop") emit("call void @fsh_rt_map_free(ptr %v)");
+      else result = copyMap(type);
     } else if (type.kind === "fixed") {
       // Element by element in a loop over the value held in a slot, each copy written back.
       const [slot, index] = [alloca(t), alloca("i64")];
@@ -3064,6 +3459,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && (valueType(e.callee.object) as { kind?: string }).kind === "map") return mapCall(e, e.callee);
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "generator") {
         const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
         const type = nextResult((valueType(e.callee.object) as GeneratorType).yields);
@@ -3293,6 +3689,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof shared !== "string" && shared.kind === "fixed") {
       if (e.object.kind !== "ident" && e.object.kind !== "this") whole();
       return convert(String(shared.size), "usize", types.get(e)!);
+    }
+    if (typeof shared !== "string" && shared.kind === "map") {
+      const size = temp();
+      emit(`${size} = call i64 @fsh_rt_map_size(ptr ${whole()})`);
+      return convert(size, "usize", types.get(e)!);
     }
     if (typeof shared !== "string" && shared.kind === "array") {
       const length = temp();
@@ -4160,6 +4561,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "new": {
         if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         if ((types.get(e) as Exclude<Type, string>).kind === "block") return blockNew(e, types.get(e) as BlockType);
+        if ((types.get(e) as Exclude<Type, string>).kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;

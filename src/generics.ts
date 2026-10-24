@@ -76,6 +76,14 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     if (typeof arg !== "string" && arg.kind === "block" && arg.which === "Channel") infer(node.args[0]!, arg.of, names, bindings, at);
     return;
   }
+  // `Map<K, V>` and `Set<T>` against one match their key and value types.
+  if (node.kind === "ref" && (node.name === "Map" || node.name === "Set") && !names.has(node.name)) {
+    if (typeof arg !== "string" && arg.kind === "map" && arg.set === (node.name === "Set")) {
+      if (node.args[0]) infer(node.args[0], arg.key, names, bindings, at);
+      if (node.args[1]) infer(node.args[1], arg.value, names, bindings, at);
+    }
+    return;
+  }
   if (node.kind === "ref" && node.name === "shared" && node.args.length === 1 && !names.has(node.name)) {
     if (typeof arg !== "string" && arg.kind === "shared") infer(node.args[0]!, arg.of, names, bindings, at);
     return;
@@ -135,6 +143,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "dyn") return true;
   if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
   if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
+  if (t.kind === "map") return concrete(t.key) && concrete(t.value);
   if (t.kind === "variant") {
     let known = concreteVariants.get(t);
     if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));

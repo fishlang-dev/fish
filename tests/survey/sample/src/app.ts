@@ -19,7 +19,7 @@ function main(users: User[], key: string) {
   const ids = users.map((u) => u.id);
   const named = users.filter(function (u) { return u.name != null; });
   const { id, ...rest } = users[0]!;
-  const m = new Map<string, number>();
+  const m = new Map<number, string>();
   const parsed = JSON.parse("{}") as User;
   if (isNaN(parseInt(key))) return;
   if (users[0] instanceof Object) delete (users[0] as any).meta;
