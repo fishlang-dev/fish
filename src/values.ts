@@ -158,6 +158,9 @@ export const fixedFills = new WeakSet<Expr>();
 export const lengthChecks = new WeakSet<Expr>();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+// The string methods that may take a regex, and the calls that did, by method.
+const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
+export const regexStringCalls = new WeakMap<Expr, string>();
 // The regex method calls, by method.
 export const regexCalls = new WeakMap<Expr, "test" | "exec">();
 // The `new RegExp(...)` expressions, which are regexes known while compiling.
@@ -1076,6 +1079,11 @@ export function expressions(ctx: Context) {
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
   function stringCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     text(callee.object, receiver, linked(callee));
+    // A method that may take a regex looks at its first argument to see which it was given.
+    const first = REGEX_METHODS.has(callee.name) && e.args[0] ? value(e.args[0]) : undefined;
+    const rx = first === undefined ? undefined : asRegex(first);
+    if (rx) return regexStringCall(e, callee, rx, lower(first!) !== rx);
+    if (first !== undefined && !STRING_METHODS[callee.name]) throw new CompileError(`'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
     const method = STRING_METHODS[callee.name];
     if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
     const [params, returns, required] = method;
@@ -1084,10 +1092,73 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${callee.name}' takes ${count} argument${params.length === 1 ? "" : "s"}`, e.start, e.end);
     }
     e.args.forEach((a, i) => {
-      const t = value(a);
+      const t = i === 0 && first !== undefined ? first : value(a);
       coerce(a, t, params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(params[i]!)}'`);
     });
     return { type: returns, what: `'${callee.name}'` };
+  }
+
+  // A string method taking a regex: `g` decides whether \`replace\`, \`match\` and \`split\` use
+  // every match or the first, and \`matchAll\` and \`replaceAll\` need it, as JavaScript requires.
+  function regexStringCall(e: Call, callee: Extract<Expr, { kind: "member" }>, rx: RegexType, generic: boolean): { type: Type; what: string } {
+    const name = callee.name;
+    const what = `'${name}'`;
+    const global = rx.flags.includes("g");
+    const typed = !rx.any || generic;
+    const unknown = () => new CompileError(`${what} types its matches from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
+    if (e.optional || callee.optional) throw new CompileError(`${what} with a regex is called without '?.'`, e.start, e.end);
+    const most = name === "search" || name === "match" || name === "matchAll" ? 1 : 2;
+    if (e.args.length > most || (name.startsWith("replace") && e.args.length < 2)) {
+      throw new CompileError(name.startsWith("replace") ? `${what} takes a regex and what replaces each match: a string, or an arrow function` : name === "split" ? "'split' takes a regex and an optional limit" : `${what} takes one regex`, e.start, e.end);
+    }
+    // What these give, or whether they may run, depends on the flags, which a 'RegExp' kept here
+    // doesn't show.
+    if (!typed && (name === "match" || name === "matchAll" || name === "replaceAll")) throw unknown();
+    if ((name === "matchAll" || name === "replaceAll") && !global) throw new CompileError(`${what} needs a regex with the 'g' flag, as JavaScript requires`, e.args[0]!.start, e.args[0]!.end);
+    let type: Type;
+    if (name === "search") type = "i64";
+    else if (name === "match") {
+      if (!global && !typed) throw unknown();
+      type = global ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
+    } else if (name === "matchAll") {
+      if (!typed) throw unknown();
+      type = arrayType(matchType(rx));
+    } else if (name === "split") {
+      const limit = e.args[1];
+      if (limit) {
+        const t = value(limit);
+        if (t !== "i64" && !adapt(limit, "i64")) throw new CompileError(`a limit is an 'i64', not '${show(t)}'`, limit.start, limit.end);
+      }
+      // A regex whose captures aren't known here may have one that takes no part.
+      type = arrayType(rx.captures.some((c) => c.optional) || !typed ? unionType(["string", "null"]) : "string");
+    } else type = replacement(e, rx, typed, unknown);
+    regexStringCalls.set(e, name);
+    return { type, what };
+  }
+
+  // What replaces each match: a string with $ patterns, or an arrow function given the match,
+  // each capture, the offset, the string and, when the pattern names them, the groups.
+  function replacement(e: Call, rx: RegexType, typed: boolean, unknown: () => CompileError): Type {
+    const given = e.args[1]!;
+    if (given.kind !== "arrow") {
+      const t = read(given);
+      if (!stringLike(t)) throw new CompileError(`what replaces each match is a string or an arrow function, not '${show(t)}'`, given.start, given.end);
+      if (t !== "string") coerce(given, t, "string", "");
+      return "string";
+    }
+    if (!typed) throw unknown();
+    const match = matchType(rx);
+    const groups = field(match, "groups")?.type;
+    const params: Type[] = ["string", ...elementsOf(match).slice(1), "i64", "string", ...(groups ? [refType(groups, false)] : [])];
+    const names = ["match", ...rx.captures.map((_, i) => `p${i + 1}`), "offset", "string", ...(groups ? ["groups"] : [])];
+    if (given.params.length > params.length) throw new CompileError(`the replacing function is given ${names.join(", ")}`, given.params[params.length]!.start, given.params[params.length]!.end);
+    expect(given, functionType(names, params, "string"));
+    const c = value(given);
+    if (typeof c === "string" || c.kind !== "closure") throw new CompileError("what replaces each match is a string or an arrow function", given.start, given.end);
+    runsOften(c, "replace", "its function once per match", given);
+    c.params.forEach((p, i) => passedExactly("replace", params[i]!, p, given.params[i], given.params[i] ?? given));
+    if (!fits(c.returns, "string")) throw new CompileError(`the replacing function gives the string each match becomes, not '${show(c.returns)}'`, given.start, given.end);
+    return "string";
   }
 
   // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or

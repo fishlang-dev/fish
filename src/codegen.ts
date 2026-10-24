@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -3511,6 +3511,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);
+      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
       if (regexCalls.get(e) === "test") {
         const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
         const [found, yes] = [temp(), temp()];
@@ -5171,9 +5172,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
     const regexT = lower(valueType(object)) as RegexType;
     const option = (types.get(e) ?? unionType([matchType(regexT), "null"])) as UnionType;
-    const match = option.members.find((m) => m !== "null") as ObjectType;
     const re = value(object);
-    const s = value(e.args[0]!);
+    const result = execOf(regexT, option, re, value(e.args[0]!));
+    if (!types.has(e)) pending.push({ v: result, type: option });
+    return result;
+  }
+
+  // The first match of a regex in s, or null.
+  function execOf(regexT: RegexType, option: UnionType, re: string, s: string): string {
+    const match = option.members.find((m) => m !== "null") as ObjectType;
     const groups = regexT.captures.length + 1;
     const [out, found, yes] = [alloca(`[${groups * 2} x i64]`), temp(), temp()];
     emit(`${found} = call i32 @fsh_rt_regex_match(ptr ${re}, ptr ${s}, ptr ${out})`);
@@ -5181,9 +5188,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [made, none, done] = [label(), label(), label()];
     emit(`br i1 ${yes}, label %${made}, label %${none}`);
     startBlock(made);
+    const some = convert(matchValue(regexT, match, s, out), match, option);
+    const filled = block;
+    emit(`br label %${done}`);
+    startBlock(none);
+    const nothing = convert("zeroinitializer", "null", option);
+    emit(`br label %${done}`);
+    startBlock(done);
+    const result = temp();
+    emit(`${result} = phi ${llvm(option)} [ ${some}, %${filled} ], [ ${nothing}, %${none} ]`);
+    return result;
+  }
+
+  // A match built from the starts and ends the runtime wrote at `slots`: slices of s, with null
+  // for a group that took no part.
+  function matchValue(regexT: RegexType, match: ObjectType, s: string, slots: string): string {
     const at = (k: number) => {
       const [p, v] = [temp(), temp()];
-      emit(`${p} = getelementptr i64, ptr ${out}, i64 ${k}`);
+      emit(`${p} = getelementptr i64, ptr ${slots}, i64 ${k}`);
       emit(`${v} = load i64, ptr ${p}`);
       return v;
     };
@@ -5234,17 +5256,123 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${next} = insertvalue ${llvm(match)} ${built}, ${llvm(f.type)} ${v}, ${i}`);
       built = next;
     });
-    const some = convert(built, match, option);
-    const filled = block;
-    emit(`br label %${done}`);
-    startBlock(none);
-    const nothing = convert("zeroinitializer", "null", option);
-    emit(`br label %${done}`);
-    startBlock(done);
-    const result = temp();
-    emit(`${result} = phi ${llvm(option)} [ ${some}, %${filled} ], [ ${nothing}, %${none} ]`);
-    if (!types.has(e)) pending.push({ v: result, type: option });
+    return built;
+  }
+
+  // A string method given a regex: search, match, matchAll, split, replace and replaceAll.
+  function regexString(e: Extract<Expr, { kind: "call" }>, name: string): string {
+    const callee = e.callee as Extract<Expr, { kind: "member" }>;
+    const regexT = lower(valueType(e.args[0]!)) as RegexType;
+    const s = operand(callee.object, e.args);
+    const re = value(e.args[0]!);
+    const type = types.get(e)!;
+    const call = (line: string) => {
+      const v = temp();
+      emit(`${v} = call ${line}`);
+      return v;
+    };
+    let result: string;
+    if (name === "search") result = call(`i64 @fsh_rt_regex_search(ptr ${re}, ptr ${s})`);
+    else if (name === "match" && !regexT.flags.includes("g")) result = execOf(regexT, type as UnionType, re, s);
+    else if (name === "match") {
+      const out = alloca(ARRAY);
+      const found = call(`i32 @fsh_rt_regex_match_all(ptr ${out}, ptr ${re}, ptr ${s})`);
+      const [yes, list] = [temp(), temp()];
+      emit(`${yes} = icmp ne i32 ${found}, 0`);
+      emit(`${list} = load ${ARRAY}, ptr ${out}`);
+      const v = temp();
+      emit(`${v} = select i1 ${yes}, ${llvm(type)} ${convert(list, arrayType("string"), type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+      result = v;
+    } else if (name === "split") {
+      const out = alloca(ARRAY);
+      const element = (type as ArrayType).element;
+      const tagged = typeof element !== "string" && element.kind === "union";
+      const tags = tagged ? [(element as UnionType).members.indexOf("null"), (element as UnionType).members.indexOf("string")] : [0, 0];
+      const limit = e.args[1] ? value(e.args[1]) : "-1";
+      emit(`call void @fsh_rt_regex_split(ptr ${out}, ptr ${re}, ptr ${s}, i64 ${limit}, i32 ${tagged ? 1 : 0}, i32 ${tags[0]}, i32 ${tags[1]})`);
+      result = temp();
+      emit(`${result} = load ${ARRAY}, ptr ${out}`);
+    } else result = regexLoop(e, name, regexT, re, s, type);
+    if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
     return result;
+  }
+
+  // matchAll and replace, which go through the matches one at a time: matchAll builds each
+  // into an array, replace puts what replaces each, from a pattern or a function, between the
+  // text around them.
+  function regexLoop(e: Extract<Expr, { kind: "call" }>, name: string, regexT: RegexType, re: string, s: string, type: Type): string {
+    // A regex whose flags aren't known here says in its program whether it is global.
+    const global = name === "matchAll" || regexT.flags.includes("g") ? 1 : regexT.any ? -1 : 0;
+    const it = temp();
+    emit(`${it} = call ptr @fsh_rt_regex_iter(ptr ${re}, ptr ${s}, i32 ${global})`);
+    const given = e.args[1];
+    const callback = given?.kind === "arrow" ? given : undefined;
+    const closure = callback && (types.get(callback) as ClosureType);
+    const env = callback ? alloca(llvm(closure!)) : "";
+    if (callback) emit(`store ${llvm(closure!)} ${owned(callback)}, ptr ${env}`);
+    const pattern = name.startsWith("replace") && !callback ? value(given!) : undefined;
+    const list = name === "matchAll" ? alloca(ARRAY) : undefined;
+    if (list) emit(`store ${ARRAY} zeroinitializer, ptr ${list}`);
+    const [head, body, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const more = temp();
+    emit(`${more} = call i32 @fsh_rt_regex_next(ptr ${it})`);
+    const yes = temp();
+    emit(`${yes} = icmp ne i32 ${more}, 0`);
+    emit(`br i1 ${yes}, label %${body}, label %${done}`);
+    startBlock(body);
+    const slots = temp();
+    emit(`${slots} = call ptr @fsh_rt_regex_slots(ptr ${it})`);
+    if (list) appended(list, (type as ArrayType).element, matchValue(regexT, (type as ArrayType).element as ObjectType, s, slots));
+    else if (pattern) emit(`call void @fsh_rt_regex_put_pattern(ptr ${it}, ptr ${pattern})`);
+    else {
+      const target = calls.get(callback!)!;
+      const match = matchType(regexT);
+      const whole = matchValue(regexT, match, s, slots);
+      const parts = elementsOf(match);
+      const groups = field(match, "groups");
+      const kept = groups ? alloca(llvm(groups.type)) : undefined;
+      const passed = closure!.params.map((p, i) => {
+        if (i < parts.length) {
+          const part = temp();
+          emit(`${part} = extractvalue ${llvm(match)} ${whole}, ${match.fields.findIndex((f) => f.name === String(i))}`);
+          return `${llvm(p)} ${convert(copied(part, parts[i]!), parts[i]!, p)}`;
+        }
+        if (i === parts.length) {
+          const index = temp();
+          emit(`${index} = extractvalue ${llvm(match)} ${whole}, ${match.fields.findIndex((f) => f.name === "index")}`);
+          return `i64 ${index}`;
+        }
+        if (i === parts.length + 1) return `ptr ${copied(s, "string")}`;
+        const g = temp();
+        emit(`${g} = extractvalue ${llvm(match)} ${whole}, ${match.fields.findIndex((f) => f.name === "groups")}`);
+        emit(`store ${llvm(groups!.type)} ${g}, ptr ${kept}`);
+        return `ptr ${kept}`;
+      });
+      const unwound = () => {
+        dispose(whole, match);
+        emit(`call void @fsh_rt_regex_close(ptr ${it})`);
+        if (needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
+      };
+      const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound)!;
+      const text = convert(gives, closure!.returns, "string");
+      emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
+      dispose(text, "string");
+      dispose(whole, match);
+    }
+    emit(`br label %${head}`);
+    startBlock(done);
+    if (callback && needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
+    if (list) {
+      emit(`call void @fsh_rt_regex_close(ptr ${it})`);
+      const v = temp();
+      emit(`${v} = load ${ARRAY}, ptr ${list}`);
+      return v;
+    }
+    const made = temp();
+    emit(`${made} = call ptr @fsh_rt_regex_finish(ptr ${it})`);
+    return made;
   }
 
   // A regex is a pointer to its compiled program, one constant per pattern and flags.

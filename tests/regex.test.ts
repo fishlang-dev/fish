@@ -107,3 +107,29 @@ test("regex exec agrees with JavaScript", async () => {
   expect(wrong).toEqual([]);
   expect(run.stderr.toString()).not.toContain("fish: leaked");
 }, 60_000);
+
+test("string methods taking a regex agree with JavaScript", async () => {
+  const cases = corpus(300);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-regex-"));
+  const file = join(dir, "methods.fsh");
+  const lines = cases.map((c, i) => {
+    const s = JSON.stringify(c.s);
+    const optional = parsePattern(c.p, c.f).captures.some((g) => g.optional);
+    const split = optional ? `${s}.split(/${c.p}/${c.f}).map((x) => x ?? "-").join("|")` : `${s}.split(/${c.p}/${c.f}).join("|")`;
+    const all = `(${s}.match(/${c.p}/g${c.f}) ?? ["none"]).join("|")`;
+    return `  let each${i} = "";\n  for (const m of ${s}.matchAll(/${c.p}/g${c.f})) each${i} += m.index + ":" + m[0] + ";";\n` +
+      `  console.log(${s}.search(/${c.p}/${c.f}), ${split}, ${all}, each${i}, ${s}.replace(/${c.p}/g${c.f}, "<$&|$1|$\`>"), ${s}.replace(/${c.p}/${c.f}, (m) => "[" + m + "]"));`;
+  });
+  writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
+  await buildAsync(file, join(dir, "methods"), false, "unwind", []);
+  const run = Bun.spawnSync([join(dir, "methods")], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const got = run.stdout.toString().replace(/\n$/, "").split("\n");
+  const wrong = cases.flatMap((c, i) => {
+    const re = (g: string) => new RegExp(c.p, g + c.f);
+    const each = [...c.s.matchAll(re("g"))].map((m) => `${m.index}:${m[0]};`).join("");
+    const want = [c.s.search(re("")), c.s.split(re("")).map((x) => x ?? "-").join("|"), (c.s.match(re("g")) ?? ["none"]).join("|"), each, c.s.replace(re("g"), "<$&|$1|$`>"), c.s.replace(re(""), (m) => "[" + m + "]")].join(" ");
+    return want === got[i] ? [] : [`/${c.p}/${c.f} on ${JSON.stringify(c.s)} gave ${got[i]}, not ${want}`];
+  });
+  expect(wrong).toEqual([]);
+  expect(run.stderr.toString()).not.toContain("fish: leaked");
+}, 60_000);

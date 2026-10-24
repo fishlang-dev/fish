@@ -266,3 +266,90 @@ function main() {
   const m2 = r.exec("xxabcdef");
   if (m2 !== null) console.log(m2[0], m2.index);
 }
+// case: regex_string_methods
+// expect: 1 -1 5
+// expect: 1 1 - 1
+// expect: 1,22,333 3
+// expect: true
+// expect: 0 a1 a 1 a
+// expect: 2 b22 b 22 b
+// expect: 5 c333 c 333 c
+// expect: 10 d d  d
+// expect: a|b|c| d a|1|b|2||2|c|3||3||3| d 13 a1
+// expect: 1 0 a|b|c 3 4
+// expect: a#b22c333 d a#b##c### d a[1]b[2][2]c[3][3][3] d a<1>b<22>c<333> d
+// expect: a1b22|a1|c333 d|$|$2|221c333 d -a-a-a- .😀.😀. .�.�.
+// expect: a1_@1b22@3c33@63_@8 d A1B22C333 D
+// expect: a111b22c333 d
+function main() {
+  const s = "a1b22c333 d";
+  console.log(s.search(/\d/), s.search(/z/), s.search(/c/g));
+  const m = s.match(/(\d)(\d)?/);
+  if (m !== null) console.log(m[0], m[1], m[2] ?? "-", m.index);
+  const all = s.match(/\d+/g);
+  if (all !== null) console.log(all.join(","), all.length);
+  console.log(s.match(/z/g) === null);
+  for (const x of s.matchAll(/(?<l>[a-z])(\d*)/g)) console.log(x.index, x[0], x[1], x[2], x.groups.l);
+  console.log(s.split(/\d+/).join("|"), s.split(/(\d)/).join("|"), s.split(/(x)?\d/).length, s.split(/b/, 1).join("|"));
+  console.log("".split(/,/).length, "".split(/(?:)/).length, "abc".split(/(?:)/).join("|"), "a😀b".split(/(?:)/u).length, "a😀b".split(/(?:)/).length);
+  console.log(s.replace(/\d/, "#"), s.replace(/\d/g, "#"), s.replaceAll(/(\d)/g, "[$1]"), s.replace(/(?<n>\d+)/g, "<$<n>>"));
+  console.log(s.replace(/b(2+)/, "$&|$`|$'|$$|$2|$11"), "aaa".replace(/a*?/g, "-"), "😀😀".replace(/(?:)/gu, "."), "😀".replace(/(?:)/g, "."));
+  console.log(s.replace(/(\d)(\d)?/g, (all, a, b, at) => `${a}${b ?? "_"}@${at}`), s.replace(/[a-z]/g, (c) => c.toUpperCase()));
+  console.log(s.replace(/(?<x>\d)/, (m, d, at, str, groups) => groups.x + str.length));
+}
+// case: regex_string_methods_kept_regex
+// expect: -b- -ba a|c 1
+class H {
+  re: RegExp;
+  constructor(re: RegExp) { this.re = re; }
+  swap(s: string): string { return s.replace(this.re, "-"); }
+  parts(s: string): string { return s.split(this.re).map((x) => x ?? "-").join("|"); }
+}
+function main() {
+  console.log(new H(/a/g).swap("aba"), new H(/a/).swap("aba"), new H(/b/).parts("abc"), "xay".search(new H(/a/).re));
+}
+// case: regex_method_matchall_g
+// error: 'matchAll' needs a regex with the 'g' flag, as JavaScript requires
+function main() {
+  for (const m of "aa".matchAll(/a/)) console.log(m[0]);
+}
+// case: regex_method_replaceall_g
+// error: 'replaceAll' needs a regex with the 'g' flag, as JavaScript requires
+function main() {
+  console.log("aa".replaceAll(/a/, "b"));
+}
+// case: regex_method_replacement
+// error: what replaces each match is a string or an arrow function, not 'i64'
+function main() {
+  console.log("aa".replace(/a/, 1));
+}
+// case: regex_method_callback_type
+// error: 'replace' passes its callback a 'null | string' here, not a 'string'
+function main() {
+  console.log("a1".replace(/(\d)?/, (m, d: string) => d));
+}
+// case: regex_method_callback_gives
+// error: the replacing function gives the string each match becomes, not 'i64'
+function main() {
+  console.log("a1".replace(/\d/, (m) => 1));
+}
+// case: regex_method_match_string
+// error: 'match' takes a regex, like 'match(/x/)'; Fish doesn't turn a string into one
+function main() {
+  console.log("a".match("a"));
+}
+// case: regex_method_unknown
+// error: 'matchAll' types its matches from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter
+class H {
+  re: RegExp;
+  constructor(re: RegExp) { this.re = re; }
+  all(s: string): i64 { return s.matchAll(this.re).length; }
+}
+function main() {
+  console.log(new H(/a/g).all("aa"));
+}
+// case: regex_method_split_limit
+// error: a limit is an 'i64', not 'number'
+function main() {
+  console.log("a,b".split(/,/, 1.5));
+}

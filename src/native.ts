@@ -2758,7 +2758,8 @@ static void fsh_rx_add(fsh_rx *r, fsh_rx_list *l, int64_t *marks, int32_t start,
   }
 }
 
-static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
+// From the index from, or only at it when anchored, as a sticky regex is.
+static int fsh_rx_pike(fsh_rx *r, int64_t from, int anchored, int64_t *out) {
   // Each instruction is at most one thread in a list, and is followed at most once per list,
   // so the work stack holds at most what every instruction pushes.
   int32_t size = r->code[3];
@@ -2777,12 +2778,12 @@ static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
     lists[k].slots = fsh_rt_alloc((int64_t)size * r->slots * sizeof(int64_t));
   }
   int64_t *start = fsh_rt_alloc(r->slots * sizeof(int64_t));
-  int sticky = r->code[2] & 2, matched = 0;
+  int sticky = anchored, matched = 0;
   int64_t stamp = 0;
   fsh_rx_list *now = &lists[0], *next = &lists[1];
   now->stamp = stamp++;
-  for (int64_t pos = 0;;) {
-    if (!matched && (pos == 0 || !sticky)) {
+  for (int64_t pos = from;;) {
+    if (!matched && (pos == from || !sticky)) {
       for (int32_t k = 0; k < r->slots; k++) start[k] = -1;
       fsh_rx_add(r, now, marks, RX_HEADER, pos, start, work);
     }
@@ -2981,11 +2982,11 @@ static int fsh_rx_run(fsh_rx *r, fsh_rx_stack *s, int64_t *slots, int64_t pc, in
   }
 }
 
-static int fsh_rx_backtrack(fsh_rx *r, int64_t *out) {
+static int fsh_rx_backtrack(fsh_rx *r, int64_t from, int anchored, int64_t *out) {
   int64_t *slots = fsh_rt_alloc(r->slots * sizeof(int64_t));
   fsh_rx_stack s = {NULL, 0, 0};
-  int matched = 0, sticky = r->code[2] & 2;
-  for (int64_t start = 0; start <= r->n && !matched; ) {
+  int matched = 0, sticky = anchored;
+  for (int64_t start = from; start <= r->n && !matched; ) {
     for (int32_t k = 0; k < r->slots; k++) slots[k] = -1;
     int64_t end;
     matched = fsh_rx_run(r, &s, slots, RX_HEADER, start, &end);
@@ -3023,17 +3024,24 @@ static uint16_t *fsh_rx_units(fsh_str *s, int64_t *count) {
   return out;
 }
 
+static void fsh_rx_open(fsh_rx *r, const int32_t *code, fsh_str *s) {
+  r->code = code;
+  r->unicode = code[2] & 1;
+  r->slots = code[0] * 2 + code[1];
+  r->in = fsh_rx_units(s, &r->n);
+}
+
+static int fsh_rx_find(fsh_rx *r, int64_t from, int anchored, int64_t *out) {
+  return r->code[2] & 4 ? fsh_rx_backtrack(r, from, anchored, out) : fsh_rx_pike(r, from, anchored, out);
+}
+
 // Matches a regex against s, writing each group's start and end, in code units or -1, to out,
 // which holds two words per group, the whole match first.
 int fsh_rt_regex_match(const int32_t *code, fsh_str *s, int64_t *out) {
   fsh_rx r;
-  r.code = code;
-  r.unicode = code[2] & 1;
-  r.slots = code[0] * 2 + code[1];
-  uint16_t *in = fsh_rx_units(s, &r.n);
-  r.in = in;
-  int matched = code[2] & 4 ? fsh_rx_backtrack(&r, out) : fsh_rx_pike(&r, out);
-  fsh_rt_free(in);
+  fsh_rx_open(&r, code, s);
+  int matched = fsh_rx_find(&r, 0, code[2] & 2, out);
+  fsh_rt_free((void *)r.in);
   return matched;
 }
 
@@ -3042,5 +3050,243 @@ int fsh_rt_regex_test(const int32_t *code, fsh_str *s) {
   int matched = fsh_rt_regex_match(code, s, out);
   fsh_rt_free(out);
   return matched;
+}
+
+// Where the next search goes after an empty match at i: one character on, a surrogate pair
+// whole under 'u', as AdvanceStringIndex says.
+static int64_t fsh_rx_advance(const fsh_rx *r, int64_t i) {
+  if (i >= r->n) return i + 1;
+  int64_t width = 1;
+  fsh_rx_at(r, i, &width);
+  return i + width;
+}
+
+// The matches of a regex in one string, the first or with 'g' each in turn, and a string
+// built from the text between them and what replaces each.
+typedef struct {
+  fsh_rx r;
+  fsh_str *s;
+  int64_t *out;
+  int64_t at, last;
+  int global, done;
+  char *built;
+  int64_t length, room;
+} fsh_rx_iter;
+
+fsh_rx_iter *fsh_rt_regex_iter(const int32_t *code, fsh_str *s, int32_t global) {
+  fsh_rx_iter *it = fsh_rt_alloc(sizeof(fsh_rx_iter));
+  fsh_rx_open(&it->r, code, s);
+  it->s = s;
+  it->out = fsh_rt_alloc(code[0] * 2 * sizeof(int64_t));
+  it->at = it->last = 0;
+  it->global = global < 0 ? (code[2] & 32) != 0 : global;
+  it->done = 0;
+  it->built = NULL;
+  it->length = it->room = 0;
+  return it;
+}
+
+int fsh_rt_regex_next(fsh_rx_iter *it) {
+  if (it->done || it->at > it->r.n || !fsh_rx_find(&it->r, it->at, it->r.code[2] & 2, it->out)) {
+    it->done = 1;
+    return 0;
+  }
+  it->at = it->out[1] == it->out[0] ? fsh_rx_advance(&it->r, it->out[1]) : it->out[1];
+  if (!it->global) it->done = 1;
+  return 1;
+}
+
+int64_t *fsh_rt_regex_slots(fsh_rx_iter *it) { return it->out; }
+
+// The text a group took, or null when it took none.
+fsh_str *fsh_rt_regex_capture(fsh_rx_iter *it, int64_t group) {
+  int64_t from = it->out[group * 2], to = it->out[group * 2 + 1];
+  return from < 0 ? NULL : fsh_rt_str_slice(it->s, from, to, 1);
+}
+
+static void fsh_rx_append(fsh_rx_iter *it, const char *bytes, int64_t n) {
+  if (it->length + n > it->room) {
+    int64_t room = (it->length + n) * 2 + 16;
+    char *grown = fsh_rt_alloc(room);
+    if (it->built) memcpy(grown, it->built, it->length);
+    fsh_rt_free(it->built);
+    it->built = grown;
+    it->room = room;
+  }
+  memcpy(it->built + it->length, bytes, n);
+  it->length += n;
+}
+
+static void fsh_rx_append_str(fsh_rx_iter *it, fsh_str *s) {
+  if (s) fsh_rx_append(it, s->bytes, s->length);
+}
+
+// The units from..to of the string matched, appended as WTF-8.
+static void fsh_rx_append_units(fsh_rx_iter *it, int64_t from, int64_t to) {
+  if (from >= to) return;
+  fsh_str *part = fsh_rt_str_slice(it->s, from, to, 1);
+  fsh_rx_append_str(it, part);
+  fsh_rt_str_release(part);
+}
+
+// Before a match's replacement goes the text since the last one.
+void fsh_rt_regex_put(fsh_rx_iter *it, fsh_str *replacement) {
+  fsh_rx_append_units(it, it->last, it->out[0]);
+  fsh_rx_append_str(it, replacement);
+  it->last = it->out[1];
+}
+
+// A group's number for $<name>, from the names the program lists after its instructions.
+static int64_t fsh_rx_named(const fsh_rx_iter *it, const unsigned char *name, int64_t n) {
+  const int32_t *code = it->r.code;
+  if (!(code[2] & 16)) return -1;
+  const int32_t *p = code + code[3] + (code[2] & 8 ? 1 + code[code[3]] * 2 : 0);
+  int64_t found = -1;
+  for (int32_t k = 0, count = *p++; k < count; k++) {
+    int32_t group = *p++, length = *p++;
+    int same = length == n;
+    for (int32_t j = 0; j < length; j++) same = same && p[j] == name[j];
+    p += length;
+    // Of a name's groups, the one that took part.
+    if (same && (found < 0 || it->out[group * 2] >= 0)) found = group;
+  }
+  return found;
+}
+
+// A replacement string's patterns, as String.prototype.replace reads them: $$, $&, the text
+// before and after the match,
+// $n and $nn for an existing group, and $<name> when the pattern names groups.
+void fsh_rt_regex_put_pattern(fsh_rx_iter *it, fsh_str *pattern) {
+  fsh_rx_append_units(it, it->last, it->out[0]);
+  const unsigned char *p = pattern ? (const unsigned char *)pattern->bytes : NULL;
+  int64_t n = pattern ? pattern->length : 0, groups = it->r.code[0] - 1;
+  for (int64_t i = 0; i < n; i++) {
+    if (p[i] != '$' || i + 1 >= n) {
+      fsh_rx_append(it, (const char *)p + i, 1);
+      continue;
+    }
+    unsigned char c = p[i + 1];
+    if (c == '$') fsh_rx_append(it, "$", 1), i++;
+    else if (c == '&') fsh_rx_append_units(it, it->out[0], it->out[1]), i++;
+    else if (c == 0x60) fsh_rx_append_units(it, 0, it->out[0]), i++;
+    else if (c == '\'') fsh_rx_append_units(it, it->out[1], it->r.n), i++;
+    else if (c >= '0' && c <= '9') {
+      int64_t one = c - '0', two = i + 2 < n && p[i + 2] >= '0' && p[i + 2] <= '9' ? one * 10 + (p[i + 2] - '0') : -1;
+      int64_t g = two >= 1 && two <= groups ? two : one >= 1 && one <= groups ? one : -1;
+      if (g < 0) {
+        fsh_rx_append(it, "$", 1);
+        continue;
+      }
+      if (it->out[g * 2] >= 0) fsh_rx_append_units(it, it->out[g * 2], it->out[g * 2 + 1]);
+      i += g == two ? 2 : 1;
+    } else if (c == '<' && (it->r.code[2] & 16)) {
+      int64_t close = i + 2;
+      while (close < n && p[close] != '>') close++;
+      if (close >= n) {
+        fsh_rx_append(it, "$", 1);
+        continue;
+      }
+      int64_t g = fsh_rx_named(it, p + i + 2, close - i - 2);
+      if (g >= 0 && it->out[g * 2] >= 0) fsh_rx_append_units(it, it->out[g * 2], it->out[g * 2 + 1]);
+      i = close;
+    } else fsh_rx_append(it, "$", 1);
+  }
+  it->last = it->out[1];
+}
+
+// The string built: what was put, then the rest of the string matched.
+fsh_str *fsh_rt_regex_finish(fsh_rx_iter *it) {
+  fsh_rx_append_units(it, it->last, it->r.n);
+  fsh_str *made = fsh_str_of(it->built ? it->built : "", it->length);
+  fsh_rt_free(it->built);
+  fsh_rt_free(it->out);
+  fsh_rt_free((void *)it->r.in);
+  fsh_rt_free(it);
+  return made;
+}
+
+void fsh_rt_regex_close(fsh_rx_iter *it) {
+  fsh_rt_free(it->built);
+  fsh_rt_free(it->out);
+  fsh_rt_free((void *)it->r.in);
+  fsh_rt_free(it);
+}
+
+// s.search(re): where the first match starts, or -1.
+int64_t fsh_rt_regex_search(const int32_t *code, fsh_str *s) {
+  int64_t *out = fsh_rt_alloc(code[0] * 2 * sizeof(int64_t));
+  int64_t at = fsh_rt_regex_match(code, s, out) ? out[0] : -1;
+  fsh_rt_free(out);
+  return at;
+}
+
+// Puts a string, or a union of a string and null with those tags, at the end of an array whose
+// room the caller made.
+static void fsh_rx_list_push(fsh_array *out, fsh_str *part, int32_t tagged, int32_t null_tag, int32_t string_tag) {
+  int64_t size = tagged ? 16 : 8;
+  if (out->length == out->capacity) {
+    int64_t room = out->capacity * 2 + 4;
+    char *grown = fsh_rt_array_alloc(room * size);
+    if (out->length) memcpy(grown, out->data, out->length * size);
+    fsh_rt_free(out->data);
+    out->data = grown;
+    out->capacity = room;
+  }
+  char *slot = out->data + out->length * size;
+  if (tagged) {
+    *(int32_t *)slot = part ? string_tag : null_tag;
+    *(fsh_str **)(slot + 8) = part;
+  } else *(fsh_str **)slot = part;
+  out->length++;
+}
+
+// s.split(re, limit), as RegExp.prototype[Symbol.split] does it: the regex tried at each
+// position in turn, the text between matches and every group's capture put in order. A
+// capture that took no part is null in a tagged array.
+void fsh_rt_regex_split(fsh_array *out, const int32_t *code, fsh_str *s, int64_t limit, int32_t tagged, int32_t null_tag, int32_t string_tag) {
+  out->data = NULL;
+  out->length = out->capacity = 0;
+  fsh_rx r;
+  fsh_rx_open(&r, code, s);
+  int64_t *slots = fsh_rt_alloc(code[0] * 2 * sizeof(int64_t));
+  uint64_t lim = limit < 0 ? UINT32_MAX : (uint64_t)limit & UINT32_MAX;
+  if (lim == 0) goto done;
+  if (r.n == 0) {
+    if (!fsh_rx_find(&r, 0, 1, slots)) fsh_rx_list_push(out, fsh_rt_str_slice(s, 0, 0, 1), tagged, null_tag, string_tag);
+    goto done;
+  }
+  int64_t p = 0, q = 0;
+  while (q < r.n) {
+    if (!fsh_rx_find(&r, q, 1, slots)) {
+      q = fsh_rx_advance(&r, q);
+      continue;
+    }
+    int64_t e = slots[1] < r.n ? slots[1] : r.n;
+    if (e == p) {
+      q = fsh_rx_advance(&r, q);
+      continue;
+    }
+    fsh_rx_list_push(out, fsh_rt_str_slice(s, p, q, 1), tagged, null_tag, string_tag);
+    if ((uint64_t)out->length == lim) goto done;
+    for (int32_t g = 1; g < code[0]; g++) {
+      fsh_rx_list_push(out, slots[g * 2] < 0 ? NULL : fsh_rt_str_slice(s, slots[g * 2], slots[g * 2 + 1], 1), tagged, null_tag, string_tag);
+      if ((uint64_t)out->length == lim) goto done;
+    }
+    p = q = e;
+  }
+  fsh_rx_list_push(out, fsh_rt_str_slice(s, p, r.n, 1), tagged, null_tag, string_tag);
+done:
+  fsh_rt_free(slots);
+  fsh_rt_free((void *)r.in);
+}
+
+// s.match(re) with 'g': every match's text, or no array when there is none.
+int fsh_rt_regex_match_all(fsh_array *out, const int32_t *code, fsh_str *s) {
+  out->data = NULL;
+  out->length = out->capacity = 0;
+  fsh_rx_iter *it = fsh_rt_regex_iter(code, s, 1);
+  while (fsh_rt_regex_next(it)) fsh_rx_list_push(out, fsh_rt_regex_capture(it, 0), 0, 0, 0);
+  fsh_rt_regex_close(it);
+  return out->length > 0;
 }
 `;

@@ -696,7 +696,8 @@ function markOptional(n: RegexNode, captures: Capture[], sure: boolean) {
 }
 
 // The compiled program the runtime's matchers run: a header of the group count, the
-// registers repeat checks use, flags (1 unicode, 2 sticky, 4 backtracking, 8 a fold table) and
+// registers repeat checks use, flags (1 unicode, 2 sticky, 4 backtracking, 8 a fold table, 16 a
+// table of group names, 32 global) and
 // where the instructions end, then instructions of 32-bit words. Positions are UTF-16 code units; with `u` or `v` a character is a code point, and a
 // surrogate pair one step. The layout is shared with `native.ts`.
 export const OP = {
@@ -850,11 +851,21 @@ export function compile(p: Pattern): number[] {
     code.push(table.length / 2, ...table);
     code[2] = code[2]! | 8;
   }
+  // The groups' names, as UTF-8 bytes, for a replacement's $<name>.
+  const named = p.captures.flatMap((c, i) => (c.name === undefined ? [] : [[i + 1, c.name] as const]));
+  if (named.length > 0) {
+    code.push(named.length);
+    for (const [group, name] of named) {
+      const bytes = new TextEncoder().encode(name);
+      code.push(group, bytes.length, ...bytes);
+    }
+    code[2] = code[2]! | 16;
+  }
   return code;
 }
 
 function flagsOf(p: Pattern): number {
-  return (p.unicode ? 1 : 0) | (p.flags.includes("y") ? 2 : 0) | (p.backtracks ? 4 : 0);
+  return (p.unicode ? 1 : 0) | (p.flags.includes("y") ? 2 : 0) | (p.backtracks ? 4 : 0) | (p.flags.includes("g") ? 32 : 0);
 }
 
 // The characters case-insensitive matching treats as one, as a key per character: the
