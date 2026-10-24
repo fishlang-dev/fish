@@ -357,10 +357,14 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
     withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
-    // A type parameter nothing decided is still the definition's placeholder.
+    // A type parameter only an arrow's own parameters decided is still the definition's
+    // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
+    // on in an argument of its own.
     const open = new Set(explicitPlaceholders(f).values());
     for (const p of params) {
-      if (open.has(bindings.get(p.name)!)) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      const t = bindings.get(p.name)!;
+      const passed = args.some((a, i) => a.kind !== "arrow" && argTypes[i] !== undefined && holdsPart(argTypes[i]!, (u) => u === t, true));
+      if (open.has(t) && !passed) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
     }
     readOnlyKept(f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance

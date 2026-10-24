@@ -1305,3 +1305,16 @@ function a<T>(c: Container<T>, d: T): T { return c.get(); }
 function main() {
   console.log(a(new J(), 1));
 }
+// case: generic_self_call
+// expect: 3
+function deep<U>(u: U, n: i64): i64 { if (n === 0) return 0; return 1 + deep(u, n - 1); }
+function main() { console.log(deep("z", 3)); }
+// case: generic_method_self_call
+// expect: 3 2
+class Box<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  deep<U>(u: U, n: i64): i64 { if (n === 0) return 0; return 1 + this.deep(u, n - 1); }
+  other<U>(u: U): i64 { return this.deep(u, 2); }
+}
+function main() { const b = new Box(1); console.log(b.deep("z", 3), b.other(true)); }
