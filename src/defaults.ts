@@ -36,6 +36,7 @@ function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   f.params.forEach((p, i) => {
     if (p.rest && i !== f.params.length - 1) throw new CompileError("a rest parameter has to be the last one, since it takes every argument after those before it", p.start, p.end);
     // A destructured parameter is a plain one under a hidden name, destructured as the body starts.
+    if ((p.pattern.kind === "object" || p.pattern.kind === "array") && p.modifiers.length > 0) throw new CompileError("a parameter property can't be destructured; it names one field", p.start, p.end);
     if ((p.pattern.kind === "object" || p.pattern.kind === "array") && !p.default && !p.rest) {
       const at = { start: p.pattern.start, end: p.pattern.end };
       const hidden = `argument ${i}`;

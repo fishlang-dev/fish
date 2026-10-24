@@ -1008,13 +1008,14 @@ export function check(written: Stmt[], library = false): Checked {
       // A place is read part by part where it is, so only the parts named move out of it, as in
       // Rust; any other value goes to a variable named for the pattern, as messages show it.
       const init = d.init!;
-      const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || (e.kind === "member" && !e.optional && read(e.object));
-      let type: Type;
+      const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
+      // A getter along the path runs each time the path is read, so its result is kept once.
+      const computed = (e: Expr): boolean => (e.kind === "member" && calls.has(e)) || ((e.kind === "member" || e.kind === "index") && computed(e.object));
+      let type = read(init) && !d.type ? value(init) : undefined;
+      const inPlace = type !== undefined && !computed(init);
       let from: (at: Span) => Expr;
-      if (read(init) && !d.type) {
-        type = value(init);
-        if (init.kind === "member" && calls.has(init)) throw unsupported("destructuring a getter's result", init);
-        const copy = (e: Expr, at: Span): Expr => (e.kind === "member" ? { ...e, object: copy(e.object, at), start: at.start, end: at.end } : { ...e, start: at.start, end: at.end });
+      if (inPlace) {
+        const copy = (e: Expr, at: Span): Expr => (e.kind === "member" || e.kind === "index" ? { ...e, object: copy(e.object, at), start: at.start, end: at.end } : { ...e, start: at.start, end: at.end });
         from = (at) => copy(init, at);
         Object.assign(s, { kind: "empty" });
       } else {
@@ -1024,8 +1025,13 @@ export function check(written: Stmt[], library = false): Checked {
         type = locals.get(s)!.type;
         from = (at) => ({ kind: "ident", name: held, start: at.start, end: at.end });
       }
-      const borrowed = isRef(type);
-      const lowered = lower(isRef(type) ? type.to : type);
+      const destructuring: Type = type!;
+      // A top-level const is read where it lives rather than lent.
+      let root = init;
+      while (root.kind === "member" || root.kind === "index") root = root.object;
+      const global = inPlace && root.kind === "ident" && !locals.has(root);
+      const borrowed = isRef(destructuring) && !global;
+      const lowered = lower(isRef(destructuring) ? destructuring.to : destructuring);
       // An object-typed parameter stands for any type with its fields, which its bound names.
       const whole = typeof lowered !== "string" && lowered.kind === "param" && lowered.bound?.kind === "object" ? lowered.bound : lowered;
       const parts: [Pattern, Expr, Type][] = [];
@@ -1037,7 +1043,7 @@ export function check(written: Stmt[], library = false): Checked {
       };
       if (pattern.kind === "object") {
         if (typeof whole === "string" || (whole.kind !== "object" && whole.kind !== "class")) {
-          throw new CompileError(`'{ ... }' destructures an object or an instance, not '${show(type)}'`, pattern.start, pattern.end);
+          throw new CompileError(`'{ ... }' destructures an object or an instance, not '${show(destructuring)}'`, pattern.start, pattern.end);
         }
         const taken = new Set<string>();
         for (const p of pattern.props) {
@@ -1050,7 +1056,7 @@ export function check(written: Stmt[], library = false): Checked {
         // The rest is an object of the fields the pattern didn't name, taken over.
         if (pattern.rest) {
           const fields = whole.kind === "class" ? allFields(whole) : whole.fields;
-          const props = fields.filter((f) => !taken.has(f.name) && !f.access).map((f): ObjectProp => ({ kind: "property", key: f.name, value: { kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
+          const props = fields.filter((f) => !taken.has(f.name) && (f.access ?? "public") === "public").map((f): ObjectProp => ({ kind: "property", key: f.name, value: { kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
           parts.push([pattern.rest, { kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
         }
       } else if (isTuple(whole)) {
@@ -1078,14 +1084,17 @@ export function check(written: Stmt[], library = false): Checked {
           const slice: Expr = { kind: "call", callee: { kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
           parts.push([pattern.rest, slice, whole]);
         }
-      } else throw new CompileError(`'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(type)}'`, pattern.start, pattern.end);
+      } else throw new CompileError(`'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(destructuring)}'`, pattern.start, pattern.end);
       const lets: Stmt[] = parts.map(([target, init]): Stmt => {
         const at = { start: target.start, end: target.end };
         const declarator: Declarator = { target, type: undefined, init, ...at };
-        // A part of a borrowed value is borrowed too, as a loop's pattern's parts are.
-        if (borrowed && target.kind === "ident" && (init.kind === "member" || init.kind === "index")) loopParts.add(declarator);
+        // A part of a borrowed value is borrowed too, as a loop's pattern's parts are; an array's
+        // parts copy.
+        if (borrowed && target.kind === "ident" && (init.kind === "member" || (init.kind === "index" && isTuple(whole)))) loopParts.add(declarator);
         return { kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
       });
+      // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
+      if (prologues.has(s)) for (const l of lets) prologues.add(l);
       place.list.splice(place.at + 1, 0, ...lets);
       return undefined;
     }
