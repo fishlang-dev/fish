@@ -384,14 +384,15 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
   // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
-  const values = ready.args.map((a, i) => {
+  // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.
+  const values = () => ready.args.map((a, i) => {
     const t = instance.locals.get(macro.params[i + before]!)!.type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
     return built<Value>({ tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
-  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values], nearest));
+  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
@@ -448,12 +449,14 @@ function stripped(decl: Decl, pending: Pending): { bare: Stmt; restore(given: De
       saved.forEach((decorators, i) => {
         if (decorators.length === 0) return;
         const want = key(before[i]!);
-        const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (!taken.has(list[i]!) ? list[i] : undefined);
-        if (!at) return;
+        const place = list[i];
+        const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (place && !taken.has(place) && kindOf(place) === kindOf(before[i]!) ? place : undefined);
+        if (!at) throw new CompileError("a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
         taken.add(at);
         at.decorators = [...decorators, ...at.decorators];
       });
     };
+    const kindOf = (x: unknown) => (x as { kind?: string }).kind ?? "param";
     const memberKey = (m: ClassMember) => `${m.kind} ${m.modifiers.includes("static") ? "static " : ""}${typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : ""}`;
     if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey);
     if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`));

@@ -814,3 +814,37 @@ macro function opt(input: AstStmt, n?: i64, e?: AstExpr): Ast[] {
 }
 @opt function f() {}
 function main() { console.log(got()); }
+// case: macro_c3_del
+// error: a macro took away what these decorators were waiting to apply to
+function kindAt(c: AstStmt, i: usize): string {
+  if (c.kind === "class") {
+    const m = c.members[i].clone();
+    if (m.kind === "field" || m.kind === "method" || m.kind === "get" || m.kind === "set") {
+      const n = m.name;
+      if (typeof n === "string") return `${m.kind} ${n}`;
+    }
+    return m.kind;
+  }
+  if (c.kind === "function") return `fn ${c.name}`;
+  return "?";
+}
+macro function note(input: AstStmt, member: usize, label: string): Ast[] {
+  const lit: AstExpr = { kind: "string", value: `${label} on ${kindAt(input.clone(), member)}@${member}`, start: 0, end: 0 };
+  return [input, quote`function ${ident(label)}(): string { return ${lit}; }`];
+}
+// a member macro that removes its member; the member's outer decorator must not move to another member
+macro function del(input: AstStmt, member: usize): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    let ms: AstClassMember[] = [];
+    for (let i = 0; i < c.members.length; i++) if (i as usize !== member) ms.push(c.members[i as usize].clone());
+    c.members = ms;
+  }
+  return c;
+}
+class A {
+  x: i64 = 1;
+  @note("outer") @del y: i64 = 2;
+  z(): i64 { return 3; }
+}
+function main() { console.log(outer()); }
