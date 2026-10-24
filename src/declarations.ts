@@ -1,7 +1,7 @@
 import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import {
-  block, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
+  block, decorated, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters, typeReference } from "./types.ts";
@@ -304,8 +304,8 @@ export function exportDeclaration(c: Cursor, start: number, decorators: Expr[]):
   if (decorators.length > 0 || c.at("@")) {
     const classStart = decorators.length > 0 ? start : c.peek().start;
     const all = [...decorators, ...decoratorList(c)];
-    if (!atClass(c)) throw c.error("expected a class after decorators");
-    return { kind: "export", body: classDeclaration(c, classStart, all), start, end: end() };
+    const body = atClass(c) ? classDeclaration(c, classStart, all) : decorated(c, classStart, all);
+    return { kind: "export", body, start, end: end() };
   }
   if (c.eat("=")) {
     const value = expression(c);

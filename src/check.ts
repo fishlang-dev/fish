@@ -320,6 +320,12 @@ export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(written: Stmt[], library = false): Checked {
+  // A macro applied to a declaration other than a class has no meaning yet.
+  holdsNode(written, (n) => {
+    const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
+    if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw unsupported("decorators on functions, type aliases, interfaces and enums", decorators[0]!);
+    return false;
+  });
   written = [...written, ...hoistLocals(written)];
   getterNames = new Set();
   holdsNode(written, (n) => {

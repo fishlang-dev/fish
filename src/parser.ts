@@ -116,7 +116,7 @@ export type Stmt = Span & (
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
-  | { kind: "enum"; name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[] }
+  | { kind: "enum"; name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; decorators?: Expr[] }
   // `name` is dotted (`A.B`), or the module string in `declare module "m"`, where `quoted` is
   // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
@@ -231,15 +231,17 @@ export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; i
 
 export type TypeParam = Span & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
 
-export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode };
+// `decorators`, on these and on functions, are the macros applied to them.
+export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[] };
 
-export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[] };
+export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[] };
 
 export type Func = Span & {
   // `macro` marks `macro function`, a comptime function over syntax trees.
   kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean;
   // Undefined for an overload signature or a `declare function`. `throws` is the error type.
   typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined;
+  decorators?: Expr[];
 };
 
 export type BinaryOp =
@@ -399,6 +401,17 @@ export function parseType(src: string): TypeNode {
   return t;
 }
 
+// A function, type alias, interface or enum after decorators, which Fish applies as macros
+// where TypeScript allows only classes.
+export function decorated(c: Cursor, start: number, decorators: Expr[]): Stmt {
+  const next = c.peek(1);
+  const at = c.at("function") || (c.at("async") && isToken(next, "function") && !next.newlineBefore) || (c.at("type") && next.kind === "ident")
+    || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
+  if (!at) throw c.error("expected a class, function, type, interface or enum after decorators");
+  const s = statement(c);
+  return { ...s, decorators, start } as Stmt;
+}
+
 // Only `export default function` may leave out the name, so `name` is "" there.
 export function func(c: Cursor, anonymous = false): Func {
   const start = c.peek().start;
@@ -455,7 +468,7 @@ export function statement(c: Cursor): Stmt {
   const decorators = decoratorList(c);
   if (atClass(c)) return classDeclaration(c, start, decorators);
   if (c.at("export")) return exportDeclaration(c, start, decorators);
-  if (decorators.length > 0) throw c.error("expected a class after decorators");
+  if (decorators.length > 0) return decorated(c, start, decorators);
   const declaration = atDeclarationKeyword(c);
   if (declaration) return declaration;
   if (c.at(";")) return { kind: "empty", start, end: c.next().end };

@@ -82,7 +82,7 @@ type AstStmt =
   | { start: i64; end: i64; kind: "block"; body: AstStmt[] }
   | { start: i64; end: i64; kind: "empty" }
   | { start: i64; end: i64; kind: "debugger" }
-  | { start: i64; end: i64; kind: "enum"; name: string; const: boolean; typeParams: AstTypeParam[]; members: AstEnumMember[] }
+  | { start: i64; end: i64; kind: "enum"; name: string; const: boolean; typeParams: AstTypeParam[]; members: AstEnumMember[]; decorators?: AstExpr[] }
   | { start: i64; end: i64; kind: "namespace"; name: string; quoted: boolean; global: boolean; body: AstStmt[] | null }
   | { start: i64; end: i64; kind: "declare"; body: AstStmt }
   | { start: i64; end: i64; kind: "comptime"; body: AstStmt[] }
@@ -95,9 +95,9 @@ type AstStmt =
   | { start: i64; end: i64; kind: "exportAll"; typeOnly: boolean; alias: string | null; module: string }
   | { start: i64; end: i64; kind: "exportAssign"; value: AstExpr }
   | { start: i64; end: i64; kind: "exportAsNamespace"; name: string }
-  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType }
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[] }
-  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null }
+  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[] }
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[] }
+  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[] }
   | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; kind: "class" };
 type AstTupleElement =
   | { start: i64; end: i64; name: string | null; optional: boolean; rest: boolean; type: AstType };
@@ -157,11 +157,11 @@ type AstDeclarator =
 type AstTypeParam =
   | { start: i64; end: i64; name: string; constraint: AstType | null; default: AstType | null; modifiers: ("const" | "in" | "out")[] };
 type AstTypeAlias =
-  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType };
+  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[] };
 type AstInterface =
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[] };
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[] };
 type AstFunc =
-  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null };
+  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[] };
 type AstBinaryOp =
   "??" | "||" | "&&" | "|" | "^" | "&" | "===" | "!==" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "instanceof" | "in" | "<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%" | "**";
 type AstUnaryOp =

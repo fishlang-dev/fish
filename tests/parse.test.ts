@@ -775,3 +775,15 @@ for (const dir of ["src", "tests"]) {
     });
   }
 }
+
+test("decorators on functions, type aliases, interfaces and enums", () => {
+  const decorated = (src: string) => parseStatements(src).map((s) => {
+    const d = s.kind === "export" ? s.body : s;
+    const decorators = "decorators" in d ? (d.decorators ?? []) : [];
+    return `${decorators.map((x) => `@${showExpr(x)} `).join("")}${d.kind}`;
+  });
+  expect(decorated("@a function f() {}\n@b @c type T = i64;\n@d interface I {}\n@e enum E { A }\n@f.g(1) async function h() {}\nexport @k const enum K { A }")).toEqual([
+    "@a function", "@b @c typeAlias", "@d interface", "@e enum", "@f.g(1) function", "@k enum",
+  ]);
+  expect(() => parseStatements("@a const x = 1;")).toThrow("expected a class, function, type, interface or enum after decorators");
+});
