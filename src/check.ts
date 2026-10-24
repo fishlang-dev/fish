@@ -1059,9 +1059,28 @@ export function check(written: Stmt[], library = false): Checked {
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
 
+    // `let a = 1, b = a` is a declaration per name, in order, each seeing those before it. A
+    // `for` head's go in a block around the loop, which scopes them as the head does.
+    function separate(list: Stmt[]) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const s = list[i]!;
+        if (s.kind === "let" && s.declarations.length > 1) {
+          list.splice(i, 1, ...s.declarations.map((d, n): Stmt => ({ ...s, declarations: [d], start: n === 0 ? s.start : d.start, end: d.end })));
+          continue;
+        }
+        let loop = s;
+        while (loop.kind === "labeled") loop = loop.body;
+        if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
+          list[i] = { kind: "block", body: [loop.init, s], start: s.start, end: s.end };
+          loop.init = undefined;
+        }
+      }
+    }
+
     // Checks a list of statements in order. What an `if` that leaves early proves holds for
     // the statements after it.
     function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
+      separate(list);
       hoist(list);
       const before = facts.length;
       for (let i = 0; i < list.length; i++) {
@@ -1410,11 +1429,11 @@ export function check(written: Stmt[], library = false): Checked {
           return;
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
-          if (s.declarations.length > 1) throw unsupported("declarations of several variables at once", s);
           const d = s.declarations[0]!;
           if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
+          if (!d.init && s.keyword === "const") throw new CompileError("a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
           if (!d.init) throw unsupported("declarations without an initializer", d);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.

@@ -174,7 +174,6 @@ test("(1, 2)", () => {
 const STATEMENTS: [string, string][] = [
   ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
-  ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],
   ["for (const k in o) {}", "'for...in' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
