@@ -77,7 +77,6 @@ const RULES: Rule[] = [
   { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
   { id: "json", action: "unsupported", title: "JSON.parse and JSON.stringify (derive for Json)", feature: "Macros, decorators and derive" },
   { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
-  { id: "localDeclarations", action: "unsupported", title: "types, interfaces, enums and classes declared inside a function", feature: "Local declarations" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
 ];
 
@@ -88,7 +87,6 @@ const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupp
 // implementation patching prototypes near 90.
 const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
-const LOCAL_FORMS = new Set(["enum", "typeAlias", "interface"]);
 
 type Node = { kind: string; start: number; end: number; [key: string]: unknown };
 const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
@@ -408,10 +406,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const specifier = n.module ?? n.require ?? dynamic;
   const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
   if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
-  if (LOCAL_FORMS.has(n.kind) && depth > 0) push("localDeclarations");
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if ("members" in n && isNode(n.extends)) push("G4");
-  if (n.kind === "class" && depth > 0 && n.name !== undefined) push("localDeclarations");
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
 }

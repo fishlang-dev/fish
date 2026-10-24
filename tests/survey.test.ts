@@ -59,7 +59,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});
   expect(counts("\"use strict\";\nsetup();\n")).toEqual({ G7: 1 });
   expect(counts("for (const [k, v] of m) {}\nfor (const { x, y: z } of ps) {}\nfor (const [a = 1] of q) {}\n")).toEqual({ destructuring: 1 });
-  expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({ localDeclarations: 2 });
+  expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({});
   expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\n")).toEqual({ G9: 1, promiseAll: 1 });
   expect(counts("class A { #x = 1; get #g() { return 1; } m() { return this.#x; } }\n")).toEqual({ classForms: 3 });
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
@@ -162,7 +162,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(52);
+  expect(r.rules.length + r.waiting.length).toBe(51);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
