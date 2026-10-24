@@ -86,3 +86,34 @@ function main() {
   let r = /abc
 }
 // error: unterminated regular expression
+// case: regex_test
+// expect: true false true true false
+// expect: true true false
+// expect: false false false
+const DIGITS = /^\d+$/;
+function digits(s: Ref<string>): boolean {
+  return DIGITS.test(s);
+}
+function main() {
+  const re = /colou?r/i;
+  console.log(re.test("Color"), re.test("colr"), /a.c/s.test("a\nc"), /^b/m.test("a\nb"), /😀{2}/.test("😀😀"));
+  const s = "12" + "3";
+  console.log(digits(s), digits("007"), digits(s + "x"));
+  const long = "a".repeat(20000);
+  console.log(/(a*)*b/.test(long), /(a|aa)+$/.test(long + "!"), /^(\w+\s?)*$/.test(long + "!"));
+}
+// case: regex_test_global
+// error: a Fish regex keeps no 'lastIndex', so 'test' on a regex with the 'g' flag would start at 0 every time
+function main() {
+  console.log(/a/g.test("a"));
+}
+// case: regex_unknown_method
+// error: 'RegExp' has no method 'compile' in Fish
+function main() {
+  /a/.compile("b");
+}
+// case: regex_test_number
+// error: 'test' matches a string, not 'i64'
+function main() {
+  console.log(/1/.test(1));
+}

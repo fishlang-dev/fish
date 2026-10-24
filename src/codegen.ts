@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexNews, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -3510,6 +3510,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (maths.has(e)) return mathCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
+      if (regexCalls.get(e) === "test") {
+        const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
+        const [found, yes] = [temp(), temp()];
+        emit(`${found} = call i32 @fsh_rt_regex_test(ptr ${re}, ptr ${value(e.args[0]!)})`);
+        emit(`${yes} = icmp ne i32 ${found}, 0`);
+        return yes;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "fill length") {
         const n = value(e.args[0]!);
         if (!lengthChecks.has(e)) return n;

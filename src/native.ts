@@ -2601,4 +2601,415 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_task_release(fsh_main_task);
   return outcome;
 }
+
+// Regexes: programs compiled while compiling (src/regex.ts), run over a string's UTF-16 code
+// units. A pattern without backreferences or lookaround runs on a Pike VM, linear in the input;
+// one with them on a backtracking VM over the same program.
+
+enum { RX_MATCH, RX_CHAR, RX_ANY, RX_ANY_ALL, RX_SET, RX_SPLIT, RX_JUMP, RX_SAVE, RX_ASSERT, RX_RESET, RX_MARK, RX_CHECK, RX_BACKREF, RX_LOOK, RX_LOOK_END };
+#define RX_BACKWARD 32
+#define RX_HEADER 4
+
+typedef struct {
+  const int32_t *code;
+  const uint16_t *in;
+  int64_t n;
+  int unicode;
+  int32_t slots;
+} fsh_rx;
+
+static int fsh_rx_line(uint32_t c) { return c == '\n' || c == '\r' || c == 0x2028 || c == 0x2029; }
+
+// The character at pos, and its width in units: a surrogate pair is one under 'u'.
+static uint32_t fsh_rx_at(const fsh_rx *r, int64_t pos, int64_t *width) {
+  uint32_t c = r->in[pos];
+  *width = 1;
+  if (r->unicode && c >= 0xD800 && c <= 0xDBFF && pos + 1 < r->n && r->in[pos + 1] >= 0xDC00 && r->in[pos + 1] <= 0xDFFF) {
+    *width = 2;
+    return 0x10000 + ((c - 0xD800) << 10) + (r->in[pos + 1] - 0xDC00);
+  }
+  return c;
+}
+
+// The character ending at pos, read backwards inside a lookbehind.
+static uint32_t fsh_rx_before(const fsh_rx *r, int64_t pos, int64_t *width) {
+  uint32_t c = r->in[pos - 1];
+  *width = 1;
+  if (r->unicode && c >= 0xDC00 && c <= 0xDFFF && pos >= 2 && r->in[pos - 2] >= 0xD800 && r->in[pos - 2] <= 0xDBFF) {
+    *width = 2;
+    return 0x10000 + ((r->in[pos - 2] - 0xD800) << 10) + (c - 0xDC00);
+  }
+  return c;
+}
+
+static int fsh_rx_in_set(const int32_t *ranges, int32_t count, uint32_t c) {
+  int32_t lo = 0, hi = count - 1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) / 2;
+    if (c < (uint32_t)ranges[mid * 2]) hi = mid - 1;
+    else if (c > (uint32_t)ranges[mid * 2 + 1]) lo = mid + 1;
+    else return 1;
+  }
+  return 0;
+}
+
+static int fsh_rx_word(const fsh_rx *r, int64_t pos, int folds) {
+  if (pos < 0 || pos >= r->n) return 0;
+  uint32_t c = r->in[pos];
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (folds && (c == 0x17F || c == 0x212A));
+}
+
+static int fsh_rx_assert(const fsh_rx *r, const int32_t *op, int64_t pos) {
+  switch (op[1]) {
+    case 0: return pos == 0 || (op[2] && fsh_rx_line(r->in[pos - 1]));
+    case 1: return pos == r->n || (op[2] && fsh_rx_line(r->in[pos]));
+    case 2: return fsh_rx_word(r, pos - 1, op[3]) != fsh_rx_word(r, pos, op[3]);
+    default: return fsh_rx_word(r, pos - 1, op[3]) == fsh_rx_word(r, pos, op[3]);
+  }
+}
+
+// How many words an instruction takes.
+static int32_t fsh_rx_size(const int32_t *op) {
+  switch (op[0] & ~RX_BACKWARD) {
+    case RX_MATCH: case RX_ANY: case RX_ANY_ALL: case RX_LOOK_END: return 1;
+    case RX_CHAR: case RX_JUMP: case RX_SAVE: case RX_MARK: case RX_CHECK: return 2;
+    case RX_SPLIT: case RX_RESET: case RX_LOOK: return 3;
+    case RX_ASSERT: return 4;
+    case RX_SET: return 2 + op[1] * 2;
+    default: return 3 + op[2];
+  }
+}
+
+// Whether a one-character instruction takes c.
+static int fsh_rx_takes(const int32_t *op, uint32_t c) {
+  switch (op[0] & ~RX_BACKWARD) {
+    case RX_CHAR: return c == (uint32_t)op[1];
+    case RX_ANY: return !fsh_rx_line(c);
+    case RX_ANY_ALL: return 1;
+    default: return fsh_rx_in_set(op + 2, op[1], c);
+  }
+}
+
+// The Pike VM: every thread steps over a character together, in priority order, so the first
+// to match beats those after it, as a backtracking matcher would find it first.
+typedef struct {
+  int32_t count;
+  int32_t *pcs;
+  int64_t *slots;
+  int64_t stamp;
+} fsh_rx_list;
+
+static void fsh_rx_add(fsh_rx *r, fsh_rx_list *l, int64_t *marks, int32_t pc, int64_t pos, int64_t *slots) {
+  if (marks[pc] == l->stamp) return;
+  marks[pc] = l->stamp;
+  const int32_t *op = r->code + pc;
+  switch (op[0]) {
+    case RX_JUMP:
+      fsh_rx_add(r, l, marks, op[1], pos, slots);
+      return;
+    case RX_SPLIT:
+      fsh_rx_add(r, l, marks, op[1], pos, slots);
+      fsh_rx_add(r, l, marks, op[2], pos, slots);
+      return;
+    case RX_SAVE:
+    case RX_MARK: {
+      int32_t k = op[0] == RX_SAVE ? op[1] : r->code[0] * 2 + op[1];
+      int64_t old = slots[k];
+      slots[k] = pos;
+      fsh_rx_add(r, l, marks, pc + 2, pos, slots);
+      slots[k] = old;
+      return;
+    }
+    case RX_CHECK:
+      if (slots[r->code[0] * 2 + op[1]] != pos) fsh_rx_add(r, l, marks, pc + 2, pos, slots);
+      return;
+    case RX_RESET: {
+      int32_t from = op[1] * 2, to = op[2] * 2;
+      int64_t old[to - from];
+      memcpy(old, slots + from, (to - from) * sizeof(int64_t));
+      for (int32_t k = from; k < to; k++) slots[k] = -1;
+      fsh_rx_add(r, l, marks, pc + 3, pos, slots);
+      memcpy(slots + from, old, (to - from) * sizeof(int64_t));
+      return;
+    }
+    case RX_ASSERT:
+      if (fsh_rx_assert(r, op, pos)) fsh_rx_add(r, l, marks, pc + 4, pos, slots);
+      return;
+    default:
+      l->pcs[l->count] = pc;
+      memcpy(l->slots + (int64_t)l->count * r->slots, slots, r->slots * sizeof(int64_t));
+      l->count++;
+  }
+}
+
+static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
+  // Each instruction is at most one thread in a list.
+  int32_t size = r->code[3];
+  int64_t *marks = fsh_rt_alloc(size * sizeof(int64_t));
+  for (int32_t k = 0; k < size; k++) marks[k] = -1;
+  fsh_rx_list lists[2];
+  for (int k = 0; k < 2; k++) {
+    lists[k].count = 0;
+    lists[k].pcs = fsh_rt_alloc(size * sizeof(int32_t));
+    lists[k].slots = fsh_rt_alloc((int64_t)size * r->slots * sizeof(int64_t));
+  }
+  int64_t *start = fsh_rt_alloc(r->slots * sizeof(int64_t));
+  int sticky = r->code[2] & 2, matched = 0;
+  int64_t stamp = 0;
+  fsh_rx_list *now = &lists[0], *next = &lists[1];
+  now->stamp = stamp++;
+  for (int64_t pos = 0;;) {
+    if (!matched && (pos == 0 || !sticky)) {
+      for (int32_t k = 0; k < r->slots; k++) start[k] = -1;
+      fsh_rx_add(r, now, marks, RX_HEADER, pos, start);
+    }
+    if (now->count == 0 && (matched || sticky || pos >= r->n)) break;
+    int64_t width = 1;
+    uint32_t c = pos < r->n ? fsh_rx_at(r, pos, &width) : 0;
+    next->count = 0;
+    next->stamp = stamp++;
+    for (int32_t t = 0; t < now->count; t++) {
+      int32_t pc = now->pcs[t];
+      int64_t *slots = now->slots + (int64_t)t * r->slots;
+      const int32_t *op = r->code + pc;
+      if (op[0] == RX_MATCH) {
+        matched = 1;
+        memcpy(out, slots, r->code[0] * 2 * sizeof(int64_t));
+        break;
+      }
+      if (pos < r->n && fsh_rx_takes(op, c)) fsh_rx_add(r, next, marks, pc + fsh_rx_size(op), pos + width, slots);
+    }
+    fsh_rx_list *swap = now;
+    now = next;
+    next = swap;
+    if (pos >= r->n) break;
+    pos += width;
+  }
+  for (int k = 0; k < 2; k++) {
+    fsh_rt_free(lists[k].pcs);
+    fsh_rt_free(lists[k].slots);
+  }
+  fsh_rt_free(start);
+  fsh_rt_free(marks);
+  return matched;
+}
+
+// The backtracking VM, for backreferences and lookaround: choices and the slots each step
+// changed go on one stack, so failing undoes them in order.
+// A frame with pc -1 restores slot to pos when popped; any other is a choice to resume.
+typedef struct {
+  int64_t pc;
+  int64_t pos;
+  int64_t slot;
+} fsh_rx_frame;
+
+typedef struct {
+  fsh_rx_frame *at;
+  int64_t count, room;
+} fsh_rx_stack;
+
+static void fsh_rx_push(fsh_rx_stack *s, int64_t pc, int64_t pos, int64_t slot) {
+  if (s->count == s->room) {
+    s->room = s->room ? s->room * 2 : 64;
+    fsh_rx_frame *grown = fsh_rt_alloc(s->room * sizeof(fsh_rx_frame));
+    if (s->at) memcpy(grown, s->at, s->count * sizeof(fsh_rx_frame));
+    fsh_rt_free(s->at);
+    s->at = grown;
+  }
+  s->at[s->count++] = (fsh_rx_frame){pc, pos, slot};
+}
+
+// What a character folds to, for a backreference that ignores case: its pair in the table the
+// program carries, or itself.
+static int64_t fsh_rx_fold(const int32_t *table, int64_t c) {
+  if (!table) return c;
+  int32_t lo = 0, hi = table[0] - 1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) / 2;
+    if (c < table[1 + mid * 2]) hi = mid - 1;
+    else if (c > table[1 + mid * 2]) lo = mid + 1;
+    else return table[2 + mid * 2];
+  }
+  return c;
+}
+
+// Runs from pc at pos until a MATCH or LOOK_END, which gives 1, or until every choice made
+// since floor fails, which gives 0 with the slots as they were.
+static int fsh_rx_run(fsh_rx *r, fsh_rx_stack *s, int64_t *slots, int64_t pc, int64_t pos, int64_t *end) {
+  int64_t floor = s->count;
+  const int32_t *table = r->code[2] & 8 ? r->code + r->code[3] : NULL;
+  for (;;) {
+    const int32_t *op = r->code + pc;
+    int back = op[0] & RX_BACKWARD;
+    int fails = 0;
+    switch (op[0] & ~RX_BACKWARD) {
+      case RX_MATCH:
+      case RX_LOOK_END:
+        *end = pos;
+        return 1;
+      case RX_CHAR: case RX_ANY: case RX_ANY_ALL: case RX_SET: {
+        int64_t width;
+        if (back ? pos <= 0 : pos >= r->n) fails = 1;
+        else {
+          uint32_t c = back ? fsh_rx_before(r, pos, &width) : fsh_rx_at(r, pos, &width);
+          if (fsh_rx_takes(op, c)) {
+            pos += back ? -width : width;
+            pc += fsh_rx_size(op);
+          } else fails = 1;
+        }
+        break;
+      }
+      case RX_JUMP:
+        pc = op[1];
+        break;
+      case RX_SPLIT:
+        fsh_rx_push(s, op[2], pos, 0);
+        pc = op[1];
+        break;
+      case RX_SAVE:
+      case RX_MARK: {
+        int32_t k = (op[0] & ~RX_BACKWARD) == RX_SAVE ? op[1] : r->code[0] * 2 + op[1];
+        fsh_rx_push(s, -1, slots[k], k);
+        slots[k] = pos;
+        pc += 2;
+        break;
+      }
+      case RX_CHECK:
+        if (slots[r->code[0] * 2 + op[1]] == pos) fails = 1;
+        else pc += 2;
+        break;
+      case RX_RESET:
+        for (int32_t k = op[1] * 2; k < op[2] * 2; k++) {
+          fsh_rx_push(s, -1, slots[k], k);
+          slots[k] = -1;
+        }
+        pc += 3;
+        break;
+      case RX_ASSERT:
+        if (fsh_rx_assert(r, op, pos)) pc += 4;
+        else fails = 1;
+        break;
+      case RX_BACKREF: {
+        // Every group of a name is tried in turn; the one that took part is matched again.
+        int64_t from = -1, to = -1;
+        for (int32_t g = 0; g < op[2]; g++) {
+          if (slots[op[3 + g] * 2] >= 0 && slots[op[3 + g] * 2 + 1] >= 0) {
+            from = slots[op[3 + g] * 2];
+            to = slots[op[3 + g] * 2 + 1];
+          }
+        }
+        int64_t length = from < 0 ? 0 : to - from;
+        if (back ? pos - length < 0 : pos + length > r->n) {
+          fails = 1;
+          break;
+        }
+        int64_t at = back ? pos - length : pos;
+        for (int64_t k = 0; k < length && !fails; k++) {
+          uint32_t a = r->in[from + k], b = r->in[at + k];
+          if (a != b && !(op[1] && fsh_rx_fold(table, a) == fsh_rx_fold(table, b))) fails = 1;
+        }
+        if (!fails) {
+          pos = back ? pos - length : pos + length;
+          pc += fsh_rx_size(op);
+        }
+        break;
+      }
+      case RX_LOOK: {
+        // A lookaround matches its body where it stands, and keeps no choice from inside it.
+        int64_t mark = s->count, ignored;
+        int ok = fsh_rx_run(r, s, slots, pc + 3, pos, &ignored);
+        if (op[1]) {
+          // A negative one undoes what its body set.
+          while (s->count > mark) {
+            fsh_rx_frame f = s->at[--s->count];
+            if (f.pc == -1) slots[f.slot] = f.pos;
+          }
+          ok = !ok;
+        } else if (ok) {
+          int64_t kept = mark;
+          for (int64_t k = mark; k < s->count; k++) if (s->at[k].pc == -1) s->at[kept++] = s->at[k];
+          s->count = kept;
+        }
+        if (ok) pc = op[2];
+        else fails = 1;
+        break;
+      }
+    }
+    if (!fails) continue;
+    // Undo back to the last choice since floor, and take it; with none, this run fails.
+    for (;;) {
+      if (s->count == floor) return 0;
+      fsh_rx_frame f = s->at[--s->count];
+      if (f.pc == -1) slots[f.slot] = f.pos;
+      else {
+        pc = f.pc;
+        pos = f.pos;
+        break;
+      }
+    }
+  }
+}
+
+static int fsh_rx_backtrack(fsh_rx *r, int64_t *out) {
+  int64_t *slots = fsh_rt_alloc(r->slots * sizeof(int64_t));
+  fsh_rx_stack s = {NULL, 0, 0};
+  int matched = 0, sticky = r->code[2] & 2;
+  for (int64_t start = 0; start <= r->n && !matched; ) {
+    for (int32_t k = 0; k < r->slots; k++) slots[k] = -1;
+    int64_t end;
+    matched = fsh_rx_run(r, &s, slots, RX_HEADER, start, &end);
+    s.count = 0;
+    if (sticky || start >= r->n) break;
+    int64_t width = 1;
+    fsh_rx_at(r, start, &width);
+    start += width;
+  }
+  if (matched) memcpy(out, slots, r->code[0] * 2 * sizeof(int64_t));
+  fsh_rt_free(s.at);
+  fsh_rt_free(slots);
+  return matched;
+}
+
+// A string's UTF-16 code units, which matching and match positions count in.
+static uint16_t *fsh_rx_units(fsh_str *s, int64_t *count) {
+  const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
+  int64_t n = s ? s->length : 0, k = 0;
+  uint16_t *out = fsh_rt_alloc((n + 1) * sizeof(uint16_t));
+  for (int64_t i = 0; i < n;) {
+    uint32_t c = p[i];
+    int w = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if (w == 2) c = ((c & 0x1F) << 6) | (p[i + 1] & 0x3F);
+    else if (w == 3) c = ((c & 0x0F) << 12) | ((p[i + 1] & 0x3F) << 6) | (p[i + 2] & 0x3F);
+    else if (w == 4) c = ((c & 0x07) << 18) | ((p[i + 1] & 0x3F) << 12) | ((p[i + 2] & 0x3F) << 6) | (p[i + 3] & 0x3F);
+    i += w;
+    if (c >= 0x10000) {
+      c -= 0x10000;
+      out[k++] = 0xD800 + (c >> 10);
+      out[k++] = 0xDC00 + (c & 0x3FF);
+    } else out[k++] = c;
+  }
+  *count = k;
+  return out;
+}
+
+// Matches a regex against s, writing each group's start and end, in code units or -1, to out,
+// which holds two words per group, the whole match first.
+int fsh_rt_regex_match(const int32_t *code, fsh_str *s, int64_t *out) {
+  fsh_rx r;
+  r.code = code;
+  r.unicode = code[2] & 1;
+  r.slots = code[0] * 2 + code[1];
+  uint16_t *in = fsh_rx_units(s, &r.n);
+  r.in = in;
+  int matched = code[2] & 4 ? fsh_rx_backtrack(&r, out) : fsh_rx_pike(&r, out);
+  fsh_rt_free(in);
+  return matched;
+}
+
+int fsh_rt_regex_test(const int32_t *code, fsh_str *s) {
+  int64_t *out = fsh_rt_alloc(code[0] * 2 * sizeof(int64_t));
+  int matched = fsh_rt_regex_match(code, s, out);
+  fsh_rt_free(out);
+  return matched;
+}
 `;

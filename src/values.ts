@@ -158,6 +158,8 @@ export const fixedFills = new WeakSet<Expr>();
 export const lengthChecks = new WeakSet<Expr>();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+// The regex method calls, by method.
+export const regexCalls = new WeakMap<Expr, "test" | "exec">();
 // The `new RegExp(...)` expressions, which are regexes known while compiling.
 export const regexNews = new WeakSet<Expr>();
 // A regex's flag properties, by the flag each reads.
@@ -814,6 +816,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "regex") return regexCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
       throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
@@ -1383,6 +1386,25 @@ export function expressions(ctx: Context) {
     }
     regexNews.add(e);
     return regexLiteral(known[0]!.replace(/\//g, "\\/").replace(/\n/g, "\\n") || "(?:)", known[1] ?? "", e);
+  }
+
+  // `re.test(s)` and `re.exec(s)`. A regex keeps no `lastIndex`, so on a `g` or `y` regex they
+  // would loop forever where JavaScript moves on; `matchAll` goes through every match instead.
+  function regexCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: RegexType): { type: Type; what: string } {
+    const what = `'${callee.name}'`;
+    if (callee.name !== "test" && callee.name !== "exec") throw new CompileError(`'RegExp' has no method '${callee.name}' in Fish; it has 'test' and 'exec', and strings take regexes in 'replace', 'split', 'match' and 'matchAll'`, callee.start, callee.end);
+    if (callee.optional || e.optional) throw new CompileError(`a regex is always there, so ${what} is called without '?.'`, e.start, e.end);
+    if (/[gy]/.test(t.flags)) {
+      throw new CompileError(`a Fish regex keeps no 'lastIndex', so ${what} on a regex with the '${t.flags.includes("g") ? "g" : "y"}' flag would start at 0 every time; ${callee.name === "exec" ? "use 'matchAll' to go through every match, or" : ""} drop the flag`, e.start, e.end);
+    }
+    if (e.args.length !== 1) throw new CompileError(`${what} takes the string to match`, e.start, e.end);
+    const s = read(e.args[0]!);
+    if (!stringLike(s)) throw new CompileError(`${what} matches a string, not '${show(s)}'`, e.args[0]!.start, e.args[0]!.end);
+    if (s !== "string") coerce(e.args[0]!, s, "string", "");
+    loaded(callee.object, types.get(callee.object)!);
+    if (callee.name === "exec") throw new CompileError("'exec' is not supported yet", e.start, e.end);
+    regexCalls.set(e, callee.name);
+    return { type: "boolean", what };
   }
 
   // `re.source`, `re.flags` and the flag properties, known from its type.
