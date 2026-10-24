@@ -1012,7 +1012,11 @@ function cloned(v: Value): Value {
   if (v.kind === "member") return { kind: "member", type: v.type, value: cloned(v.value) };
   if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
-  return { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
+  const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
+  // A clone of a quote's value keeps its bindings for a quote it is spliced into.
+  const scope = scopes.get(v);
+  if (scope) scopes.set(copy, scope);
+  return copy;
 }
 
 // What a thrown value is, for the compile error reporting it.

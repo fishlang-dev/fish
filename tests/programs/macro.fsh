@@ -390,3 +390,14 @@ macro function m(input: AstStmt): Ast[] {
 function main() {
   console.log(show());
 }
+// case: macro_scope_through_clone
+// expect: 7 7 9
+const y: i64 = 9;
+macro function seven(input: AstStmt): Ast[] {
+  const decl = quote`const y = 7;`;
+  return [input, quote`function ${ident("sevenA")}(): i64 { ${decl.clone()}; return y; }`, quote`function ${ident("sevenB")}(): i64 { ${decl}; return y; }`];
+}
+@seven function f() {}
+function main() {
+  console.log(sevenA(), sevenB(), y);
+}
