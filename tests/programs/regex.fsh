@@ -191,3 +191,24 @@ class Holder {
 function main() {
   console.log(new Holder(/a/).show());
 }
+// case: regex_backreferences_and_lookaround
+// expect: true false true
+// expect: 42 7
+// expect: 7
+// expect: true false
+// expect: is IS is
+// expect: 12 c 5
+// expect: true true true
+function main() {
+  console.log(/(\w)\1/.test("hello"), /(?<q>['"]).*?\k<q>/.test(`say "hi'`), /(a)|\1b/.test("b"));
+  const price = /(?<=\$)\d+(?=\.\d\d)/.exec("cost: $42.50");
+  if (price !== null) console.log(price[0], price.index);
+  const free = /(?<!\$)\b\d+/.exec("$5 or 7");
+  if (free !== null) console.log(free[0]);
+  console.log(/^(?!.*bad).*$/.test("all good"), /^(?!.*bad).*$/.test("too bad"));
+  const word = /\b(\w+)\s+\1\b/i.exec("This is IS a test");
+  if (word !== null) console.log(word[0], word[1]);
+  const back = /(?<=(\d+)(\w))x/.exec("ab12cx");
+  if (back !== null) console.log(back[1], back[2], back.index);
+  console.log(/(?<=\1(a))b/.test("aab"), /(ß)\1/iu.test("ßẞ"), /(ſ)\1/iu.test("sS"));
+}
