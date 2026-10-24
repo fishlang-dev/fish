@@ -97,7 +97,7 @@ function main() {
   keep(quote`1`);
 }
 // case: macro_shape
-// error: a macro takes one parameter, the declaration it is applied to
+// error: the macro 'two' takes 1 argument after what it is applied to, but this gives 0
 macro function two(a: Ast, b: Ast): Ast {
   return a;
 }
@@ -437,3 +437,33 @@ macro function m(input: AstStmt): Ast[] {
 }
 @m function f() {}
 function main() { show(); }
+// case: macro_arguments
+// expect: 6 3 b
+const BASE = 2;
+macro function times(input: AstStmt, factor: i64, label: string, extra: AstExpr): Ast[] {
+  const n = ident(label);
+  const lit: AstExpr = { kind: "int", value: factor, start: 0, end: 0 };
+  return [input, quote`function ${n}(): i64 { return ${extra} * ${lit}; }`];
+}
+macro function named(input: AstStmt, name: string): Ast[] {
+  return [input, quote`function ${ident(name)}(): string { return "b"; }`];
+}
+@times(BASE + 1, "six", 2) function f() {}
+@times(1, "three", 1 + 2) @named("bee") function g() {}
+function main() {
+  console.log(six(), three(), bee());
+}
+// case: macro_argument_count
+// error: the macro 'named' takes 1 argument after what it is applied to, but this gives 2
+macro function named(input: AstStmt, name: string): Ast {
+  return input;
+}
+@named("a", "b") function f() {}
+function main() {}
+// case: macro_argument_type
+// error: this argument is a 'i64', but the macro 'named' takes 'name' as a 'string'
+macro function named(input: AstStmt, name: string): Ast {
+  return input;
+}
+@named(1) function f() {}
+function main() {}

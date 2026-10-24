@@ -323,7 +323,7 @@ export const selfCalls = new WeakSet<Expr>();
 function macroShape(f: Func) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
   if (f.typeParams.length > 0) throw new CompileError(`a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
-  if (f.params.length !== 1 || f.params[0]!.rest) throw new CompileError(`a macro takes one parameter, the declaration it is applied to, ${shape}`, f.start, f.end);
+  if (f.params.length === 0 || f.params.some((p) => p.rest)) throw new CompileError(`a macro takes the declaration it is applied to, then any arguments, ${shape}`, f.start, f.end);
   const t = f.params[0]!.type;
   if (t?.kind !== "ref" || (t.name !== "Ast" && t.name !== "AstStmt") || t.args.length > 0) {
     throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", f.params[0]!.start, f.params[0]!.end);

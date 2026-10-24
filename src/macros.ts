@@ -1,11 +1,11 @@
 import type { Checked } from "./check.ts";
-import { astValues, comptimeCall, type Value } from "./comptime.ts";
+import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import type { Expr, Func, Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
-import type { Type } from "./typing.ts";
+import { fits, show, type Type } from "./typing.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
 // it while compiling, and what the macro gives replaces it in its file, before the files are
@@ -47,9 +47,12 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
       return (s.kind === "export" ? s.body : s) as Decl;
     };
     for (const site of sites) for (const x of linked(site).decorators!) macroOf(x, macros);
-    const macroCode = macroProgram(program, macros, new Set(sites.map(linked)));
+    // Each argument a macro takes as a value is computed while compiling, as a constant checked
+    // with the macros, typed as its parameter.
+    const args = new Map(sites.map((site) => [site, argumentsOf(linked(site).decorators!.at(-1)!, macros)] as const));
+    const macroCode = macroProgram(program, macros, new Set(sites.map(linked)), [...args.values()].flat().flatMap((a) => (a.constant ? [a.constant] : [])));
     const checked = checkMacros(macroCode);
-    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded, pins, library);
+    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded, pins, library, args.get(site)!);
   }
 }
 
@@ -119,13 +122,36 @@ function macroFunctions(program: Stmt[]): Map<string, Func> {
 // A name as written, without the suffix the linker gives it.
 const written = (name: string) => name.replace(/-fsh\d+$/, "");
 
-// The macro a decorator names.
+// The macro a decorator names, `@name` or `@name(args)`.
 function macroOf(d: Expr, macros: Map<string, Func>): Func {
-  if (d.kind === "call") throw new CompileError("decorators with arguments aren't supported yet", d.start, d.end);
-  if (d.kind !== "ident") throw new CompileError("a decorator names a macro, as in '@name'", d.start, d.end);
-  const macro = macros.get(d.name);
-  if (!macro) throw new CompileError(`'${written(d.name)}' isn't a macro; a decorator applies a 'macro function ${written(d.name)}(input: Ast): Ast'`, d.start, d.end);
+  const callee = d.kind === "call" ? d.callee : d;
+  if (callee.kind !== "ident") throw new CompileError("a decorator names a macro, as in '@name' or '@name(args)'", d.start, d.end);
+  const macro = macros.get(callee.name);
+  if (!macro) throw new CompileError(`'${written(callee.name)}' isn't a macro; a decorator applies a 'macro function ${written(callee.name)}(input: Ast): Ast'`, callee.start, callee.end);
   return macro;
+}
+
+// A decorator's argument: its syntax, for a parameter typed `Ast` or `AstExpr`, or else the
+// constant that computes its value.
+type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string };
+let constants = 0;
+
+function argumentsOf(d: Expr, macros: Map<string, Func>, before = 1): Argument[] {
+  const macro = macroOf(d, macros);
+  const given = d.kind === "call" ? d.args : [];
+  const wanted = macro.params.length - before;
+  if (given.length !== wanted) {
+    throw new CompileError(`the macro '${written(macro.name)}' takes ${wanted} argument${wanted === 1 ? "" : "s"} after what it is applied to, but this gives ${given.length}`, d.start, d.end);
+  }
+  return given.map((expr, i) => {
+    const param = macro.params[i + before]!;
+    const t = param.type;
+    if (t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
+    const name = `__fishArgument${constants++}`;
+    const at = { start: expr.start, end: expr.end };
+    const constant: Stmt = { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: undefined, init: expr, ...at }], ...at };
+    return { expr, syntax: false, constant, name };
+  });
 }
 
 // What a top-level statement declares.
@@ -167,7 +193,7 @@ function freeNames(s: Stmt): Set<string> {
 }
 
 // The std library, the macros, and every declaration they use, found by name.
-function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: Set<Decl>): Stmt[] {
+function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: Set<Decl>, constants: Stmt[] = []): Stmt[] {
   const std = program.filter((s) => s.start >= STD_BASE);
   const own = program.filter((s) => s.start < STD_BASE);
   const byName = new Map(own.flatMap((s) => namesOf(s).map((n) => [n, s] as const)));
@@ -187,7 +213,11 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: Set<Dec
     }
   };
   for (const m of macros.values()) visit(byName.get(m.name)!, m, undefined);
-  return [...std, ...own.filter((s) => kept.has(s))];
+  for (const c of constants) for (const name of freeNames(c)) {
+    const used = byName.get(name);
+    if (used) visit(used, macros.values().next().value!, undefined);
+  }
+  return [...std, ...own.filter((s) => kept.has(s)), ...constants];
 }
 
 // The top-level declarations a program's quotes make.
@@ -212,7 +242,7 @@ function quoteDeclarations(s: Stmt): string[] {
 
 // Runs a site's nearest decorator's macro on its declaration, and puts what it gives in the
 // declaration's place, the other decorators kept on each declaration given for a later round.
-function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded, pins: Set<string>, library: boolean) {
+function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded, pins: Set<string>, library: boolean, args: Argument[]) {
   const nearest = linked.decorators!.at(-1)!;
   const rest = site.decl.decorators!.slice(0, -1);
   const macro = macroOf(nearest, macros);
@@ -244,17 +274,35 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
   })));
   const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
-  const result = withHygiene(hygiene, () => comptimeCall(instance, [value], nearest));
+  // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
+  const written_ = site.decl.decorators!.at(-1)!;
+  const original = written_.kind === "call" ? written_.args : [];
+  const values = args.map((a, i) => {
+    const t = instance.locals.get(macro.params[i + 1]!)!.type;
+    if (!a.syntax) {
+      const constant = checked.instances.find((c) => c.body.name === `const ${a.name}`)!;
+      if (!fits(constant.returns, t)) {
+        const name = (macro.params[i + 1]!.pattern as { name?: string }).name ?? "it";
+        throw new CompileError(`this argument is a '${show(constant.returns)}', but the macro '${written(macro.name)}' takes '${name}' as a '${show(t)}'`, a.expr.start, a.expr.end);
+      }
+      return comptimeBody(constant);
+    }
+    return built<Value>({ tree: original[i]!, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
+  });
+  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...values], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
+  const name = namesOf(site.decl)[0];
   const replacing = given.map((d) => {
     if (!d || typeof d !== "object" || !(TOP_LEVEL.has(d.kind) || isExport(d))) {
       throw new CompileError(`the macro '${written(macro.name)}' gave ${d && typeof d === "object" ? `a '${d.kind}'` : "nothing"}, but a macro gives declarations that can stand at the top level`, nearest.start, nearest.end);
     }
-    const decl = rest.length > 0 ? ({ ...d, decorators: [...rest, ...(d.decorators ?? [])] } as Decl) : d;
+    // The decorators further out go on with the declaration itself, or what took its place.
+    const self = given.find((g) => g && typeof g === "object" && namesOf(g)[0] === name) ?? given[0];
+    const decl = rest.length > 0 && d === self ? ({ ...d, decorators: [...rest, ...(d.decorators ?? [])] } as Decl) : d;
     // On an exported declaration, what the macro gives under names the program can see is
     // exported too; its private declarations aren't. A library's exports are C functions, so
     // there only the declaration's own name stays exported.
