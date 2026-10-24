@@ -75,10 +75,73 @@ function main() {
   const x: Id = 1;
 }
 // case: local_before
-// error: cannot find type 'Num'
+// error: class 'P' is used before its declaration
+class P { x: i64 = 1; }
 function main() {
-  const n: Num = 1;
+  const a = new P().x;
+  class P { x: i64 = 7; }
+}
+// case: local_whole_block
+// expect: 3 7 7
+// expect: 20
+// expect: 2 1
+// expect: 5
+class P { x: i64 = 1; }
+enum E { A = 2 }
+function main() {
+  const n: Num = 3;
+  const make = (): i64 => new P().x;
+  function made(): i64 { return new P().x; }
+  const e = (): i64 => E.A;
   type Num = i64;
+  class P { x: i64 = 7; }
+  enum E { A = 20 }
+  console.log(n, make(), made());
+  console.log(e());
+  class A { b(): B { return new B(); } n(): i64 { return 1; } }
+  class B { a(): A { return new A(); } n(): i64 { return 2; } }
+  console.log(new A().b().n(), new B().a().n());
+  class Holder { opts: Opts = { size: 5 }; }
+  type Opts = { size: i64 };
+  console.log(new Holder().opts.size);
+}
+// case: local_in_local_members
+// expect: 7
+// expect: s
+// expect: red 1
+type T = boolean;
+function f<T>(v: T): T {
+  class Box {
+    x: i64 = 7;
+    keep(v: T): T {
+      type W = { w: T };
+      type Pair = [Box, Box];
+      const p: Pair = [new Box(), new Box()];
+      const w: W = { w: v };
+      console.log(p[1].x);
+      return w.w;
+    }
+  }
+  return new Box().keep(v);
+}
+function main() {
+  console.log(f("s"));
+  type Color = "red" | "blue";
+  const Color = 1;
+  const c: Color = "red";
+  console.log(c, Color);
+}
+// case: local_capture_scope
+// expect: 2
+// expect: 9
+function helper(): i64 { return 9; }
+function main() {
+  class C { f(): i64 { return helper(); } }
+  {
+    const helper = 2;
+    console.log(helper);
+  }
+  console.log(new C().f());
 }
 // case: local_message
 // error: type 'P' is not assignable to type 'string'

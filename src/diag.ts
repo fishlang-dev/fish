@@ -10,9 +10,10 @@ export type Note = { message: string; start: number; end: number };
 // A file of a program other than the one an error is rendered against, from `base` on.
 export type Source = { base: number; src: string; file: string };
 
-// The names local declarations are hoisted under, 'Point@0', shown as written.
-const LOCAL_NAME = /([\w$]+)@\d+/g;
-export const written = (text: string) => text.replace(LOCAL_NAME, "$1");
+// The names local declarations are hoisted under, 'Point@0', shown as written. Only those are,
+// so a string like "user@1" in a message stays as it is.
+export const LOCAL_NAMES = new Set<string>();
+export const written = (text: string) => text.replace(/([\w$]+)@\d+/g, (m, name: string) => (LOCAL_NAMES.has(m) ? name : m));
 
 // A user-facing compile error pointing at a [start, end) source range. `sources` holds the
 // program's other files, when it spans several.

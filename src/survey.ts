@@ -2,7 +2,8 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
-import { parse } from "./parser.ts";
+import { hoistLocals } from "./locals.ts";
+import { parse, type Stmt } from "./parser.ts";
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
 // The grade counts the work a person does, the migration lint's rejected constructs and guided
@@ -52,6 +53,7 @@ const RULES: Rule[] = [
   { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
+  { id: "localCaptures", action: "guided", title: "a class or enum declared inside a function that uses the function's variables: pass them to its constructor" },
   { id: "destructuringAssignment", action: "guided", title: "a destructuring assignment used as a value or as a for update: write it as a statement of its own" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "guided", title: "a let with neither a type nor a value: write its type, as in 'let x: string', since Fish doesn't work it out from later assignments" },
@@ -136,7 +138,9 @@ function scanFile(path: string, file: string): FileScan {
   const lines = src.split("\n").filter((l) => l.trim() !== "").length;
   const findings: [string, Example][] = [];
   try {
-    scan(parse(src), (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
+    const program = parse(src);
+    scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
+    for (const offset of captures(program)) findings.push(["localCaptures", { file, ...position(src, offset) }]);
   } catch (e) {
     // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
     // lines, so it can't flatter the score.
@@ -255,6 +259,18 @@ export function grade(score: number): string {
 
 // Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
 // counts the functions a node sits in, and `ambient` marks declarations under `declare`.
+// Where each local class or enum using its function's variables starts. Hoisting renames the
+// tree it reads, so it reads a copy, and a file it can't hoist adds none.
+function captures(program: Stmt[]): number[] {
+  const found: number[] = [];
+  try {
+    hoistLocals(structuredClone(program), (local) => found.push(local.start));
+  } catch {
+    return [];
+  }
+  return found;
+}
+
 function scan(program: unknown[], note: (id: string, offset: number, module?: string) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
