@@ -100,6 +100,8 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_parse_int(ptr, i64, ptr)",
   "declare i32 @fsh_rt_parse_float(ptr, ptr)",
   "declare i32 @fsh_rt_parse_number(ptr, ptr)",
+  "declare ptr @fsh_rt_to_fixed(double, i64)",
+  "declare ptr @fsh_rt_int_to_fixed(i64, i32, i64)",
   "declare ptr @fsh_rt_http_date()",
   "declare i64 @fsh_rt_now_ms()",
   "declare void @fsh_rt_constants(ptr)",

@@ -1279,6 +1279,54 @@ int fsh_rt_parse_number(fsh_str *s, double *out) {
 }
 
 char *fsh_rt_format_f64(double x, char *out) { return fsh_format(x, 0, out); }
+
+fsh_str *fsh_rt_str_from_f64(double x);
+
+// JavaScript's toFixed: the integer nearest x times 10 to the digits, the larger of two equally
+// near, from x's exact decimal expansion, which printf gives; NaN and anything from 1e21 up
+// print as they otherwise would.
+fsh_str *fsh_rt_to_fixed(double x, int64_t f) {
+  if (x != x || fabs(x) >= 1e21) return fsh_rt_str_from_f64(x);
+  char exact[1200];
+  snprintf(exact, sizeof exact, "%.1100f", fabs(x));
+  int64_t whole = strchr(exact, '.') - exact;
+  char *digits = fsh_rt_alloc(whole + f + 3);
+  digits[0] = '0';
+  memcpy(digits + 1, exact, whole);
+  memcpy(digits + 1 + whole, exact + whole + 1, f);
+  if (exact[whole + 1 + f] >= '5') {
+    int64_t i = whole + f;
+    for (; digits[i] == '9'; i--) digits[i] = '0';
+    digits[i]++;
+  }
+  int64_t lead = digits[0] == '0' ? 1 : 0;
+  char *out = fsh_rt_alloc(whole + f + 4);
+  int64_t n = 0;
+  if (x < 0) out[n++] = '-';
+  memcpy(out + n, digits + lead, whole + 1 - lead);
+  n += whole + 1 - lead;
+  if (f > 0) {
+    out[n++] = '.';
+    memcpy(out + n, digits + 1 + whole, f);
+    n += f;
+  }
+  fsh_str *s = fsh_str_of(out, n);
+  fsh_rt_free(digits);
+  fsh_rt_free(out);
+  return s;
+}
+
+fsh_str *fsh_rt_int_to_fixed(int64_t v, int32_t is_signed, int64_t f) {
+  char text[24];
+  int n = is_signed ? snprintf(text, sizeof text, "%lld", (long long)v) : snprintf(text, sizeof text, "%llu", (unsigned long long)v);
+  fsh_str *s = fsh_str_new(n + (f > 0 ? f + 1 : 0));
+  memcpy(s->own, text, n);
+  if (f > 0) {
+    s->own[n] = '.';
+    memset(s->own + n + 1, '0', f);
+  }
+  return s;
+}
 char *fsh_rt_format_f32(float x, char *out) { return fsh_format(x, 1, out); }
 
 fsh_str *fsh_rt_str_from_f64(double x) {

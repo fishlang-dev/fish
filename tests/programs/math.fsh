@@ -251,3 +251,64 @@ function main() {
   const r = 2.5;
   console.log(parseInt("1", r));
 }
+// case: to_fixed
+// expect: 3 2.5 2.50 2.50000 2.50000000000000000000
+// expect: 1 1.0 1.00 1.00500 1.00499999999999989342
+// expect: 1 1.4 1.45 1.45000 1.44999999999999995559
+// expect: -2 -1.5 -1.50 -1.50000 -1.50000000000000000000
+// expect: -0 -0.0 -0.00 -0.00010 -0.00010000000000000000
+// expect: 0 0.0 0.00 0.00000 0.00000000000000000000
+// expect: 0 0.0 0.00 0.00000 0.00000000000000000000
+// expect: 1e+21 1e+21 1e+21 1e+21 1e+21
+// expect: 1.2e+21 1.2e+21 1.2e+21 1.2e+21 1.2e+21
+// expect: 123 123.5 123.46 123.45600 123.45600000000000306954
+// expect: 0 0.0 0.00 0.00000 0.00000100000000000000
+// expect: 0 0.0 0.00 0.00000 0.00000010000000000000
+// expect: NaN NaN NaN NaN NaN
+// expect: Infinity Infinity Infinity Infinity Infinity
+// expect: -Infinity -Infinity -Infinity -Infinity -Infinity
+// expect: 8 8.3 8.35 8.34500 8.34500000000000063949
+// expect: 10 10.2 10.23 10.23500 10.23499999999999943157
+// expect: 100 100.0 100.00 99.99500 99.99500000000000454747
+// expect: 1 0.5 0.50 0.50000 0.50000000000000000000
+// expect: -1 -0.5 -0.50 -0.50000 -0.50000000000000000000
+// expect: 1 1.3 1.25 1.25000 1.25000000000000000000
+// expect: 1 1.4 1.35 1.35000 1.35000000000000008882
+// expect: 0 0.0 0.00 0.00000 0.00000000000000000000
+// expect: 123456789012345683968 123456789012345683968.0 123456789012345683968.00 123456789012345683968.00000 123456789012345683968.00000000000000000000
+// expect: 5.00 -7 102
+// expect: 255.0 9007199254740993 0.1000000015 -9223372036854775808.00
+function main() {
+  const xs: f64[] = [2.5, 1.005, 1.45, -1.5, -0.0001, -0.0, 0, 1e21, 1.2e21, 123.456, 0.000001, 1e-7, 0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0, 8.345, 10.235, 99.995, 0.5, -0.5, 1.25, 1.35, 5e-324, 123456789012345680000];
+  for (const x of xs) console.log(x.toFixed(0), x.toFixed(1), x.toFixed(2), x.toFixed(5), x.toFixed(20));
+  console.log((5).toFixed(2), (-7).toFixed(0), (0.1).toFixed(100).length);
+  const b: u8 = 255;
+  const big = 9007199254740993;
+  const h: f32 = 0.1;
+  console.log(b.toFixed(1), big.toFixed(0), h.toFixed(10), (-9223372036854775807 - 1).toFixed(2));
+}
+// case: to_fixed_default_and_statement
+// expect: 2 2 -3
+function main() {
+  console.log((1.5).toFixed(), (2).toFixed(), (-2.5).toFixed());
+  const x = 2.5;
+  x.toFixed(1);
+  console.log("v" + x.toFixed(1));
+}
+// expect: v2.5
+// case: to_fixed_range
+// panic: toFixed() digits argument must be between 0 and 100
+function main() {
+  const d = 101;
+  console.log((1.5).toFixed(d));
+}
+// case: to_fixed_negative
+// panic: toFixed() digits argument must be between 0 and 100
+function main() {
+  console.log((1.5).toFixed(-1));
+}
+// case: to_fixed_float_digits
+// error: 'toFixed' takes its digits as an 'i64', not 'number'
+function main() {
+  console.log((1.5).toFixed(1.5));
+}

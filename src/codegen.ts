@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -432,6 +432,33 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const zeros = op(`select i1 ${op(`fcmp oeq ${t} ${a}, ${b}`)}, ${t} ${op(`bitcast ${bits} ${joined} to ${t}`)}, ${t} ${pick}`);
       return op(`select i1 ${op(`fcmp uno ${t} ${a}, ${a}`)}, ${t} ${a}, ${t} ${zeros}`);
     });
+  }
+
+  // `x.toFixed(digits)`: a float from its exact value, an integer exactly; digits past 100
+  // panic, as JavaScript throws a RangeError.
+  function toFixed(e: Extract<Expr, { kind: "call" }>): string {
+    const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
+    const type = lower(valueType(object)) as Numeric;
+    const x = value(object);
+    const digits = e.args[0] ? value(e.args[0]) : "0";
+    if (e.args[0]) panicIf(op(`icmp ugt i64 ${digits}, 100`), "toFixed() digits argument must be between 0 and 100", e.args[0]);
+    const result = temp();
+    if (isFloat(type)) {
+      const wide = type === "f32" ? op(`fpext float ${x} to double`) : x;
+      emit(`${result} = call ptr @fsh_rt_to_fixed(double ${wide}, i64 ${digits})`);
+    } else {
+      const { signed, bits } = INTEGERS[type as Integer];
+      const wide = bits === 64 ? x : op(`${signed ? "sext" : "zext"} ${llvm(type)} ${x} to i64`);
+      emit(`${result} = call ptr @fsh_rt_int_to_fixed(i64 ${wide}, i32 ${signed ? 1 : 0}, i64 ${digits})`);
+    }
+    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    return result;
+
+    function op(line: string) {
+      const v = temp();
+      emit(`${v} = ${line}`);
+      return v;
+    }
   }
 
   // A number parsed by the runtime, or null where JavaScript would give NaN.
@@ -3480,6 +3507,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
+      if (fixedPrints.has(e)) return toFixed(e);
       if (e.callee.kind === "ident" && e.callee.name === "fill length") {
         const n = value(e.args[0]!);
         if (!lengthChecks.has(e)) return n;

@@ -157,6 +157,8 @@ export const fixedFills = new WeakSet<Expr>();
 export const lengthChecks = new WeakSet<Expr>();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+// The `toFixed` calls.
+export const fixedPrints = new WeakSet<Expr>();
 // The `Math` calls and constants, which codegen lowers itself.
 export const maths = new WeakSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
@@ -801,6 +803,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
+    if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
       throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
@@ -1306,6 +1309,17 @@ export function expressions(ctx: Context) {
   // `Array.of(a, b)` is the array literal `[a, b]`; `Array.from(x, f?)` is the array of what x
   // holds, clones of an array's elements, a string's code points or a generator's values, or of
   // `0` to `n - 1` from `{ length: n }`, mapped by f when there is one.
+  // `x.toFixed(digits)` prints a number with that many digits after the point, as JavaScript does.
+  function toFixed(e: Call): { type: Type; what: string } {
+    if (e.args.length > 1) throw new CompileError("'toFixed' takes how many digits to print after the point, 0 when not given", e.start, e.end);
+    const digits = e.args[0];
+    fixedPrints.add(e);
+    if (!digits) return { type: "string", what: "'toFixed'" };
+    const t = value(digits);
+    if (t !== "i64" && !adapt(digits, "i64")) throw new CompileError(`'toFixed' takes its digits as an 'i64', not '${show(t)}'`, digits.start, digits.end);
+    return { type: "string", what: "'toFixed'" };
+  }
+
   // The global `parseInt`, `parseFloat`, `Number` and `Number.parse...` a call makes, unless a
   // name of the program's hides it.
   function parserOf(callee: Expr): "parseInt" | "parseFloat" | "Number" | undefined {
