@@ -1115,7 +1115,7 @@ export function expressions(ctx: Context) {
     runsOften(c, name, "its callback once per element", callback);
     c.params.forEach((p, i) => {
       const at = callback.params[i] ?? callback;
-      passedExactly(name, params[i]!, p, callback.params[i], at);
+      passedExactly(name, params[i]!, p, callback.params[i], at, i !== params.length - 1);
     });
     const gives = c.returns;
     if (holdsFuture(gives)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
@@ -1317,10 +1317,12 @@ export function expressions(ctx: Context) {
     return checked;
   }
 
-  // A method calling a callback passes exactly this type, with nothing to convert it, so the
-  // callback's parameter has to be that type, and can't be optional: the argument always comes.
-  function passedExactly(name: string, given: Type, written: Type, p: Param | undefined, at: Span) {
-    if (sameLowered(given, written)) return;
+  // A method calling a callback converts each value it passes to the parameter's type, so a
+  // literal may widen, except a reference or, with `converted` false, an index, which it passes
+  // as it is. The argument always comes, so the parameter can't be optional.
+  function passedExactly(name: string, given: Type, written: Type, p: Param | undefined, at: Span, converted = true) {
+    if (p && (p.optional || defaulted.has(p)) && !sameLowered(given, written)) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
+    if (sameLowered(given, written) || (converted && !isRefType(given) && fits(given, written))) return;
     if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     throw new CompileError(`'${name}' passes its callback ${article(show(given))} here, not ${article(show(written))}`, at.start, at.end);
   }
@@ -3157,6 +3159,8 @@ export function expressions(ctx: Context) {
     }
     if (!fits(type, fn)) throw new CompileError(message, e.start, e.end);
     const body = closureBody(type);
+    // A call through a stored callable passes every argument, with no default to fall back on.
+    if (body.body.params.some((p) => defaulted.has(p))) throw new CompileError("a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
     const capture = (name: string) => `'${name}'`;
     const borrowed = type.fields.find((f) => isRefType(f.type));
     if (borrowed) throw new CompileError(`this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
