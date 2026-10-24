@@ -71,7 +71,8 @@ function startsStatement(text: string): boolean {
   try {
     const tokens = lexer(text);
     const first = tokens.next();
-    if (first.kind === "punct" && first.text === "{") return true;
+    // A decorated class is a declaration there too.
+    if (first.kind === "punct" && (first.text === "{" || first.text === "@")) return true;
     if (first.kind !== "ident") return false;
     if (first.text === "function" || first.text === "class") return true;
     const second = tokens.next();
@@ -94,7 +95,10 @@ function spliceOf(node: unknown): number | undefined {
 // it makes; a splice anywhere else, as a name, is an error.
 export function holesOf(q: Quote, types: Record<Category, Type>, at: Span): Category[] {
   const found: (Category | undefined)[] = q.holes.map(() => undefined);
-  walk(q.tree, types[q.category], types, q.asExpressions, (i, category) => (found[i] = category));
+  walk(q.tree, types[q.category], types, q.asExpressions, (i, category) => {
+    if (i >= q.holes.length) throw new CompileError(`'${SPLICE}${i}' is the name a quote's splices are parsed under, so a quote can't use it`, at.start, at.end);
+    found[i] = category;
+  });
   return found.map((c, i) => {
     if (c) return c;
     const hole = q.holes[i]!;

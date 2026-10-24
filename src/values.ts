@@ -1041,6 +1041,7 @@ export function expressions(ctx: Context) {
   function quote(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
     if (e.typeArgs.length > 0) throw new CompileError("a quote takes no type arguments", e.start, e.end);
     const q = quoted(e, asType);
+    q.asExpressions.clear();
     const at = { start: e.start, end: e.end };
     const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
     holesOf(q, types, e).forEach((category, i) => {

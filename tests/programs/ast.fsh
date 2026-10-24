@@ -189,3 +189,12 @@ const K = comptime make();
 function main() {
   console.log(K);
 }
+// case: ast_quote_decorated
+// expect: class
+function make(): string {
+  return quote`@sealed class D {}`.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
