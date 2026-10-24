@@ -48,12 +48,14 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
-    classForms: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1,
+    classForms: 1, process: 1, fetch: 1, timers: 1, stderr: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
 
 test("forms that look alike are told apart", () => {
+  expect(counts("const a = JSON.parse(s) as User;\nconst b = JSON.stringify(a);\n")).toEqual({ A8: 1 });
+  expect(counts("const a = JSON.parse(s);\nconst b = JSON.stringify(a, null, 2);\n")).toEqual({ json: 2 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});

@@ -77,7 +77,7 @@ const RULES: Rule[] = [
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
   { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
-  { id: "json", action: "unsupported", title: "JSON.parse and JSON.stringify (derive for Json)", feature: "Macros, decorators and derive" },
+  { id: "json", action: "unsupported", title: "JSON.parse with no 'as T' to give its type, and JSON.stringify's replacer and indent arguments", feature: "Dynamic Json values" },
   { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
 ];
@@ -338,6 +338,8 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 // interfaces, whose generic methods Fish doesn't have.
 const heldArrows = new WeakSet<object>();
 const statementDestructures = new WeakSet<object>();
+// `JSON.parse(s) as T`, which ports as `JSON.parse<T>(s)`.
+const typedParses = new WeakSet<object>();
 const interfaceMembers = new WeakSet<object>();
 
 function classify(n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
@@ -412,7 +414,10 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const simple: Record<string, string> = { tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
-  if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
+  if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) {
+    push("A8");
+    typedParses.add(n.expr);
+  }
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0 && !heldArrows.has(n)) push("genericMethods");
   if (n.kind === "function" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && Array.isArray(n.params) && "returns" in n) push("genericMethods");
   if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
@@ -460,7 +465,9 @@ function callRules(n: Node, push: (id: string) => void) {
   if (named(callee, "fetch")) push("fetch");
   if (["setTimeout", "setInterval", "clearTimeout", "clearInterval"].some((name) => named(callee, name))) push("timers");
   if (memberOf(callee, "console", ["error", "warn"]) || memberOf(callee, "Date", ["now"]) || memberOf(callee, "performance", ["now"])) push("stderr");
-  if (memberOf(callee, "JSON", ["parse", "stringify"])) push("json");
+  // A parse with no type to read into wants the dynamic Json value; stringify takes one value.
+  if (memberOf(callee, "JSON", ["parse"]) && !typedParses.has(n)) push("json");
+  if (memberOf(callee, "JSON", ["stringify"]) && (n.args as unknown[]).length > 1) push("json");
   if (memberOf(callee, "Promise", ["all", "race", "allSettled", "any"])) push("promiseAll");
   if (!isNode(callee) || callee.kind !== "member") return;
   const name = callee.name as string;
