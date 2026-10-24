@@ -274,3 +274,90 @@ function main() {
   const e: AstExpr = { kind: "num" };
   console.log(e.kind);
 }
+// case: macro_two_quotes_local
+// expect: 7 9
+const y: i64 = 9;
+macro function m(input: AstStmt): Ast[] {
+  const decl = quote`const y: i64 = 7;`;
+  return [input, quote`function ${ident("seven")}(): i64 { ${decl}; return y; }`];
+}
+@m function f() {}
+function main() {
+  console.log(seven(), y);
+}
+// case: macro_cap_match_binding
+// expect: 10
+const V: i64 = 10;
+macro function wrap(input: AstStmt): Ast[] {
+  if (input.kind === "function") {
+    const body = input.body.clone();
+    if (body !== null) {
+      const ret = body[0].clone();
+      if (ret.kind === "return") {
+        const e = ret.value;
+        if (e !== null) return [quote`function ${ident("w")}(o: i64): i64 { return match (o) { case V => ${e.clone()}, }; }`];
+      }
+    }
+  }
+  return [input];
+}
+@wrap function g(): i64 { return V; }
+function main() {
+  console.log(w(5));
+}
+// case: macro_same_start
+// expect: x x
+macro function sufA(input: AstStmt): AstStmt { let d = input; if (d.kind === "function") d.name = `${d.name}A`; return d; }
+macro function sufB(input: AstStmt): AstStmt { let d = input; if (d.kind === "function") d.name = `${d.name}B`; return d; }
+function make(dec: AstExpr, name: string): AstStmt {
+  return quote`@${dec} function ${ident(name)}(): string { return "x"; }`;
+}
+macro function two(input: AstStmt): Ast[] {
+  return [make(ident("sufA"), "a"), make(ident("sufB"), "b")];
+}
+@two function f() {}
+function main() { console.log(aA(), bB()); }
+// case: macro_quoted_top_const
+// expect: 10
+macro function m(input: AstStmt): Ast[] {
+  return [input, quote`const LIMIT: i64 = 10;`, quote`function ${ident("limit")}(): i64 { return LIMIT; }`];
+}
+@m function f() {}
+function main() {
+  console.log(limit());
+}
+// case: macro_declare_single
+// expect: 3
+macro function withAbs(input: AstStmt): Ast[] {
+  return [input, quote`declare function labs(x: i64): i64;`, quote`function ${ident("absOf")}(x: i64): i64 { return unsafe { labs(x) }; }`];
+}
+@withAbs function f() {}
+function main() { console.log(absOf(-3)); }
+// case: macro_quoted_const_export_single
+// expect: 1
+macro function m(input: AstStmt): Ast[] {
+  return [input, quote`export function base(): i64 { return 1; }`, quote`function ${ident("viaBase")}(): i64 { return base(); }`];
+}
+@m function f() {}
+function main() { console.log(viaBase()); }
+// case: macro_other_macro_declares
+// expect: 1 user
+function helper(): string { return "user"; }
+macro function a(input: AstStmt): Ast[] {
+  return [input, quote`function helper(): i64 { return 1; }`, quote`function ${ident("viaA")}(): i64 { return helper(); }`];
+}
+macro function b(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("viaB")}(): string { return helper(); }`];
+}
+@a function f() {}
+@b function g() {}
+function main() {
+  console.log(viaA(), viaB());
+}
+// case: macro_main_ref
+// expect: ok
+macro function m(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("again")}(): i64 { if (false) main(); return 1; }`];
+}
+@m function f() {}
+function main() { console.log("ok"); }

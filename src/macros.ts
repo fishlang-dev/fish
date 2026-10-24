@@ -1,7 +1,7 @@
 import type { Checked } from "./check.ts";
 import { astValues, comptimeCall, type Value } from "./comptime.ts";
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
-import { FILE_SPAN, flatten, type Loaded, type Module } from "./modules.ts";
+import { flatten, type Loaded, type Module } from "./modules.ts";
 import type { Expr, Func, Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
@@ -26,37 +26,41 @@ type Site = { module: Module; index: number; decl: Decl; exported: boolean };
 
 let expansions = 0;
 
-// Expands every file's macros in place, and gives the declarations their expansions name in
-// other files, for the linker to name to match.
-export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked): Set<string> {
-  const pins = new Set<string>();
+// Expands every file's macros in place.
+export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
   for (let round = 0; ; round++) {
     const sites = loaded.modules.flatMap(decorated);
-    if (sites.length === 0) return pins;
+    if (sites.length === 0) return;
     if (round === ROUNDS) {
       const at = sites[0]!.decl.decorators![0]!;
       throw new CompileError(`macros gave declarations using macros ${ROUNDS} rounds deep; does a macro give back what it was applied to, with its decorator?`, at.start, at.end);
     }
     // The program as linked, from copies, for checking and running the macros; an import of what
     // an expansion will make isn't there yet, and nothing the macros use may need one.
-    const program = flatten(copied(loaded), library, pins, true);
+    const { loaded: copy, of } = copied(loaded);
+    const program = flatten(copy, library, true);
     const macros = macroFunctions(program);
-    const linkedSites = new Map(program.flatMap((s) => {
-      const d = (s.kind === "export" ? s.body : s) as Decl;
-      return d && (d.decorators?.length ?? 0) > 0 ? [[d.start, d] as const] : [];
-    }));
-    for (const d of linkedSites.values()) for (const x of d.decorators!) macroOf(x, macros);
-    const macroCode = macroProgram(program, macros, new Set(linkedSites.values()));
+    const linked = (site: Site) => {
+      const s = of.get(site.module.statements[site.index]!)!;
+      return (s.kind === "export" ? s.body : s) as Decl;
+    };
+    for (const site of sites) for (const x of linked(site).decorators!) macroOf(x, macros);
+    const macroCode = macroProgram(program, macros, new Set(sites.map(linked)));
     const checked = checkMacros(macroCode);
-    const declared = new Set(macroCode.flatMap(quoteDeclarations));
-    for (const site of [...sites].reverse()) run(site, linkedSites.get(site.decl.start)!, macros, checked, declared, loaded, pins);
+    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded);
   }
 }
 
-// Every file's statements copied, so linking the copy leaves the files as written.
-function copied(loaded: Loaded): Loaded {
+// Every file's statements copied, so linking the copy leaves the files as written, and the copy
+// of each statement.
+function copied(loaded: Loaded): { loaded: Loaded; of: Map<Stmt, Stmt> } {
   const copies = new Map<Module, Module>();
-  for (const m of loaded.modules) copies.set(m, { ...m, statements: structuredClone(m.statements), targets: new Map() });
+  const of = new Map<Stmt, Stmt>();
+  for (const m of loaded.modules) {
+    const statements = structuredClone(m.statements);
+    m.statements.forEach((s, i) => of.set(s, statements[i]!));
+    copies.set(m, { ...m, statements, targets: new Map() });
+  }
   for (const m of loaded.modules) {
     const copy = copies.get(m)!;
     m.statements.forEach((s, i) => {
@@ -64,7 +68,33 @@ function copied(loaded: Loaded): Loaded {
       if (target) copy.targets.set(copy.statements[i]!, copies.get(target)!);
     });
   }
-  return { ...loaded, modules: loaded.modules.map((m) => copies.get(m)!) };
+  return { loaded: { ...loaded, modules: loaded.modules.map((m) => copies.get(m)!) }, of };
+}
+
+// The names a file means by itself: its own declarations and its imports.
+function namesIn(module: Module): Set<string> {
+  const names = new Set(module.statements.flatMap(namesOf));
+  for (const s of module.statements) {
+    if (s.kind !== "import") continue;
+    const i = s as { default?: string; namespace?: string; named?: { name: string; alias?: string }[] };
+    if (i.default) names.add(i.default);
+    if (i.namespace) names.add(i.namespace);
+    for (const x of i.named ?? []) names.add(x.alias ?? x.name);
+  }
+  return names;
+}
+
+// The statements of the macro code a macro reaches, its own first.
+function reached(code: Stmt[], macro: Func): Stmt[] {
+  const byName = new Map(code.flatMap((s) => namesOf(s).map((n) => [n, s] as const)));
+  const found = new Set<Stmt>();
+  const visit = (s: Stmt | undefined) => {
+    if (!s || found.has(s)) return;
+    found.add(s);
+    for (const name of freeNames(s)) visit(byName.get(name));
+  };
+  visit(byName.get(macro.name));
+  return [...found];
 }
 
 function decorated(module: Module): Site[] {
@@ -167,8 +197,7 @@ function quoteDeclarations(s: Stmt): string[] {
     const n = node as Expr;
     if (n.kind === "tagged" && n.tag.kind === "ident" && (n.tag.name === "quote" || n.tag.name === "quoteType")) {
       try {
-        const name = declaredBy(quoted(n, n.tag.name === "quoteType"));
-        if (name) found.push(name);
+        found.push(...declaredBy(quoted(n, n.tag.name === "quoteType")));
       } catch {
         // A quote that doesn't parse is reported when the macro is checked.
       }
@@ -181,7 +210,7 @@ function quoteDeclarations(s: Stmt): string[] {
 
 // Runs a site's nearest decorator's macro on its declaration, and puts what it gives in the
 // declaration's place, the other decorators kept on each declaration given for a later round.
-function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, declared: Set<string>, loaded: Loaded, pins: Set<string>) {
+function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded) {
   const nearest = linked.decorators!.at(-1)!;
   const rest = site.decl.decorators!.slice(0, -1);
   const macro = macroOf(nearest, macros);
@@ -200,26 +229,53 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
     if (e instanceof CompileError) throw e;
     throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
-  const file = Math.floor(macro.start / FILE_SPAN);
   const suffix = `@m${expansions++}`;
   const fresh = (name: string) => {
     LOCAL_NAMES.add(`${name}${suffix}`);
     return `${name}${suffix}`;
   };
-  const hygiene: Hygiene = { declared: new Map([...declared].map((n) => [n, fresh(n)])), file, names: new Set(loaded.modules[file]!.statements.flatMap(namesOf)), pins, fresh };
+  // The declarations this macro's quotes make are known from the start, so a quote naming one
+  // made by a quote it builds later means it.
+  const declared = reached(code, macro).flatMap(quoteDeclarations);
+  const hygiene: Hygiene = { bound: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins: new Set(), fresh };
   const result = withHygiene(hygiene, () => comptimeCall(instance, [value], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
-  const name = namesOf(site.decl)[0];
+  // A name past the linker's suffix is one only a pin may write, as `ident` can't.
+  const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
+  if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
   const replacing = given.map((d) => {
     if (!d || typeof d !== "object" || !(TOP_LEVEL.has(d.kind) || isExport(d))) {
       throw new CompileError(`the macro '${written(macro.name)}' gave ${d && typeof d === "object" ? `a '${d.kind}'` : "nothing"}, but a macro gives declarations that can stand at the top level`, nearest.start, nearest.end);
     }
     const decl = rest.length > 0 ? ({ ...d, decorators: [...rest, ...(d.decorators ?? [])] } as Decl) : d;
-    // An exported declaration stays exported under its name; what the macro adds beside it isn't.
-    return site.exported && !isExport(decl) && namesOf(decl)[0] === name ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
+    // On an exported declaration, what the macro gives under names the program can see is
+    // exported too; its private declarations aren't.
+    const visible = namesOf(decl).every((n) => !LOCAL_NAMES.has(n)) && EXPORTABLE.has(decl.kind);
+    return site.exported && !isExport(decl) && visible ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
   });
   site.module.statements.splice(site.index, 1, ...replacing);
+}
+
+const EXPORTABLE = new Set(["function", "class", "typeAlias", "interface", "enum"]);
+
+// A name in a tree that `bad` picks, if any.
+function findName(node: unknown, bad: (name: string) => boolean): string | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  if (Array.isArray(node)) {
+    for (const x of node) {
+      const found = findName(x, bad);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  const n = node as Record<string, unknown>;
+  if (typeof n.name === "string" && bad(n.name)) return n.name;
+  for (const v of Object.values(n)) {
+    const found = findName(v, bad);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 // A value made while compiling as the syntax tree it stands for.

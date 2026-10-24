@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
+import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
 import { field, unfold, unfolded, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
@@ -186,10 +187,12 @@ export type Builder<V> = {
   none: V;
 };
 
-// While a macro runs: the private names of the declarations its quotes make, and the file it is
-// in, whose own top-level names its quotes mean wherever the expansion lands, pinned to the name
-// the linker gives them there.
-export type Hygiene = { declared: Map<string, string>; file: number; names: Set<string>; pins: Set<string>; fresh(name: string): string };
+// While a macro runs: the private name each name its quotes bind or declare has, shared by
+// every quote the run builds, so a statement quoted on its own and spliced into another keeps
+// its bindings; the names each file declares or imports, which a quote written there means
+// wherever its expansion lands; and the spellings that pin them, `name-fsh<file>`, which the
+// linker gives the declaration the name means in that file.
+export type Hygiene = { bound: Map<string, string>; namesIn(file: number): Set<string>; pins: Set<string>; fresh(name: string): string };
 let hygiene: Hygiene | undefined;
 
 export function withHygiene<T>(h: Hygiene, run: () => T): T {
@@ -202,32 +205,36 @@ export function withHygiene<T>(h: Hygiene, run: () => T): T {
   }
 }
 
-// The top-level name a quote declares, when it is a declaration.
-export function declaredBy(q: Quote): string | undefined {
-  const t = q.tree as { kind?: string; name?: unknown };
-  return q.category === "AstStmt" && DECLARATIONS.has(t.kind!) && typeof t.name === "string" && nameSplice(t.name) === undefined ? t.name : undefined;
+// The top-level names a quote declares, when it is a declaration. A C function keeps its name.
+export function declaredBy(q: Quote): string[] {
+  if (q.category !== "AstStmt") return [];
+  const t = (q.tree as Stmt).kind === "export" ? (q.tree as Extract<Stmt, { kind: "export" }>).body : (q.tree as Stmt);
+  if (!t) return [];
+  if (t.kind === "let") return t.declarations.flatMap((d) => (d.target.kind === "ident" && nameSplice(d.target.name) === undefined ? [d.target.name] : []));
+  const name = (t as { name?: unknown }).name;
+  return DECLARATIONS.has(t.kind) && typeof name === "string" && nameSplice(name) === undefined ? [name] : [];
 }
 
 const DECLARATIONS = new Set(["function", "class", "typeAlias", "interface", "enum"]);
 // The nodes whose `name` is a name of the program's, bound or used: never a member's or a key's.
 const NAMED = new Set(["ident", "ref", "variant", "function", "class", "typeAlias", "interface", "enum", "infer", "mapped"]);
+// The bare names a match pattern means rather than binds.
+const VARIANTS = new Set(["None"]);
 
 // A quote's tree with its names made hygienic: each name it binds, a variable, a parameter, a
-// type parameter, a match binding or a declaration inside it, private to this quote; the
-// declaration it is, if it is one, by the name the macro's run gives it; and a name its macro's
-// file declares at the top level, pinned to that declaration.
-function hygienic(tree: unknown, h: Hygiene): unknown {
+// type parameter, a match binding, an `infer` or a declaration, private to the macro's run; and
+// a name the file the quote is written in declares or imports, pinned to what it means there.
+function hygienic(tree: unknown, h: Hygiene, file: number): unknown {
   const copy = structuredClone(tree);
-  const bound = new Map<string, string>();
-  const root = copy as { kind?: string; name?: unknown };
+  const names = h.namesIn(file);
   const bind = (name: unknown) => {
-    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
+    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !h.bound.has(name)) h.bound.set(name, h.fresh(name));
   };
   const pattern = (p: unknown, inMatch = false) => {
     if (!p || typeof p !== "object") return;
     const n = p as { kind?: string; name?: unknown; target?: unknown; props?: { value: unknown }[]; elements?: unknown[]; rest?: unknown; args?: unknown[]; patterns?: unknown[] };
-    // ponytail: a bare capitalised name in a match is taken as a variant, as in `case None`.
-    if (n.kind === "ident" && !(inMatch && typeof n.name === "string" && /^[A-Z]/.test(n.name))) bind(n.name);
+    // In a match a bare name binds, as the checker reads it, except `None`.
+    if (n.kind === "ident" && !(inMatch && typeof n.name === "string" && VARIANTS.has(n.name))) bind(n.name);
     if (n.kind === "default") pattern(n.target, inMatch);
     for (const x of n.props ?? []) pattern(x.value, inMatch);
     for (const x of [...(n.elements ?? []), ...(n.args ?? []), ...(n.patterns ?? [])]) pattern(x, inMatch);
@@ -237,7 +244,9 @@ function hygienic(tree: unknown, h: Hygiene): unknown {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) return node.forEach(collect);
     const n = node as Record<string, unknown> & { kind?: string };
-    if (DECLARATIONS.has(n.kind!) && node !== root) bind(n.name);
+    // A C function's name, and its parameters', are C's.
+    if (n.kind === "declare") return;
+    if (DECLARATIONS.has(n.kind!) || n.kind === "infer" || n.kind === "mapped") bind(n.name);
     if (n.kind === "let") for (const d of n.declarations as { target: unknown }[]) pattern(d.target);
     if (Array.isArray(n.params)) for (const p of n.params as { pattern: unknown }[]) pattern(p.pattern);
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: unknown }[]) bind(p.name);
@@ -248,16 +257,18 @@ function hygienic(tree: unknown, h: Hygiene): unknown {
   collect(copy);
   const renamed = (name: string): string | undefined => {
     const [head, ...rest] = name.split(".");
-    const to = bound.get(head!) ?? h.declared.get(head!);
+    const to = h.bound.get(head!);
     if (to) return [to, ...rest].join(".");
-    if (!h.names.has(head!)) return undefined;
-    h.pins.add(`${h.file}\0${head}`);
-    return [`${head}-fsh${h.file}`, ...rest].join(".");
+    if (!names.has(head!)) return undefined;
+    const pinned = `${head}-fsh${file}`;
+    h.pins.add(pinned);
+    return [pinned, ...rest].join(".");
   };
   const rename = (node: unknown) => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) return node.forEach(rename);
     const n = node as Record<string, unknown> & { kind?: string };
+    if (n.kind === "declare") return;
     if (NAMED.has(n.kind!) && typeof n.name === "string") n.name = renamed(n.name) ?? n.name;
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
     if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
@@ -266,7 +277,7 @@ function hygienic(tree: unknown, h: Hygiene): unknown {
       for (const k of Object.keys(n)) delete n[k];
       Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
     }
-    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
+    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = h.bound.get(p.name) ?? p.name;
     Object.values(n).forEach(rename);
   };
   rename(copy);
@@ -301,7 +312,7 @@ export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | und
     }
     return b.record(t, fields);
   };
-  return make(at && hygiene ? hygienic(q.tree, hygiene) : q.tree, types[q.category]);
+  return make(at && hygiene ? hygienic(q.tree, hygiene, Math.floor(at.start / FILE_SPAN)) : q.tree, types[q.category]);
 }
 
 // An integer an Ast holds, as an `i64` until big integers.

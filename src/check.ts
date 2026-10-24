@@ -324,6 +324,10 @@ function macroShape(f: Func) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
   if (f.typeParams.length > 0) throw new CompileError(`a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
   if (f.params.length !== 1 || f.params[0]!.rest) throw new CompileError(`a macro takes one parameter, the declaration it is applied to, ${shape}`, f.start, f.end);
+  const t = f.params[0]!.type;
+  if (t?.kind !== "ref" || (t.name !== "Ast" && t.name !== "AstStmt") || t.args.length > 0) {
+    throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", f.params[0]!.start, f.params[0]!.end);
+  }
   if (!f.returnType) throw new CompileError(`a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
 }
 
@@ -597,8 +601,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
-  // A macro has run already, and is checked only to run it.
-  funcs.forEach((f) => (!f.macro || macros) && checkBody(definition(f)));
+  funcs.forEach((f) => checkBody(definition(f)));
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
     else checkBody(pending.shift()!);

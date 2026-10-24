@@ -27,8 +27,8 @@ export function compile(src: string, file: string, release = false, panic: Panic
 
 // The program's files with their macros expanded, linked into one program.
 function expanded(loaded: Loaded, library: boolean): Stmt[] {
-  const pins = expandMacros(loaded, library, (macros) => check(macros, false, true));
-  return flatten(loaded, library, pins);
+  expandMacros(loaded, library, (macros) => check(macros, false, true));
+  return flatten(loaded, library);
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against.

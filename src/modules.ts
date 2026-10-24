@@ -106,11 +106,9 @@ type Linked = {
 // and what it imports. A top-level name keeps its spelling unless that would mean something else
 // in another file, when it takes a suffix telling the files apart (`helper-fsh2`), which messages leave
 // out. Only the entry file keeps `export function`, which a library makes a C function.
-// `pins` are declarations, `file index\0name`, that a macro's expansion in another file names as
-// `name-fsh<index>`, so they take that name.
 // With `lenient`, an import of a name no file exports is left unlinked, as one an expansion of a
 // macro has yet to make.
-export function flatten({ modules }: Loaded, library = false, pins = new Set<string>(), lenient = false): Stmt[] {
+export function flatten({ modules }: Loaded, library = false, lenient = false): Stmt[] {
   const linked = new Map(modules.map((m, i) => [m, linkOf(m, i, library)]));
   const exported = (m: Module, name: string, seen = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
@@ -145,8 +143,7 @@ export function flatten({ modules }: Loaded, library = false, pins = new Set<str
       // Another file using the name for something else, its own local or a std name, would
       // otherwise reach this declaration.
       const elsewhere = all.some((o) => o !== l && o.used.has(d.name) && local(o, d.name) !== d);
-      const pinned = pins.has(`${l.index}\0${d.name}`);
-      d.unique = !pinned && (d.fixed || (!elsewhere && !taken.has(d.name))) ? d.name : apart(d.name, l);
+      d.unique = d.fixed || (!elsewhere && !taken.has(d.name)) ? d.name : apart(d.name, l);
       taken.add(d.unique);
     }
   }
@@ -154,8 +151,14 @@ export function flatten({ modules }: Loaded, library = false, pins = new Set<str
   return all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
-      // A name a macro pinned to another file's declaration is that declaration's already.
-      if (/-fsh\d+$/.test(name)) continue;
+      // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
+      const pinned = /^(.*)-fsh(\d+)$/.exec(name);
+      if (pinned) {
+        const there = all[Number(pinned[2])];
+        const d = there && local(there, pinned[1]!);
+        if (d) to.set(name, d.unique);
+        continue;
+      }
       const d = local(l, name);
       // A name another file declares, and this one neither declares nor imports, is this file's
       // own local or nothing at all here.
@@ -166,7 +169,8 @@ export function flatten({ modules }: Loaded, library = false, pins = new Set<str
     return l.body.filter((s) => {
       if (s.kind !== "declare" || s.body.kind !== "function") return true;
       const f = s.body;
-      const text = (t: Span | undefined) => (t ? l.module.src.slice(t.start - l.module.base, t.end - l.module.base).replace(/\s+/g, "") : "");
+      // The types as written, without where: a declaration a macro gave has its quote's spans.
+      const text = (t: Span | undefined) => (t ? shapeOf(t) : "");
       const signature = `${f.params.map((p) => text(p.type)).join(",")}:${text(f.returnType)}`;
       const known = foreign.get(f.name);
       if (!known) foreign.set(f.name, { signature, file: l.module.file || "the entry file" });
@@ -280,4 +284,11 @@ function renameIn(v: unknown, to: (name: string) => string | undefined, seen = n
   } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
   if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
   Object.values(node).forEach((x) => renameIn(x, to, seen));
+}
+
+// A syntax tree as text, its keys in order and without its spans.
+function shapeOf(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(shapeOf).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => k !== "start" && k !== "end").sort().map((k) => `${k}:${shapeOf((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return typeof v === "bigint" ? `${v}n` : JSON.stringify(v) ?? "";
 }
