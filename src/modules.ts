@@ -106,7 +106,11 @@ type Linked = {
 // and what it imports. A top-level name keeps its spelling unless that would mean something else
 // in another file, when it takes a suffix telling the files apart (`helper-fsh2`), which messages leave
 // out. Only the entry file keeps `export function`, which a library makes a C function.
-export function flatten({ modules }: Loaded, library = false): Stmt[] {
+// `pins` are declarations, `file index\0name`, that a macro's expansion in another file names as
+// `name-fsh<index>`, so they take that name.
+// With `lenient`, an import of a name no file exports is left unlinked, as one an expansion of a
+// macro has yet to make.
+export function flatten({ modules }: Loaded, library = false, pins = new Set<string>(), lenient = false): Stmt[] {
   const linked = new Map(modules.map((m, i) => [m, linkOf(m, i, library)]));
   const exported = (m: Module, name: string, seen = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
@@ -129,7 +133,7 @@ export function flatten({ modules }: Loaded, library = false): Stmt[] {
   for (const l of linked.values()) {
     for (const [alias, { from, name, at }] of l.imports) {
       if (l.own.has(alias)) throw new CompileError(`'${alias}' is both imported and declared in this file; rename the import, as in 'import { ${name} as other${alias[0]!.toUpperCase()}${alias.slice(1)} }'`, at.start, at.end);
-      if (exported(from, name)) continue;
+      if (exported(from, name) || lenient) continue;
       const hidden = linked.get(from)!.own.has(name) ? `; it declares '${name}' without exporting it, so add 'export' before that declaration` : "";
       throw new CompileError(name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
     }
@@ -141,7 +145,8 @@ export function flatten({ modules }: Loaded, library = false): Stmt[] {
       // Another file using the name for something else, its own local or a std name, would
       // otherwise reach this declaration.
       const elsewhere = all.some((o) => o !== l && o.used.has(d.name) && local(o, d.name) !== d);
-      d.unique = d.fixed || (!elsewhere && !taken.has(d.name)) ? d.name : apart(d.name, l);
+      const pinned = pins.has(`${l.index}\0${d.name}`);
+      d.unique = !pinned && (d.fixed || (!elsewhere && !taken.has(d.name))) ? d.name : apart(d.name, l);
       taken.add(d.unique);
     }
   }
@@ -149,6 +154,8 @@ export function flatten({ modules }: Loaded, library = false): Stmt[] {
   return all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
+      // A name a macro pinned to another file's declaration is that declaration's already.
+      if (/-fsh\d+$/.test(name)) continue;
       const d = local(l, name);
       // A name another file declares, and this one neither declares nor imports, is this file's
       // own local or nothing at all here.

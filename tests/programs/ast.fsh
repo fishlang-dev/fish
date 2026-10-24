@@ -203,7 +203,7 @@ function main() {
   console.log(K);
 }
 // case: ast_quote_big_integer
-// error: which an Ast's 'i64' can't hold
+// error: an Ast holds an integer as an 'i64', which can't hold
 function make(): string {
   return quote`123456789012345678901234567890n`.kind;
 }

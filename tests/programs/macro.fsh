@@ -136,3 +136,141 @@ macro function withSecret(input: AstStmt): Ast[] {
 function main() {
   console.log(secret());
 }
+// case: macro_h1b_ident_binding_silent
+// expect: 5
+const total: i64 = 99;
+macro function m(input: AstStmt): Ast[] {
+  if (input.kind === "function") {
+    const body = input.body.clone();
+    if (body !== null) {
+      const ret = body[0].clone();
+      if (ret.kind === "return") {
+        const v = ret.value;
+        if (v !== null) return [
+          quote`function ${ident("withTotal")}(): i64 { const ${ident("total")}: i64 = 5; return ${v.clone()}; }`,
+          quote`function other(): i64 { const total: i64 = 1; return total; }`,
+        ];
+      }
+    }
+  }
+  return [input];
+}
+@m function g(): i64 { return total; }
+function main() {
+  console.log(withTotal());
+}
+// case: macro_h19_match_binding_capture
+// expect: 10
+const v: i64 = 10;
+macro function wrap(input: AstStmt): Ast[] {
+  if (input.kind === "function") {
+    const body = input.body.clone();
+    if (body !== null) {
+      const ret = body[0].clone();
+      if (ret.kind === "return") {
+        const e = ret.value;
+        if (e !== null) return [quote`function ${ident("w")}(o: i64): i64 { return match (o) { case v => ${e.clone()}, }; }`];
+      }
+    }
+  }
+  return [input];
+}
+@wrap function g(): i64 { return v; }
+function main() {
+  console.log(w(5));
+}
+// case: macro_h18_this_param
+// expect: 2
+macro function m(input: AstStmt): Ast[] {
+  return [input,
+    quote`class ${ident("Counter")} { n: i64 = 1; inc(this: Mut<this>) { this.n = this.n + 1; } }`];
+}
+@m function f() {}
+function main() {
+  let c = new Counter();
+  c.inc();
+  console.log(c.n);
+}
+// case: macro_h2_shorthand
+// expect: 1 2
+type P = { x: i64; y: i64 };
+macro function m(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("make")}(): P { const x = 1; return { x, y: 2 }; }`];
+}
+@m function f() {}
+function main() {
+  const p = make();
+  console.log(p.x, p.y);
+}
+// case: macro_h21_type_param_capture
+// expect: hello
+type T = string;
+macro function wrap(input: AstStmt): Ast[] {
+  if (input.kind === "function") {
+    const r = input.returnType.clone();
+    if (r !== null) return [input, quote`function ${ident("keepFirst")}<T>(a: ${r.clone()}, b: T): ${r.clone()} { return a; }`];
+  }
+  return [input];
+}
+@wrap function g(): T { return "x"; }
+function main() {
+  console.log(keepFirst("hello", 5));
+}
+// case: macro_h3_helper_quote
+// expect: 42 1
+function build(): AstStmt {
+  return quote`function helper(): i64 { return 41; }`;
+}
+macro function m(input: AstStmt): Ast[] {
+  return [input, build(), quote`function ${ident("answer")}(): i64 { return helper() + 1; }`];
+}
+function helper(): i64 { return 1; }
+@m function f() {}
+function main() {
+  console.log(answer(), helper());
+}
+// case: macro_s3e_macro_local_type
+// expect: 3
+macro function m(input: Ast): Ast[] {
+  type Name = string;
+  const n: Name = "three";
+  return [input, quote`function ${ident(n)}(): i64 { return 3; }`];
+}
+@m function f() {}
+function main() {
+  console.log(three());
+}
+// case: macro_e2_export_const
+// expect: 3
+macro function withConst(input: AstStmt): Ast[] {
+  return [input, quote`const ${ident("THREE")}: i64 = 3;`];
+}
+@withConst export function f() {}
+function main() { console.log(THREE); }
+// case: macro_parameter_type
+// error: a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'
+macro function m(input: AstExpr): Ast {
+  return input;
+}
+@m function f() {}
+function main() {}
+// case: macro_generic
+// error: a macro takes no type parameters
+macro function m<T>(input: Ast): Ast {
+  return input;
+}
+function main() {}
+// case: macro_result_type
+// error: a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not 'i64'
+macro function m(input: Ast): i64 {
+  return 1;
+}
+@m function f() {}
+function main() {}
+// case: macro_user_ast_name
+// expect: num
+type AstExpr = { kind: "num" };
+function main() {
+  const e: AstExpr = { kind: "num" };
+  console.log(e.kind);
+}

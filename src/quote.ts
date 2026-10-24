@@ -186,9 +186,97 @@ export type Builder<V> = {
   none: V;
 };
 
+// While a macro runs: the private names of the declarations its quotes make, and the file it is
+// in, whose own top-level names its quotes mean wherever the expansion lands, pinned to the name
+// the linker gives them there.
+export type Hygiene = { declared: Map<string, string>; file: number; names: Set<string>; pins: Set<string>; fresh(name: string): string };
+let hygiene: Hygiene | undefined;
+
+export function withHygiene<T>(h: Hygiene, run: () => T): T {
+  const outer = hygiene;
+  hygiene = h;
+  try {
+    return run();
+  } finally {
+    hygiene = outer;
+  }
+}
+
+// The top-level name a quote declares, when it is a declaration.
+export function declaredBy(q: Quote): string | undefined {
+  const t = q.tree as { kind?: string; name?: unknown };
+  return q.category === "AstStmt" && DECLARATIONS.has(t.kind!) && typeof t.name === "string" && nameSplice(t.name) === undefined ? t.name : undefined;
+}
+
+const DECLARATIONS = new Set(["function", "class", "typeAlias", "interface", "enum"]);
+// The nodes whose `name` is a name of the program's, bound or used: never a member's or a key's.
+const NAMED = new Set(["ident", "ref", "variant", "function", "class", "typeAlias", "interface", "enum", "infer", "mapped"]);
+
+// A quote's tree with its names made hygienic: each name it binds, a variable, a parameter, a
+// type parameter, a match binding or a declaration inside it, private to this quote; the
+// declaration it is, if it is one, by the name the macro's run gives it; and a name its macro's
+// file declares at the top level, pinned to that declaration.
+function hygienic(tree: unknown, h: Hygiene): unknown {
+  const copy = structuredClone(tree);
+  const bound = new Map<string, string>();
+  const root = copy as { kind?: string; name?: unknown };
+  const bind = (name: unknown) => {
+    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
+  };
+  const pattern = (p: unknown, inMatch = false) => {
+    if (!p || typeof p !== "object") return;
+    const n = p as { kind?: string; name?: unknown; target?: unknown; props?: { value: unknown }[]; elements?: unknown[]; rest?: unknown; args?: unknown[]; patterns?: unknown[] };
+    // ponytail: a bare capitalised name in a match is taken as a variant, as in `case None`.
+    if (n.kind === "ident" && !(inMatch && typeof n.name === "string" && /^[A-Z]/.test(n.name))) bind(n.name);
+    if (n.kind === "default") pattern(n.target, inMatch);
+    for (const x of n.props ?? []) pattern(x.value, inMatch);
+    for (const x of [...(n.elements ?? []), ...(n.args ?? []), ...(n.patterns ?? [])]) pattern(x, inMatch);
+    pattern(n.rest, inMatch);
+  };
+  const collect = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(collect);
+    const n = node as Record<string, unknown> & { kind?: string };
+    if (DECLARATIONS.has(n.kind!) && node !== root) bind(n.name);
+    if (n.kind === "let") for (const d of n.declarations as { target: unknown }[]) pattern(d.target);
+    if (Array.isArray(n.params)) for (const p of n.params as { pattern: unknown }[]) pattern(p.pattern);
+    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: unknown }[]) bind(p.name);
+    if (n.kind === "try") pattern(n.param);
+    if (Array.isArray(n.arms)) for (const a of n.arms as { pattern: unknown }[]) pattern(a.pattern, true);
+    Object.values(n).forEach(collect);
+  };
+  collect(copy);
+  const renamed = (name: string): string | undefined => {
+    const [head, ...rest] = name.split(".");
+    const to = bound.get(head!) ?? h.declared.get(head!);
+    if (to) return [to, ...rest].join(".");
+    if (!h.names.has(head!)) return undefined;
+    h.pins.add(`${h.file}\0${head}`);
+    return [`${head}-fsh${h.file}`, ...rest].join(".");
+  };
+  const rename = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(rename);
+    const n = node as Record<string, unknown> & { kind?: string };
+    if (NAMED.has(n.kind!) && typeof n.name === "string") n.name = renamed(n.name) ?? n.name;
+    // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
+    if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
+      const key = n.name;
+      const value = { kind: "ident", name: renamed(key), start: n.start, end: n.end };
+      for (const k of Object.keys(n)) delete n[k];
+      Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
+    }
+    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
+    Object.values(n).forEach(rename);
+  };
+  rename(copy);
+  return copy;
+}
+
 // Without `at`, every node keeps its own span, as a declaration a macro takes does.
 export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>): V {
-  const make = (node: unknown, type: Type): V => {
+  // `here` is the span of the node a part is in, where an error about the part is reported.
+  const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
     const t = unfolded(type);
     if (typeof t !== "string" && t.kind === "union") {
       if (node === null || node === undefined) return b.member(b.none, t, "null");
@@ -196,27 +284,28 @@ export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | und
       if (splice) return b.splice(splice.i, type);
       const member = memberFor(node, t);
       if (!member) throw new Error("internal error: a quoted node fits no member of its Ast type");
-      return b.member(make(node, member), t, member);
+      return b.member(make(node, member, here), t, member);
     }
     if (node === null || node === undefined || t === "null") return b.none;
     if (t === "string" && nameSplice(node) !== undefined) return b.name(nameSplice(node)!);
-    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), at ?? { start: 0, end: 0 })) : (node as V);
+    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), here)) : (node as V);
     if (t.kind === "literal") return t.value as V;
-    if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element)));
+    if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element, here)));
     if (t.kind !== "object") throw new Error(`internal error: an Ast field of type '${t.kind}'`);
     const n = node as Record<string, unknown>;
+    const own = !at && typeof n.start === "number" && typeof n.end === "number" ? { start: n.start, end: n.end } : here;
     const fields = new Map<string, V>();
     for (const f of t.fields) {
       if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(at ? at[f.name] : (n[f.name] as number))));
-      else fields.set(f.name, make(n[f.name], f.type));
+      else fields.set(f.name, make(n[f.name], f.type, own));
     }
     return b.record(t, fields);
   };
-  return make(q.tree, types[q.category]);
+  return make(at && hygiene ? hygienic(q.tree, hygiene) : q.tree, types[q.category]);
 }
 
 // An integer an Ast holds, as an `i64` until big integers.
 function inRange(n: bigint, at: Span): bigint {
-  if (n < -(1n << 63n) || n >= 1n << 63n) throw new CompileError(`this quote holds the integer ${n}, which an Ast's 'i64' can't hold`, at.start, at.end);
+  if (n < -(1n << 63n) || n >= 1n << 63n) throw new CompileError(`an Ast holds an integer as an 'i64', which can't hold ${n}`, at.start, at.end);
   return n;
 }

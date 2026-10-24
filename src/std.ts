@@ -646,10 +646,7 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
   const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  // A program declaring one of the Ast library's names keeps the rest of it.
-  const declared = new Set(written.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : [])));
-  const astLibrary = ast.filter((s) => !("name" in s && typeof s.name === "string" && declared.has(s.name)));
-  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, astLibrary, [...astNames, "quote", "quoteType", "ident"]) ? astLibrary : [])];
+  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, ast, [...astNames, "quote", "quoteType"]) ? ast : [])];
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the

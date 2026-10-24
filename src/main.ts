@@ -6,7 +6,9 @@ import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
-import { flatten, load } from "./modules.ts";
+import { flatten, load, type Loaded } from "./modules.ts";
+import { expandMacros } from "./macros.ts";
+import type { Stmt } from "./parser.ts";
 import { NATIVE } from "./native.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
@@ -20,7 +22,13 @@ export type Library = "static" | "shared";
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
   const loaded = load(file, src);
-  return withSources(loaded.sources, () => codegen(check(flatten(loaded, library), library), { src, file, release, panic, library, sources: loaded.sources }));
+  return withSources(loaded.sources, () => codegen(check(expanded(loaded, library), library), { src, file, release, panic, library, sources: loaded.sources }));
+}
+
+// The program's files with their macros expanded, linked into one program.
+function expanded(loaded: Loaded, library: boolean): Stmt[] {
+  const pins = expandMacros(loaded, library, (macros) => check(macros, false, true));
+  return flatten(loaded, library, pins);
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against.
@@ -38,7 +46,7 @@ function withSources<T>(sources: Source[], run: () => T): T {
 export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
   const src = readFileSync(file, "utf8");
   const loaded = load(file, src);
-  const checked = withSources(loaded.sources, () => check(flatten(loaded, true), true));
+  const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
   const ir = withSources(loaded.sources, () => codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }));
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");

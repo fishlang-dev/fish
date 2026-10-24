@@ -19,7 +19,6 @@ import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts"
 import { ANY_REGEX, allFields, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
-import { expandMacros } from "./macros.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
@@ -320,10 +319,17 @@ function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at
 export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
+// A macro takes the declaration it is applied to, and no type parameters.
+function macroShape(f: Func) {
+  const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
+  if (f.typeParams.length > 0) throw new CompileError(`a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
+  if (f.params.length !== 1 || f.params[0]!.rest) throw new CompileError(`a macro takes one parameter, the declaration it is applied to, ${shape}`, f.start, f.end);
+  if (!f.returnType) throw new CompileError(`a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
+}
+
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 export function check(written: Stmt[], library = false, macros = false): Checked {
-  written = expandMacros(written, (program) => check(program, false, true));
-  // A macro applies only to a top-level declaration.
+  // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
     if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
@@ -378,9 +384,11 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       funcs.push(Object.assign({ ...s.body, body: [] }, { foreign: true }));
       continue;
     }
-    // `export function f() {}` is an ordinary function, and in a library a C function too.
+    // `export function f() {}` is an ordinary function, and in a library a C function too; an
+    // exported macro is for other files.
     if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
-      funcs.push(Object.assign({ ...s.body }, { exported: true }));
+      if (s.body.macro) macroShape(s.body);
+      funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body }, { exported: true }));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -412,6 +420,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     if (!hasBody(s)) throw unsupported("functions without a body", s);
+    if (s.macro) macroShape(s);
     funcs.push(s);
   }
   const byName = new Map<string, Func>();
@@ -588,7 +597,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
-  funcs.forEach((f) => checkBody(definition(f)));
+  // A macro has run already, and is checked only to run it.
+  funcs.forEach((f) => (!f.macro || macros) && checkBody(definition(f)));
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
     else checkBody(pending.shift()!);
@@ -598,7 +608,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
-  const compiled = new Set([...funcs, ...[...infoOf.values()].flatMap(bodiesOf)]);
+  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body)), ...closures.filter((i) => i.concrete)] };
 
   // What a function's returned reference borrows from: the parameters with its written
