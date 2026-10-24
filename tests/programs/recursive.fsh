@@ -352,3 +352,47 @@ function main() {
   for (const k of t.kids.values()) line = line + (line === "" ? "" : " ") + `${k.v} ${k.kids.length}`;
   console.log(line);
 }
+// case: recursive_type_functions
+// expect: 2 2
+// expect: yes 0 1
+// expect: 1
+type T = T[];
+type Tree = { v: i64; kids: Tree[] };
+type Json = { kind: "num"; n: i64 } | { kind: "arr"; items: Json[] };
+type IsTree<X> = X extends { v: i64 } ? "yes" : "no";
+type Arr = Exclude<Json, { kind: "num"; n: i64 }>;
+function mk(): Tree {
+  return { v: 1, kids: [] };
+}
+function depth(t: Ref<T>): i64 {
+  let d = 0;
+  for (const c of t) {
+    const x = depth(c) + 1;
+    if (x > d) d = x;
+  }
+  return d;
+}
+async function main() {
+  const x: T = [[], [[]]];
+  console.log(depth(x), x.length);
+  const y: IsTree<Tree> = "yes";
+  const a: Arr = { kind: "arr", items: [] };
+  const r: ReturnType<typeof mk> = mk();
+  console.log(y, a.items.length, r.v);
+  const t: Tree = { v: 1, kids: [{ v: 2, kids: [] }] };
+  const h = spawn(async () => t.kids.length);
+  const n = await h;
+  console.log(n);
+}
+// case: recursive_comptime_constant
+// error: 'Tree' can't be computed while compiling
+type Tree = { v: i64; kids: Tree[] };
+function mk(n: i64): Tree {
+  let t: Tree = { v: n, kids: [] };
+  if (n > 0) t.kids.push(mk(n - 1));
+  return t;
+}
+const T = comptime mk(3);
+function main() {
+  console.log(T.v);
+}

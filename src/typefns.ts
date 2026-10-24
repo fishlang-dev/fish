@@ -6,16 +6,18 @@ import { allFields, isNumeric, patternType, promiseElement, literalType, objectT
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
-export function openParam(t: Type, deep: boolean): ParamType | undefined {
-  if (typeof t === "string") return undefined;
-  if (t.kind === "param") return t.concrete ? openParam(t.concrete, deep) : t;
+export function openParam(t: Type, deep: boolean, seen = new Set<Type>()): ParamType | undefined {
+  // A type holding itself is looked into once.
+  if (typeof t === "string" || seen.has(t)) return undefined;
+  seen.add(t);
+  if (t.kind === "param") return t.concrete ? openParam(t.concrete, deep, seen) : t;
   if (!deep) return undefined;
   const promised = promiseElement(t);
   const parts = promised ? [promised] : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
     : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? [])
     : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns] : [];
   for (const part of parts) {
-    const open = openParam(part, deep);
+    const open = openParam(part, deep, seen);
     if (open) return open;
   }
   return undefined;

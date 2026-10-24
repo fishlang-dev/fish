@@ -739,7 +739,9 @@ const arrays = new Map<string, ArrayType>();
 export function standsFor(back: RecursiveType, of: Type) {
   back.of = of;
   const array = arrays.get(`[${keyOf(back)}]`);
-  if (!array || typeof of === "string") return;
+  // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
+  // elements stay blocks.
+  if (!array || typeof of === "string" || of.kind === "array") return;
   array.element = of;
   arrays.set(`[${keyOf(of)}]`, array);
   ties.set(of, back);

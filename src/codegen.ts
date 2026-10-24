@@ -9,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -324,6 +324,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const fault = (t: Type): Type | undefined => {
       if (typeof t === "string") return t === "void" ? t : undefined;
       if (t.kind === "literal" || t.kind === "regex") return undefined;
+      // A type holding itself isn't built into the program.
+      if (tiedBy(t)) return t;
       const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "object" || t.kind === "variant" ? t.fields.map((f) => f.type)
         : t.kind === "class" ? [...(t.base ? [t.base] : []), ...t.fields.map((f) => f.type)] : t.kind === "interior" && constant && t.which !== "Cell" ? [t.of] : undefined;
       if (!parts) return t;

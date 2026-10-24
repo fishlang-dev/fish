@@ -2163,13 +2163,15 @@ export function expressions(ctx: Context) {
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
   // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
-  function unsent(t: Type): Type | undefined {
-    if (typeof t === "string") return undefined;
+  function unsent(t: Type, seen = new Set<Type>()): Type | undefined {
+    // A type holding itself is looked into once.
+    if (typeof t === "string" || seen.has(t)) return undefined;
+    seen.add(t);
     if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
     const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
       : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
-      const found = unsent(part);
+      const found = unsent(part, seen);
       if (found) return found;
     }
     return undefined;
