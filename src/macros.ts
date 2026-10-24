@@ -1,4 +1,5 @@
 import type { Checked } from "./check.ts";
+import { upcasts } from "./classes.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
@@ -136,20 +137,10 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
-    upcasting(method);
+    upcasts.add(`${at.start}:${at.end}`);
     decl.members = [...decl.members, method];
   }
   return [exported ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
-}
-
-// Marks `other` in a derived `super.equals(other)`: the base's `equals` reads the embedded
-// base, which a reference to the class points at, though Fish code can't upcast it itself.
-function upcasting(node: unknown) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) return node.forEach(upcasting);
-  const n = node as Record<string, unknown>;
-  if (n.kind === "call" && (n.callee as { object?: { kind?: string } }).object?.kind === "super") Object.assign((n.args as object[])[0]!, { upcast: true });
-  Object.values(n).forEach(upcasting);
 }
 
 // Gives every node of a tree one span, as code a decorator made.

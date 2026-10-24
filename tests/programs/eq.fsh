@@ -222,3 +222,21 @@ const SAME = comptime same();
 function main() {
   console.log(SAME, same());
 }
+// case: eq_wider_object_params
+// expect: true false
+// expect: true false
+function same3(a: { x: i64 }, b: { x: i64; y: i64 }): boolean { return a === b; }
+function same(a: { x: i64 }, b: { x: i64 }): boolean { return a === b; }
+function main() {
+  console.log(same3({ x: 1 }, { x: 1, y: 2 }), same3({ x: 2 }, { x: 1, y: 2 }));
+  const w = { x: 1, y: 2 };
+  console.log(same({ x: 1 }, w.clone()), same(w, { x: 2 }));
+}
+// case: eq_macro_after_derived_base
+// expect: true false
+macro function keep(input: Ast): Ast { return input; }
+@derive(Eq) class B { constructor(public x: i64) {} }
+@keep @derive(Eq) class D extends B { constructor(x: i64) { super(x); } }
+function main() {
+  console.log(new D(1) === new D(1), new D(1) === new D(2));
+}
