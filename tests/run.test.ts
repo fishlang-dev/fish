@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
@@ -18,6 +18,11 @@ import { parse } from "../src/parser.ts";
 //   // link: <name>     link the C library <name>, as `--link <name>` does
 // A program spanning several files is a directory holding `main.fsh`, whose comments say what
 // to expect, and the files it imports.
+//
+// A file may hold many programs, each starting at a `// case: <name>` line and running to the
+// next. Each case is built and checked on its own, as the file `<name>.fsh` holding just its
+// lines, so its line numbers and messages read as they would in a file of its own; its test is
+// `<file> > <name>`. Text before the first case is the file's comment and belongs to no case.
 //
 // Programs are built and run concurrently, as many at once as the machine has cores, or
 // FISH_TEST_JOBS; each test waits for its own program and checks it, in order.
@@ -53,7 +58,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
       parse(src);
       return empty;
     }
-    const out = join(tmp, name.replace(/\.fsh$/, ""));
+    const out = join(tmp, name.replace(/\.fsh$/, "").replace(/[^\w.-]+/g, "_"));
     const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
     await buildAsync(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
     // Every program is checked for leaks: the runtime reports what is still allocated at exit.
@@ -72,24 +77,56 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
   }
 }
 
-const programs = readdirSync(dir).filter((f) => f.endsWith(".fsh") || existsSync(join(dir, f, "main.fsh")));
-const sources = new Map(programs.map((name) => {
-  const file = name.endsWith(".fsh") ? join(dir, name) : join(dir, name, "main.fsh");
-  return [name, { file, src: readFileSync(file, "utf8") }];
-}));
+// A test's program: a file, a directory's `main.fsh`, or a case of a file, which is written out
+// as its own file; or what is wrong with a file's cases.
+type Program = { label: string; file: string; src: string; problem?: string };
+const DIRECTIVE = /^\/\/ (expect|error|panic|fails|mode|link):/;
+
+function programsOf(entry: string): [string, Program][] {
+  const file = entry.endsWith(".fsh") ? join(dir, entry) : join(dir, entry, "main.fsh");
+  const src = readFileSync(file, "utf8");
+  if (!entry.endsWith(".fsh") || !/^\/\/ case: /m.test(src)) return [[entry, { label: entry, file, src }]];
+  const problem = (message: string, line: number): [string, Program][] => [[entry, { label: entry, file, src, problem: `${entry}:${line}: ${message}` }]];
+  const cases: { name: string; line: number; lines: string[] }[] = [];
+  for (const [i, line] of src.split("\n").entries()) {
+    const marker = /^\/\/ case: (.*)$/.exec(line);
+    if (marker) {
+      const name = marker[1]!.trim();
+      if (!/^[\w-]+$/.test(name)) return problem(`a case's name is letters, digits, '_' and '-', not '${name}'`, i + 1);
+      if (cases.some((c) => c.name === name)) return problem(`the case '${name}' is named twice`, i + 1);
+      cases.push({ name, line: i + 1, lines: [] });
+    } else if (cases.length > 0) cases.at(-1)!.lines.push(line);
+    else if (DIRECTIVE.test(line)) return problem("this directive comes before the first case, so it belongs to none", i + 1);
+  }
+  const empty = cases.find((c) => c.lines.every((l) => l.trim() === ""));
+  if (empty) return problem(`the case '${empty.name}' is empty`, empty.line);
+  const folder = join(tmp, "cases", entry.replace(/\.fsh$/, ""));
+  mkdirSync(folder, { recursive: true });
+  return cases.map((c) => {
+    const text = c.lines.join("\n");
+    const path = join(folder, `${c.name}.fsh`);
+    writeFileSync(path, text);
+    return [`${entry} > ${c.name}`, { label: `${c.name}.fsh`, file: path, src: text }];
+  });
+}
+
+const sources = new Map(readdirSync(dir).filter((f) => f.endsWith(".fsh") || existsSync(join(dir, f, "main.fsh"))).flatMap(programsOf));
+const programs = [...sources.keys()];
 // A test starts its own program and the next ones, several pools' widths ahead, so a whole run
 // keeps every core busy past a slow program while `bun test -t <pattern>` builds little more
 // than it selects.
 const outcomes = new Map<string, Promise<Outcome>>();
 function ahead(at: number) {
   for (const name of programs.slice(at, at + jobs * 8)) {
-    if (!outcomes.has(name)) outcomes.set(name, pooled(() => outcome(name, sources.get(name)!.file, sources.get(name)!.src)));
+    const program = sources.get(name)!;
+    if (!outcomes.has(name) && !program.problem) outcomes.set(name, pooled(() => outcome(name, program.file, program.src)));
   }
 }
 
 for (const name of programs) {
   test(name, async () => {
-    const { src } = sources.get(name)!;
+    const { src, label, problem } = sources.get(name)!;
+    if (problem) throw new Error(problem);
     const expected = [...src.matchAll(/\/\/ expect: (.*)/g)].map((m) => m[1] + "\n").join("");
     const errors = [...src.matchAll(/\/\/ error: (.*)/g)].map((m) => m[1]!);
     const panics = [...src.matchAll(/\/\/ panic: (.*)/g)].map((m) => m[1]!);
@@ -99,7 +136,7 @@ for (const name of programs) {
 
     if (run.error !== undefined) {
       if (!(run.error instanceof CompileError) || errors.length === 0) throw run.error;
-      const message = formatError(run.error, name, src);
+      const message = formatError(run.error, label, src);
       for (const error of errors) expect(message).toContain(error);
       return;
     }
