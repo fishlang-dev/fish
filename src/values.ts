@@ -11,6 +11,7 @@ import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType,
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
+import { unusedDefaults } from "./check.ts";
 import { STD_BASE } from "./std.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
@@ -3018,6 +3019,8 @@ export function expressions(ctx: Context) {
   // for `b`, the result may still be empty.
   function orElse(e: Extract<Expr, { kind: "binary" }>): Type {
     const option = read(e.left);
+    // A default a destructuring assignment adds is only for an Option's absence.
+    if (!isOption(option) && unusedDefaults.has(e)) return option;
     if (!isOption(option)) throw new CompileError(`the left side of '??' is a '${show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
     const inner = held(option);
     // A parameter's default is checked as an argument for it would be; a nullable one's is null.

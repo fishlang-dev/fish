@@ -47,6 +47,19 @@ export function assignedNames(node: unknown, names = new Set<string>()): Set<str
   const n = node as { kind?: string; target?: { kind?: string; name?: string }; operand?: { kind?: string; name?: string } };
   const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
   if (target?.kind === "ident") names.add(target.name!);
+  // A destructuring assignment assigns each name its pattern holds.
+  if (n.kind === "destructure") for (const name of patternNames((n as { pattern: unknown }).pattern)) names.add(name);
   Object.values(node).forEach((v) => assignedNames(v, names));
+  return names;
+}
+
+// The variables a destructuring pattern assigns.
+function patternNames(p: unknown, names: string[] = []): string[] {
+  if (typeof p !== "object" || p === null) return names;
+  const q = p as { kind?: string; name?: string; target?: unknown; elements?: unknown[]; props?: { value: unknown }[]; rest?: unknown };
+  if (q.kind === "ident") names.push(q.name!);
+  else if (q.kind === "default") patternNames(q.target, names);
+  else if (q.kind === "array") [...(q.elements ?? []), q.rest].forEach((x) => patternNames(x, names));
+  else if (q.kind === "object") [...(q.props ?? []).map((x) => x.value), q.rest].forEach((x) => patternNames(x, names));
   return names;
 }

@@ -230,3 +230,82 @@ function main() {
   let i = 0, j = 1;
   for (let t = 0; t < 3; [i, j] = [j, i + j]) t++;
 }
+// case: destructuring_assignment_review_def
+// expect: 5 5
+// expect: 7 7
+function main() {
+  let a = 0, b = 0;
+  [a, b = a] = [5];
+  console.log(a, b);
+  let x = 0, y = 0;
+  const src: { x: i64; y?: i64 } = { x: 7 };
+  ({ x, y = x } = src);
+  console.log(x, y);
+}
+// case: destructuring_assignment_review_buf
+// expect: 1 0
+function main() {
+  let prev: i64[] = [0, 0];
+  let curr: i64[] = [1, 1];
+  [prev, curr] = [curr, prev];
+  console.log(prev[0], curr[0]);
+}
+// case: destructuring_assignment_review_mixed
+// expect: x 1
+function main() {
+  let s = "";
+  let n = 0;
+  [s, n] = ["x", 1];
+  console.log(s, n);
+}
+// case: destructuring_assignment_review_lit_u8
+// expect: 1
+function main() {
+  let a: u8 = 0;
+  [a] = [1];
+  console.log(a);
+}
+// case: destructuring_assignment_review_lit_union
+// expect: on
+function main() {
+  let k: "on" | "off" = "off";
+  [k] = ["on"];
+  console.log(k);
+}
+// case: destructuring_assignment_review_narrow
+// expect: 5
+function main() {
+  let v: string | i64 = "s" + 1;
+  if (typeof v === "string") {
+    [v] = [5];
+  }
+  console.log(v);
+}
+// case: destructuring_assignment_review_ctor
+// expect: a1 2
+// expect: b1 3
+class P {
+  x: string;
+  y: i64;
+  constructor(x: string, y: i64) { [this.x, this.y] = [x, y]; }
+}
+class Q {
+  x: string;
+  y: i64;
+  constructor(x: string, y: i64) { ({ x: this.x, y: this.y } = { x, y }); }
+}
+function main() {
+  const p = new P("a" + 1, 2);
+  console.log(p.x, p.y);
+  const q = new Q("b" + 1, 3);
+  console.log(q.x, q.y);
+}
+// case: destructuring_assignment_review_ref
+// expect: x
+class C { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let x = new C("x");
+  let r: Ref<C> = x;
+  ({ r } = { r: x });
+  console.log(r.s);
+}
