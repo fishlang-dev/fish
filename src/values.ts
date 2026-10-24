@@ -1055,6 +1055,9 @@ export function expressions(ctx: Context) {
       Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
       return call(e);
     }
+    if (computed.has(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
+      throw new CompileError(`'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
+    }
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
@@ -1500,6 +1503,7 @@ export function expressions(ctx: Context) {
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
+      if (computed.has(callee.object)) throw new CompileError(`'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
       const lent = isRefType(held) && held.mutable;
       if (!place(callee.object) && !lent) throw new CompileError(`'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
@@ -1539,7 +1543,8 @@ export function expressions(ctx: Context) {
     const callback = e.args[name === "update" ? 1 : 0]!;
     if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place; passing a function by name isn't supported yet`, callback.start, callback.end);
     const lend = (u: Type) => (isCopy(u) ? u : refType(u, false));
-    const params = name === "update" ? [refType(t.value, true)] : t.set ? [lend(t.key)] : [lend(t.value), lend(t.key)];
+    // A Set's forEach passes each member twice, as JavaScript's does.
+    const params = name === "update" ? [refType(t.value, true)] : t.set ? [lend(t.key), lend(t.key)] : [lend(t.value), lend(t.key)];
     const passes = name === "update" ? "the value to change" : t.set ? "each member" : "each value and its key";
     expect(callback, functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void"));
     const c = value(callback);
@@ -1570,10 +1575,15 @@ export function expressions(ctx: Context) {
       if (made) expect(from, arrayType(set ? made.key : tupleType([made.key, made.value])));
       else if (!set && from.kind === "array") for (const x of from.elements) if (x?.kind === "array" && x.elements.length === 2) pairs.add(x);
       const t = value(from);
+      if (made) {
+        const wants = arrayType(set ? made.key : tupleType([made.key, made.value]));
+        coerce(from, t, wants, `'new ${name}' takes ${shape}, not '${show(t)}'`);
+        return made;
+      }
       const element = isArray(t) ? lower(t.element) : undefined;
       const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 ? elementsOf(element as ObjectType) : undefined;
       if (element === undefined || (!set && !pair)) throw new CompileError(`'new ${name}' takes ${shape}, not '${show(t)}'`, from.start, from.end);
-      const result = made ?? collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
+      const result = collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
       const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
       coerce(from, t, wants, `argument of type '${show(t)}' is not assignable to parameter of type '${show(wants)}'`);
       return result;
@@ -2917,6 +2927,10 @@ export function expressions(ctx: Context) {
     if (holder && isArray(isRefType(holder) ? holder.to : holder)) {
       const capacity = (target as { name: string }).name === "capacity";
       throw new CompileError(capacity ? "an array's 'capacity' can't be set; use 'reserve(n)' to make room, or 'shrinkToFit()' to give it back" : "an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
+    }
+    const table = holder && (isRefType(holder) ? holder.to : holder);
+    if (table && typeof table !== "string" && table.kind === "map") {
+      throw new CompileError("a Map's or a Set's 'size' can't be set; use 'delete' or 'clear' to remove entries", target.start, target.end);
     }
     if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);

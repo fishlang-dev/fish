@@ -600,7 +600,12 @@ typedef struct {
   void (*drop_value)(void *);
 } fsh_map;
 
+// Set once before main, so every thread hashes with the same seed.
 static uint64_t fsh_map_seed = 0;
+
+__attribute__((constructor)) static void fsh_map_seeding(void) {
+  if (getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
+}
 
 // ponytail: a seeded multiplicative hash, not SipHash; use SipHash-1-3 if hash flooding matters
 static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
@@ -643,7 +648,6 @@ static void fsh_map_reindex(fsh_map *m) {
 }
 
 fsh_map *fsh_rt_map_new(int64_t size, int64_t key_at, int64_t value_at, int32_t strings, void (*drop_key)(void *), void (*drop_value)(void *)) {
-  if (!fsh_map_seed && getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
   fsh_map *m = fsh_rt_alloc(sizeof(fsh_map));
   *m = (fsh_map){NULL, 0, 0, 0, NULL, 0, size, key_at, value_at, strings, drop_key, drop_value};
   return m;

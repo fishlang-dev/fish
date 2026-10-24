@@ -640,14 +640,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // With `from`, the array whose pairs or members it takes over, a later key replacing an earlier.
   function mapNew(t: MapType, from: Expr | undefined): string {
     const entry = entryType(t);
+    // The array runs first, so a panic in it has no table to leave behind.
+    const whole = from && owned(from);
     const [size, keyAt, valueAt] = [offsetOf(entry), offsetOf(entry, 3), offsetOf(entry, 4)];
     const drop = (part: Type) => (needsDrop(part) ? elementDrop(part) : "null");
     const made = temp();
     emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${lower(t.key) === "string" ? 1 : 0}, ptr ${drop(t.key)}, ptr ${t.set ? "null" : drop(t.value)})`);
-    if (!from) return made;
-    const array = types.get(from) as ArrayType;
+    if (!from || !whole) return made;
+    const array = (coercions.get(from) ?? types.get(from)) as ArrayType;
     const et = llvm(array.element);
-    const whole = owned(from);
     const [data, length] = [temp(), temp()];
     emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
     emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
@@ -773,9 +774,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (name === "keys" || name === "values" || name === "entries") return listed(e, name, t, map);
     if (name === "forEach") return eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
-    const key = owned(e.args[0]!);
+    // A panic in the value's argument drops the key made before it.
+    const [key, given] = delivered((hand) => [hand(owned(e.args[0]!), t.key), name === "set" ? hand(owned(e.args[1]!), t.value) : undefined]);
     if (name === "set" || name === "add") {
-      inserted(t, map, key, name === "set" ? owned(e.args[1]!) : undefined);
+      inserted(t, map, key, given);
       return at;
     }
     const bits = keyBits(key, t.key);
@@ -968,7 +970,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(callback)!;
     const env = alloca(llvm(closure));
     emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
-    const parts: [3 | 4, Type][] = t.set ? [[3, t.key]] : [[4, t.value], [3, t.key]];
+    const parts: [3 | 4, Type][] = t.set ? [[3, t.key], [3, t.key]] : [[4, t.value], [3, t.key]];
     entriesLoop(t, map, (at) => {
       const passed = parts.slice(0, closure.params.length).map(([i, type], n) => {
         const slot = temp();
