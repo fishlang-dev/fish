@@ -136,8 +136,13 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
+// The element types written on `Array.of<T>(...)` calls, which became array literals.
+const ofElements = new WeakMap<Expr, TypeNode>();
+
 // The `FixedArray.filled` calls, by the fixed array each makes.
 export const fixedFills = new WeakSet<Expr>();
+// The `array length` checks that panic on a negative length.
+export const lengthChecks = new WeakSet<Expr>();
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
@@ -720,9 +725,28 @@ export function expressions(ctx: Context) {
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
       const made = callee.object;
+      if (e.typeArgs.length > 0) throw new CompileError("'fill' takes no type argument; write the element type on the array, as in 'new Array<u8>(n).fill(0)'", e.start, e.end);
       if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
-      Object.assign(e, { callee: { kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [made.args[0], e.args[0]], typeArgs: made.typeArgs });
-      return call(e);
+      const [n, x] = [made.args[0]!, e.args[0]!];
+      Object.assign(e, { callee: { kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
+      // What the prelude can't do with the value is said at the value, not inside the prelude.
+      let result;
+      try {
+        result = call(e);
+      } catch (err) {
+        if (err instanceof CompileError && err.start >= STD_BASE) throw new CompileError(`'new Array(n).fill(x)' can't be made from this value: ${err.message}`, x.start, x.end);
+        throw err;
+      }
+      const t = lower(types.get(x)!);
+      if (typeof t !== "string" && t.kind === "generator") throw new CompileError("'new Array(n).fill(x)' puts a clone of x in every slot, and a generator can't be cloned: it runs once", x.start, x.end);
+      clonable(t, x);
+      return result;
+    }
+    // A length the user wrote, an `i64` or a `usize`; a fill's panics when negative, as JavaScript throws.
+    if (callee.kind === "ident" && callee.name === "array length") {
+      const t = read(e.args[0]!);
+      if (t !== "i64" && t !== "usize") throw new CompileError(`an array's length is an 'i64' or a 'usize', not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
+      return { type: "i64", what: "an array length" };
     }
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
@@ -1232,15 +1256,20 @@ export function expressions(ctx: Context) {
   function arrayStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const at = { start: callee.start, end: callee.end };
     if (callee.name === "of") {
+      if (e.typeArgs.length > 1) throw new CompileError("'Array.of' takes one type argument, its element type", e.start, e.end);
+      if (e.typeArgs[0]) ofElements.set(e, e.typeArgs[0]);
       const literal = Object.assign(e, { kind: "array", elements: e.args }) as unknown as Expr;
-      if (e.typeArgs.length === 1) expect(literal, arrayType(resolveType(e.typeArgs[0]!)));
       return { type: value(literal), what: "'Array.of'" };
     }
     if (callee.name !== "from") throw new CompileError(`'Array' has no '${callee.name}'; arrays are made with 'Array.of', 'Array.from' or 'new Array(n).fill(x)'`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError("'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
     const [source, f] = e.args as [Expr, Expr | undefined];
     const prelude = (name: string, args: Expr[]): Expr => ({ kind: "call", callee: { kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
-    const length = source.kind === "object" && source.props.length === 1 && source.props[0]!.kind === "property" && source.props[0]!.key === "length" ? source.props[0]!.value : undefined;
+    const prop = source.kind === "object" && source.props.length === 1 ? source.props[0]! : undefined;
+    const written = prop?.kind === "property" && prop.key === "length" ? prop.value
+      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
+    const length = written && arrayLength(written, false);
     let made: Expr;
     if (length) {
       if (!f) throw new CompileError("'Array.from({ length: n })' alone would hold n undefined values, which Fish has no way to make; give it a function, as in 'Array.from({ length: n }, (_, i) => i)'", e.start, e.end);
@@ -1254,8 +1283,16 @@ export function expressions(ctx: Context) {
       else throw new CompileError(`'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${show(t)}'`, source.start, source.end);
     }
     if (f) made = { kind: "call", callee: { kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
-    Object.assign(e, made);
+    Object.assign(e, made, { start: e.start, end: e.end });
     return call(e as Call);
+  }
+
+  // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
+  // `panics` a negative one ending the program at n.
+  function arrayLength(n: Expr, panics: boolean): Expr {
+    const checked: Expr = { kind: "call", callee: { kind: "ident", name: "array length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
+    if (panics) lengthChecks.add(checked);
+    return checked;
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -1726,6 +1763,8 @@ export function expressions(ctx: Context) {
   function cloned(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError("'clone' takes no arguments", e.start, e.end);
     const stored = lower(receiver);
+    // A generator runs once, through its frame, so there is no second one to make.
+    if (typeof stored !== "string" && stored.kind === "generator") throw new CompileError("a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
     // A copy of a value holding references borrows what it does.
     if (holdsRef(receiver)) borrowsFrom.set(e, [callee.object]);
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
@@ -2115,6 +2154,17 @@ export function expressions(ctx: Context) {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
+        // `Array.of<T>(...)`: an array of T, its elements checked against it.
+        const written = ofElements.get(e);
+        if (written) {
+          const element = resolveType(written);
+          for (const x of e.elements as Expr[]) {
+            expect(x, element);
+            const t = value(x);
+            coerce(x, t, element, `type '${show(t)}' is not assignable to type '${show(element)}'`);
+          }
+          return arrayType(element);
+        }
         const inline = fixedLiterals.get(e);
         if (inline) {
           const given = e.elements as Expr[];
@@ -2197,7 +2247,11 @@ export function expressions(ctx: Context) {
         if (named) expectFrom(named.constructor, list);
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
         if (e.callee.kind === "ident" && e.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
-          throw new CompileError(list.length === 1 ? "'new Array(n)' would hold n empty slots, which Fish has no way to make; fill it, as in 'new Array(n).fill(0)', or use 'Array.from({ length: n }, (_, i) => ...)'" : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
+          const one = list.length === 1 ? value(list[0]!) : undefined;
+          throw new CompileError(list.length === 0 ? "'new Array()' is an empty array; write '[]', with its type where it can't be inferred, as in 'const xs: string[] = []'"
+            : one !== undefined && isInteger(one) ? "'new Array(n)' would hold n empty slots, which Fish has no way to make; fill it, as in 'new Array(n).fill(0)', or use 'Array.from({ length: n }, (_, i) => ...)'"
+            : list.length === 1 ? "'new Array(x)' of one value that isn't a length makes '[x]'; write 'Array.of(x)' or '[x]'"
+            : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
         }
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;

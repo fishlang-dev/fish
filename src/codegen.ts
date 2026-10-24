@@ -1,5 +1,5 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -2960,6 +2960,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      if (e.callee.kind === "ident" && e.callee.name === "array length") {
+        const n = value(e.args[0]!);
+        if (!lengthChecks.has(e)) return n;
+        const [negative, fail, ok] = [temp(), label(), label()];
+        emit(`${negative} = icmp slt i64 ${n}, 0`);
+        emit(`br i1 ${negative}, label %${fail}, label %${ok}`);
+        startBlock(fail);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\ninvalid array length\n`)})`);
+        emit("unreachable");
+        startBlock(ok);
+        return n;
+      }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
       if (e.callee.kind === "ident" && e.callee.name === "spawn") {
         const future = valueType(e.args[0]!) as FutureType;

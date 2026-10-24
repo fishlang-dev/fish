@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { elementsOf, field, fits, generatorElement, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { elementsOf, field, fits, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -86,7 +86,8 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     return;
   }
   // `Generator<T>` against a generator matches what it yields.
-  if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && typeof arg !== "string" && arg.kind === "generator") return infer(node.args[0]!, arg.yields, names, bindings, at);
+  // A parameter of a generator interface, or one standing for a generator, yields too.
+  if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(node.args[0]!, yieldsOf(arg)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
@@ -429,7 +430,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       return type;
     }
     if (bound.kind === "interface") {
-      const reason = unsatisfied(type, bound, members, arg);
+      const reason = unsatisfied(typeof type !== "string" && type.kind === "param" && type.concrete ? lower(type) : type, bound, members, arg);
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
       return type;
     }
