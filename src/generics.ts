@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { elementsOf, field, fits, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { elementsOf, field, fits, generatorElement, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -85,6 +85,8 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
     return;
   }
+  // `Generator<T>` against a generator matches what it yields.
+  if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && typeof arg !== "string" && arg.kind === "generator") return infer(node.args[0]!, arg.yields, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
@@ -168,6 +170,7 @@ export function comptimeName(p: Param): string {
 }
 
 export function instancing({ resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
+  const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
   const implicits = new Map<Body, Map<number, Bound>>();
   // Which implicit parameters are references to their type, and how.
@@ -295,8 +298,13 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
+    // A `Generator<T>` bound names the function's own type parameters, which the call has just
+    // decided, so the argument is checked against what they stand for.
+    const decided = new Map([...explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])));
     for (const [i, bound] of implicitOf(f)) {
-      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, bound, lent.get(f)!.has(i)));
+      const element = generatorElement(bound);
+      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : bound;
+      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
       const unlocked = lent.get(f)!.get(i)?.mutable ? unlocks(held, bound) : undefined;
@@ -366,8 +374,12 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     return typeParamsOf(f).length > 0 || implicitOf(f).size > 0 || f.params.some((p) => p.comptime);
   }
 
+  // One set of placeholders per body, so a parameter's type and the body name the same `T`;
+  // callers get a copy they may add to.
   function explicitPlaceholders(f: Body): Map<string, Type> {
-    return placeholders(typeParamsOf(f), (t, scope) => withScope(scope, () => resolveType(t)));
+    let made = explicit.get(f);
+    if (!made) explicit.set(f, made = placeholders(typeParamsOf(f), (t, scope) => withScope(scope, () => resolveType(t))));
+    return new Map(made);
   }
 
   // A parameter typed with an interface or an object type is an implicit type parameter, so
