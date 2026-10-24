@@ -1024,7 +1024,9 @@ export function check(written: Stmt[], library = false): Checked {
           const name = `index ${e.index.start}`;
           indexes.set(e, name);
           const at = { start: e.index.start, end: e.index.end };
-          hoisted.unshift({ kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: undefined, init: e.index, ...at }], ...at });
+          // An index into an array or a string is a `usize`, which gives a literal sum its type.
+          const usize: TypeNode = { kind: "ref", name: "usize", args: [], ...at };
+          hoisted.unshift({ kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: usize, init: e.index, ...at }], ...at });
         }
         const copy = (e: Expr, at: Span): Expr => {
           if (e.kind === "member") return { ...e, object: copy(e.object, at), start: at.start, end: at.end };
