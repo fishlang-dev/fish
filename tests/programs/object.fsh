@@ -246,3 +246,50 @@ function main() { const o: { a: i64 } | null = null; const p = { ...o }; }
 // case: object_spread_duplicate
 // error: duplicate property 'a'
 function main() { const d = { a: 1 }; const o = { a: 2, a: 3, ...d }; }
+// case: object_spread_snapshot
+// expect: x1 5 y2
+// A named spread is cloned when the literal reaches it, before a later part changes it.
+type O = { s: string; n: i64 };
+function set(o: Mut<O>): i64 { o.s = "y" + 2; return 5; }
+function main() {
+  let d: O = { s: "x" + 1, n: 1 };
+  const r = { ...d, k: set(d) };
+  console.log(r.s, r.k, d.s);
+}
+// case: object_spread_private
+// expect: 1 2
+// A spread takes an instance's public fields only, so an earlier property keeps its name.
+class C { private x: i64 = 42; y: i64 = 2; }
+function main() {
+  const r = { x: 1, ...new C() };
+  console.log(r.x, r.y);
+}
+// case: object_spread_overridden
+// expect: x1 1
+// A property a later spread replaces is dropped.
+type O = { s: string; n: i64 };
+function main() {
+  const d: O = { s: "x" + 1, n: 1 };
+  const r = { s: "p" + 2, ...d };
+  console.log(r.s, r.n);
+}
+// case: object_spread_borrow_live
+// error: cannot change 'list' while 'r' borrows 'list[...]' and is used later
+type O = { s: string; n: i64 };
+function main() {
+  let list: O[] = [{ s: "x" + 1, n: 1 }];
+  const r: Ref<O> = list[0];
+  for (let i = 0; i < 50; i++) list.push({ s: "p" + i, n: i });
+  list.shift();
+  const o = { ...r };
+  console.log(o.s);
+}
+// case: object_spread_no_adapt
+// error: type '{ n: i64 }' is not assignable to type '{ n: u8 }'
+function main() {
+  const d = { n: 300 };
+  const o: { n: u8 } = { n: 1, ...d };
+  console.log(o.n);
+  const p: { n: u8 } = { n: 1, ...{ n: 70000 } };
+  console.log(p.n);
+}

@@ -2640,7 +2640,8 @@ export function expressions(ctx: Context) {
   // A fresh object literal's literal properties take the number types of the fields they meet,
   // in nested literals too; the literal's type is then made again from its properties.
   function adaptFields(e: Expr, type: Type, to: Type): Type {
-    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
+    // A literal with spreads keeps the types its parts give.
+    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class") || e.props.some((p) => p.kind === "spread")) return type;
     let changed = false;
     for (const p of e.props) {
       if (p.kind !== "property" || typeof p.key !== "string") continue;

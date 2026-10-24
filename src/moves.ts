@@ -1415,7 +1415,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(e.object, call);
       case "object":
         for (const p of e.props) {
-          if (p.kind === "property") expr(p.value);
+          if (p.kind === "property" || p.kind === "spread") expr(p.value);
           else if (p.kind === "shorthand") used(locals.get(p), p.end);
         }
         return;

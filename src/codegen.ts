@@ -4723,54 +4723,64 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A property's name and value.
   // A shorthand's variable may be narrowed, or an enum member the field widens, so its value
   // is converted to the field's type.
-  // An object literal with spreads: its parts run in order, and each field comes from the last
-  // part naming it. A spread's source is cloned field by field, or, made for the literal, taken
-  // apart, with the fields a later part replaces dropped.
+  // An object literal with spreads, built in order: each part's fields go in as it runs, a named
+  // source cloned then and there, before a later part could change or move it, and a source made
+  // for the literal taken apart. A field a later part replaces is dropped; until the object is
+  // made, every value gathered is dropped if a later part panics. A spread gives an instance's
+  // public fields only.
   function spreadObject(e: Extract<Expr, { kind: "object" }>, type: ObjectType): string {
-    type Part = { spread?: ObjectType | ClassType; v: string; taken?: boolean; name?: string };
-    const parts = delivered((hand) => e.props.map((p): Part => {
-      if (p.kind !== "spread") {
-        const [name, v] = property(p, type);
-        return { name, v: hand(v, field(type, name)!.type) };
+    const got = new Map<string, { v: string; type: Type }>();
+    const put = (name: string, v: string, t: Type) => {
+      const old = got.get(name);
+      if (old) {
+        pending = pending.filter((entry) => entry !== old);
+        dispose(old.v, old.type);
       }
-      const src = p.value;
-      // The source's own type in this instance, its fields laid out as this instance has them.
-      const held = types.get(src)!;
-      const source = lower(isRef(held) ? held.to : held) as ObjectType | ClassType;
-      const taken = fresh(src);
-      let v = taken ? hand(owned(src), source) : value(src);
-      if (isRef(types.get(src)!)) {
-        const read = temp();
-        emit(`${read} = load ${llvm(source)}, ptr ${v}`);
-        v = read;
-      }
-      return { spread: source, v, taken };
-    }));
-    const from = (name: string) => parts.findLastIndex((part) => (part.spread ? field(part.spread, name) !== undefined : part.name === name));
-    const read = (part: Part, name: string) => {
-      const t = field(part.spread!, name)!.type;
-      const v = temp();
-      emit(`${v} = extractvalue ${llvm(part.spread!)} ${part.v}, ${fieldPath(part.spread!, name).join(", ")}`);
-      return [v, t] as const;
+      const entry = { v, type: t };
+      pending.push(entry);
+      got.set(name, entry);
     };
+    for (const p of e.props) {
+      if (p.kind === "property") {
+        put(p.key as string, owned(p.value), valueType(p.value));
+        continue;
+      }
+      if (p.kind === "shorthand") {
+        const local = resolved(p);
+        const read = temp();
+        emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
+        put(p.name, copied(read, local.type), local.type);
+        continue;
+      }
+      if (p.kind !== "spread") throw new Error("internal error: unchecked property");
+      const held = types.get(p.value)!;
+      // The source's own type in this instance, its fields laid out as this instance has them.
+      const source = lower(isRef(held) ? held.to : held) as ObjectType | ClassType;
+      const taken = fresh(p.value);
+      let whole = taken ? owned(p.value) : value(p.value);
+      if (isRef(held)) {
+        const read = temp();
+        emit(`${read} = load ${llvm(source)}, ptr ${whole}`);
+        whole = read;
+      }
+      const fields = source.kind === "class" ? allFields(source) : source.fields;
+      for (const f of fields) {
+        const v = temp();
+        emit(`${v} = extractvalue ${llvm(source)} ${whole}, ${fieldPath(source, f.name).join(", ")}`);
+        const shown = source.kind !== "class" || (f.access ?? "public") === "public";
+        if (shown) put(f.name, taken ? v : copied(v, f.type), f.type);
+        else if (taken) dispose(v, f.type);
+      }
+    }
     let result = "undef";
     type.fields.forEach((f, i) => {
-      const part = parts[from(f.name)]!;
-      let v = part.v;
-      if (part.spread) {
-        const [got, t] = read(part, f.name);
-        v = convert(part.taken ? got : copied(got, t), t, f.type);
-      }
+      const part = got.get(f.name)!;
       const next = temp();
-      emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${v}, ${i}`);
+      emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${convert(part.v, part.type, f.type)}, ${i}`);
       result = next;
     });
-    // What a taken source held and the result doesn't keep is dropped.
-    parts.forEach((part, at) => {
-      if (!part.spread || !part.taken) return;
-      const kept = (name: string) => from(name) === at && field(type, name) !== undefined;
-      for (const f of part.spread.kind === "class" ? allFields(part.spread) : part.spread.fields) if (!kept(f.name)) dispose(read(part, f.name)[0], f.type);
-    });
+    const made = new Set(got.values());
+    pending = pending.filter((entry) => !made.has(entry as { v: string; type: Type }));
     return result;
   }
 

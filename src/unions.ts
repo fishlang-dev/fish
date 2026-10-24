@@ -23,7 +23,8 @@ export type Union = {
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
 export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type: Type; apply(coercions: Map<Expr, Type>): void } | undefined {
-  if (e.kind !== "object" || typeof to === "string" || to.kind !== "object") return undefined;
+  // A literal with spreads takes its fields' types from them, which no literal narrows.
+  if (e.kind !== "object" || typeof to === "string" || to.kind !== "object" || e.props.some((p) => p.kind === "spread")) return undefined;
   const fields: Field[] = [];
   const steps: ((coercions: Map<Expr, Type>) => void)[] = [];
   const own = types.get(e) as Exclude<Type, string>;
