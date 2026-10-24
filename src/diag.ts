@@ -10,6 +10,10 @@ export type Note = { message: string; start: number; end: number };
 // A file of a program other than the one an error is rendered against, from `base` on.
 export type Source = { base: number; src: string; file: string };
 
+// The names local declarations are hoisted under, 'Point@0', shown as written.
+const LOCAL_NAME = /([\w$]+)@\d+/g;
+export const written = (text: string) => text.replace(LOCAL_NAME, "$1");
+
 // A user-facing compile error pointing at a [start, end) source range. `sources` holds the
 // program's other files, when it spans several.
 export class CompileError extends Error {
@@ -19,10 +23,10 @@ export class CompileError extends Error {
   sources: Source[] = [];
 
   constructor(message: string, start: number, end = start + 1, note?: Note) {
-    super(message);
+    super(written(message));
     this.start = start;
     this.end = end;
-    this.note = note;
+    this.note = note && { ...note, message: written(note.message) };
   }
 }
 

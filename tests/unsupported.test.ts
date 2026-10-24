@@ -173,9 +173,6 @@ const STATEMENTS: [string, string][] = [
   ["debugger", "'debugger' statements"],
   ["for (const k in o) {}", "'for...in' loops"],
   ["for await (const x of xs) {}", "'for await...of' loops"],
-  ["class A {}", "local classes"],
-  ["@sealed class A {}", "decorators"],
-  ["enum E { A }", "local enums"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];

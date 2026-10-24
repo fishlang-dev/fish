@@ -1,10 +1,10 @@
 // case: interface
+// expect: 1
 function main() {
   interface Point { x: i64 }
+  const p: Point = { x: 1 };
+  console.log(p.x);
 }
-// error: local interfaces are not supported yet
-// error:   interface Point { x: i64 }
-// error:   ^^^^^^^^^^^^^^^^^^^^^^^^^^
 // case: interface_argument
 interface Animal {
   speak(): i64

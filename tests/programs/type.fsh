@@ -46,12 +46,12 @@ function main() {
 }
 // expect: 2 1 3 false
 // case: type_alias_local
+// expect: 3
 function main() {
   type Count = i64
+  const c: Count = 3
+  console.log(c)
 }
-// error: local type aliases are not supported yet
-// error:   type Count = i64
-// error:   ^^^^^^^^^^^^^^^^
 // case: type_alias_recursive
 type Node = { value: i64; next: Node }
 
