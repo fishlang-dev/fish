@@ -471,18 +471,18 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
-        // A nested function calling itself uses what it captured again, for the call, so nothing
-        // borrowed from those may be live across it.
-        if (selfCalls.has(e)) {
-          for (const [alias] of instance.captures ?? []) {
-            const at: Named = { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end };
-            free(String(alias.id), at, instance.changed?.has(alias) ? "lend mutably" : "read");
-          }
-        }
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
+          // A nested function calling itself uses what it captured again, lent to the call before
+          // its arguments run, so neither they nor anything live across it may borrow from those.
+          if (selfCalls.has(e)) {
+            [...(instance.captures ?? [])].forEach(([alias], i) => {
+              const at: Named = { kind: "ident", name: alias.name, start: e.callee.start + i, end: e.callee.end };
+              lend(String(alias.id), instance.changed?.has(alias) ?? false, at, undefined, name, e);
+            });
+          }
           // A closure is read to call it, or taken over when it can run only once.
           const run = e.callee.kind === "ident" ? lower(types.get(e.callee) ?? "void") : undefined;
           if (e.callee.kind === "ident" && locals.has(e.callee)) {

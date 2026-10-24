@@ -128,22 +128,13 @@ function namesIn(p: Pattern): string[] {
   return [];
 }
 
-// The names a function's body uses that its parameters and its own declarations don't give.
+// The names a function's body uses that its parameters and its body's own top-level declarations
+// don't give. A name declared only in an inner block may still mean an outer variable elsewhere,
+// so it stays a use.
 function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
-  const own = new Set([...fn.params.flatMap((p) => namesIn(p.pattern)), ...declaredIn(fn.body)]);
+  const top = (fn.body ?? []).flatMap((s) => (s.kind === "let" ? s.declarations.flatMap((d) => namesIn(d.target)) : s.kind === "function" ? [s.name] : []));
+  const own = new Set([...fn.params.flatMap((p) => namesIn(p.pattern)), ...top]);
   return new Set([...identifiers(fn.body)].filter((n) => !own.has(n)));
-}
-
-// The names declared anywhere inside a piece of syntax, by `let`, `const` and functions.
-function declaredIn(node: unknown, found: string[] = []): string[] {
-  if (Array.isArray(node)) for (const x of node) declaredIn(x, found);
-  else if (node && typeof node === "object") {
-    const s = node as Stmt;
-    if (s.kind === "let") for (const d of s.declarations) found.push(...namesIn(d.target));
-    if (s.kind === "function") found.push(s.name);
-    for (const v of Object.values(node)) if (v && typeof v === "object") declaredIn(v, found);
-  }
-  return found;
 }
 
 // Every name written in a piece of syntax.
@@ -151,7 +142,8 @@ function identifiers(node: unknown, found = new Set<string>()): Set<string> {
   if (Array.isArray(node)) for (const x of node) identifiers(x, found);
   else if (node && typeof node === "object") {
     const n = node as { kind?: string; name?: unknown };
-    if (n.kind === "ident" && typeof n.name === "string") found.add(n.name);
+    // A shorthand property `{ x }` reads `x` too.
+    if ((n.kind === "ident" || n.kind === "shorthand") && typeof n.name === "string") found.add(n.name);
     for (const v of Object.values(node)) if (v && typeof v === "object") identifiers(v, found);
   }
   return found;

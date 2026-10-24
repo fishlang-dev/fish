@@ -100,3 +100,35 @@ function main() { let p = new P(); function take(): P { return p; } }
 // case: nested_generic
 // error: generic nested functions are not supported yet
 function main() { function g<T>(x: T): T { return x; } }
+// case: nested_self_call_argument
+// error: cannot use 'xs[0]' while 'xs' is lent mutably to 'g' for this call
+// A self call lends what the function uses before its arguments run, so an argument can't
+// borrow what the call may change.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() {
+  let xs = [new P(1)];
+  const other = new P(9);
+  function g(d: i64, r: Ref<P>): void {
+    if (d > 0) {
+      g(d - 1, xs[0]);
+      console.log(r.n);
+    } else {
+      xs = [new P(2)];
+      console.log(r.n);
+    }
+  }
+  g(1, other);
+}
+// case: nested_hoist_scopes
+// expect: 2 2
+// A name declared only in an inner block of the body, or read through a shorthand property, still
+// means the variable around the function, so hoisting keeps the function after it.
+function main() {
+  const x = 1;
+  {
+    const x = 2;
+    function g(): i64 { { const x = 9; } return x; }
+    function h(): i64 { const o = { x }; return o.x; }
+    console.log(g(), h());
+  }
+}
