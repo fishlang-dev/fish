@@ -475,14 +475,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
-          // A nested function calling itself uses what it captured again, lent to the call before
-          // its arguments run, so neither they nor anything live across it may borrow from those.
-          if (selfCalls.has(e)) {
-            [...(instance.captures ?? [])].forEach(([alias], i) => {
-              const at: Named = { kind: "ident", name: alias.name, start: e.callee.start + i, end: e.callee.end };
-              lend(String(alias.id), instance.changed?.has(alias) ?? false, at, undefined, name, e);
-            });
-          }
+          // A nested function calling itself uses what it captured again: lent shared while its
+          // arguments run, so they may read it, then mutably for the call where it changes it, so
+          // nothing borrowed from those may be live across it. Keys below zero, one per capture,
+          // so no argument's loan can replace these.
+          const captures = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias], i) => ({ alias, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named })) : [];
+          for (const c of captures) lend(String(c.alias.id), false, c.at, undefined, name, e, c.at.start, c.key);
           // A closure is read to call it, or taken over when it can run only once.
           const run = e.callee.kind === "ident" ? lower(types.get(e.callee) ?? "void") : undefined;
           if (e.callee.kind === "ident" && locals.has(e.callee)) {
@@ -517,6 +515,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const reads = builtin && !changes && (array(object) || mapped(object));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
+          for (const c of captures) {
+            if (!instance.changed?.has(c.alias) || !state) continue;
+            state.loans.delete(c.key);
+            lend(String(c.alias.id), true, c.at, undefined, name, e, e.end - 1, c.key);
+          }
           if (object && changes) {
             state?.loans.delete(object.start);
             change(object);
@@ -865,10 +868,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
-  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at = e.start) {
+  // A loan is keyed by where it starts, or by `key` for one no source offset may share.
+  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at = e.start, key = e.start) {
     free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
-    state.loans.set(e.start, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
+    state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
   }
 
   // A reference variable given a value holds what it borrows: a place lent to it, or what

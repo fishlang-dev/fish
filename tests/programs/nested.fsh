@@ -101,7 +101,7 @@ function main() { let p = new P(); function take(): P { return p; } }
 // error: generic nested functions are not supported yet
 function main() { function g<T>(x: T): T { return x; } }
 // case: nested_self_call_argument
-// error: cannot use 'xs[0]' while 'xs' is lent mutably to 'g' for this call
+// error: cannot mutably lend 'xs' while 'xs[...]' is lent to 'g' for this call
 // A self call lends what the function uses before its arguments run, so an argument can't
 // borrow what the call may change.
 class P { n: i64; constructor(n: i64) { this.n = n; } }
@@ -131,4 +131,14 @@ function main() {
     function h(): i64 { const o = { x }; return o.x; }
     console.log(g(), h());
   }
+}
+// case: nested_self_call_reads
+// expect: 3
+// A self call's arguments may read what the function changes, since the call changes it only once
+// they have run.
+function main() {
+  let xs = [1];
+  function grow(n: usize): void { if (n < 3) { xs.push(1); grow(xs.length); } }
+  grow(1);
+  console.log(xs.length);
 }
