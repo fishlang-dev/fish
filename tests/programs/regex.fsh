@@ -1,3 +1,4 @@
+// case: regex
 // mode: parse
 function f() {
   let simple = /ab+c/
@@ -22,3 +23,8 @@ function noSpaces() {
   let shifted = a >>>= 1
   let left = a <<= 1
 }
+// case: regex_unterminated
+function main() {
+  let r = /abc
+}
+// error: unterminated regular expression

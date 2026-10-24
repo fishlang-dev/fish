@@ -1,3 +1,4 @@
+// case: logic
 // The right side of && and || runs only when the left side does not decide the result.
 function loud(label: i64, result: boolean): boolean {
   print("evaluated", label)
@@ -17,4 +18,8 @@ function main() {
   // expect: evaluated 6
   // expect: false
   print(1 < 2 && 2 < 3 || false)  // expect: true
+}
+// case: logic_types
+function main() {
+  print(1 && true)  // error: operator '&&' cannot be applied to types 'i64' and 'boolean'
 }

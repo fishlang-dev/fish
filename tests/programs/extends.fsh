@@ -1,3 +1,4 @@
+// case: extends
 type Named = { id: i64 }
 
 class Animal {
@@ -88,3 +89,98 @@ function main() {
 // expect: 42 3
 // expect: 7 515 false
 // expect: 3 7
+// case: extends_cycle
+class A extends B {}
+class B extends A {}
+
+function main() {}
+// error: embeds itself through 'extends'
+// case: extends_no_super
+class Base {
+  constructor(public x: i64) {}
+}
+
+class Derived extends Base {
+  constructor() {
+    print(1)
+    super(1)
+  }
+}
+
+function main() {}
+// error: a derived class's constructor must start with 'super(...)'
+// case: extends_not_base
+class Animal {
+  legs = 4
+}
+
+class Dog extends Animal {}
+
+function walk(a: Animal) {}
+
+function main() {
+  walk(new Dog())
+}
+// error: 'Dog' extends 'Animal' by embedding one, so it can't be used as 'Animal'; extract an interface both classes implement
+// case: extends_override
+class Greeter {
+  greet(): i64 {
+    return this.name()
+  }
+
+  name(): i64 {
+    return 1
+  }
+}
+
+class Loud extends Greeter {
+  name(): i64 {
+    return 2
+  }
+}
+
+function main() {}
+// error: overriding 'name' is an error here: 'Greeter' reaches it through 'this', and with 'extends' as embedding that would still run 'Greeter.name'; extract an interface instead
+// case: extends_protected
+class Base {
+  protected secret = 1
+}
+
+class Derived extends Base {
+  reveal(): i64 {
+    return this.secret
+  }
+}
+
+function main() {
+  print(new Derived().reveal())
+  print(new Derived().secret)
+}
+// error: property 'secret' is protected and only accessible within class 'Base' and its subclasses
+// case: extends_redeclare
+class Base {
+  x = 1
+}
+
+class Derived extends Base {
+  x = 2
+}
+
+function main() {}
+// error: 'x' is already a field of 'Base'; with 'extends' as embedding it would be a second, separate field
+// case: extends_super_elsewhere
+class Base {}
+
+class Derived extends Base {
+  again(this: Mut<this>) {
+    super()
+  }
+}
+
+function main() {}
+// error: 'super(...)' can only be the first statement of a derived class's constructor
+// case: extends_unknown
+class Dog extends Animal {}
+
+function main() {}
+// error: cannot find class 'Animal'

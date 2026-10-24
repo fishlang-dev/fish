@@ -1,3 +1,4 @@
+// case: narrowing
 type Dir = "up" | "down" | i64
 
 function describe(x: i64 | boolean): i64 {
@@ -43,3 +44,19 @@ function main() {
 // expect: 10 true
 // expect: false
 // expect: true false true
+// case: narrowing_needed
+function f(x: i64 | boolean): i64 {
+  return x * 2
+}
+
+function main() {}
+// error: operator '*' cannot be applied to types 'boolean | i64' and 'i64'
+// case: narrowing_reassigned
+function main() {
+  let x: i64 | boolean = 1
+  if (typeof x === "number") {
+    print(x + 1)
+  }
+  x = true
+}
+// error: operator '+' cannot be applied to types 'boolean | i64' and 'i64'

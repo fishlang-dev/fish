@@ -1,0 +1,152 @@
+// case: destructure_array_moves
+// error: an array pattern reads each element as 'xs[i]', and a 'P' would be moved out of the array, leaving a hole
+class P { n: i64 = 1; } function main() { const ps = [new P()]; const [p] = ps; }
+// case: destructure_array_short
+// panic: index out of bounds: the len is 2 but the index is 2
+function main() { const [a, b, c] = "x,y".split(","); console.log(a, b, c); }
+// case: destructure_declarations
+// expect: 1 ann1 none 5 2 bee
+// expect: s1 3
+// expect: x y missing 0
+// expect: 10
+// expect: 1 w2 3
+// Object and array patterns in declarations: renames, defaults for null fields, nesting, rest,
+// holes, tuples, arrays of copies with defaults and rest, and let names that change.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+type User = { id: i64; name: string; tag: string | null; pet: P; extra: { a: i64; b: string } };
+function main() {
+  const u: User = { id: 1, name: "ann" + 1, tag: null, pet: new P(5), extra: { a: 2, b: "bee" } };
+  const { id, name: label, tag = "none", pet, extra: { a, b }, ...rest } = u;
+  console.log(id, label, tag, pet.n, a, b);
+  const t: [string, i64, P] = ["s" + 1, 2, new P(3)];
+  const [first, , third] = t;
+  console.log(first, third.n);
+  const parts = "x,y,z".split(",");
+  const [p0, p1 = "d", , p3 = "missing", ...others] = parts;
+  console.log(p0, p1, p3, others.length);
+  let { n } = new P(9);
+  n = n + 1;
+  console.log(n);
+  const v = { q: 1, r: "w" + 2, s: 3 };
+  const { q, ...left } = v;
+  console.log(q, left.r, left.s);
+}
+// case: destructure_index_once
+// expect: 1 2 1
+// expect: f
+// expect: 3 4
+// expect: 3
+// An index along a destructured path runs once, however many parts read through it.
+type Pt = { x: i64; y: i64 };
+function f(): usize { console.log("f"); return 1; }
+function main() {
+  const ps: Pt[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }];
+  let i: usize = 0;
+  const { x, y } = ps[i++];
+  console.log(x, y, i);
+  const { x: a, y: b } = ps[f()];
+  console.log(a, b);
+  const { x: c } = ps[1 + 0];
+  console.log(c);
+}
+// case: destructure_missing_field
+// error: property 'zz' does not exist on type '{ a: i64 }'
+function main() { const { zz } = { a: 1 }; }
+// case: destructure_moved
+// error: 'o.p.n' can't be used here because 'o.p' was moved
+class P { n: i64 = 1; } function main() { const o = { p: new P(), k: 3 }; const { p } = o; console.log(o.p.n); }
+// case: destructure_moves
+// expect: 5 2 1
+// expect: 1 3
+// expect: 3 s3 3
+// Destructuring a place moves only the parts it names, as Rust's let does; copies leave it whole,
+// and a borrowed value lends its parts.
+class P { n: i64 = 1; }
+class Q { n: i64; s: string; constructor(n: i64) { this.n = n; this.s = "s" + n; } }
+function show(q: Ref<Q>): string { const { n, s } = q; return `${n} ${s}`; }
+function main() {
+  const o = { a: 1, b: 2 };
+  let { a, b } = o;
+  a = 5;
+  console.log(a, b, o.a);
+  const h = { p: new P(), k: 3 };
+  const { p } = h;
+  console.log(p.n, h.k);
+  const q = new Q(3);
+  console.log(show(q), q.n);
+}
+// case: destructure_not_object
+// error: '{ ... }' destructures an object or an instance, not 'i64'
+function main() { const { a } = 5; }
+// case: destructure_param_default
+// error: a destructured parameter can't have a default yet; give the default to the parts
+type Point = { x: i64 }; function f({ x }: Point = { x: 1 }): i64 { return x; } function main() {}
+// case: destructure_params
+// expect: 25 a1
+// expect: 2 7 2
+// expect: a=1&b=2
+// expect: 3
+// expect: 5
+// Destructured parameters on functions, constructors, methods and callbacks.
+type Point = { x: i64; y: i64 };
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function len({ x, y }: Point): i64 { return x * x + y * y; }
+function first([a, b]: [string, i64]): string { return `${a}${b}`; }
+class Box { v: i64; constructor({ x }: Point) { this.v = x; } add({ y = 0 }: { y: i64 | null }): i64 { return this.v + y; } }
+function own({ p, k }: { p: P; k: i64 }): i64 { return p.n + k; }
+function main() {
+  console.log(len({ x: 3, y: 4 }), first(["a", 1]));
+  const b = new Box({ x: 2, y: 9 });
+  console.log(b.v, b.add({ y: 5 }), b.add({ y: null }));
+  const pairs: [string, i64][] = [["a", 1], ["b", 2]];
+  console.log(pairs.map(([k, v]) => `${k}=${v}`).join("&"));
+  const pts: Point[] = [{ x: 1, y: 2 }];
+  console.log(pts.map(({ x, y }) => x + y).join());
+  console.log(own({ p: new P(4), k: 1 }));
+}
+// case: destructure_property
+// error: a parameter property can't be destructured; it names one field
+class C { constructor(public { a }: { a: i64 }) {} } function main() {}
+// case: destructure_sources
+// expect: get
+// expect: 1 2 3
+// expect: 3 s3
+// expect: s4 4
+// expect: 8
+// expect: 1 2
+// expect: 5 6
+// expect: 1
+// expect: 1 2 1
+// Patterns over a getter's result (read once), an instance with rest, a borrowed array with a
+// default, a derived constructor's destructured parameter, a top-level const and an element.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+class S { get inner(): { o: { x: i64; y: i64; p: P } } { console.log("get"); return { o: { x: 1, y: 2, p: new P(3) } }; } }
+class Q { n: i64; s: string; constructor(n: i64) { this.n = n; this.s = "s" + n; } }
+type Pt = { x: i64; y: i64 };
+class B { x: i64; constructor(x: i64) { this.x = x; } }
+class D extends B { y: i64; constructor({ x, y }: Pt) { super(x); this.y = y; } }
+class E { constructor(public k: i64, { x }: Pt) { console.log(k, x); } }
+const CFG = { a: 1, s: "x", inner: { xs: [1, 2] } };
+function f(xs: Ref<i64[]>): i64 { const [a, b = 7] = xs; return a + b; }
+function main() {
+  const s = new S();
+  const { x, y, p } = s.inner.o;
+  console.log(x, y, p.n);
+  const q = new Q(3);
+  const { n, ...r } = q;
+  console.log(n, r.s);
+  const { s: t, ...r2 } = new Q(4);
+  console.log(t, r2.n);
+  console.log(f([1]));
+  const d = new D({ x: 1, y: 2 });
+  console.log(d.x, d.y);
+  new E(5, { x: 6, y: 7 });
+  const { inner } = CFG;
+  console.log(inner.xs[0]);
+  const ps: Pt[] = [{ x: 1, y: 2 }];
+  const { x: px, y: py } = ps[0];
+  console.log(px, py, ps.length);
+}
+// case: destructure_tuple_rest
+// error: rest elements in tuple patterns are not supported yet
+function main() { const t: [i64, i64, i64] = [1, 2, 3]; const [a, ...r] = t; }

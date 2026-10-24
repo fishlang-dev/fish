@@ -1,3 +1,4 @@
+// case: clone
 // `.clone()` copies an object, an instance or a union; a class's own `clone()` runs instead,
 // through a type parameter too.
 type Point = { x: i64; y: i64 }
@@ -42,3 +43,36 @@ function main() {
   print(p.x, q.x, c.n, d.n, typeof v === "number" ? 0 : v.y, t.copies, w.copies, z.y)
 }
 // expect: 1 9 0 2 4 2 1 6
+// case: clone_inherited
+// A base's own clone() makes a base, so a derived class without one gets the compiler's copy;
+// Copy values clone too.
+class Base {
+  n: i64 = 1
+  clone(): Base {
+    let b = new Base()
+    b.n = this.n + 100
+    return b
+  }
+}
+
+class Derived extends Base {
+  m: i64 = 2
+}
+
+function main() {
+  const d = new Derived()
+  const e: Derived = d.clone()
+  const five = 5
+  print(e.n, e.m, d.clone().n, new Base().clone().n, five.clone())
+}
+// expect: 1 2 1 101 5
+// case: clone_shape
+class Tracked {
+  copies: i64 = 0
+  clone(extra: i64): Tracked {
+    return new Tracked()
+  }
+}
+
+function main() {}
+// error: a 'clone' method must take no parameters and return 'Tracked', since it replaces the compiler's copy

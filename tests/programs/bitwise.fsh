@@ -1,3 +1,4 @@
+// case: bitwise
 function main() {
   print(12 & 10, 12 | 10, 12 ^ 10, ~0, ~5)
   print(1 << 10, -8 >> 1, -8 >>> 60, 8 >>> 1)
@@ -26,3 +27,8 @@ function main() {
 // expect: false 0
 // expect: true 1
 // expect: true 1
+// case: bitwise_booleans
+function main() {
+  print(true & false)
+}
+// error: operator '&' can't be applied to booleans; use '&&'

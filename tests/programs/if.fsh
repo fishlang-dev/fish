@@ -1,3 +1,4 @@
+// case: if
 function sign(n: i64): i64 {
   if (n < 0) {
     return -1
@@ -21,4 +22,13 @@ function main() {
   }
   print("outer", x)    // expect: outer 1
   if (x > 5) print("unreachable")
+}
+// case: if_missing_return
+function positive(n: i64): i64 {  // error: not all code paths return a value
+  if (n > 0) {
+    return n
+  }
+}
+
+function main() {
 }
