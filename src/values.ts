@@ -2024,6 +2024,7 @@ export function expressions(ctx: Context) {
     // `x!` gives a copy of what x holds, which a change wouldn't reach.
     const through = copied(object);
     if (through) throw new CompileError(`can't call '${name}' through '${through}', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
+    if (readCopy(object)) throw new CompileError(`'${name}' changes its object, and this one is read through a Dyn, which gives a copy; change it through a method`, object.start, object.end);
     intoMember(object, types, `call '${name}' on`);
     if (place(object)) changeable(object, `call '${name}' on`);
   }
@@ -3046,6 +3047,8 @@ export function expressions(ctx: Context) {
   // of a constant can change, and `this` changes only in a constructor or a method declared
   // `this: Mut<this>`.
   function changeable(target: Expr, action: string) {
+    // Below a read through a Dyn, the place is part of a copy.
+    if (readCopy(target) && !computed.has(target)) throw new CompileError(`cannot ${action} this: it is part of a value read through a Dyn, which gives a copy, so the change would be lost; change it through a method`, target.start, target.end);
     let root = target;
     let path = "";
     // Through a mutable reference anything below it may change, whatever variable holds the
