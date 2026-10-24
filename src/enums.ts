@@ -10,7 +10,8 @@ export type EnumInfo = { type: Type; members: Map<string, LiteralType>; data?: D
 
 // An enum whose members may hold values: a union of variants, made once per set of type
 // arguments, since its payload types may name its type parameters.
-export type DataEnum = { name: string; id: number; params: string[]; members: EnumMember[]; instances: Map<string, EnumInstance>; at: Span };
+// `eq` marks one that `@derive(Eq)` lets `===` compare.
+export type DataEnum = { name: string; id: number; params: string[]; members: EnumMember[]; instances: Map<string, EnumInstance>; at: Span; eq: boolean };
 export type EnumInstance = { type: Type; variants: Map<string, VariantType> };
 
 type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[] };
@@ -45,7 +46,8 @@ function dataEnum(node: EnumNode): EnumInfo {
     if (m.init) throw new CompileError(`enum '${node.name}' mixes members with values and members holding data; split it into two enums`, m.start, m.end);
   }
   const params = node.typeParams.map((p) => p.name);
-  return { type: "never", members: new Map(), data: { name: node.name, id: enums++, params, members: node.members, instances: new Map(), at: node } };
+  const eq = ((node as { derives?: string[] }).derives ?? []).includes("Eq");
+  return { type: "never", members: new Map(), data: { name: node.name, id: enums++, params, members: node.members, instances: new Map(), at: node, eq } };
 }
 
 const I64_MAX = (1n << 63n) - 1n;

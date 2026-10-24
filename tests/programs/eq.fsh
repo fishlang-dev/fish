@@ -68,3 +68,70 @@ function main() {
   const b: B = { b: 1 };
   console.log(a === b);
 }
+// case: eq_derived_class
+// expect: true false
+// expect: false true
+// expect: true
+@derive(Eq)
+class Point {
+  x: i64;
+  y: i64;
+  constructor(x: i64, y: i64) { this.x = x; this.y = y; }
+}
+@derive(Eq)
+class Named {
+  constructor(public name: string, public at: Point) {}
+}
+function main() {
+  console.log(new Point(1, 2) === new Point(1, 2), new Point(1, 2) === new Point(2, 1));
+  console.log(new Point(1, 2) !== new Point(1, 2), new Point(1, 2) !== new Point(1, 3));
+  console.log(new Named("a", new Point(1, 2)) === new Named("a", new Point(1, 2)));
+}
+// case: eq_own_equals
+// expect: true false
+class Money {
+  cents: i64;
+  note: string;
+  constructor(cents: i64, note: string) { this.cents = cents; this.note = note; }
+  equals(other: Ref<this>): boolean { return this.cents === other.cents; }
+}
+function main() {
+  console.log(new Money(5, "a") === new Money(5, "b"), new Money(5, "a") === new Money(6, "a"));
+}
+// case: eq_derived_enum
+// expect: true false false
+// expect: true
+@derive(Eq)
+enum Cmd { Move(i64, i64), Say(string), Stop }
+function main() {
+  const a: Cmd = Cmd.Move(1, 2);
+  console.log(a === Cmd.Move(1, 2), a === Cmd.Move(2, 1), a === Cmd.Stop);
+  console.log(Cmd.Say("hi") === Cmd.Say("hi"));
+}
+// case: eq_derive_json
+// error: 'derive' knows 'Eq' so far; 'Json' isn't one it can derive yet
+@derive(Json)
+class P { x: i64 = 1; }
+function main() {}
+// case: eq_equals_shape
+// error: 'P.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean
+class P {
+  x: i64 = 1;
+  equals(other: i64): boolean { return this.x === other; }
+}
+function main() {
+  console.log(new P() === new P());
+}
+// case: eq_enum_payload_not_eq
+// error: a Map isn't compared by value
+@derive(Eq)
+enum E { M(Map<string, i64>), N }
+function main() {
+  const e: E = E.N;
+  console.log(e === E.N);
+}
+// case: eq_derive_on_function
+// error: 'derive' applies to a class or an enum
+@derive(Eq)
+function f() {}
+function main() {}

@@ -538,8 +538,12 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
     case "object":
       return t.match ? t : t.fields.map((f) => part(f.type)).find((p) => p !== undefined);
     case "class":
-    case "variant":
       return eq(t) ? undefined : t;
+    case "variant":
+      if (!eq(t)) return t;
+      return (t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t])
+        .flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields : []))
+        .map((f) => part(f.type)).find((p) => p !== undefined);
     default:
       return t;
   }

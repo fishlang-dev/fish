@@ -2,7 +2,7 @@ import type { Checked } from "./check.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
-import type { ClassMember, Expr, Func, Stmt } from "./parser.ts";
+import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import { fits, show, type Type } from "./typing.ts";
@@ -59,7 +59,7 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
       const twins = placed(linked(site));
       own.forEach((d, i) => {
         const twin = twins[i]!.decorator;
-        prepared.set(d.decorator, { linked: twin, args: argumentsOf(twin, macros, d.where) });
+        prepared.set(d.decorator, builtin(twin, macros) ? { linked: twin, args: [], builtin: true } : { linked: twin, args: argumentsOf(twin, macros, d.where) });
       });
     }
     const constants = [...prepared.values()].flatMap((p) => p.args.flatMap((a) => (a.constant ? [a.constant] : [])));
@@ -82,7 +82,7 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
         const pending = pendingOf(d);
         const ready = prepared.get(pending.decorator);
         if (!ready) break;
-        const out = run(d, s.kind === "export", site.module, pending, ready, context);
+        const out = ready.builtin ? derived(d, s.kind === "export", pending) : run(d, s.kind === "export", site.module, pending, ready, context);
         statements.splice(site.index + at, 1, ...out);
         count += out.length - 1;
       }
@@ -103,8 +103,51 @@ function checkArguments(check: () => Checked, constants: Stmt[]): Checked {
   }
 }
 
-type Prepared = { linked: Expr; args: Argument[] };
+type Prepared = { linked: Expr; args: Argument[]; builtin?: true };
 type Context = { macros: Map<string, Func>; checked: Checked; code: Stmt[]; loaded: Loaded; pins: Set<string>; library: boolean };
+
+// Whether a decorator is `@derive(...)`, which the compiler gives unless the program has its own.
+function builtin(d: Expr, macros: Map<string, Func>): boolean {
+  const callee = d.kind === "call" ? d.callee : d;
+  return callee.kind === "ident" && callee.name === "derive" && !macros.has("derive");
+}
+
+// `@derive(Eq)`: on a class, the `equals` comparing every field that `===` calls, unless the
+// class has one; on a data enum, a mark letting `===` compare its values.
+function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
+  const at = pending.decorator;
+  if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
+  const traits = at.kind === "call" ? at.args : [];
+  if (traits.length === 0) throw new CompileError("'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
+  for (const t of traits) {
+    if (t.kind !== "ident" || t.name !== "Eq") throw new CompileError(`'derive' knows 'Eq' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
+  }
+  const decl = { ...d, decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
+  if (decl.kind === "enum") Object.assign(decl, { derives: ["Eq"] });
+  if (decl.kind === "class" && !decl.members.some((m) => (m as { name?: unknown }).name === "equals")) {
+    const fields = decl.members.flatMap((m) => {
+      if (m.kind === "field" && typeof m.name === "string" && !m.modifiers.includes("static")) return [m.name];
+      if (m.kind === "constructor") return m.params.flatMap((p) => (p.modifiers.length > 0 && p.pattern.kind === "ident" ? [p.pattern.name] : []));
+      return [];
+    });
+    const test = fields.length === 0 ? "true" : fields.map((f) => `this.${f} === other.${f}`).join(" && ");
+    const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
+    const method = made.members[0]!;
+    respan(method, at);
+    decl.members = [...decl.members, method];
+  }
+  return [exported ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
+}
+
+// Gives every node of a tree one span, as code a decorator made.
+function respan(node: unknown, at: { start: number; end: number }) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) return node.forEach((x) => respan(x, at));
+  const n = node as Record<string, unknown>;
+  if (typeof n.start === "number") n.start = at.start;
+  if (typeof n.end === "number") n.end = at.end;
+  Object.values(n).forEach((x) => respan(x, at));
+}
 
 // Each decorator a declaration holds, with where it is written, in the order `allDecorators`
 // gives them.

@@ -97,6 +97,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
+  // In a member's signature, the type `this` names the class, as in `equals(other: Ref<this>)`.
+  const members = new Map([...scope, ["this", type]]);
   const methods = new Map<string, Body>();
   const statics = new Map<string, Body>();
   const getters = new Map<string, Body>();
@@ -203,7 +205,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     table.set(m.name, {
       // A static method has its own symbol, since an instance method may share its name.
       name: `${name}.${isStatic ? "static " : ""}${m.name}`,
-      scope,
+      scope: members,
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,

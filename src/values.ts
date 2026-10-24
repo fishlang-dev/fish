@@ -197,6 +197,9 @@ export const MATH_CONSTANTS: Record<string, number> = {
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
+// The `equals` each class's `===` calls.
+export const equalities = new WeakMap<ClassType, Instance>();
+
 // Each quote, by the Ast types it was checked with, for comptime to build its value from.
 export const quotes = new WeakMap<Expr, Record<Category, Type>>();
 
@@ -3153,9 +3156,20 @@ export function expressions(ctx: Context) {
     return "it has no value equality";
   }
 
-  // Whether a class or a data enum's values compare.
-  function comparesAsValue(_t: ClassType | VariantType): boolean {
-    return false;
+  // Whether a class or a data enum's values compare: a class through its `equals`, an enum
+  // when it derives Eq.
+  function comparesAsValue(t: ClassType | VariantType): boolean {
+    if (t.kind === "variant") return [...enums.values()].some((e) => e.data?.name === t.enum && e.data.eq);
+    const known = equalities.get(t);
+    if (known) return true;
+    const method = inherited(classOf(t), "methods", "equals");
+    if (!method) return false;
+    const instance = instanceOf(method);
+    const [arg, ...more] = paramTypes(instance);
+    const shaped = more.length === 0 && arg !== undefined && isRefType(arg) && !arg.mutable && (lower(arg.to) === lower(t) || (typeof arg.to !== "string" && arg.to.kind === "class" && derives(t, arg.to))) && returnOf(instance, method) === "boolean";
+    if (!shaped) throw new CompileError(`'${t.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
+    equalities.set(t, instance);
+    return true;
   }
 
   // `+` with a string on either side joins the two into a new string.

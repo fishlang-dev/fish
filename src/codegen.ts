@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, equalities, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -2606,6 +2606,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const out = temp();
       emit(`${out} = load i1, ptr ${result}`);
       return out;
+    }
+    // An instance compares through its class's `equals`, which takes the other by reference.
+    const own = type.kind === "class" ? equalities.get(type) : undefined;
+    if (own) {
+      const [x, y] = [alloca(llvm(type)), alloca(llvm(type))];
+      emit(`store ${llvm(type)} ${a}, ptr ${x}`);
+      emit(`store ${llvm(type)} ${b}, ptr ${y}`);
+      return invoke(own, upcast(x, type as ClassType, own.body.owner!), [`ptr ${upcast(y, type as ClassType, own.body.owner!)}`])!;
     }
     // An object, an instance or an enum's member: its fields, a base first.
     const parts = type.kind === "class" && type.base ? [[type.base, 0] as const, ...type.fields.map((f, i) => [f.type, i + 1] as const)] : (type as ObjectType).fields.map((f, i) => [f.type, i] as const);
