@@ -330,3 +330,50 @@ class P { x: i64 = 1; }
 function main() {
   try { JSON.parse<P>("{}"); } catch (e) {}
 }
+// case: json_http
+// expect: HTTP/1.1 200 OK|content-type: application/json|{"id":7,"name":"ann"}
+// expect: HTTP/1.1 201 Created|content-type: application/json|{"id":8,"name":"bo"}
+// expect: HTTP/1.1 400 Bad Request|content-type: text/plain;charset=UTF-8|missing field 'name' at $
+@derive(Json)
+class User { constructor(public id: i64, public name: string) {} }
+type NewUser = { name: string };
+async function ask(port: i64, raw: string): Promise<string> throws IoError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode(raw));
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+function line(text: string): string {
+  const parts = text.split("\r\n\r\n");
+  const head = parts[0].split("\r\n");
+  const typed = head.filter((h) => h.toLowerCase().startsWith("content-type:"));
+  return head[0] + "|" + (typed.length > 0 ? typed[0] : "") + "|" + parts[1].trim();
+}
+async function main(): Promise<void> throws IoError {
+  let app = new Router();
+  app.get("/users/:id", async (req) => Response.json(new User(7, "ann")));
+  app.post("/users", async (req) => {
+    try {
+      const made = await req.json<NewUser>();
+      return Response.json({ id: 8, name: made.name }, { status: 201 });
+    } catch (e) {
+      return new Response(e.message, { status: 400 });
+    }
+  });
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info) => { seen.port.store(info.port); } }, app.handler()));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+  const a = await ask(port, "GET /users/7 HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+  console.log(line(a));
+  const b = await ask(port, "POST /users HTTP/1.1\r\nHost: h\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"name\":\"bo\"}");
+  console.log(line(b));
+  const c = await ask(port, "POST /users HTTP/1.1\r\nHost: h\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{\"nom\":1}");
+  console.log(line(c));
+}

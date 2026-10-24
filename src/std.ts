@@ -145,6 +145,11 @@ class Request {
     return this.body;
   }
 
+  // The body read as JSON into a T.
+  async json<T>(): Promise<T> throws JsonError {
+    return JSON.parse<T>(this.body);
+  }
+
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
   // route has no such parameter.
   param(name: string): string {
@@ -185,6 +190,15 @@ class Response {
     this.statusText = statusText;
     this.headers = headers;
     this.body = text;
+  }
+
+  // A response whose body is the value as JSON, typed 'application/json' unless the headers
+  // given say otherwise.
+  static json<T>(data: Ref<T>, init?: ResponseInit): Response {
+    let res = new Response(null, init);
+    if (!res.headers.has("content-type")) res.headers.set("content-type", "application/json");
+    res.body = JSON.stringify(data);
+    return res;
   }
 
   get ok(): boolean {
