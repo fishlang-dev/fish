@@ -1973,10 +1973,12 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
-        // An array's one property is its length.
+        // An array's properties are its length and its capacity, the room before a push grows it;
+        // capacity isn't JavaScript's.
         if (isArray(object)) {
           if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
-          // Its capacity too, the room it has before a push grows it; neither is JavaScript's.
+          // A shared value's array is read as a copy, which has only the room it needs.
+          if (e.name === "capacity" && ctx.copiesOut.has(e.object)) throw new CompileError(`a shared value's array is read as a copy, so read its capacity inside '${placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
           if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";

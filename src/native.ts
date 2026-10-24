@@ -497,11 +497,14 @@ void fsh_rt_array_grow(fsh_array *a, int64_t more, int64_t size, const char *at)
     fsh_rt_panic("capacity overflow\n");
   }
   if (a->length + more <= a->capacity) return;
-  char *data = fsh_rt_alloc((a->length + more) * size);
+  // Growing at least doubles, as pushes do, so a reserve before each push stays linear; from
+  // nothing it gives exactly what was asked, as Rust's does.
+  int64_t capacity = a->capacity * 2 > a->length + more ? a->capacity * 2 : a->length + more;
+  char *data = fsh_rt_alloc(capacity * size);
   if (a->length) memcpy(data, a->data, a->length * size);
   fsh_rt_free(a->data);
   a->data = data;
-  a->capacity = a->length + more;
+  a->capacity = capacity;
 }
 
 // Gives back the room past the length, the whole buffer when the array is empty.
