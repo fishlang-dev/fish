@@ -38,6 +38,9 @@ export const ARRAY = "{ ptr, i64, i64 }";
 // A Dyn is a pointer to its value's block, then to its vtable.
 export const DYN = "{ ptr, ptr }";
 
+// A type's size in bytes as it is laid out.
+export const byteSize = (t: Type): number => size(t)[0];
+
 function size(t: Type): [number, number] {
   if (typeof t !== "string" && t.kind === "array") return [24, 8];
   if (typeof t !== "string" && t.kind === "fixed") {

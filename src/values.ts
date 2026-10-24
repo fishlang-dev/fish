@@ -137,7 +137,7 @@ export type Context = {
 export const substituted = new WeakSet<Expr>();
 
 // The `FixedArray.filled` calls, by the fixed array each makes.
-export const fixedFills = new WeakMap<Expr, FixedType>();
+export const fixedFills = new WeakSet<Expr>();
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
@@ -1212,7 +1212,9 @@ export function expressions(ctx: Context) {
     expect(v, written.element);
     const t = value(v);
     coerce(v, t, written.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(written.element)}'`);
-    fixedFills.set(e, written);
+    // Each instance's own type, as a generic body's differ, and a statement keeps it too.
+    fixedFills.add(e);
+    types.set(e, written);
     return { type: written, what: "'FixedArray.filled'" };
   }
 

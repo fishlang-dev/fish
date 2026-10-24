@@ -4,6 +4,7 @@ import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
+import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
 
@@ -207,8 +208,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const element = storable(resolveType(of), of);
     if (holdsRef(element)) throw unsupported("fixed arrays of references", of);
     // Its elements live where it does, often the stack, so all of them together are limited.
-    const inner = (t: Type): number => (typeof t !== "string" && t.kind === "fixed" ? t.size * inner(t.element) : 1);
-    if (size * BigInt(inner(element)) > 65536n) throw new CompileError("a FixedArray holds at most 65,536 elements inline, nested ones counted; use an array, 'T[]', for more", n.start, n.end);
+    if (size * BigInt(byteSize(element)) > 65536n) throw new CompileError("a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
     if (typeof element !== "string" && element.kind === "interface") throw new CompileError(`a FixedArray can't hold the interface type '${element.name}' directly; use 'Dyn<${element.name}>'`, of.start, of.end);
     return fixedType(element, Number(size));
   }

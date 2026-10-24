@@ -2928,8 +2928,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A method's receiver runs before its arguments, as in JavaScript. A method called in an
   // optional chain runs only when the chain isn't empty.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    const fill = fixedFills.get(e);
-    if (fill) return fixedFilled(e, fill);
+    if (fixedFills.has(e)) return fixedFilled(e, types.get(e) as FixedType);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
   }

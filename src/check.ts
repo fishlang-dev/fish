@@ -124,9 +124,18 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 function iterated(instance: Instance, e: Expr): Type {
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
   // A fixed array it borrows is kept as a pointer to where it lives.
-  if (typeof type !== "string" && type.kind === "fixed" && borrowed(instance, e)) return refType(type, false);
+  if (typeof type !== "string" && type.kind === "fixed" && borrowed(instance, e) && !throughShared(instance, e)) return refType(type, false);
   if (typeof type === "string" || type.kind !== "array" || !borrowed(instance, e)) return type;
   return objectType([{ name: "a", type: refType(type.element, false) }, { name: "b", type: "i64" }, { name: "c", type: "i64" }]);
+}
+
+// Whether a place is read through a shared value, whose fields are copied out under its lock
+// rather than borrowed where they live.
+function throughShared(instance: Instance, e: Expr): boolean {
+  if (e.kind !== "member" && e.kind !== "index") return false;
+  const held = instance.types.get(e.object);
+  const object = typeof held !== "string" && held?.kind === "ref" ? held.to : held;
+  return (typeof object !== "string" && object?.kind === "shared") || throughShared(instance, e.object);
 }
 
 // Whether an expression reads a value where it lives rather than making one.
