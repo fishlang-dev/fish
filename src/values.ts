@@ -3560,7 +3560,8 @@ export function expressions(ctx: Context) {
       const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
-    if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(to)}`, dynTable(e, held, to));
+    // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.
+    if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(lower(to))}`, dynTable(e, held, lower(to) as DynType));
     coercions.set(e, to);
   }
 

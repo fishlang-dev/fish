@@ -1,4 +1,4 @@
-import type { Instance } from "./check.ts";
+import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
@@ -238,6 +238,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, widenLet(lower(t))])]);
     const t = withScope(scope, () => resolveType(written));
     if (typeof t === "string" || t.kind !== "function") return undefined;
+    // A parameter only the callback itself could decide is left for the call to report.
+    const undecided = [...explicitPlaceholders(f)].filter(([n]) => !bindings.has(n)).map(([, p]) => p);
+    if (t.params.some((p) => holdsPart(p, (u) => undecided.includes(u), true))) return undefined;
     // What it gives is left open while it names a type parameter the call hasn't decided.
     const open = holdsPart(t.returns, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined, true);
     return functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns);
@@ -352,7 +355,13 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       }
       if (typeof type !== "string" && type.kind === "function") throw unsupported("function types as type arguments", at);
     }
-    withScope(bindings, () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
+    // A bound may name the class's parameters too, as this instance of it holds them.
+    withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
+    // A type parameter nothing decided is still the definition's placeholder.
+    const open = new Set(explicitPlaceholders(f).values());
+    for (const p of params) {
+      if (open.has(bindings.get(p.name)!)) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+    }
     readOnlyKept(f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
@@ -368,7 +377,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     ]);
     for (const [i, bound] of implicitOf(f)) {
       const element = generatorElement(bound);
-      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : bound.kind === "function" && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
+      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
@@ -446,11 +455,10 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   // A function-typed parameter's bound as the body sees it: written in terms of the type
   // parameters the body itself holds, so calling it with one of them fits.
   function sameParams(f: Body, i: number, bound: Bound, scope: Map<string, Type>): Bound {
-    if (bound.kind !== "function") return bound;
     const written = f.params[i]!.type!;
     const t = withScope(scope, () => resolveType(written));
     const own = typeof t !== "string" && t.kind === "ref" ? t.to : t;
-    return typeof own !== "string" && own.kind === "function" ? own : bound;
+    return typeof own !== "string" && own.kind === bound.kind ? (own as Bound) : bound;
   }
 
   function generic(f: Body): boolean {
@@ -466,9 +474,10 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
       const own = typeParamsOf(f);
       const outer = classParams(f).map((p) => p.name);
-      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && outer.some((n) => JSON.stringify(p.constraint).includes(`"name":${JSON.stringify(n)}`)));
+      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode(p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
       made = shared ? sharedPlaceholders.get(f.typeParams!) : undefined;
-      if (!made) made = placeholders(own, (t, scope) => withScope(scope, () => resolveType(t)));
+      // A bound may name the class's own parameters, as this instance holds them.
+      if (!made) made = placeholders(own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
       if (shared) sharedPlaceholders.set(f.typeParams!, made);
       explicit.set(f, made);
     }

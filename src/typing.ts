@@ -840,6 +840,10 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
+  if (typeof t !== "string" && t.kind === "interface" && t.generic) {
+    const args = t.generic.args.map((a) => replaced(a, swap));
+    return args.some((a, i) => a !== t.generic!.args[i]) ? instanceInterface(t, args) : t;
+  }
   if (typeof t !== "string" && t.kind === "function") {
     const params = t.params.map((p) => replaced(p, swap));
     const returns = replaced(t.returns, swap);

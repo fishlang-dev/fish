@@ -2,7 +2,7 @@ import { checkOverrides, declareClass, extend, isLifetime, type Body, type Class
 import { CompileError } from "./diag.ts";
 import { stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -228,7 +228,8 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const self = instance.body.self;
   if (self && !self.constructor) fields.push(receiverField(self, (t) => (instance.concrete ? lower(t) : t)));
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
-  [...new Set(instance.locals.values())].sort((a, b) => a.id - b.id).forEach(add);
+  // A local generic function's name holds nothing.
+  [...new Set(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
   const visit = (node: unknown) => {
     if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
     const s = node as Stmt;
@@ -273,6 +274,31 @@ export const nestedFunctions = new WeakMap<Expr, string>();
 // statement that declared it.
 const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
 let lifts = 0;
+
+// Whether a piece of syntax holds a node `found` picks out.
+export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen = new Set<unknown>()): boolean {
+  if (!node || typeof node !== "object" || seen.has(node)) return false;
+  seen.add(node);
+  if (Array.isArray(node)) return node.some((x) => holdsNode(x, found, seen));
+  if (found(node as { kind?: unknown })) return true;
+  return Object.values(node).some((x) => holdsNode(x, found, seen));
+}
+
+// Every name the body of a function declares anywhere, as a variable, a function, a class or a
+// parameter, and the type parameters it is generic over.
+function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[] }): Set<string> {
+  const names = new Set<string>(f.params.flatMap((p) => namesIn(p.pattern)));
+  for (const p of f.typeParams ?? []) names.add(p.name);
+  holdsNode(f.body, (n) => {
+    const s = n as Stmt | Expr;
+    if (s.kind === "let") for (const d of s.declarations) for (const x of namesIn(d.target)) names.add(x);
+    if ((s.kind === "function" || s.kind === "class") && typeof s.name === "string") names.add(s.name);
+    if (s.kind === "arrow" || s.kind === "function") for (const p of s.params) for (const x of namesIn(p.pattern)) names.add(x);
+    if ((s.kind === "function" || s.kind === "arrow") && s.typeParams) for (const p of s.typeParams) names.add(p.name);
+    return false;
+  });
+  return names;
+}
 
 // A generic arrow held by a const, as the function declaration it amounts to.
 function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
@@ -1855,16 +1881,28 @@ export function check(written: Stmt[], library = false): Checked {
     // function of its own, instantiated per call, so it can use nothing of the body around it.
     function lift(s: Stmt, name: string, fn: Func): undefined {
       const own = fn as Extract<Stmt, { kind: "function" }>;
-      if (JSON.stringify(fn.body).includes('"kind":"this"')) {
+      if (holdsNode(fn.body, (n) => n.kind === "this")) {
         throw new CompileError(`'${name}' is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
       }
+      // It is checked apart from the body around it, so a name that body declares anywhere,
+      // before or after, a sibling generic function or a type parameter included, would mean
+      // something else inside it.
+      const around = new Set([...declaredIn(f), ...(f.scope?.keys() ?? []), ...scopes.flatMap((s) => [...s.keys()])]);
       for (const n of freeNames(own)) {
-        const local = n === name ? undefined : lookup(n);
-        if (local && !local.generic) throw new CompileError(`'${name}' is generic, so it is made anew for each call and can't use '${n}' from the function around it; pass it as a parameter`, fn.start, fn.end);
+        if (n !== name && (around.has(n) || lookup(n))) throw new CompileError(`'${name}' is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
       }
+      const typed = holdsNode([fn.params, fn.returnType, fn.body], (n) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name));
+      if (typed) throw new CompileError(`'${name}' is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
       let lifted = liftedFunctions.get(s);
       if (!lifted) {
         lifted = { name, fn: { ...fn, name: `${f.name}.${name}#${lifts++}` } };
+        // Its calls of itself call what it was lifted to.
+        const symbol = lifted.fn.name;
+        holdsNode(fn.body, (n) => {
+          const c = n as Expr;
+          if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) c.callee.name = symbol;
+          return false;
+        });
         liftedFunctions.set(s, lifted);
         byName.set(lifted.fn.name, lifted.fn);
         funcs.push(lifted.fn);
