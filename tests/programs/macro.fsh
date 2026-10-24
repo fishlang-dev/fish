@@ -361,3 +361,12 @@ macro function m(input: AstStmt): Ast[] {
 }
 @m function f() {}
 function main() { console.log("ok"); }
+// case: macro_stacked_pins_single
+// expect: 1 base
+function label(): string { return "base"; }
+macro function keep(input: Ast): Ast { return input; }
+macro function withLabel(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("described")}(): string { return label(); }`];
+}
+@keep @withLabel function one(): i64 { return 1; }
+function main() { console.log(one(), described()); }

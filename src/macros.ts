@@ -28,6 +28,8 @@ let expansions = 0;
 
 // Expands every file's macros in place.
 export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
+  // The pinned names every round's quotes made, which a later round's macro may give back.
+  const pins = new Set<string>();
   for (let round = 0; ; round++) {
     const sites = loaded.modules.flatMap(decorated);
     if (sites.length === 0) return;
@@ -47,7 +49,7 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
     for (const site of sites) for (const x of linked(site).decorators!) macroOf(x, macros);
     const macroCode = macroProgram(program, macros, new Set(sites.map(linked)));
     const checked = checkMacros(macroCode);
-    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded);
+    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded, pins, library);
   }
 }
 
@@ -210,7 +212,7 @@ function quoteDeclarations(s: Stmt): string[] {
 
 // Runs a site's nearest decorator's macro on its declaration, and puts what it gives in the
 // declaration's place, the other decorators kept on each declaration given for a later round.
-function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded) {
+function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded, pins: Set<string>, library: boolean) {
   const nearest = linked.decorators!.at(-1)!;
   const rest = site.decl.decorators!.slice(0, -1);
   const macro = macroOf(nearest, macros);
@@ -237,7 +239,7 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
   const declared = reached(code, macro).flatMap(quoteDeclarations);
-  const hygiene: Hygiene = { bound: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins: new Set(), fresh };
+  const hygiene: Hygiene = { bound: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, fresh };
   const result = withHygiene(hygiene, () => comptimeCall(instance, [value], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
@@ -250,8 +252,10 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
     }
     const decl = rest.length > 0 ? ({ ...d, decorators: [...rest, ...(d.decorators ?? [])] } as Decl) : d;
     // On an exported declaration, what the macro gives under names the program can see is
-    // exported too; its private declarations aren't.
-    const visible = namesOf(decl).every((n) => !LOCAL_NAMES.has(n)) && EXPORTABLE.has(decl.kind);
+    // exported too; its private declarations aren't. A library's exports are C functions, so
+    // there only the declaration's own name stays exported.
+    const visible = namesOf(decl).every((n) => !LOCAL_NAMES.has(n)) && EXPORTABLE.has(decl.kind)
+      && (!library || namesOf(decl)[0] === namesOf(site.decl)[0]);
     return site.exported && !isExport(decl) && visible ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
   });
   site.module.statements.splice(site.index, 1, ...replacing);
