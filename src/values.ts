@@ -859,6 +859,11 @@ export function expressions(ctx: Context) {
     }
     expectFrom(target, e.args);
     const argTypes = e.args.map(value);
+    // The array iterators clone elements: a generic body's instance checks the real element.
+    if ((target.name === "array entries" || target.name === "array values") && argTypes[0] !== undefined) {
+      const array = lower(isRefType(argTypes[0]) ? argTypes[0].to : argTypes[0]);
+      if (isArray(array)) clonable(array.element, e, target.name.slice("array ".length));
+    }
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
@@ -1661,9 +1666,11 @@ export function expressions(ctx: Context) {
     const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
     const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
     if (permit) throw say("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead");
-    if ((typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
+    // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
+    // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
+    if (!by && (typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
     const inner = holdsInterior(stored);
-    if (inner) throw say(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`);
+    if (inner) throw say(`can't clone ${inner === stored ? "" : "a value holding "}${article(inner.which)}, which is changed in place wherever it is shared; make a new one from what it holds`);
     if (holdsHandle(stored)) throw say("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself");
     // Two mutable references to one thing can't be.
     if (holdsMut(type)) throw say("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing");
