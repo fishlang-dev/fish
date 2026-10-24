@@ -128,6 +128,24 @@ function namesIn(p: Pattern): string[] {
   return [];
 }
 
+// The names a function's body uses that its parameters and its own declarations don't give.
+function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
+  const own = new Set([...fn.params.flatMap((p) => namesIn(p.pattern)), ...declaredIn(fn.body)]);
+  return new Set([...identifiers(fn.body)].filter((n) => !own.has(n)));
+}
+
+// The names declared anywhere inside a piece of syntax, by `let`, `const` and functions.
+function declaredIn(node: unknown, found: string[] = []): string[] {
+  if (Array.isArray(node)) for (const x of node) declaredIn(x, found);
+  else if (node && typeof node === "object") {
+    const s = node as Stmt;
+    if (s.kind === "let") for (const d of s.declarations) found.push(...namesIn(d.target));
+    if (s.kind === "function") found.push(s.name);
+    for (const v of Object.values(node)) if (v && typeof v === "object") declaredIn(v, found);
+  }
+  return found;
+}
+
 // Every name written in a piece of syntax.
 function identifiers(node: unknown, found = new Set<string>()): Set<string> {
   if (Array.isArray(node)) for (const x of node) identifiers(x, found);
@@ -1014,12 +1032,13 @@ export function check(written: Stmt[], library = false): Checked {
     // that allows, so a call before a function's own statement still finds it, as JavaScript's
     // hoisting does. A function using another goes after it.
     function hoist(list: Stmt[]) {
-      const functions = list.filter((s): s is Extract<Stmt, { kind: "function" }> => s.kind === "function" && s.body !== undefined);
+      // An async one takes over what it uses when it is made, so it stays where it is written.
+      const functions = list.filter((s): s is Extract<Stmt, { kind: "function" }> => s.kind === "function" && s.body !== undefined && !s.async);
       if (functions.length === 0) return;
       const declared = (s: Stmt): string[] => (s.kind === "let" ? s.declarations.flatMap((d) => namesIn(d.target)) : s.kind === "function" ? [s.name] : []);
       for (let pass = 0; pass < functions.length; pass++) {
         for (const fn of functions) {
-          const used = identifiers(fn.body);
+          const used = freeNames(fn);
           list.splice(list.indexOf(fn), 1);
           let at = 0;
           list.forEach((s, i) => declared(s).some((n) => n !== fn.name && used.has(n)) && (at = i + 1));
@@ -1031,7 +1050,8 @@ export function check(written: Stmt[], library = false): Checked {
     // `name(...)` inside the nested function `name`: a call of itself, with its own captures.
     function selfCall(e: Extract<Expr, { kind: "call" }>): { type: Type; what: string } | undefined {
       const name = (e.callee as Extract<Expr, { kind: "ident" }>).name;
-      if (f.closure?.self !== name) return undefined;
+      // A name the body declares itself is that, not the function.
+      if (f.closure?.self !== name || scopes.some((scope) => scope.has(name))) return undefined;
       if (!f.returnType) throw new CompileError(`'${name}' calls itself, so its return type has to be written, as TypeScript requires, as in 'function ${name}(...): T'`, e.start, e.end);
       if (f.async) throw unsupported("async nested functions that call themselves", e);
       const required = f.params.filter((p) => !p.optional && !p.rest).length;

@@ -1,4 +1,4 @@
-// Nested function declarations: hoisted in their block, borrowing what they use per call.
+// Nested function declarations: hoisted in their block, borrowing what they use as arrows do.
 // case: nested_basics
 // expect: 4
 // expect: 136 a-ba+b 9
@@ -21,19 +21,17 @@ class C { v: i64 = 3; m(): i64 { function sq(x: i64): i64 { return x * x; } retu
 function main() {
   console.log(outer(5), names(), new C().m());
 }
-// case: nested_per_call
-// expect: 1
+// case: nested_borrows_like_arrows
 // expect: 2
 // expect: 2
 // expect: 1
-// A nested function lends what it changes for each call only, so the variable is usable between
-// calls; passed as a value it is a closure, borrowing from there.
+// A nested function borrows what it uses from its declaration to its last use, as an arrow
+// does; passed to a call, it lends for the call.
 function twice(f: () => void) { f(); f(); }
 function main() {
   let n = 0;
   function inc() { n++; }
   inc();
-  console.log(n);
   inc();
   console.log(n);
   let m = 0;
@@ -46,11 +44,44 @@ function main() {
   g();
   console.log(k);
 }
+// case: nested_borrow_between_calls
+// error: cannot use 'n' while 'inc' borrows 'n' mutably and is used later
+function main() { let n = 0; function inc() { n++; } inc(); console.log(n); inc(); }
+// case: nested_self_call_borrow
+// error: cannot mutably lend 'xs' while 'r' borrows 'xs[...]' and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() {
+  let xs = [new P(1)];
+  function g(d: i64): void {
+    if (d > 0) {
+      const r: Ref<P> = xs[0];
+      g(d - 1);
+      console.log(r.n);
+    } else xs = [new P(2)];
+  }
+  g(1);
+}
+// case: nested_free_names
+// expect: 6 3
+// Hoisting looks only at the names a function uses from outside it, and a function's call of
+// itself comes before an outer function of the same name.
+function f(): i64 { return 100; }
+function main() {
+  let total = 0;
+  add(1);
+  add(5);
+  function add(x: i64) { total += x; }
+  const x = 5;
+  {
+    function f(n: i64): i64 { return n <= 0 ? 0 : 1 + f(n - 1); }
+    console.log(total, f(3));
+  }
+}
 // case: nested_moved_capture
-// error: 'xs' was moved, so it can't be used here
+// error: cannot move 'xs' while 'add' borrows 'xs' mutably and is used later
 function main() { let xs = [1]; function add() { xs.push(2); } const r = xs; add(); }
 // case: nested_loop_conflict
-// error: cannot mutably lend 'xs' while a 'for...of' loop is reading 'xs'
+// error: while 'add' borrows 'xs' mutably
 function main() { let xs = [1]; function add() { xs.push(2); } for (const x of xs) { add(); } }
 // case: nested_value_conflict
 // error: cannot use 'n' while 'g' borrows 'n' mutably and is used later

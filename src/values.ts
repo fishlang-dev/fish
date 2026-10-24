@@ -798,9 +798,10 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
       return traitCall(e, callee, receiver);
     }
-    if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    // A nested function's call of itself comes before any outer name it shares.
     const itself = callee.kind === "ident" ? ctx.selfCall(e) : undefined;
     if (itself) return itself;
+    if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
     if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
       const stored = field(receiver, callee.name);

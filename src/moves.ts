@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { computed, dynCalls, isPrint, MAP_CHANGES } from "./values.ts";
-import { nestedFunctions } from "./check.ts";
+import { selfCalls } from "./check.ts";
 import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -52,8 +52,6 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, coercions, borrowsFrom } = instance;
-  // The nested functions held by each variable, by the variable's id, which lend per call.
-  const perCall = new Map<number, Extract<Expr, { kind: "arrow" }>>();
   const body = f.body;
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
@@ -183,7 +181,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const d = s.declarations[0]!;
         const name = d.target.kind === "ident" ? d.target.name : "";
         const local = locals.get(s)!;
-        if (d.init?.kind === "arrow" && nestedFunctions.has(d.init)) perCall.set(local.id, d.init);
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
         expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
@@ -441,8 +438,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "arrow":
         for (const [place, use, from, mutable, held] of captured(e)) {
           usable(use, place);
-          // A nested function lends what it uses at each call instead.
-          if (nestedFunctions.has(e)) continue;
           if (!held || isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
           else {
             free(place, use, "move");
@@ -476,14 +471,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
-        // A nested function called by name borrows what it uses for the call, as arguments are.
-        const nested = e.callee.kind === "ident" ? perCall.get(locals.get(e.callee)?.id ?? -1) : undefined;
-        if (nested) {
-          for (const [place, , from, mutable] of captured(nested)) {
-            // Messages name what the call uses, at the call.
-            const at: Named = { kind: "ident", name: from?.name ?? "this", start: e.callee.start, end: e.callee.end };
-            usable(at, place);
-            free(place, at, mutable ? "lend mutably" : "read");
+        // A nested function calling itself uses what it captured again, for the call, so nothing
+        // borrowed from those may be live across it.
+        if (selfCalls.has(e)) {
+          for (const [alias] of instance.captures ?? []) {
+            const at: Named = { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end };
+            free(String(alias.id), at, instance.changed?.has(alias) ? "lend mutably" : "read");
           }
         }
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
@@ -755,9 +748,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
-    // A nested function used as a value is a closure from there, lending what it uses.
-    const nested = e.kind === "ident" ? perCall.get(locals.get(e)?.id ?? -1) : undefined;
-    if (nested) return captured(nested).map(([place, , , mutable]) => [place, e, mutable]);
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
     // A closure made for a call lends what it captures for the call.
@@ -911,13 +901,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
-    // A closure holds what it captures; a nested function only while each call runs.
-    if (e.kind === "arrow" && nestedFunctions.has(e)) return;
-    const nested = e.kind === "ident" ? perCall.get(locals.get(e)?.id ?? -1) : undefined;
-    if (nested) {
-      for (const [place, , , mutable] of captured(nested)) lend(place, mutable, e, holder);
-      return;
-    }
+    // A closure holds what it captures.
     if (e.kind === "arrow") {
       for (const [place, use, from, mutable, held] of captured(e)) {
         // A copy of a mutable reference lends it again.
