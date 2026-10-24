@@ -85,6 +85,8 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
     return;
   }
+  // `FixedArray<T, N>` against a fixed array matches its element type.
+  if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
   if (node.kind === "tuple" && isTuple(arg) && (arg as ObjectType).fields.length === node.elements.length) {
     const elements = elementsOf(arg as ObjectType);

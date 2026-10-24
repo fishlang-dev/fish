@@ -136,6 +136,9 @@ export type Context = {
 // is a stored field or a getter's is only known for each instance.
 export const substituted = new WeakSet<Expr>();
 
+// The `FixedArray.filled` calls, by the fixed array each makes.
+export const fixedFills = new WeakMap<Expr, FixedType>();
+
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
 
@@ -290,7 +293,9 @@ export function expressions(ctx: Context) {
       wanted.set(e, t.element);
       for (const x of e.elements) if (x) expect(x, t.element);
     }
-    // A literal where a fixed array is expected is that fixed array.
+    // A literal where a fixed array is expected is that fixed array; an Option or union holding
+    // one fixed array expects that one.
+    if ((e.kind === "array" || e.kind === "call") && typeof t !== "string" && t.kind === "union" && t.members.filter(isFixed).length === 1) t = t.members.find(isFixed)!;
     if (e.kind === "array" && isFixed(t)) {
       fixedLiterals.set(e, t);
       for (const x of e.elements) if (x) expect(x, t.element);
@@ -1207,6 +1212,7 @@ export function expressions(ctx: Context) {
     expect(v, written.element);
     const t = value(v);
     coerce(v, t, written.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(written.element)}'`);
+    fixedFills.set(e, written);
     return { type: written, what: "'FixedArray.filled'" };
   }
 
@@ -1577,7 +1583,7 @@ export function expressions(ctx: Context) {
     if (typeof t === "string") return undefined;
     if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
     const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
-      : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
+      : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
       const found = unsent(part);
       if (found) return found;

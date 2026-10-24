@@ -413,8 +413,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // is discarded.
   function expr(e: Expr, consume?: Consumer, discarded = false) {
     // A value lent to a reference stays where it is.
-    const lent = coercions.get(e);
-    if (lent && isRef(lent) && !isRef(types.get(e)!)) consume = undefined;
+    const lentAs = coercions.get(e);
+    if (lentAs && isRef(lentAs) && !isRef(types.get(e)!)) consume = undefined;
     switch (e.kind) {
       case "int":
       case "bool":
@@ -446,7 +446,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           }
         }
         return;
-      case "object":
+      case "object": {
+        // One value can't hold a mutable borrow of a place beside another borrow of it.
+        const lends = e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
+        lends.forEach(([place, part, mutable], i) => {
+          const other = lends.slice(0, i).find(([q, , m]) => overlaps(place, q) && (mutable || m));
+          if (other) throw new CompileError(`'${text(part as Named)}' is borrowed ${mutable && other[2] ? "mutably twice" : "mutably and shared"} in one value, which would let one change what the other reads`, part.start, part.end);
+        });
         for (const p of e.props) {
           const into = (place: string) => `'${place}' moved here into the new object; use '${place}.clone()' to keep a copy`;
           if (p.kind === "property") expr(p.value, into);
@@ -454,6 +460,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           else if (p.kind === "shorthand") use(p, into, field(types.get(e) as Exclude<Type, string>, p.name)!.type);
         }
         return;
+      }
       case "new": {
         const name = e.callee.kind === "ident" ? `'new ${e.callee.name}'` : "the constructor";
         return during(e, () => handOver(e.args ?? [], name, e));
@@ -1268,6 +1275,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Moving a value out of an array by index would leave a hole in it, as in Rust.
   function elementMove(e: Named, type: Type): CompileError {
     const advice = holdsHandle(type, true) ? "" : `'${text(e)}.clone()' to take a copy, or `;
+    const t = types.get((e as Extract<Expr, { kind: "index" }>).object);
+    const inline = t !== undefined && typeof t !== "string" && (t.kind === "fixed" || (t.kind === "ref" && typeof t.to !== "string" && t.to.kind === "fixed"));
+    if (inline) return new CompileError(`'${text(e)}' can't be moved out of its fixed array, which keeps every element${advice ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
     return new CompileError(`'${text(e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
   }
 

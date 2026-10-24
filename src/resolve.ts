@@ -201,10 +201,14 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function fixedArray(t: Extract<TypeNode, { kind: "ref" }>): Type {
     if (t.args.length !== 2) throw new CompileError("'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
     const [of, n] = t.args as [TypeNode, TypeNode];
+    if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("a FixedArray's length can't be negative", n.start, n.end);
     const size = n.kind === "literal" && n.value.kind === "int" ? n.value.value : undefined;
     if (size === undefined) throw new CompileError("a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
-    if (size > 1_000_000n) throw new CompileError("a FixedArray holds at most 1,000,000 elements inline; use an array, 'T[]', for more", n.start, n.end);
     const element = storable(resolveType(of), of);
+    if (holdsRef(element)) throw unsupported("fixed arrays of references", of);
+    // Its elements live where it does, often the stack, so all of them together are limited.
+    const inner = (t: Type): number => (typeof t !== "string" && t.kind === "fixed" ? t.size * inner(t.element) : 1);
+    if (size * BigInt(inner(element)) > 65536n) throw new CompileError("a FixedArray holds at most 65,536 elements inline, nested ones counted; use an array, 'T[]', for more", n.start, n.end);
     if (typeof element !== "string" && element.kind === "interface") throw new CompileError(`a FixedArray can't hold the interface type '${element.name}' directly; use 'Dyn<${element.name}>'`, of.start, of.end);
     return fixedType(element, Number(size));
   }

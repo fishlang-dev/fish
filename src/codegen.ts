@@ -1,5 +1,5 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, isPrint, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -1033,13 +1033,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function fixedLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, type: FixedType) {
     const local = resolved(s.left as Stmt);
     scopes.push([]);
-    let base: string;
-    if (isRef(types.get(s.right)!)) base = evaluate(s.right);
-    else if (lendable(s.right)) base = address(s.right);
+    // Where the array lives is kept in the loop's slot, and read again each pass, as a
+    // generator's or an async function's loop may be resumed in a later call.
+    const lent = isRef(types.get(s.right)!) || lendable(s.right);
+    const held = loopSlot(s, 0, lent ? "ptr" : llvm(type));
+    if (lent) emit(`store ptr ${isRef(types.get(s.right)!) ? evaluate(s.right) : address(s.right)}, ptr ${held}`);
     else {
-      base = loopSlot(s, 0, llvm(type));
-      own(base, type);
-      emit(`store ${llvm(type)} ${owned(s.right)}, ptr ${base}`);
+      own(held, type);
+      emit(`store ${llvm(type)} ${owned(s.right)}, ptr ${held}`);
     }
     settle();
     const counter = loopSlot(s, 1, "i64");
@@ -1056,6 +1057,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     scopes.push([]);
     reserve(local);
     own(slot(local), local.type);
+    let base = held;
+    if (lent) {
+      base = temp();
+      emit(`${base} = load ptr, ptr ${held}`);
+    }
     const at = temp();
     emit(`${at} = getelementptr ${llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
     if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
@@ -1834,6 +1840,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
     if (type.kind === "array" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn") return true;
+    if (type.kind === "fixed") return type.size > 0 && needsDrop(type.element);
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
@@ -1843,8 +1850,6 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function parts(type: Exclude<Type, string>): [Type, number][] {
     // A Lock is its word, then what it holds.
     if (type.kind === "interior") return type.which === "Lock" ? [[type.of, 1]] : [];
-    // A fixed array is its elements, each reached by its index.
-    if (type.kind === "fixed") return Array.from({ length: type.size }, (_, i): [Type, number] => [type.element, i]);
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
@@ -1898,6 +1903,32 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     let result = "%v";
     if (type.kind === "array") {
       result = kind === "drop" ? dropArray(type) : copyArray(type);
+    } else if (type.kind === "fixed") {
+      // Element by element in a loop over the value held in a slot, each copy written back.
+      const [slot, index] = [alloca(t), alloca("i64")];
+      emit(`store ${t} %v, ptr ${slot}`);
+      emit(`store i64 0, ptr ${index}`);
+      const [head, body, done] = [label(), label(), label()];
+      emit(`br label %${head}`);
+      startBlock(head);
+      const [i, more] = [temp(), temp()];
+      emit(`${i} = load i64, ptr ${index}`);
+      emit(`${more} = icmp ult i64 ${i}, ${type.size}`);
+      emit(`br i1 ${more}, label %${body}, label %${done}`);
+      startBlock(body);
+      const [at, v, after] = [temp(), temp(), temp()];
+      emit(`${at} = getelementptr ${t}, ptr ${slot}, i64 0, i64 ${i}`);
+      emit(`${v} = load ${llvm(type.element)}, ptr ${at}`);
+      const made = each(v, type.element, false);
+      if (kind === "copy") emit(`store ${llvm(type.element)} ${made}, ptr ${at}`);
+      emit(`${after} = add i64 ${i}, 1`);
+      emit(`store i64 ${after}, ptr ${index}`);
+      emit(`br label %${head}`);
+      startBlock(done);
+      if (kind === "copy") {
+        result = temp();
+        emit(`${result} = load ${t}, ptr ${slot}`);
+      }
     } else if (type.kind === "shared") {
       if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
@@ -2897,8 +2928,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A method's receiver runs before its arguments, as in JavaScript. A method called in an
   // optional chain runs only when the chain isn't empty.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    const made = types.get(e);
-    if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "FixedArray" && typeof made !== "string" && made?.kind === "fixed") return fixedFilled(e, made);
+    const fill = fixedFills.get(e);
+    if (fill) return fixedFilled(e, fill);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
   }
@@ -3243,8 +3274,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return read;
     };
     if (shared === "string") return convert(units(whole()), "usize", types.get(e)!);
-    // A fixed array's length is known while compiling.
-    if (typeof shared !== "string" && shared.kind === "fixed") return convert(String(shared.size), "usize", types.get(e)!);
+    // A fixed array's length is known while compiling; what it is read from still runs, and an
+    // index into it is still checked.
+    if (typeof shared !== "string" && shared.kind === "fixed") {
+      if (e.object.kind !== "ident" && e.object.kind !== "this") whole();
+      return convert(String(shared.size), "usize", types.get(e)!);
+    }
     if (typeof shared !== "string" && shared.kind === "array") {
       const length = temp();
       emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);

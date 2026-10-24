@@ -123,6 +123,8 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 // moving the generator doesn't leave a pointer to the frame behind.
 function iterated(instance: Instance, e: Expr): Type {
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
+  // A fixed array it borrows is kept as a pointer to where it lives.
+  if (typeof type !== "string" && type.kind === "fixed" && borrowed(instance, e)) return refType(type, false);
   if (typeof type === "string" || type.kind !== "array" || !borrowed(instance, e)) return type;
   return objectType([{ name: "a", type: refType(type.element, false) }, { name: "b", type: "i64" }, { name: "c", type: "i64" }]);
 }

@@ -385,6 +385,9 @@ function interpreter() {
     step(e);
     // A place lent to a `Mut`: the place itself, which reads and writes go through.
     const [own, target] = [f.instance.types.get(e), f.instance.coercions.get(e) ?? f.instance.types.get(e)];
+    // A fixed array copies where an array shares, which comptime values don't follow yet.
+    const held = typeof own === "string" ? own : own?.kind === "ref" ? own.to : own;
+    if (typeof held !== "string" && held?.kind === "fixed") unsupported("a FixedArray", e);
     if (mutable(target) && !mutable(own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return place(f, e);
     const v = raw(f, e);
     return isShort(v) ? v : typed(f, e, v);
