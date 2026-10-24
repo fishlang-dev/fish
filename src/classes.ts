@@ -240,7 +240,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
 
 // The spans of `equals` methods `@derive(Eq)` wrote over a base class. Their `super.equals(other)`
 // lends `other` to the base's `equals`, which reads the embedded base a reference to the class
-// points at, though Fish code can't upcast it itself. A span outlives the copies macros make.
+// points at, though Fish code can't upcast it itself. A span outlives the copies macros make;
+// the set holds one program's spans, cleared as its macros expand.
 export const upcasts = new Set<string>();
 
 // Links a derived class to the base it embeds. Its constructor must start with
