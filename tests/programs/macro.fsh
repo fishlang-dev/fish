@@ -726,3 +726,91 @@ function main() {
     @keep x: i64 = 1;
   }
 }
+// case: macro_c2_enum
+// expect: light dark
+// the inner macro gives an enum; the outer quotes a match on its members by bare name
+macro function inner(input: AstStmt): Ast[] {
+  return [input, quote`enum ${ident("Shade")} { Light, Dark }`];
+}
+macro function outer(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("name")}(s: Shade): string { return match (s) { case Dark => "dark", case Light => "light" }; }`];
+}
+@outer @inner function f() {}
+function main() { console.log(name(Shade.Light), name(Shade.Dark)); }
+// case: macro_c2_gs
+// expect: g1 on get@1
+// expect: g2 on get@1
+// expect: s1 on set@2
+// expect: s2 on set@2
+// getter and setter of the same name, each decorated; each macro adds a function named after its label and member kind
+function kindAt(c: AstStmt, i: usize): string {
+  if (c.kind === "class") {
+    const m = c.members[i].clone();
+    return m.kind;
+  }
+  return "?";
+}
+macro function note(input: AstStmt, member: usize, label: string): Ast[] {
+  const lit: AstExpr = { kind: "string", value: `${label} on ${kindAt(input.clone(), member)}@${member}`, start: 0, end: 0 };
+  return [input, quote`function ${ident(label)}(): string { return ${lit}; }`];
+}
+class A {
+  n: i64 = 0;
+  @note("g2") @note("g1") get v(): i64 { return this.n; }
+  @note("s2") @note("s1") set v(x: i64) { this.n = x; }
+}
+function main() { console.log(g1()); console.log(g2()); console.log(s1()); console.log(s2()); }
+// case: macro_c2_ctor
+// expect: outer on constructor@2
+// a member macro that inserts a member in front; the constructor's outer decorator must stay on the constructor
+function kindAt(c: AstStmt, i: usize): string {
+  if (c.kind === "class") {
+    const m = c.members[i].clone();
+    return m.kind;
+  }
+  return "?";
+}
+macro function note(input: AstStmt, member: usize, label: string): Ast[] {
+  const lit: AstExpr = { kind: "string", value: `${label} on ${kindAt(input.clone(), member)}@${member}`, start: 0, end: 0 };
+  return [input, quote`function ${ident(label)}(): string { return ${lit}; }`];
+}
+macro function front(input: AstStmt, member: usize): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const k = quote`class X { pad: i64 = 0; }`;
+    if (k.kind === "class") {
+      let ms: AstClassMember[] = [k.members[0].clone()];
+      for (const x of c.members) ms.push(x.clone());
+      c.members = ms;
+    }
+  }
+  return c;
+}
+class A {
+  x: i64;
+  @note("outer") @front constructor() { this.x = 1; }
+  m(): i64 { return 2; }
+}
+function main() { console.log(outer()); }
+// case: macro_c2_def4
+// expect: 10 3
+// a syntax parameter whose default is a quote
+const LIMIT = 5;
+macro function addFn(input: AstStmt, name: string, e: AstExpr = quote`LIMIT * 2`): Ast[] {
+  return [input, quote`function ${ident(name)}(): i64 { return ${e}; }`];
+}
+@addFn("got") function f() {}
+@addFn("given", 3) function g() {}
+function main() { console.log(got(), given()); }
+// case: macro_c2_def2
+// expect: n=-1 e=none
+// an optional value parameter and an optional syntax parameter, left out
+macro function opt(input: AstStmt, n?: i64, e?: AstExpr): Ast[] {
+  const v = n ?? -1;
+  let s = `n=${v}`;
+  if (e === null) s = s + " e=none"; else s = s + " e=some";
+  const lit: AstExpr = { kind: "string", value: s, start: 0, end: 0 };
+  return [input, quote`function ${ident("got")}(): string { return ${lit}; }`];
+}
+@opt function f() {}
+function main() { console.log(got()); }

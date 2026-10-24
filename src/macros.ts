@@ -2,7 +2,7 @@ import type { Checked } from "./check.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
-import type { Expr, Func, Stmt } from "./parser.ts";
+import type { ClassMember, Expr, Func, Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import { fits, show, type Type } from "./typing.ts";
@@ -67,22 +67,25 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
     const checked = checkArguments(() => checkMacros(macroCode), constants);
     const context = { macros, checked, code: macroCode, loaded, pins, library };
     for (const site of [...sites].reverse()) {
-      let given: Stmt[] = [site.module.statements[site.index]!];
+      // What the site's macros give stands in its file as each one runs, so a later one sees it.
+      const statements = site.module.statements;
+      let count = 1;
       for (;;) {
-        const at = given.findIndex((s) => {
+        const range = statements.slice(site.index, site.index + count);
+        const at = range.findIndex((s) => {
           const d = (s.kind === "export" ? s.body : s) as Decl;
           return d && allDecorators(d).some((x) => prepared.has(x));
         });
         if (at < 0) break;
-        const s = given[at]!;
+        const s = range[at]!;
         const d = (s.kind === "export" ? s.body : s) as Decl;
         const pending = pendingOf(d);
         const ready = prepared.get(pending.decorator);
         if (!ready) break;
-        given.splice(at, 1, ...run(d, s.kind === "export", site.module, pending, ready, context));
-        given = [...given];
+        const out = run(d, s.kind === "export", site.module, pending, ready, context);
+        statements.splice(site.index + at, 1, ...out);
+        count += out.length - 1;
       }
-      site.module.statements.splice(site.index, 1, ...given);
     }
   }
 }
@@ -216,7 +219,7 @@ function macroOf(d: Expr, macros: Map<string, Func>): Func {
 
 // A decorator's argument: its syntax, for a parameter typed `Ast` or `AstExpr`, or else the
 // constant that computes its value.
-type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string };
+type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string; none?: true };
 let constants = 0;
 
 function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
@@ -238,11 +241,14 @@ function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]
     const index = where === "own" && macro.params[1]?.type?.kind === "ref" && (macro.params[1].type.name === "i64" || macro.params[1].type.name === "usize") && given.length < needed ? "; a macro taking an index applies to a member or a parameter" : "";
     throw new CompileError(`the macro '${written(macro.name)}' takes ${count} argument${params.length === 1 ? "" : "s"} after what it is applied to, but this gives ${given.length}${index}`, d.start, d.end);
   }
-  // A parameter left out takes its default, or nothing.
+  // A parameter left out takes its default, the macro's own code computing its value, or else
+  // nothing.
   return params.map((param, i) => {
     const t = param.type;
-    const expr = given[i] ?? param.default ?? { kind: "null", start: d.start, end: d.end };
-    if (t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
+    const arg = given[i];
+    if (!arg && !param.default) return { expr: d, syntax: false, none: true };
+    const expr = arg ?? param.default!;
+    if (arg && t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
     const name = `__fishArgument${constants++}`;
     const at = { start: expr.start, end: expr.end };
     const constant: Stmt = { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
@@ -380,6 +386,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   const values = ready.args.map((a, i) => {
     const t = instance.locals.get(macro.params[i + before]!)!.type;
+    if (a.none) return null;
     if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
     return built<Value>({ tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
@@ -424,19 +431,32 @@ function stripped(decl: Decl, pending: Pending): { bare: Stmt; restore(given: De
     : { ...decl, decorators: undefined };
   const name = namesOf(decl)[0];
   const restore = (given: Decl[]) => {
-    const same = given.find((d) => d.kind === decl.kind && namesOf(d)[0] === name) ?? given.find((d) => d.kind === decl.kind) ?? (pending.where === "own" ? given[0] : undefined);
+    const named = given.find((d) => d.kind === decl.kind && namesOf(d)[0] === name);
+    const same = named ?? given.find((d) => d.kind === decl.kind) ?? (pending.where === "own" ? given[0] : undefined);
+    const waiting = [...members, ...params].some((x) => x.length > 0);
+    // Decorators of members or parameters need their container back to go on.
+    if (waiting && !named) {
+      const at = [...members, ...params].find((x) => x.length > 0)![0]!;
+      throw new CompileError(`a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
+    }
     if (!same) return;
     if (own.length > 0) Object.assign(same, { decorators: [...own, ...(same.decorators ?? [])] });
-    const back = <T extends { decorators: Expr[] }>(list: T[], saved: Expr[][], key: (x: T) => unknown) => {
+    // Each goes back to the member of the same kind and name, or the same kind when it has none,
+    // or else the same place, a member taking one member's decorators.
+    const back = <T extends { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string) => {
+      const taken = new Set<T>();
       saved.forEach((decorators, i) => {
         if (decorators.length === 0) return;
-        const at = list.find((x) => key(x) !== undefined && key(x) === key(original[i] as T)) ?? list[i];
-        if (at) at.decorators = [...decorators, ...at.decorators];
+        const want = key(before[i]!);
+        const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (!taken.has(list[i]!) ? list[i] : undefined);
+        if (!at) return;
+        taken.add(at);
+        at.decorators = [...decorators, ...at.decorators];
       });
     };
-    const original: unknown[] = decl.kind === "class" ? decl.members : decl.kind === "function" ? decl.params : [];
-    if (same.kind === "class" && decl.kind === "class") back(same.members, members, (m) => (typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : undefined));
-    if (same.kind === "function" && decl.kind === "function") back(same.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : undefined));
+    const memberKey = (m: ClassMember) => `${m.kind} ${m.modifiers.includes("static") ? "static " : ""}${typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : ""}`;
+    if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey);
+    if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`));
   };
   return { bare: bare as Stmt, restore };
 }
