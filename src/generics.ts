@@ -361,10 +361,12 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
     const open = new Set(explicitPlaceholders(f).values());
-    for (const p of params) {
+    // A placeholder an argument holds, directly or in a function-typed parameter's bound.
+    const holds = (given: Type, t: Type): boolean => holdsPart(given, (u) => u === t || (typeof u !== "string" && u.kind === "param" && u.bound?.kind === "function" && [...u.bound.params, u.bound.returns].some((b) => holds(b, t))), true);
+    for (const p of typeArgs.length > 0 ? [] : params) {
       const t = bindings.get(p.name)!;
-      const passed = args.some((a, i) => a.kind !== "arrow" && argTypes[i] !== undefined && holdsPart(argTypes[i]!, (u) => u === t, true));
-      if (open.has(t) && !passed) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      if (!open.has(t)) continue;
+      if (!args.some((a, i) => a.kind !== "arrow" && argTypes[i] !== undefined && holds(argTypes[i]!, t))) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
     }
     readOnlyKept(f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance

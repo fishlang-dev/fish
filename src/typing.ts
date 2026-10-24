@@ -746,10 +746,13 @@ export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
 
 // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
 // reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
-export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
-  const holds = (u: Type) => holdsPart(u, found, throughRefs);
+export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen = new Set<Type>()): boolean {
+  const holds = (u: Type) => holdsPart(u, found, throughRefs, seen);
   if (found(t)) return true;
   if (typeof t === "string") return false;
+  // A type that holds itself, through an array of itself, is looked into once.
+  if (seen.has(t)) return false;
+  seen.add(t);
   if (t.kind === "ref") return throughRefs && holds(t.to);
   if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
   if (t.kind === "union") return t.members.some(holds);

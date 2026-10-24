@@ -1318,3 +1318,19 @@ class Box<T> {
   other<U>(u: U): i64 { return this.deep(u, 2); }
 }
 function main() { const b = new Box(1); console.log(b.deep("z", 3), b.other(true)); }
+// case: generic_recursive_type_argument
+// expect: 1
+class Node { kids: Node[] = []; n: i64 = 1; }
+function count<T>(node: Ref<Node>, tag: T): usize { return node.kids.length; }
+function main() {
+  let r = new Node();
+  r.kids.push(new Node());
+  console.log(count(r, true));
+}
+// case: generic_callback_passed_on
+// expect: 2
+function walk2<T>(n: i64, visit: () => T): i64 {
+  if (n === 0) { visit(); return 0; }
+  return 1 + walk2<T>(n - 1, visit);
+}
+function main() { console.log(walk2(2, () => 5)); }
