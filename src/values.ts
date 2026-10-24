@@ -155,6 +155,16 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The `Math` calls and constants, which codegen lowers itself.
+export const maths = new WeakSet<Expr>();
+// `Math`'s functions on f64, by how many numbers each takes.
+export const MATH_FLOAT: Record<string, number> = {
+  floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
+  sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1, pow: 2, atan2: 2, hypot: 2,
+};
+export const MATH_CONSTANTS: Record<string, number> = {
+  PI: Math.PI, E: Math.E, LN2: Math.LN2, LN10: Math.LN10, LOG2E: Math.LOG2E, LOG10E: Math.LOG10E, SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
+};
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
@@ -738,6 +748,7 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
+    if (callee.kind === "member" && isMath(callee.object)) return mathCall(e, callee.name);
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
       const made = callee.object;
@@ -1291,6 +1302,44 @@ export function expressions(ctx: Context) {
   // `Array.of(a, b)` is the array literal `[a, b]`; `Array.from(x, f?)` is the array of what x
   // holds, clones of an array's elements, a string's code points or a generator's values, or of
   // `0` to `n - 1` from `{ length: n }`, mapped by f when there is one.
+  // The global `Math`, unless a name of the program's hides it.
+  function isMath(e: Expr): boolean {
+    return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math");
+  }
+
+  // `Math.abs`, `sign`, `min` and `max` keep the numeric type they are given, a literal taking
+  // the type of the numbers beside it as with an operator; the rest take and give `f64`.
+  function mathCall(e: Call, name: string): { type: Type; what: string } {
+    const what = `'Math.${name}'`;
+    if (name === "random") throw new CompileError("'Math.random' is not supported yet; it will come from the OS's secure random source", e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    const arity = MATH_FLOAT[name];
+    if (arity !== undefined) {
+      if (e.args.length !== arity) throw new CompileError(`${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
+      for (const a of e.args) {
+        const t = value(a);
+        if (t === "f64" || adapt(a, "f64")) continue;
+        throw new CompileError(isNumeric(t) ? `${what} takes a '${show("f64")}', an f64, not '${show(t)}'; convert it with 'as', as in 'n as f64'` : `${what} takes a number, not '${show(t)}'`, a.start, a.end);
+      }
+      maths.add(e);
+      return { type: "f64", what };
+    }
+    if (!["abs", "sign", "min", "max"].includes(name)) throw new CompileError(`'Math' has no '${name}' in Fish yet`, e.start, e.end);
+    const many = name === "min" || name === "max";
+    if (many ? e.args.length === 0 : e.args.length !== 1) throw new CompileError(many ? `${what} takes one or more numbers` : `${what} takes one number`, e.start, e.end);
+    const given = e.args.map((a) => value(a));
+    given.forEach((t, i) => {
+      if (!isNumeric(t)) throw new CompileError(`${what} takes numbers, not '${show(t)}'`, e.args[i]!.start, e.args[i]!.end);
+    });
+    const fixed = e.args.findIndex((a) => !literalOnly(a, true));
+    const to = fixed >= 0 ? given[fixed]! : given.some(isFloat) ? "f64" : "i64";
+    e.args.forEach((a, i) => {
+      if (given[i] !== to && !adapt(a, to)) throw new CompileError(`${what} takes numbers of one type, but got '${show(to)}' and '${show(given[i]!)}'; convert one with 'as'`, a.start, a.end);
+    });
+    maths.add(e);
+    return { type: to, what };
+  }
+
   function arrayStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const at = { start: callee.start, end: callee.end };
     if (callee.name === "of") {
@@ -2289,6 +2338,11 @@ export function expressions(ctx: Context) {
         for (const x of e.exprs) joined(x, operand(x), "a template");
         return "string";
       case "member": {
+        if (isMath(e.object)) {
+          if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError(`'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
+          maths.add(e);
+          return "f64";
+        }
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
         if (named?.data) return variant(e, named, true);

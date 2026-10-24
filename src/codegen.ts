@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -50,6 +50,9 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 // An instance's name in the IR. A generic class's instance is named by its type arguments,
 // which may hold quotes, so those are escaped as LLVM spells them.
 const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
+
+// The Math functions LLVM has intrinsics for; the other float ones are libm's.
+const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt", "exp", "log", "log2", "log10", "sin", "cos", "pow"]);
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
@@ -133,6 +136,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   let comparators = 0;
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
   const intrinsics = new Set<string>();
+  // The C functions the program declares itself, which the libm functions Math uses may be.
+  const foreign = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
   const { convert, test, equals, unionField, holds } = conversions(builder);
 
@@ -155,6 +160,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A C function is declared under its own name, unless the runtime already declares it.
     if (instance.body.foreign) {
       const returns = crossed(instance.returns);
+      foreign.add(instance.body.name);
       if (!DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
       continue;
     }
@@ -263,7 +269,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     ...(library ? [] : [`@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`]),
     "",
     ...RUNTIME,
-    ...intrinsics,
+    ...[...intrinsics].filter((line) => !foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
     "",
     ...out,
     ...start,
@@ -363,6 +369,69 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
     return result;
+  }
+
+  // `Math` on f64 lowers to LLVM's intrinsics or to libm; `abs`, `sign`, `min` and `max` keep
+  // their numeric type, a float `min` or `max` giving NaN for any NaN and telling -0 from 0, as
+  // JavaScript does.
+  function mathCall(e: Extract<Expr, { kind: "call" }>): string {
+    const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
+    const type = types.get(e) as Numeric;
+    const t = llvm(type);
+    const args = e.args.map((a) => value(a));
+    const r = () => temp();
+    const call = (fn: string, xs: string[], of = t) => {
+      const result = r();
+      intrinsics.add(`declare ${of} ${fn}(${xs.map(() => of).join(", ")})`);
+      emit(`${result} = call ${of} ${fn}(${xs.map((x) => `${of} ${x}`).join(", ")})`);
+      return result;
+    };
+    const op = (line: string) => {
+      const result = r();
+      emit(`${result} = ${line}`);
+      return result;
+    };
+    if (MATH_INTRINSICS.has(name)) return call(`@llvm.${name}.f64`, args);
+    if (name in MATH_FLOAT && name !== "round") return call(`@${name}`, args);
+    const [x] = args as [string];
+    const float = isFloat(type);
+    const number = (n: number) => (float ? floatConstant(n, type) : String(n));
+    if (name === "round") {
+      const down = call("@llvm.floor.f64", [x]);
+      const up = op(`fcmp oge double ${op(`fsub double ${x}, ${down}`)}, ${floatConstant(0.5, "f64")}`);
+      const rounded = op(`select i1 ${up}, double ${op(`fadd double ${down}, ${floatConstant(1, "f64")}`)}, double ${down}`);
+      return call("@llvm.copysign.f64", [rounded, x]);
+    }
+    const signed = !float && INTEGERS[type as Integer].signed;
+    const less = float ? "fcmp olt" : signed ? "icmp slt" : "icmp ult";
+    const more = float ? "fcmp ogt" : signed ? "icmp sgt" : "icmp ugt";
+    if (name === "abs") {
+      if (float) return call(`@llvm.fabs.${type}`, [x]);
+      if (!signed) return x;
+      const negative = op(`icmp slt ${t} ${x}, 0`);
+      const [neg, done, start] = [label(), label(), block];
+      emit(`br i1 ${negative}, label %${neg}, label %${done}`);
+      startBlock(neg);
+      const negated = arithmetic("-", "0", x, e, type as Integer, "negate");
+      const from = block;
+      emit(`br label %${done}`);
+      startBlock(done);
+      return op(`phi ${t} [ ${x}, %${start} ], [ ${negated}, %${from} ]`);
+    }
+    if (name === "sign") {
+      const zero = float ? x : "0";
+      const below = op(`select i1 ${op(`${less} ${t} ${x}, ${number(0)}`)}, ${t} ${signed || float ? number(-1) : "0"}, ${t} ${zero}`);
+      return op(`select i1 ${op(`${more} ${t} ${x}, ${number(0)}`)}, ${t} ${number(1)}, ${t} ${below}`);
+    }
+    const better = name === "min" ? less : more;
+    return args.reduce((a, b) => {
+      const pick = op(`select i1 ${op(`${better} ${t} ${a}, ${b}`)}, ${t} ${a}, ${t} ${b}`);
+      if (!float) return pick;
+      const bits = type === "f32" ? "i32" : "i64";
+      const joined = op(`${name === "min" ? "or" : "and"} ${bits} ${op(`bitcast ${t} ${a} to ${bits}`)}, ${op(`bitcast ${t} ${b} to ${bits}`)}`);
+      const zeros = op(`select i1 ${op(`fcmp oeq ${t} ${a}, ${b}`)}, ${t} ${op(`bitcast ${bits} ${joined} to ${t}`)}, ${t} ${pick}`);
+      return op(`select i1 ${op(`fcmp uno ${t} ${a}, ${a}`)}, ${t} ${a}, ${t} ${zeros}`);
+    });
   }
 
   function emit(line: string) {
@@ -3393,6 +3462,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
+      if (maths.has(e)) return mathCall(e);
       if (e.callee.kind === "ident" && e.callee.name === "fill length") {
         const n = value(e.args[0]!);
         if (!lengthChecks.has(e)) return n;
@@ -4558,6 +4628,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return convert(t, local.type, types.get(e)!);
       }
       case "member":
+        if (maths.has(e)) return floatConstant(MATH_CONSTANTS[e.name]!, "f64");
         return unwraps(e.object) ? link(e, e.object, () => member(e))! : member(e);
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
