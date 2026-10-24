@@ -106,7 +106,6 @@ for (const [signature, what, part] of SIGNATURES) {
 const EXPRESSIONS: [string, string][] = [
   ["1n", "bigint literals"],
   ["super", "'super' expressions"],
-  ["/a+/g", "regular expressions"],
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
   ["<T>(x: T) => x", "generic arrow functions"],

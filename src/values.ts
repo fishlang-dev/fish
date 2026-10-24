@@ -6,10 +6,11 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
-import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType } from "./typing.ts";
+import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
+import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { STD_BASE } from "./std.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
@@ -157,6 +158,10 @@ export const fixedFills = new WeakSet<Expr>();
 export const lengthChecks = new WeakSet<Expr>();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+// The `new RegExp(...)` expressions, which are regexes known while compiling.
+export const regexNews = new WeakSet<Expr>();
+// A regex's flag properties, by the flag each reads.
+export const REGEX_FLAGS: Record<string, string> = { hasIndices: "d", global: "g", ignoreCase: "i", multiline: "m", dotAll: "s", unicode: "u", unicodeSets: "v", sticky: "y" };
 // The `toFixed` calls.
 export const fixedPrints = new WeakSet<Expr>();
 // The `Math` calls and constants, which codegen lowers itself.
@@ -1357,6 +1362,37 @@ export function expressions(ctx: Context) {
     return { type: unionType([name === "parseInt" ? "i64" : "f64", "null"]), what };
   }
 
+  // A regex's pattern, parsed and compiled here so its errors come while compiling.
+  function regexLiteral(source: string, flags: string, at: Span): RegexType {
+    try {
+      const pattern = parsePattern(source, flags);
+      compileRegex(pattern);
+      return regexType(source, flags, pattern.captures);
+    } catch (err) {
+      if (err instanceof RegexSyntaxError) throw new CompileError(err.message, at.start, at.end);
+      throw err;
+    }
+  }
+
+  // `new RegExp(pattern, flags?)` with both known while compiling is a regex like a literal's.
+  function regexNew(e: Extract<Expr, { kind: "new" }>, list: Expr[]): Type {
+    if (list.length < 1 || list.length > 2) throw new CompileError("'new RegExp' takes a pattern and optional flags", e.start, e.end);
+    const known = list.map((a) => (a.kind === "string" ? a.value : a.kind === "template" && a.exprs.length === 0 ? a.quasis[0]! : undefined));
+    if (known.some((k) => k === undefined)) {
+      throw new CompileError("a regex is compiled while compiling, so 'new RegExp' takes its pattern and flags as string literals; for a pattern known only when the program runs, Fish has no regex", e.start, e.end);
+    }
+    regexNews.add(e);
+    return regexLiteral(known[0]!.replace(/\//g, "\\/").replace(/\n/g, "\\n") || "(?:)", known[1] ?? "", e);
+  }
+
+  // `re.source`, `re.flags` and the flag properties, known from its type.
+  function regexMember(e: Extract<Expr, { kind: "member" }>, t: RegexType): Type {
+    if (e.name === "source" || e.name === "flags") return "string";
+    if (e.name in REGEX_FLAGS) return "boolean";
+    if (e.name === "lastIndex") throw new CompileError("a Fish regex keeps no state, so it has no 'lastIndex'; use 'matchAll' to go through every match", e.start, e.end);
+    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+  }
+
   // The global `Math`, unless a name of the program's hides it.
   function isMath(e: Expr): boolean {
     return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math") && !byName.has("const Math") && !enums.has("Math");
@@ -2317,6 +2353,8 @@ export function expressions(ctx: Context) {
         return "i64";
       case "float":
         return "f64";
+      case "regex":
+        return regexLiteral(e.pattern, e.flags, e);
       case "null":
         return "null";
       // A throw expression never gives a value, so it fits wherever it is.
@@ -2413,6 +2451,10 @@ export function expressions(ctx: Context) {
         if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
         if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
         if (typeof object !== "string" && object.kind === "dyn") return dynField(e, object);
+        if (typeof object !== "string" && object.kind === "regex") {
+          if (object !== through) coercions.set(e.object, object);
+          return regexMember(e, object);
+        }
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
         if (shared) {
@@ -2601,6 +2643,7 @@ export function expressions(ctx: Context) {
           return blockNew(e, e.callee.name, list);
         }
         if (e.callee.kind === "ident" && (e.callee.name === "Map" || e.callee.name === "Set") && !lookup(e.callee.name)) return mapNew(e, e.callee.name === "Set", list);
+        if (e.callee.kind === "ident" && e.callee.name === "RegExp" && !lookup("RegExp") && !classes.has("RegExp")) return regexNew(e, list);
         if (e.callee.kind === "ident" && e.callee.name === "AbortController" && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("'AbortController' takes no arguments", e.start, e.end);
           return blockType("AbortController");

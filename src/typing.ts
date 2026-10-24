@@ -201,7 +201,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -431,6 +431,23 @@ export function promiseElement(t: Type): Type | undefined {
 // A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
 // only inside `unsafe`. It copies like a number and owns nothing.
 export type PointerType = { kind: "pointer"; to: Type; mutable: boolean; fields: Field[] };
+
+// A regex: its pattern and flags, which fix what each capture may hold. Its value points at a
+// compiled program that never changes, so it copies freely and needs no drop.
+export type RegexType = { kind: "regex"; source: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[] };
+
+const regexes = new Map<string, RegexType>();
+
+export function regexType(source: string, flags: string, captures: RegexType["captures"]): RegexType {
+  const key = `regex ${flags} ${source}`;
+  let t = regexes.get(key);
+  if (!t) {
+    t = { kind: "regex", source, flags, captures, fields: [] };
+    regexes.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
 
 const pointers = new Map<string, PointerType>();
 
@@ -671,7 +688,7 @@ const variants = new Map<string, VariantType>();
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
 export function isCopy(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer") return true;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer" || t.kind === "regex") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
   // A fixed array copies when its elements do, as Rust's `[T; N]` does.
@@ -773,7 +790,7 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn") return t;
+  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn" || t.kind === "regex") return t;
   if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
   if (t.kind === "pattern") return "string";
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
@@ -1016,6 +1033,7 @@ export function show(t: Type): string {
   if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
   if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
   if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;
+  if (t.kind === "regex") return "RegExp";
   if (t.kind === "array") {
     const e = t.element;
     const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure" || (e.kind === "dyn" && callableOf.has(e.of)));

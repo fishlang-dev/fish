@@ -707,6 +707,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         }
         return;
       case "float":
+      case "regex":
       case "null":
         return;
       // A throw expression hands its value on, and nothing after it runs.
@@ -1493,6 +1494,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(e.body, call);
       case "int":
       case "float":
+      case "regex":
       case "bool":
       case "string":
       case "null":

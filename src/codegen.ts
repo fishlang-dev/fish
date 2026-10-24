@@ -1,5 +1,6 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexNews, type DynTable } from "./values.ts";
+import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -8,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -73,6 +74,7 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
+  const regexes = new Map<string, string>();
   const out: string[] = [];
   // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
   let allocas: string[] = [];
@@ -321,7 +323,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // The first part of a type comptime can't make, or undefined.
     const fault = (t: Type): Type | undefined => {
       if (typeof t === "string") return t === "void" ? t : undefined;
-      if (t.kind === "literal") return undefined;
+      if (t.kind === "literal" || t.kind === "regex") return undefined;
       const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "object" || t.kind === "variant" ? t.fields.map((f) => f.type)
         : t.kind === "class" ? [...(t.base ? [t.base] : []), ...t.fields.map((f) => f.type)] : t.kind === "interior" && constant && t.which !== "Cell" ? [t.of] : undefined;
       if (!parts) return t;
@@ -4564,6 +4566,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "float":
         return floatConstant(e.value, types.get(e) as "f32" | "f64");
+      case "regex":
+        return regex(types.get(e) as RegexType);
       case "as": {
         const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
         const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
@@ -4674,6 +4678,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "member":
         if (maths.has(e)) return floatConstant(MATH_CONSTANTS[e.name]!, "f64");
+        const held = types.has(e.object) ? lower(valueType(e.object)) : undefined;
+        if (typeof held !== "string" && held?.kind === "regex") {
+          const t = held;
+          if (e.name === "source") return text(t.source);
+          if (e.name === "flags") return text([..."dgimsuvy"].filter((f) => t.flags.includes(f)).join(""));
+          return t.flags.includes(REGEX_FLAGS[e.name]!) ? "1" : "0";
+        }
         return unwraps(e.object) ? link(e, e.object, () => member(e))! : member(e);
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
@@ -4717,6 +4728,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return result;
       }
       case "new": {
+        if (regexNews.has(e)) return regex(types.get(e) as RegexType);
         if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         if ((types.get(e) as Exclude<Type, string>).kind === "block") return blockNew(e, types.get(e) as BlockType);
         if ((types.get(e) as Exclude<Type, string>).kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
@@ -5080,6 +5092,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A value computed while compiling, built as a value of its type: scalars and strings as
   // constants, aggregates assembled from their baked parts.
   function bake(tagged: Value, type: Type): string {
+    // A regex comptime made is its pattern's program, whatever stands for it there.
+    if (typeof type !== "string" && type.kind === "regex") return regex(type);
     if (typeof type !== "string" && type.kind === "union") {
       const member = memberOf(tagged, type);
       return convert(bake(untagged(tagged), member), member, type);
@@ -5138,6 +5152,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A literal's string block: a count below zero, so it is never freed, its length, a pointer
   // to its bytes, no base, its UTF-16 length, and no breadcrumbs.
+  // A regex is a pointer to its compiled program, one constant per pattern and flags.
+  function regex(t: RegexType): string {
+    const key = `${t.flags}/${t.source}`;
+    const made = regexes.get(key);
+    if (made) return made;
+    const program = compileRegex(parsePattern(t.source, t.flags));
+    const name = `@.regex.${globals.length}`;
+    globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
+    regexes.set(key, name);
+    return name;
+  }
+
   function text(value: string): string {
     const made = texts.get(value);
     if (made) return made;

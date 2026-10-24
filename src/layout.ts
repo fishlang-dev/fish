@@ -16,7 +16,7 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // union is its member's index, then enough 64-bit words for its largest member.
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map") return "ptr";
+  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex") return "ptr";
   if (t.kind === "array") return ARRAY;
   if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
   if (t.kind === "dyn") return DYN;
@@ -55,7 +55,7 @@ function size(t: Type): [number, number] {
   if (t === "null" || t === "never") return [0, 1];
   if (t === "string") return [8, 8];
   if (typeof t === "string") return [0, 1];
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map") return [8, 8];
+  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
   if (t.kind === "interior" && t.which !== "Lock") return size(t.of);
