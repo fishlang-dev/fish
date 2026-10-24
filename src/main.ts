@@ -105,16 +105,32 @@ function cType(t: Type): string {
 export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
   const ir = compile(readFileSync(file, "utf8"), file, release, panic);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
-  const native = join(dir, "native.c");
-  writeFileSync(native, NATIVE);
   try {
-    const clang = Bun.spawnSync(["clang", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)], {
-      stdin: new TextEncoder().encode(ir),
-    });
+    const clang = Bun.spawnSync(clangArgs(dir, out, release, links), { stdin: new TextEncoder().encode(ir) });
     if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// `build`, with clang run without blocking, so several builds can go at once.
+export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
+  const ir = compile(readFileSync(file, "utf8"), file, release, panic);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-"));
+  try {
+    const clang = Bun.spawn(clangArgs(dir, out, release, links), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+    const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
+    if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Clang's command line for a program read from stdin, with the runtime's source written to `dir`.
+function clangArgs(dir: string, out: string, release: boolean, links: string[]): string[] {
+  const native = join(dir, "native.c");
+  writeFileSync(native, NATIVE);
+  return ["clang", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
 }
 
 function fail(message: string): never {
