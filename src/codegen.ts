@@ -9,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, matchType, regexType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -5100,8 +5100,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A value computed while compiling, built as a value of its type: scalars and strings as
   // constants, aggregates assembled from their baked parts.
   function bake(tagged: Value, type: Type): string {
-    // A regex comptime made is its pattern's program, whatever stands for it there.
-    if (typeof type !== "string" && type.kind === "regex") return regex(type);
+    // A regex comptime made is its flags and pattern, as the interpreter holds it.
+    if (typeof type !== "string" && type.kind === "regex") {
+      const held = untagged(tagged) as string;
+      const slash = held.indexOf("/");
+      const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
+      return regex(regexType(pattern, flags, parsePattern(pattern, flags).captures));
+    }
     if (typeof type !== "string" && type.kind === "union") {
       const member = memberOf(tagged, type);
       return convert(bake(untagged(tagged), member), member, type);
@@ -5165,7 +5170,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function regexExec(e: Extract<Expr, { kind: "call" }>): string {
     const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
     const regexT = lower(valueType(object)) as RegexType;
-    const option = types.get(e) as UnionType;
+    const option = (types.get(e) ?? unionType([matchType(regexT), "null"])) as UnionType;
     const match = option.members.find((m) => m !== "null") as ObjectType;
     const re = value(object);
     const s = value(e.args[0]!);
@@ -5244,10 +5249,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A regex is a pointer to its compiled program, one constant per pattern and flags.
   function regex(t: RegexType): string {
-    const key = `${t.flags}/${t.source}`;
+    const key = `${t.flags}/${t.pattern}`;
     const made = regexes.get(key);
     if (made) return made;
-    const program = compileRegex(parsePattern(t.source, t.flags));
+    const program = compileRegex(parsePattern(t.pattern, t.flags));
     const name = `@.regex.${globals.length}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);

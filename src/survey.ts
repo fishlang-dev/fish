@@ -62,6 +62,7 @@ const RULES: Rule[] = [
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
   { id: "regex", action: "unsupported", title: "string methods taking a regex: replace, replaceAll, split, match, matchAll and search", feature: "Regex string methods" },
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
+  { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
@@ -376,7 +377,10 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     const [first] = n.args as Node[];
     if (isNode(first) && (first.kind === "regex" || (first.kind === "new" && named(first.callee, "RegExp")))) push("regex");
   }
-  if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every((a) => isNode(a) && a.kind === "string")) push("dynamicRegex");
+  const literal = (a: unknown) => isNode(a) && (a.kind === "string" || (a.kind === "template" && (a.exprs as unknown[]).length === 0));
+  if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every(literal)) push("dynamicRegex");
+  if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" && (n.callee.name === "exec" || n.callee.name === "test") && isNode(n.callee.object) && n.callee.object.kind === "regex" && /[gy]/.test(n.callee.object.flags as string)) push("regexState");
+  if (n.kind === "member" && n.name === "lastIndex") push("regexState");
   const simple: Record<string, string> = { destructure: "destructuringAssignment", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");

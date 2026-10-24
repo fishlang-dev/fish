@@ -817,7 +817,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
     const rx = receiver === undefined ? undefined : asRegex(receiver);
-    if (callee.kind === "member" && rx) return regexCall(e, callee, rx);
+    if (callee.kind === "member" && rx) return regexCall(e, callee, rx, lower(receiver!) !== rx);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
       throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
@@ -1367,11 +1367,11 @@ export function expressions(ctx: Context) {
   }
 
   // A regex's pattern, parsed and compiled here so its errors come while compiling.
-  function regexLiteral(source: string, flags: string, at: Span): RegexType {
+  function regexLiteral(source: string, flags: string, at: Span, shown = source): RegexType {
     try {
       const pattern = parsePattern(source, flags);
       compileRegex(pattern);
-      return regexType(source, flags, pattern.captures);
+      return regexType(source, flags, pattern.captures, shown);
     } catch (err) {
       if (err instanceof RegexSyntaxError) throw new CompileError(err.message, at.start, at.end);
       throw err;
@@ -1386,12 +1386,12 @@ export function expressions(ctx: Context) {
       throw new CompileError("a regex is compiled while compiling, so 'new RegExp' takes its pattern and flags as string literals; for a pattern known only when the program runs, Fish has no regex", e.start, e.end);
     }
     regexNews.add(e);
-    return regexLiteral(known[0]!.replace(/\//g, "\\/").replace(/\n/g, "\\n") || "(?:)", known[1] ?? "", e);
+    return regexLiteral(known[0]!, known[1] ?? "", e, shownSource(known[0]!));
   }
 
   // `re.test(s)` and `re.exec(s)`. A regex keeps no `lastIndex`, so on a `g` or `y` regex they
   // would loop forever where JavaScript moves on; `matchAll` goes through every match instead.
-  function regexCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: RegexType): { type: Type; what: string } {
+  function regexCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: RegexType, generic: boolean): { type: Type; what: string } {
     const what = `'${callee.name}'`;
     if (callee.name !== "test" && callee.name !== "exec") throw new CompileError(`'RegExp' has no method '${callee.name}' in Fish; it has 'test' and 'exec', and strings take regexes in 'replace', 'split', 'match' and 'matchAll'`, callee.start, callee.end);
     if (callee.optional || e.optional) throw new CompileError(`a regex is always there, so ${what} is called without '?.'`, e.start, e.end);
@@ -1403,6 +1403,9 @@ export function expressions(ctx: Context) {
     if (!stringLike(s)) throw new CompileError(`${what} matches a string, not '${show(s)}'`, e.args[0]!.start, e.args[0]!.end);
     if (s !== "string") coerce(e.args[0]!, s, "string", "");
     loaded(callee.object, types.get(callee.object)!);
+    if (callee.name === "exec" && t.any && !generic) {
+      throw new CompileError("'exec' types its match from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter", e.start, e.end);
+    }
     regexCalls.set(e, callee.name);
     return { type: callee.name === "test" ? "boolean" : unionType([matchType(t), "null"]), what };
   }
@@ -1414,6 +1417,24 @@ export function expressions(ctx: Context) {
     if (typeof held === "string") return undefined;
     if (held.kind === "regex") return held;
     return held.kind === "param" && held.bound?.kind === "regex" ? held.bound : undefined;
+  }
+
+  // How JavaScript shows a pattern given as a string: a '/' not already escaped, outside a class,
+  // and line terminators escaped, and an empty one as '(?:)'.
+  function shownSource(pattern: string): string {
+    if (pattern === "") return "(?:)";
+    let out = "", inClass = false;
+    for (let i = 0; i < pattern.length; i++) {
+      const c = pattern[i]!;
+      if (c === "\\" && i + 1 < pattern.length) {
+        out += c + pattern[++i];
+        continue;
+      }
+      if (c === "[") inClass = true;
+      else if (c === "]") inClass = false;
+      out += c === "/" && !inClass ? "\\/" : c === "\n" ? "\\n" : c === "\r" ? "\\r" : c === "\u2028" ? "\\u2028" : c === "\u2029" ? "\\u2029" : c;
+    }
+    return out;
   }
 
   // `re.source`, `re.flags` and the flag properties, known from its type.

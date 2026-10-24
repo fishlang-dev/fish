@@ -1461,7 +1461,7 @@ export function check(written: Stmt[], library = false): Checked {
             throw new CompileError(`an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
           }
           // So does a regex given as a 'RegExp', which keeps its pattern's captures.
-          const describes = annotated && (isInterface(annotated) || annotated === ANY_REGEX);
+          const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
           if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
           return;
@@ -1715,6 +1715,8 @@ export function check(written: Stmt[], library = false): Checked {
           const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? result(s.value) : value(s.value);
           // A closure returned is boxed into the callable the function declares.
           if (typeof type !== "string" && type.kind === "closure" && (typeof declared === "string" || declared?.kind !== "dyn")) throw unsupported("functions returned without a function return type", s.value!);
+          // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
+          if (!declared && typeof inferred !== "string" && inferred?.kind === "regex" && typeof type !== "string" && type.kind === "regex" && inferred !== type) inferred = ANY_REGEX;
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);

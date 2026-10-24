@@ -2699,52 +2699,75 @@ typedef struct {
   int64_t stamp;
 } fsh_rx_list;
 
-static void fsh_rx_add(fsh_rx *r, fsh_rx_list *l, int64_t *marks, int32_t pc, int64_t pos, int64_t *slots) {
-  if (marks[pc] == l->stamp) return;
-  marks[pc] = l->stamp;
-  const int32_t *op = r->code + pc;
-  switch (op[0]) {
-    case RX_JUMP:
-      fsh_rx_add(r, l, marks, op[1], pos, slots);
-      return;
-    case RX_SPLIT:
-      fsh_rx_add(r, l, marks, op[1], pos, slots);
-      fsh_rx_add(r, l, marks, op[2], pos, slots);
-      return;
-    case RX_SAVE:
-    case RX_MARK: {
-      int32_t k = op[0] == RX_SAVE ? op[1] : r->code[0] * 2 + op[1];
-      int64_t old = slots[k];
-      slots[k] = pos;
-      fsh_rx_add(r, l, marks, pc + 2, pos, slots);
-      slots[k] = old;
-      return;
+// Follows the steps that take no character from pc, in priority order, putting each thread that
+// reaches one that does on the list. A slot a step sets is put back once what follows it is
+// explored, by a frame below it on the work stack, so nothing recurses on the C stack.
+typedef struct {
+  int32_t pc;
+  int32_t slot;
+  int64_t old;
+} fsh_rx_work;
+
+static void fsh_rx_add(fsh_rx *r, fsh_rx_list *l, int64_t *marks, int32_t start, int64_t pos, int64_t *slots, fsh_rx_work *work) {
+  int64_t top = 0;
+  work[top++] = (fsh_rx_work){start, -1, 0};
+  while (top > 0) {
+    fsh_rx_work w = work[--top];
+    if (w.slot >= 0) {
+      slots[w.slot] = w.old;
+      continue;
     }
-    case RX_CHECK:
-      if (slots[r->code[0] * 2 + op[1]] != pos) fsh_rx_add(r, l, marks, pc + 2, pos, slots);
-      return;
-    case RX_RESET: {
-      int32_t from = op[1] * 2, to = op[2] * 2;
-      int64_t old[to - from];
-      memcpy(old, slots + from, (to - from) * sizeof(int64_t));
-      for (int32_t k = from; k < to; k++) slots[k] = -1;
-      fsh_rx_add(r, l, marks, pc + 3, pos, slots);
-      memcpy(slots + from, old, (to - from) * sizeof(int64_t));
-      return;
+    int32_t pc = w.pc;
+    if (marks[pc] == l->stamp) continue;
+    marks[pc] = l->stamp;
+    const int32_t *op = r->code + pc;
+    switch (op[0]) {
+      case RX_JUMP:
+        work[top++] = (fsh_rx_work){op[1], -1, 0};
+        break;
+      case RX_SPLIT:
+        work[top++] = (fsh_rx_work){op[2], -1, 0};
+        work[top++] = (fsh_rx_work){op[1], -1, 0};
+        break;
+      case RX_SAVE:
+      case RX_MARK: {
+        int32_t k = op[0] == RX_SAVE ? op[1] : r->code[0] * 2 + op[1];
+        work[top++] = (fsh_rx_work){0, k, slots[k]};
+        slots[k] = pos;
+        work[top++] = (fsh_rx_work){pc + 2, -1, 0};
+        break;
+      }
+      case RX_CHECK:
+        if (slots[r->code[0] * 2 + op[1]] != pos) work[top++] = (fsh_rx_work){pc + 2, -1, 0};
+        break;
+      case RX_RESET:
+        for (int32_t k = op[1] * 2; k < op[2] * 2; k++) {
+          work[top++] = (fsh_rx_work){0, k, slots[k]};
+          slots[k] = -1;
+        }
+        work[top++] = (fsh_rx_work){pc + 3, -1, 0};
+        break;
+      case RX_ASSERT:
+        if (fsh_rx_assert(r, op, pos)) work[top++] = (fsh_rx_work){pc + 4, -1, 0};
+        break;
+      default:
+        l->pcs[l->count] = pc;
+        memcpy(l->slots + (int64_t)l->count * r->slots, slots, r->slots * sizeof(int64_t));
+        l->count++;
     }
-    case RX_ASSERT:
-      if (fsh_rx_assert(r, op, pos)) fsh_rx_add(r, l, marks, pc + 4, pos, slots);
-      return;
-    default:
-      l->pcs[l->count] = pc;
-      memcpy(l->slots + (int64_t)l->count * r->slots, slots, r->slots * sizeof(int64_t));
-      l->count++;
   }
 }
 
 static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
-  // Each instruction is at most one thread in a list.
+  // Each instruction is at most one thread in a list, and is followed at most once per list,
+  // so the work stack holds at most what every instruction pushes.
   int32_t size = r->code[3];
+  int64_t room = 1;
+  for (int32_t pc = RX_HEADER; pc < size; pc += fsh_rx_size(r->code + pc)) {
+    const int32_t *op = r->code + pc;
+    room += op[0] == RX_RESET ? (op[2] - op[1]) * 2 + 1 : 2;
+  }
+  fsh_rx_work *work = fsh_rt_alloc(room * sizeof(fsh_rx_work));
   int64_t *marks = fsh_rt_alloc(size * sizeof(int64_t));
   for (int32_t k = 0; k < size; k++) marks[k] = -1;
   fsh_rx_list lists[2];
@@ -2761,7 +2784,7 @@ static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
   for (int64_t pos = 0;;) {
     if (!matched && (pos == 0 || !sticky)) {
       for (int32_t k = 0; k < r->slots; k++) start[k] = -1;
-      fsh_rx_add(r, now, marks, RX_HEADER, pos, start);
+      fsh_rx_add(r, now, marks, RX_HEADER, pos, start, work);
     }
     if (now->count == 0 && (matched || sticky || pos >= r->n)) break;
     int64_t width = 1;
@@ -2777,7 +2800,7 @@ static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
         memcpy(out, slots, r->code[0] * 2 * sizeof(int64_t));
         break;
       }
-      if (pos < r->n && fsh_rx_takes(op, c)) fsh_rx_add(r, next, marks, pc + fsh_rx_size(op), pos + width, slots);
+      if (pos < r->n && fsh_rx_takes(op, c)) fsh_rx_add(r, next, marks, pc + fsh_rx_size(op), pos + width, slots, work);
     }
     fsh_rx_list *swap = now;
     now = next;
@@ -2791,6 +2814,7 @@ static int fsh_rx_pike(fsh_rx *r, int64_t *out) {
   }
   fsh_rt_free(start);
   fsh_rt_free(marks);
+  fsh_rt_free(work);
   return matched;
 }
 
@@ -2904,9 +2928,16 @@ static int fsh_rx_run(fsh_rx *r, fsh_rx_stack *s, int64_t *slots, int64_t pc, in
           break;
         }
         int64_t at = back ? pos - length : pos;
-        for (int64_t k = 0; k < length && !fails; k++) {
+        // Ignoring case under 'u', characters are compared whole, a surrogate pair as one.
+        for (int64_t k = 0; k < length && !fails;) {
+          int64_t wa = 1, wb = 1;
           uint32_t a = r->in[from + k], b = r->in[at + k];
-          if (a != b && !(op[1] && fsh_rx_fold(table, a) == fsh_rx_fold(table, b))) fails = 1;
+          if (op[1] && r->unicode) {
+            a = fsh_rx_at(r, from + k, &wa);
+            b = fsh_rx_at(r, at + k, &wb);
+          }
+          if (wa != wb || (a != b && !(op[1] && fsh_rx_fold(table, a) == fsh_rx_fold(table, b)))) fails = 1;
+          k += wa;
         }
         if (!fails) {
           pos = back ? pos - length : pos + length;

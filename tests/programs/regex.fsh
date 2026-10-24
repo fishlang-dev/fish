@@ -224,3 +224,45 @@ function main() {
   console.log(/σ/iu.test("ς"), /Σ/i.test("ς"), /k/iu.test("K"), /k/i.test("K"), /ß/iu.test("ẞ"), /[\q{abc|d}]/v.exec("xxabc")?.index ?? -1);
   console.log(/\w/iu.test("ſ"), /\w/i.test("ſ"), /\bſ/iu.test("ſ"), /[^\P{Lu}]/u.test("A"));
 }
+// case: regex_review_repairs
+// expect: true ^https?:\/\/ a\/b (?:)
+// expect: true true false true true
+// expect: true
+// expect: true
+// expect: true true false false true
+// expect: true true true
+function pick(b: boolean) {
+  if (b) return /a/;
+  return /b/;
+}
+function two(): RegExp {
+  return /q(r)/;
+}
+const T = comptime two();
+function main() {
+  const url = new RegExp("^https?:\\/\\/");
+  console.log(url.test("https://x.dev"), url.source, new RegExp("a/b").source, new RegExp("").source);
+  console.log(/(.)\1/iu.test("𐐀𐐨"), /\P{Lu}/iu.test("A"), /\P{Lu}/iv.test("A"), /ΐ/iu.test("ΐ"), /ﬅ/iu.test("ﬆ"));
+  /a(b)/.exec("ab");
+  const all = [/(a)(b)/, /c/];
+  for (const r of all) console.log(r.test("abc"));
+  let r = /a/;
+  r = /b/;
+  console.log(r.test("b"), pick(true).test("a"), pick(false).test("a"), T.test("x"), T.test("qr"));
+  console.log(/a{0,60000}b/.test("aab"), /(?:b|){100000}c/.test("c"), /(?:a?){20000}b/.test("aab"));
+}
+// case: regex_exec_unknown_pattern
+// error: 'exec' types its match from the regex's pattern, which isn't known for a 'RegExp' kept here
+class Holder {
+  re: RegExp;
+  constructor(re: RegExp) { this.re = re; }
+}
+function make(): RegExp { return /(a)(b)(c)(d)(e)(f)/; }
+function main() {
+  const h = new Holder(/(a)(b)(c)(d)(e)(f)/);
+  const m = h.re.exec("abcdef");
+  if (m !== null) console.log(m[0], m.index);
+  const r = make();
+  const m2 = r.exec("xxabcdef");
+  if (m2 !== null) console.log(m2[0], m2.index);
+}

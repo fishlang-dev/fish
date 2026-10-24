@@ -435,19 +435,21 @@ export type PointerType = { kind: "pointer"; to: Type; mutable: boolean; fields:
 
 // A regex: its pattern and flags, which fix what each capture may hold. Its value points at a
 // compiled program that never changes, so it copies freely and needs no drop.
-export type RegexType = { kind: "regex"; source: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
+// \`source\` is how JavaScript shows the pattern; \`pattern\` what is matched, which differ only for
+// a \`new RegExp\` whose string held a \`/\` or a line terminator.
+export type RegexType = { kind: "regex"; source: string; pattern: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
 
 // The \`RegExp\` annotation: any regex. A parameter of it is an implicit type parameter, so each
 // instance knows its regex; elsewhere it holds one whose pattern isn't known there.
-export const ANY_REGEX: RegexType = { kind: "regex", source: "", flags: "", captures: [], fields: [], any: true };
+export const ANY_REGEX: RegexType = { kind: "regex", source: "", pattern: "", flags: "", captures: [], fields: [], any: true };
 
 const regexes = new Map<string, RegexType>();
 
-export function regexType(source: string, flags: string, captures: RegexType["captures"]): RegexType {
-  const key = `regex ${flags} ${source}`;
+export function regexType(pattern: string, flags: string, captures: RegexType["captures"], source = pattern): RegexType {
+  const key = `regex ${flags} ${pattern}`;
   let t = regexes.get(key);
   if (!t) {
-    t = { kind: "regex", source, flags, captures, fields: [] };
+    t = { kind: "regex", source, pattern, flags, captures, fields: [] };
     regexes.set(key, t);
     keys.set(t, key);
   }
@@ -570,7 +572,9 @@ export function standInLiteral(key: string): LiteralType {
 // and a literal whose base type is also a member adds nothing. A single member is itself.
 // An enum's union carries the enum's name, for messages.
 export function unionType(parts: Type[], name?: string): Type {
-  const flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
+  let flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
+  // Regexes of different patterns are one \`RegExp\`, as every regex is a pointer to a program.
+  if (new Set(flat.filter((p) => typeof p !== "string" && p.kind === "regex")).size > 1) flat = flat.map((p) => (typeof p !== "string" && p.kind === "regex" ? ANY_REGEX : p));
   // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
   // as whichever sorts first.
   const seen = new Set<string>();
@@ -608,6 +612,8 @@ export function widenEnum(t: Type): Type {
 // A `let` holds its literal's whole type too, as in TypeScript: `let s = "a"` is a string.
 export function widenLet(t: Type): Type {
   if (typeof t !== "string" && t.kind === "literal" && !t.owner && typeof t.value === "string") return "string";
+  // A \`let\` may later hold another regex, so it holds any.
+  if (typeof t !== "string" && t.kind === "regex") return ANY_REGEX;
   return widenEnum(t);
 }
 

@@ -394,7 +394,9 @@ export function parsePattern(source: string, flags: string): Pattern {
       return { kind: "backref", groups: [], fold, name } as RegexNode;
     }
     const set = classEscape();
-    if (set) return set;
+    // Without \`v\`, a negated escape like \\P{Lu} is its complement before case folding, as
+    // JavaScript reads it; under \`v\`, and in a negated class, folding comes first.
+    if (set) return set.negated && !sets ? { ...set, ranges: complement(set.ranges, top), negated: false } : set;
     return { kind: "char", c: characterEscape(false), fold };
   }
 
@@ -714,6 +716,7 @@ export function compile(p: Pattern): number[] {
     return code.length - words.length;
   };
   let registers = 0;
+  const registerOf = new Map<RegexNode, number>();
   let folds = false;
   const top = p.unicode ? 0x10ffff : 0xffff;
 
@@ -800,15 +803,9 @@ export function compile(p: Pattern): number[] {
     if (n.min > 0 && n.max === 1 && n.min === 1) return pass();
     for (let i = 0; i < n.min; i++) pass();
     if (n.max === n.min) return;
-    const optional = (body: () => void) => {
-      const split = emit(OP.split, 0, 0);
-      const into = code.length;
-      body();
-      const out = code.length;
-      code[split + 1] = n.greedy ? into : out;
-      code[split + 2] = n.greedy ? out : into;
-    };
-    const register = registers++;
+    // Each repeat has its own register, used again by every copy a bounded repeat makes of it.
+    let register = registerOf.get(n);
+    if (register === undefined) registerOf.set(n, register = registers++);
     if (n.max === Infinity) {
       const loop = code.length;
       const split = emit(OP.split, 0, 0);
@@ -822,17 +819,21 @@ export function compile(p: Pattern): number[] {
       code[split + 2] = n.greedy ? out : into;
       return;
     }
-    // A bounded repeat's optional passes nest, so a later one runs only after an earlier one.
-    const nest = (left: number) => {
-      if (left === 0) return;
-      optional(() => {
-        emit(OP.mark, register);
-        pass();
-        emit(OP.check, register);
-        nest(left - 1);
-      });
-    };
-    nest(n.max - n.min);
+    // A bounded repeat's optional passes nest, so a later one runs only after an earlier one;
+    // each that is skipped skips the rest, to the end.
+    const splits: [number, number][] = [];
+    for (let left = n.max - n.min; left > 0; left--) {
+      const split = emit(OP.split, 0, 0);
+      splits.push([split, code.length]);
+      emit(OP.mark, register!);
+      pass();
+      emit(OP.check, register!);
+    }
+    const out = code.length;
+    for (const [split, into] of splits) {
+      code[split + 1] = n.greedy ? into : out;
+      code[split + 2] = n.greedy ? out : into;
+    }
   }
 
   emit(p.captures.length + 1, 0, flagsOf(p), 0);
@@ -875,6 +876,7 @@ function classesOf(unicode: boolean): number[][] {
     if (x !== y) parent[Math.max(x, y)] = Math.min(x, y);
   };
   const single = (s: string) => (unicode ? ([...s].length === 1 ? s.codePointAt(0)! : -1) : s.length === 1 ? s.charCodeAt(0) : -1);
+  const longUppers = new Map<string, number>();
   for (let c = 0; c <= top; c++) {
     if (c >= 0xd800 && c <= 0xdfff) continue;
     const ch = String.fromCodePoint(c);
@@ -884,6 +886,14 @@ function classesOf(unicode: boolean): number[][] {
       continue;
     }
     for (const other of [single(ch.toUpperCase()), single(ch.toLowerCase())]) if (other >= 0) join(c, other);
+    // Characters whose upper case is several, like ΐ and ΐ, may still fold together; the check
+    // below keeps only those that do.
+    const upper = ch.toUpperCase();
+    if (single(upper) < 0) {
+      const first = longUppers.get(upper);
+      if (first === undefined) longUppers.set(upper, c);
+      else join(c, first);
+    }
   }
   const groups = new Map<number, number[]>();
   for (let c = 0; c <= top; c++) {
