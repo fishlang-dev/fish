@@ -44,6 +44,7 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
 }
 class AbortError { message: string = "This operation was aborted"; }
 class IoError { message: string; constructor(message: string) { this.message = message; } }
+class JsonError { message: string; constructor(message: string) { this.message = message; } }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
 class TextDecoder { decode(input: Ref<u8[]>): string { return utf8Decode(input); } }
 `;

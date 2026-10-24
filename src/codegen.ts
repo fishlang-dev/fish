@@ -9,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -129,6 +129,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The function comparing two values of each compound type, made once.
   const comparers = new Map<Type, string>();
   const jsonWriters = new Map<Type, string>();
+  const jsonReaders = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
@@ -2797,6 +2798,508 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     jsonRaw(w, "]");
   }
 
+  // `JSON.parse<T>(s)`: s read as a T. A failure, or text left after the value, throws a
+  // JsonError holding the reader's message.
+  function parseJsonCall(e: Extract<Expr, { kind: "call" }>): string {
+    const type = types.get(e)!;
+    const s = operand(e.args[0]!, []);
+    const r = temp();
+    emit(`${r} = call ptr @fsh_rt_json_in(ptr ${s})`);
+    const [ok, v] = jsonRead(r, type);
+    const [check, extra, bad, good] = [label(), label(), label(), label()];
+    emit(`br i1 ${ok}, label %${check}, label %${bad}`);
+    startBlock(check);
+    const [ended, whole] = [temp(), temp()];
+    emit(`${ended} = call i32 @fsh_rt_json_end(ptr ${r})`);
+    emit(`${whole} = icmp ne i32 ${ended}, 0`);
+    emit(`br i1 ${whole}, label %${good}, label %${extra}`);
+    startBlock(extra);
+    dispose(v, type);
+    emit(`br label %${bad}`);
+    startBlock(bad);
+    const [message, error] = [temp(), temp()];
+    emit(`${message} = call ptr @fsh_rt_json_close(ptr ${r})`);
+    const failure = current.raises.get(e)!.from;
+    emit(`${error} = insertvalue ${llvm(failure)} zeroinitializer, ptr ${message}, 0`);
+    raised(e, error);
+    startBlock(good);
+    const none = temp();
+    emit(`${none} = call ptr @fsh_rt_json_close(ptr ${r})`);
+    emit(`call void @fsh_rt_str_release(ptr ${none})`);
+    return v;
+  }
+
+  // Reads a value of a type through the function made for it, which reports whether it could.
+  function jsonRead(r: string, type: Type): [ok: string, v: string] {
+    const t = lower(type);
+    let name = jsonReaders.get(t);
+    if (!name) {
+      name = `@"fsh.json.read.${jsonReaders.size}"`;
+      jsonReaders.set(t, name);
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      emit(`store ${llvm(t)} ${readParts("%r", t)}, ptr %out`);
+      emit("ret i1 true");
+      out.push(`define internal i1 ${name}(ptr %r, ptr %out) {`, "entry:", ...allocas, ...body, "}", "");
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    }
+    const [slot, ok, v] = [alloca(llvm(t)), temp(), temp()];
+    emit(`${ok} = call i1 ${name}(ptr ${r}, ptr ${slot})`);
+    emit(`${v} = load ${llvm(t)}, ptr ${slot}`);
+    return [ok, v];
+  }
+
+  // Goes on when a reading step succeeded, an i32 or i1 that isn't zero; otherwise the reading
+  // function fails, after `undo` drops what it had made.
+  function jsonGuard(ok: string, width: "i32" | "i1", undo?: () => void) {
+    const [bad, good] = [label(), label()];
+    let test = ok;
+    if (width === "i32") {
+      test = temp();
+      emit(`${test} = icmp ne i32 ${ok}, 0`);
+    }
+    emit(`br i1 ${test}, label %${good}, label %${bad}`);
+    startBlock(bad);
+    undo?.();
+    emit("ret i1 false");
+    startBlock(good);
+  }
+
+  // Fails the reading function with "expected <what>" at the reader's place.
+  function jsonExpected(r: string, what: string, undo?: () => void) {
+    const ignored = temp();
+    emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(what)})`);
+    undo?.();
+    emit("ret i1 false");
+    startBlock(label());
+  }
+
+  // A value of the type, read inside a reading function, which fails and returns where it can't.
+  function readParts(r: string, t: Type): string {
+    if (typeof t !== "string" && t.kind === "literal") return readLiteral(r, t);
+    if (t === "null") {
+      const ok = temp();
+      emit(`${ok} = call i32 @fsh_rt_json_null(ptr ${r})`);
+      jsonGuard(ok, "i32");
+      return "zeroinitializer";
+    }
+    if (t === "boolean") {
+      const [slot, ok, v, b] = [alloca("i32"), temp(), temp(), temp()];
+      emit(`${ok} = call i32 @fsh_rt_json_bool(ptr ${r}, ptr ${slot})`);
+      jsonGuard(ok, "i32");
+      emit(`${v} = load i32, ptr ${slot}`);
+      emit(`${b} = trunc i32 ${v} to i1`);
+      return b;
+    }
+    if (t === "string") {
+      const [slot, ok, v] = [alloca("ptr"), temp(), temp()];
+      emit(`${ok} = call i32 @fsh_rt_json_text(ptr ${r}, ptr ${slot}, ptr ${cString("string")})`);
+      jsonGuard(ok, "i32");
+      emit(`${v} = load ptr, ptr ${slot}`);
+      return v;
+    }
+    if (isFloat(t)) {
+      const [slot, ok, v] = [alloca("double"), temp(), temp()];
+      emit(`${ok} = call i32 @fsh_rt_json_float(ptr ${r}, ptr ${slot}, ptr ${cString(t)})`);
+      jsonGuard(ok, "i32");
+      emit(`${v} = load double, ptr ${slot}`);
+      if (t === "f64") return v;
+      const narrow = temp();
+      emit(`${narrow} = fptrunc double ${v} to float`);
+      return narrow;
+    }
+    if (typeof t === "string" && Object.hasOwn(INTEGERS, t)) {
+      const { bits, signed } = INTEGERS[t as Integer];
+      const [slot, ok, v] = [alloca("i64"), temp(), temp()];
+      emit(`${ok} = call i32 @fsh_rt_json_int(ptr ${r}, ptr ${slot}, i32 ${bits}, i32 ${signed ? 1 : 0}, ptr ${cString(t)})`);
+      jsonGuard(ok, "i32");
+      emit(`${v} = load i64, ptr ${slot}`);
+      if (bits === 64) return v;
+      const narrow = temp();
+      emit(`${narrow} = trunc i64 ${v} to i${bits}`);
+      return narrow;
+    }
+    const c = t as Exclude<Type, string>;
+    if (c.kind === "recursive") {
+      const [ok, v] = jsonRead(r, c.of);
+      jsonGuard(ok, "i1");
+      return convert(v, c.of, c);
+    }
+    if (c.kind === "array") return readElements(r, c);
+    if (c.kind === "map") return readEntries(r, c);
+    if (c.kind === "union") return c.members.every((m) => typeof m !== "string" && m.kind === "variant") ? readVariant(r, c) : readMember(r, c);
+    if (c.kind === "object" && isTuple(c)) return readTuple(r, c);
+    const fields = c.kind === "class" ? jsonFields(c) : (c as ObjectType).fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] }));
+    return readObject(r, c, fields);
+  }
+
+  // A literal type's value, read as its base and checked; the error points at where it starts.
+  function readLiteral(r: string, t: LiteralType): string {
+    const mark = alloca("[3 x i64]");
+    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    const what = typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
+    const base = typeof t.value === "string" ? "string" : typeof t.value === "boolean" ? "boolean" : "i64";
+    const v = readParts(r, base);
+    const same = temp();
+    if (base === "string") {
+      const found = temp();
+      emit(`${found} = call i32 @fsh_rt_json_same(ptr ${v}, ptr ${cString(t.value as string)}, i64 ${new TextEncoder().encode(t.value as string).length})`);
+      emit(`call void @fsh_rt_str_release(ptr ${v})`);
+      emit(`${same} = icmp ne i32 ${found}, 0`);
+    } else if (base === "boolean") emit(`${same} = icmp eq i1 ${v}, ${t.value}`);
+    else emit(`${same} = icmp eq i64 ${v}, ${String(t.value)}`);
+    jsonGuard(same, "i1", () => {
+      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      const ignored = temp();
+      emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(what)})`);
+    });
+    return "zeroinitializer";
+  }
+
+  // An array's elements, each pushed as it is read; a failure drops what was read.
+  function readElements(r: string, t: ArrayType): string {
+    const array = alloca(ARRAY);
+    emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
+    const undo = () => {
+      const held = temp();
+      emit(`${held} = load ${ARRAY}, ptr ${array}`);
+      dispose(held, t);
+    };
+    const opened = temp();
+    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
+    jsonGuard(opened, "i32");
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, item, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, first, more] = [temp(), temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${first} = icmp eq i64 ${i}, 0`);
+    const wide = temp();
+    emit(`${wide} = zext i1 ${first} to i32`);
+    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${wide})`);
+    const [failed, ended] = [temp(), temp()];
+    emit(`${failed} = icmp slt i32 ${more}, 0`);
+    const [bad, ok] = [label(), label()];
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(bad);
+    undo();
+    emit("ret i1 false");
+    startBlock(ok);
+    emit(`${ended} = icmp eq i32 ${more}, 0`);
+    emit(`br i1 ${ended}, label %${done}, label %${item}`);
+    startBlock(item);
+    const mark = temp();
+    emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${i})`);
+    const [read, v] = jsonRead(r, t.element);
+    jsonGuard(read, "i1", undo);
+    emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+    appended(array, t.element, v);
+    const next = temp();
+    emit(`${next} = add i64 ${i}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    const result = temp();
+    emit(`${result} = load ${ARRAY}, ptr ${array}`);
+    return result;
+  }
+
+  // A tuple's elements, exactly as many as it has, in order.
+  function readTuple(r: string, t: ObjectType): string {
+    const order = t.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+    const opened = temp();
+    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
+    jsonGuard(opened, "i32");
+    const read: { v: string; type: Type; i: number }[] = [];
+    const undo = () => read.forEach((x) => dispose(x.v, x.type));
+    const what = `an array of ${order.length}`;
+    // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
+    const step = (n: number, wanted: 0 | 1) => {
+      const [more, readable, right] = [temp(), temp(), temp()];
+      emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
+      emit(`${readable} = icmp sge i32 ${more}, 0`);
+      jsonGuard(readable, "i1", undo);
+      emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
+      return right;
+    };
+    order.forEach(({ f, i }, n) => {
+      const right = step(n, 1);
+      const [bad, good] = [label(), label()];
+      emit(`br i1 ${right}, label %${good}, label %${bad}`);
+      startBlock(bad);
+      jsonExpected(r, what, undo);
+      emit(`br label %${good}`);
+      startBlock(good);
+      const mark = temp();
+      emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${n})`);
+      const [ok, v] = jsonRead(r, f.type);
+      jsonGuard(ok, "i1", undo);
+      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+      read.push({ v, type: f.type, i });
+    });
+    const right = step(order.length, 0);
+    const [bad, good] = [label(), label()];
+    emit(`br i1 ${right}, label %${good}, label %${bad}`);
+    startBlock(bad);
+    jsonExpected(r, what, undo);
+    emit(`br label %${good}`);
+    startBlock(good);
+    return read.reduce((agg, x) => {
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(t)} ${agg}, ${llvm(lower(x.type))} ${x.v}, ${x.i}`);
+      return next;
+    }, "undef");
+  }
+
+  // An object's fields by key, in any order, unknown keys passed over and a repeated key's
+  // last value kept, as JavaScript reads them; a missing field is an error unless it may be
+  // empty. A failure drops the fields read so far.
+  function readObject(r: string, t: Exclude<Type, string>, fields: { name: string; type: Type; path: number[] }[]) {
+    const slots = fields.map((f) => ({ ...f, slot: alloca(llvm(lower(f.type))), seen: alloca("i1") }));
+    for (const f of slots) emit(`store i1 false, ptr ${f.seen}`);
+    const undo = () => {
+      for (const f of slots.filter((f) => needsDrop(f.type))) {
+        const [was, drop, after, v] = [temp(), label(), label(), temp()];
+        emit(`${was} = load i1, ptr ${f.seen}`);
+        emit(`br i1 ${was}, label %${drop}, label %${after}`);
+        startBlock(drop);
+        emit(`${v} = load ${llvm(lower(f.type))}, ptr ${f.slot}`);
+        dispose(v, f.type);
+        emit(`br label %${after}`);
+        startBlock(after);
+      }
+    };
+    const opened = temp();
+    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString("object")})`);
+    jsonGuard(opened, "i32");
+    const first = alloca("i32");
+    emit(`store i32 1, ptr ${first}`);
+    const [head, entry, next, done] = [label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [isFirst, more, failed, ended] = [temp(), temp(), temp(), temp()];
+    emit(`${isFirst} = load i32, ptr ${first}`);
+    emit(`store i32 0, ptr ${first}`);
+    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
+    emit(`${failed} = icmp sge i32 ${more}, 0`);
+    jsonGuard(failed, "i1", undo);
+    emit(`${ended} = icmp eq i32 ${more}, 0`);
+    emit(`br i1 ${ended}, label %${done}, label %${entry}`);
+    startBlock(entry);
+    const [keySlot, gotKey, key] = [alloca("ptr"), temp(), temp()];
+    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    jsonGuard(gotKey, "i32", undo);
+    emit(`${key} = load ptr, ptr ${keySlot}`);
+    for (const f of slots) {
+      const [found, match, skip] = [temp(), label(), label()];
+      const same = temp();
+      emit(`${found} = call i32 @fsh_rt_json_same(ptr ${key}, ptr ${cString(f.name)}, i64 ${new TextEncoder().encode(f.name).length})`);
+      emit(`${same} = icmp ne i32 ${found}, 0`);
+      emit(`br i1 ${same}, label %${match}, label %${skip}`);
+      startBlock(match);
+      const mark = temp();
+      emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+      emit(`call void @fsh_rt_str_release(ptr ${key})`);
+      // A repeated key replaces the value read before.
+      if (needsDrop(f.type)) {
+        const [was, drop, after, old] = [temp(), label(), label(), temp()];
+        emit(`${was} = load i1, ptr ${f.seen}`);
+        emit(`store i1 false, ptr ${f.seen}`);
+        emit(`br i1 ${was}, label %${drop}, label %${after}`);
+        startBlock(drop);
+        emit(`${old} = load ${llvm(lower(f.type))}, ptr ${f.slot}`);
+        dispose(old, f.type);
+        emit(`br label %${after}`);
+        startBlock(after);
+      }
+      const [ok, v] = jsonRead(r, f.type);
+      jsonGuard(ok, "i1", undo);
+      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+      emit(`store ${llvm(lower(f.type))} ${v}, ptr ${f.slot}`);
+      emit(`store i1 true, ptr ${f.seen}`);
+      emit(`br label %${head}`);
+      startBlock(skip);
+    }
+    emit(`call void @fsh_rt_str_release(ptr ${key})`);
+    const skipped = temp();
+    emit(`${skipped} = call i32 @fsh_rt_json_skip(ptr ${r})`);
+    jsonGuard(skipped, "i32", undo);
+    emit(`br label %${next}`);
+    startBlock(next);
+    emit(`br label %${head}`);
+    startBlock(done);
+    let agg = "undef";
+    for (const f of slots) {
+      const [was, have, absent, join, v] = [temp(), label(), label(), label(), temp()];
+      emit(`${was} = load i1, ptr ${f.seen}`);
+      emit(`br i1 ${was}, label %${join}, label %${absent}`);
+      startBlock(absent);
+      const empty = isOption(lower(f.type));
+      if (empty) emit(`store ${llvm(lower(f.type))} ${convert("zeroinitializer", "null", lower(f.type))}, ptr ${f.slot}`);
+      else {
+        const ignored = temp();
+        emit(`${ignored} = call i32 @fsh_rt_json_missing(ptr ${r}, ptr ${cString(f.name)})`);
+        undo();
+        emit("ret i1 false");
+        startBlock(have);
+      }
+      emit(`br label %${join}`);
+      startBlock(join);
+      emit(`${v} = load ${llvm(lower(f.type))}, ptr ${f.slot}`);
+      const made = temp();
+      emit(`${made} = insertvalue ${llvm(t)} ${agg}, ${llvm(lower(f.type))} ${v}, ${f.path.join(", ")}`);
+      agg = made;
+    }
+    return agg;
+  }
+
+  // A union's value: each member tried in turn from the same place, the first that reads
+  // winning; when none does, the error kept is from the one that read furthest.
+  function readMember(r: string, t: UnionType): string {
+    const mark = alloca("[3 x i64]");
+    const result = alloca(llvm(t));
+    const done = label();
+    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    for (const m of t.members) {
+      const [ok, v] = jsonRead(r, m);
+      const [won, lost] = [label(), label()];
+      emit(`br i1 ${ok}, label %${won}, label %${lost}`);
+      startBlock(won);
+      emit(`call void @fsh_rt_json_forget(ptr ${r})`);
+      emit(`store ${llvm(t)} ${convert(v, m, t)}, ptr ${result}`);
+      emit(`br label %${done}`);
+      startBlock(lost);
+      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+    }
+    emit("ret i1 false");
+    startBlock(done);
+    const v = temp();
+    emit(`${v} = load ${llvm(t)}, ptr ${result}`);
+    return v;
+  }
+
+  // A data enum's member, tagged as serde writes it: a bare name, or an object of one key, the
+  // name, holding its value or an array of its values.
+  function readVariant(r: string, t: UnionType): string {
+    const variants = t.members as VariantType[];
+    const result = alloca(llvm(t));
+    const [named, keyed, done] = [label(), label(), label()];
+    const names = variants.map((v) => v.member).join(", ");
+    const mark = alloca("[3 x i64]");
+    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    const [c, quoted] = [temp(), temp()];
+    emit(`${c} = call i32 @fsh_rt_json_peek(ptr ${r})`);
+    emit(`${quoted} = icmp eq i32 ${c}, 34`);
+    emit(`br i1 ${quoted}, label %${named}, label %${keyed}`);
+    // Pick the member a name says, or fail naming the ones there are.
+    const pick = (name: string, units: boolean, then: (v: VariantType) => void) => {
+      for (const v of variants.filter((v) => (v.fields.length === 0) === units)) {
+        const [found, same, yes, no] = [temp(), temp(), label(), label()];
+        emit(`${found} = call i32 @fsh_rt_json_same(ptr ${name}, ptr ${cString(v.member)}, i64 ${new TextEncoder().encode(v.member).length})`);
+        emit(`${same} = icmp ne i32 ${found}, 0`);
+        emit(`br i1 ${same}, label %${yes}, label %${no}`);
+        startBlock(yes);
+        emit(`call void @fsh_rt_str_release(ptr ${name})`);
+        then(v);
+        emit(`br label %${done}`);
+        startBlock(no);
+      }
+      emit(`call void @fsh_rt_str_release(ptr ${name})`);
+      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      jsonExpected(r, `one of ${names}`);
+      emit(`br label %${done}`);
+    };
+    startBlock(named);
+    const name = readParts(r, "string");
+    pick(name, true, (v) => emit(`store ${llvm(t)} ${convert("zeroinitializer", v, t)}, ptr ${result}`));
+    startBlock(keyed);
+    const opened = temp();
+    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString(`one of ${names}`)})`);
+    jsonGuard(opened, "i32");
+    const [more, one] = [temp(), temp()];
+    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 1)`);
+    emit(`${one} = icmp sgt i32 ${more}, 0`);
+    jsonGuard(one, "i1", () => {
+      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      const ignored = temp();
+      emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(`one of ${names}`)})`);
+    });
+    const [keySlot, gotKey, key] = [alloca("ptr"), temp(), temp()];
+    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    jsonGuard(gotKey, "i32");
+    emit(`${key} = load ptr, ptr ${keySlot}`);
+    const path = temp();
+    emit(`${path} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+    pick(key, false, (v) => {
+      const payload = v.fields.length === 1 ? readParts(r, lower(v.fields[0]!.type)) : readTuple(r, tupleType(v.fields.map((f) => f.type)));
+      const made = v.fields.length === 1 ? (() => {
+        const one = temp();
+        emit(`${one} = insertvalue ${llvm(v)} undef, ${llvm(lower(v.fields[0]!.type))} ${payload}, 0`);
+        return one;
+      })() : v.fields.reduce((agg, f, i) => {
+        const [part, next] = [temp(), temp()];
+        const tuple = tupleType(v.fields.map((f) => f.type));
+        emit(`${part} = extractvalue ${llvm(tuple)} ${payload}, ${tuple.fields.findIndex((g) => g.name === String(i))}`);
+        emit(`${next} = insertvalue ${llvm(v)} ${agg}, ${llvm(lower(f.type))} ${part}, ${i}`);
+        return next;
+      }, "undef");
+      const [closing, closed] = [temp(), temp()];
+      emit(`${closing} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 0)`);
+      emit(`${closed} = icmp eq i32 ${closing}, 0`);
+      jsonGuard(closed, "i1", () => {
+        dispose(made, v);
+        const ignored = temp();
+        emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString("an object of one key")})`);
+      });
+      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${path})`);
+      emit(`store ${llvm(t)} ${convert(made, v, t)}, ptr ${result}`);
+    });
+    startBlock(done);
+    const v = temp();
+    emit(`${v} = load ${llvm(t)}, ptr ${result}`);
+    return v;
+  }
+
+  // A string-keyed Map's entries, each key's last value kept.
+  function readEntries(r: string, t: MapType): string {
+    const map = mapNew(t, undefined);
+    const undo = () => dispose(map, t);
+    const opened = temp();
+    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString("object")})`);
+    jsonGuard(opened, "i32", undo);
+    const first = alloca("i32");
+    emit(`store i32 1, ptr ${first}`);
+    const [head, entry, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [isFirst, more, failed, ended] = [temp(), temp(), temp(), temp()];
+    emit(`${isFirst} = load i32, ptr ${first}`);
+    emit(`store i32 0, ptr ${first}`);
+    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
+    emit(`${failed} = icmp sge i32 ${more}, 0`);
+    jsonGuard(failed, "i1", undo);
+    emit(`${ended} = icmp eq i32 ${more}, 0`);
+    emit(`br i1 ${ended}, label %${done}, label %${entry}`);
+    startBlock(entry);
+    const [keySlot, gotKey, key, mark] = [alloca("ptr"), temp(), temp(), temp()];
+    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    jsonGuard(gotKey, "i32", undo);
+    emit(`${key} = load ptr, ptr ${keySlot}`);
+    emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+    const [ok, v] = jsonRead(r, t.value);
+    jsonGuard(ok, "i1", () => {
+      emit(`call void @fsh_rt_str_release(ptr ${key})`);
+      undo();
+    });
+    emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+    inserted(t, map, key, v);
+    emit(`br label %${head}`);
+    startBlock(done);
+    return map;
+  }
+
   // A string-keyed Map's live entries, in the order they went in, as an object's fields.
   function jsonEntries(w: string, map: string, t: MapType) {
     const entry = entryType(t);
@@ -3992,6 +4495,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
       if (jsonCalls.get(e) === "stringify") return stringifyCall(e);
+      if (jsonCalls.get(e) === "parse") return parseJsonCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);

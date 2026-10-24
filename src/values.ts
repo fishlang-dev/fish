@@ -807,6 +807,7 @@ export function expressions(ctx: Context) {
     const json = jsonOf(callee);
     if (json && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError("'JSON' is always there, so its functions are called without '?.'", e.start, e.end);
     if (json === "stringify") return stringify(e);
+    if (json === "parse") return jsonParse(e);
     const parser = parserOf(callee);
     if (parser && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError(`'${parser}' is always there, so it is called without '?.'`, e.start, e.end);
     if (parser) return parse(e, parser);
@@ -1607,21 +1608,44 @@ export function expressions(ctx: Context) {
     if (e.args.length > 1) throw unsupported("'JSON.stringify' replacer and indent arguments", e.args[1]!);
     const x = e.args[0];
     if (!x) throw new CompileError("'JSON.stringify' takes the value to write", e.start, e.end);
-    jsonable(read(x), x);
+    jsonable(read(x), x, "written as");
     jsonCalls.set(e, "stringify");
     return { type: "string", what: "'JSON.stringify'" };
   }
 
+  // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
+  function jsonParse(e: Call): { type: Type; what: string } {
+    const [written, ...others] = e.typeArgs;
+    if (!written) throw new CompileError("'JSON.parse' reads into the type it's given, as in 'JSON.parse<User>(s)'; the dynamic Json value, for data without a type, isn't supported yet", e.start, e.end);
+    if (others.length > 0) throw new CompileError("'JSON.parse' takes one type argument, the type to read", e.start, e.end);
+    if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
+    const text = e.args[0];
+    if (!text) throw new CompileError("'JSON.parse' takes the text to read", e.start, e.end);
+    const t = resolveType(written);
+    jsonable(t, written, "read from");
+    if (holdsRef(t)) throw new CompileError(`'JSON.parse' makes owned values, so '${show(t)}' can't hold references`, written.start, written.end);
+    if (holdsPattern(t)) throw unsupported("template literal pattern types in 'JSON.parse'", written);
+    if (holdsPart(t, (u) => typeof u !== "string" && u.kind === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
+    const hidden = holdsPart(t, (u) => typeof u !== "string" && u.kind === "class" && u.fields.some((f) => f.name.startsWith("#")));
+    if (hidden) throw new CompileError("a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
+    const s = read(text);
+    if (!stringLike(s)) throw new CompileError(`'JSON.parse' reads a string, not '${show(s)}'`, text.start, text.end);
+    if (s !== "string") coerce(text, s, "string", "");
+    raise(e, classes.get("JsonError")!.type, "'JSON.parse'");
+    jsonCalls.set(e, "parse");
+    return { type: t, what: "'JSON.parse'" };
+  }
+
   // Refuses a type with a part JSON can't hold, saying why.
-  function jsonable(t: Type, at: Span) {
+  function jsonable(t: Type, at: Span, verb: string) {
     const part = unjson(t, derivesJson);
     if (!part) return;
     const why = typeof part === "string" ? "it has no JSON form"
-      : part.kind === "class" ? `a class is written as JSON when it has '@derive(Json)', which '${part.name}' doesn't`
-      : part.kind === "variant" ? `an enum holding values is written as JSON when it has '@derive(Json)', which '${part.enum}' doesn't`
-      : part.kind === "map" ? (part.set ? "a Set has no JSON form; write an array of its members" : "only a Map with string keys has a JSON form, an object")
+      : part.kind === "class" ? `a class is ${verb} JSON when it has '@derive(Json)', which '${part.name}' doesn't`
+      : part.kind === "variant" ? `an enum holding values is ${verb} JSON when it has '@derive(Json)', which '${part.enum}' doesn't`
+      : part.kind === "map" ? (part.set ? "a Set has no JSON form; use an array of its members" : "only a Map with string keys has a JSON form, an object")
       : "it has no JSON form";
-    throw new CompileError(`values of type '${show(part)}' can't be written as JSON: ${why}`, at.start, at.end);
+    throw new CompileError(`values of type '${show(part)}' can't be ${verb} JSON: ${why}`, at.start, at.end);
   }
 
   function derivesJson(t: ClassType | VariantType): boolean {

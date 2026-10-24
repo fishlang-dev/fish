@@ -1452,6 +1452,420 @@ fsh_str *fsh_rt_json_done(fsh_json_out *w) {
   fsh_rt_free(w);
   return s;
 }
+
+// JSON text being read: where it is, how deep in arrays and objects, the path to the value
+// being read, as an error names it, and the error, kept from the attempt that read furthest
+// when a union tries its members in turn.
+typedef struct fsh_json_in {
+  const unsigned char *p;
+  int64_t n, at, depth;
+  char *path;
+  int64_t path_length, path_room;
+  char *error;
+  int64_t error_at;
+} fsh_json_in;
+
+// ponytail: a fixed nesting limit keeps hostile input from overflowing the stack; make it an
+// option if real data nests deeper
+#define FSH_JSON_DEPTH 512
+
+fsh_json_in *fsh_rt_json_in(fsh_str *s) {
+  fsh_json_in *r = fsh_rt_alloc(sizeof(fsh_json_in));
+  r->p = (const unsigned char *)s->bytes;
+  r->n = s->length;
+  r->at = 0;
+  r->depth = 0;
+  r->path_room = 64;
+  r->path = fsh_rt_alloc(r->path_room);
+  r->path[0] = '$';
+  r->path_length = 1;
+  r->error = NULL;
+  r->error_at = -1;
+  return r;
+}
+
+// The error's message, or NULL when there was none, with the reader freed.
+fsh_str *fsh_rt_json_close(fsh_json_in *r) {
+  fsh_str *message = r->error ? fsh_str_of(r->error, strlen(r->error)) : NULL;
+  fsh_rt_free(r->error);
+  fsh_rt_free(r->path);
+  fsh_rt_free(r);
+  return message;
+}
+
+static void fsh_json_path(fsh_json_in *r, const char *p, int64_t n) {
+  if (r->path_length + n > r->path_room) {
+    int64_t room = r->path_room * 2;
+    while (room < r->path_length + n) room *= 2;
+    char *path = fsh_rt_alloc(room);
+    memcpy(path, r->path, r->path_length);
+    fsh_rt_free(r->path);
+    r->path = path;
+    r->path_room = room;
+  }
+  memcpy(r->path + r->path_length, p, n);
+  r->path_length += n;
+}
+
+// The path's length before a field's name or an element's index goes on it, to go back to.
+int64_t fsh_rt_json_field_path(fsh_json_in *r, fsh_str *key) {
+  int64_t mark = r->path_length;
+  fsh_json_path(r, ".", 1);
+  fsh_json_path(r, key->bytes, key->length);
+  return mark;
+}
+
+int64_t fsh_rt_json_index_path(fsh_json_in *r, int64_t i) {
+  int64_t mark = r->path_length;
+  char text[24];
+  fsh_json_path(r, text, snprintf(text, sizeof text, "[%lld]", (long long)i));
+  return mark;
+}
+
+void fsh_rt_json_back(fsh_json_in *r, int64_t mark) {
+  r->path_length = mark;
+}
+
+// Where reading is, so a union may try another member from the same place.
+void fsh_rt_json_save(fsh_json_in *r, int64_t *mark) {
+  mark[0] = r->at;
+  mark[1] = r->path_length;
+  mark[2] = r->depth;
+}
+
+void fsh_rt_json_restore(fsh_json_in *r, int64_t *mark) {
+  r->at = mark[0];
+  r->path_length = mark[1];
+  r->depth = mark[2];
+}
+
+// Drops the errors of a union's members once one of them was read.
+void fsh_rt_json_forget(fsh_json_in *r) {
+  fsh_rt_free(r->error);
+  r->error = NULL;
+  r->error_at = -1;
+}
+
+// Keeps an error made at the reading position, unless one from further on is kept.
+static int32_t fsh_json_error(fsh_json_in *r, char *message) {
+  if (!r->error || r->at > r->error_at) {
+    fsh_rt_free(r->error);
+    r->error = message;
+    r->error_at = r->at;
+  } else fsh_rt_free(message);
+  return 0;
+}
+
+// Text that isn't JSON, in JavaScript's words.
+static int32_t fsh_json_syntax(fsh_json_in *r) {
+  char *message = fsh_rt_alloc(96);
+  if (r->at >= r->n) snprintf(message, 96, "Unexpected end of JSON input");
+  else {
+    unsigned char c = r->p[r->at];
+    int64_t width = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if (r->at + width > r->n) width = r->n - r->at;
+    snprintf(message, 96, "Unexpected token %.*s in JSON at position %lld", (int)width, (const char *)r->p + r->at, (long long)r->at);
+  }
+  return fsh_json_error(r, message);
+}
+
+// A value of the wrong kind or shape, with where it sits.
+int32_t fsh_rt_json_expected(fsh_json_in *r, const char *what) {
+  int64_t size = strlen(what) + r->path_length + 16;
+  char *message = fsh_rt_alloc(size);
+  snprintf(message, size, "expected %s at %.*s", what, (int)r->path_length, r->path);
+  return fsh_json_error(r, message);
+}
+
+int32_t fsh_rt_json_missing(fsh_json_in *r, const char *name) {
+  int64_t size = strlen(name) + r->path_length + 24;
+  char *message = fsh_rt_alloc(size);
+  snprintf(message, size, "missing field '%s' at %.*s", name, (int)r->path_length, r->path);
+  return fsh_json_error(r, message);
+}
+
+static void fsh_json_space(fsh_json_in *r) {
+  while (r->at < r->n && (r->p[r->at] == ' ' || r->p[r->at] == '\t' || r->p[r->at] == '\n' || r->p[r->at] == '\r')) r->at++;
+}
+
+// The next byte after white space, or -1 at the end.
+int32_t fsh_rt_json_peek(fsh_json_in *r) {
+  fsh_json_space(r);
+  return r->at < r->n ? r->p[r->at] : -1;
+}
+
+static int fsh_json_word(fsh_json_in *r, const char *word, int64_t n) {
+  if (r->n - r->at < n || memcmp(r->p + r->at, word, n) != 0) return 0;
+  r->at += n;
+  return 1;
+}
+
+// A value of another kind than the one wanted is a wrong shape; anything else isn't JSON.
+static int32_t fsh_json_wrong(fsh_json_in *r, const char *what) {
+  int32_t c = fsh_rt_json_peek(r);
+  int starts = c == '{' || c == '[' || c == '"' || c == '-' || (c >= '0' && c <= '9') || c == 't' || c == 'f' || c == 'n';
+  return starts ? fsh_rt_json_expected(r, what) : fsh_json_syntax(r);
+}
+
+int32_t fsh_rt_json_null(fsh_json_in *r) {
+  if (fsh_rt_json_peek(r) == 'n' && fsh_json_word(r, "null", 4)) return 1;
+  return fsh_json_wrong(r, "null");
+}
+
+int32_t fsh_rt_json_bool(fsh_json_in *r, int32_t *out) {
+  int32_t c = fsh_rt_json_peek(r);
+  if (c == 't' && fsh_json_word(r, "true", 4)) return *out = 1;
+  if (c == 'f' && fsh_json_word(r, "false", 5)) {
+    *out = 0;
+    return 1;
+  }
+  return fsh_json_wrong(r, "boolean");
+}
+
+static int fsh_json_digit(fsh_json_in *r, int64_t i) {
+  return i < r->n && r->p[i] >= '0' && r->p[i] <= '9';
+}
+
+// The length of the number at the reading position, and whether it is written whole; 0 with
+// bad set to where it stops being one.
+static int64_t fsh_json_number(fsh_json_in *r, int *whole, int64_t *bad) {
+  int64_t i = r->at;
+  *whole = 1;
+  if (i < r->n && r->p[i] == '-') i++;
+  if (!fsh_json_digit(r, i)) return *bad = i, 0;
+  if (r->p[i] == '0') i++;
+  else
+    while (fsh_json_digit(r, i)) i++;
+  if (i < r->n && r->p[i] == '.') {
+    i++;
+    *whole = 0;
+    if (!fsh_json_digit(r, i)) return *bad = i, 0;
+    while (fsh_json_digit(r, i)) i++;
+  }
+  if (i < r->n && (r->p[i] == 'e' || r->p[i] == 'E')) {
+    i++;
+    *whole = 0;
+    if (i < r->n && (r->p[i] == '+' || r->p[i] == '-')) i++;
+    if (!fsh_json_digit(r, i)) return *bad = i, 0;
+    while (fsh_json_digit(r, i)) i++;
+  }
+  return i - r->at;
+}
+
+// An integer of the given width: written whole, or as a whole number a double holds exactly,
+// as JavaScript would read it.
+int32_t fsh_rt_json_int(fsh_json_in *r, int64_t *out, int32_t bits, int32_t is_signed, const char *what) {
+  int32_t c = fsh_rt_json_peek(r);
+  if (c != '-' && !(c >= '0' && c <= '9')) return fsh_json_wrong(r, what);
+  int whole;
+  int64_t bad, length = fsh_json_number(r, &whole, &bad);
+  if (length == 0) {
+    r->at = bad;
+    return fsh_json_syntax(r);
+  }
+  const unsigned char *p = r->p + r->at;
+  int negative = p[0] == '-', over = 0;
+  uint64_t magnitude = 0;
+  if (whole) {
+    for (int64_t i = negative; i < length; i++) {
+      uint64_t d = p[i] - '0';
+      if (magnitude > (UINT64_MAX - d) / 10) over = 1;
+      else magnitude = magnitude * 10 + d;
+    }
+  } else {
+    double x = fsh_js_strtod(p, length);
+    if (x != floor(x) || fabs(x) > 9007199254740992.0) over = 1;
+    else magnitude = (uint64_t)fabs(x);
+  }
+  uint64_t top = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
+  uint64_t limit = is_signed ? (negative ? 1ull << (bits - 1) : (1ull << (bits - 1)) - 1) : negative ? 0 : top;
+  if (over || magnitude > limit) {
+    int64_t size = strlen(what) + r->path_length + length + 32;
+    char *message = fsh_rt_alloc(size);
+    snprintf(message, size, "%.*s doesn't fit %s at %.*s", (int)length, (const char *)p, what, (int)r->path_length, r->path);
+    return fsh_json_error(r, message);
+  }
+  *out = negative ? (int64_t)(0 - magnitude) : (int64_t)magnitude;
+  r->at += length;
+  return 1;
+}
+
+int32_t fsh_rt_json_float(fsh_json_in *r, double *out, const char *what) {
+  int32_t c = fsh_rt_json_peek(r);
+  if (c != '-' && !(c >= '0' && c <= '9')) return fsh_json_wrong(r, what);
+  int whole;
+  int64_t bad, length = fsh_json_number(r, &whole, &bad);
+  if (length == 0) {
+    r->at = bad;
+    return fsh_json_syntax(r);
+  }
+  *out = fsh_js_strtod(r->p + r->at, length);
+  r->at += length;
+  return 1;
+}
+
+static int fsh_json_hex(fsh_json_in *r, int64_t i, uint32_t *out) {
+  if (r->n - i < 4) return 0;
+  uint32_t v = 0;
+  for (int64_t k = i; k < i + 4; k++) {
+    unsigned char c = r->p[k];
+    int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+    if (d < 0) return 0;
+    v = v * 16 + d;
+  }
+  *out = v;
+  return 1;
+}
+
+// A string with its escapes decoded. An escaped pair of surrogates is one character, and a
+// lone one stays a lone surrogate, as a JavaScript string may hold one.
+int32_t fsh_rt_json_text(fsh_json_in *r, fsh_str **out, const char *what) {
+  if (fsh_rt_json_peek(r) != '"') return fsh_json_wrong(r, what);
+  char *bytes = fsh_rt_alloc(r->n - r->at + 1);
+  int64_t length = 0, i = r->at + 1;
+  for (;;) {
+    if (i >= r->n) {
+      r->at = i;
+      fsh_rt_free(bytes);
+      return fsh_json_syntax(r);
+    }
+    unsigned char c = r->p[i];
+    if (c == '"') break;
+    if (c < 0x20) {
+      r->at = i;
+      fsh_rt_free(bytes);
+      return fsh_json_syntax(r);
+    }
+    if (c != '\\') {
+      bytes[length++] = c;
+      i++;
+      continue;
+    }
+    unsigned char e = i + 1 < r->n ? r->p[i + 1] : 0;
+    const char *simple = strchr("\"\\/bfnrt", e);
+    if (e && simple) {
+      bytes[length++] = "\"\\/\b\f\n\r\t"[simple - "\"\\/bfnrt"];
+      i += 2;
+      continue;
+    }
+    uint32_t code, low;
+    if (e != 'u' || !fsh_json_hex(r, i + 2, &code)) {
+      r->at = i + 1;
+      fsh_rt_free(bytes);
+      return fsh_json_syntax(r);
+    }
+    i += 6;
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < r->n && r->p[i] == '\\' && r->p[i + 1] == 'u' && fsh_json_hex(r, i + 2, &low) && low >= 0xDC00 && low <= 0xDFFF) {
+      code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+      i += 6;
+      bytes[length++] = 0xF0 | code >> 18;
+      bytes[length++] = 0x80 | (code >> 12 & 0x3F);
+      bytes[length++] = 0x80 | (code >> 6 & 0x3F);
+      bytes[length++] = 0x80 | (code & 0x3F);
+    } else length += fsh_put(bytes + length, code);
+  }
+  *out = fsh_str_of(bytes, length);
+  fsh_rt_free(bytes);
+  r->at = i + 1;
+  return 1;
+}
+
+// Whether a string read is the given text, as a key or an enum member's name.
+int32_t fsh_rt_json_same(fsh_str *s, const char *text, int64_t n) {
+  return s->length == n && memcmp(s->bytes, text, n) == 0;
+}
+
+// Opens an array or an object, the bracket given.
+int32_t fsh_rt_json_open(fsh_json_in *r, int32_t open, const char *what) {
+  if (fsh_rt_json_peek(r) != open) return fsh_json_wrong(r, what);
+  if (r->depth >= FSH_JSON_DEPTH) {
+    char *message = fsh_rt_alloc(64);
+    snprintf(message, 64, "JSON nested more than %d deep at position %lld", FSH_JSON_DEPTH, (long long)r->at);
+    return fsh_json_error(r, message);
+  }
+  r->depth++;
+  r->at++;
+  return 1;
+}
+
+// Whether another element or field follows, past its comma when it isn't the first: 1 when
+// one does, 0 when the closing bracket, now passed, ends it, and -1 on text that isn't JSON.
+int32_t fsh_rt_json_more(fsh_json_in *r, int32_t close, int32_t first) {
+  int32_t c = fsh_rt_json_peek(r);
+  if (c == close && first) {
+    r->at++;
+    r->depth--;
+    return 0;
+  }
+  if (!first) {
+    if (c == close) {
+      r->at++;
+      r->depth--;
+      return 0;
+    }
+    if (c != ',') return fsh_json_syntax(r) - 1;
+    r->at++;
+    if (fsh_rt_json_peek(r) == close) return fsh_json_syntax(r) - 1;
+  }
+  return 1;
+}
+
+// An object's key, with the colon after it.
+int32_t fsh_rt_json_key(fsh_json_in *r, fsh_str **out) {
+  if (fsh_rt_json_peek(r) != '"') return fsh_json_syntax(r);
+  if (!fsh_rt_json_text(r, out, "a key")) return 0;
+  if (fsh_rt_json_peek(r) != ':') {
+    fsh_rt_str_release(*out);
+    return fsh_json_syntax(r);
+  }
+  r->at++;
+  return 1;
+}
+
+// Passes over a value of any kind, as a key nothing reads is.
+int32_t fsh_rt_json_skip(fsh_json_in *r) {
+  int32_t c = fsh_rt_json_peek(r);
+  if (c == '"') {
+    fsh_str *s;
+    if (!fsh_rt_json_text(r, &s, "a string")) return 0;
+    fsh_rt_str_release(s);
+    return 1;
+  }
+  if (c == '{' || c == '[') {
+    int32_t close = c == '{' ? '}' : ']';
+    if (!fsh_rt_json_open(r, c, "a value")) return 0;
+    for (int32_t first = 1;; first = 0) {
+      int32_t more = fsh_rt_json_more(r, close, first);
+      if (more <= 0) return more + 1;
+      if (c == '{') {
+        fsh_str *key;
+        if (!fsh_rt_json_key(r, &key)) return 0;
+        fsh_rt_str_release(key);
+      }
+      if (!fsh_rt_json_skip(r)) return 0;
+    }
+  }
+  if ((c == 't' && fsh_json_word(r, "true", 4)) || (c == 'f' && fsh_json_word(r, "false", 5)) || (c == 'n' && fsh_json_word(r, "null", 4))) return 1;
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    int whole;
+    int64_t bad, length = fsh_json_number(r, &whole, &bad);
+    if (length == 0) {
+      r->at = bad;
+      return fsh_json_syntax(r);
+    }
+    r->at += length;
+    return 1;
+  }
+  return fsh_json_syntax(r);
+}
+
+// Nothing but white space left after the value.
+int32_t fsh_rt_json_end(fsh_json_in *r) {
+  if (fsh_rt_json_peek(r) < 0) return 1;
+  char *message = fsh_rt_alloc(96);
+  snprintf(message, 96, "Unexpected non-whitespace character after JSON at position %lld", (long long)r->at);
+  return fsh_json_error(r, message);
+}
 ` + CASEMAP + String.raw`
 // A code point found in a sorted table of pairs, by its first column.
 static const uint32_t *fsh_lookup(const uint32_t (*table)[2], int64_t n, uint32_t cp) {
