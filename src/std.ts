@@ -1,3 +1,4 @@
+import { AST } from "./ast.ts";
 import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -624,7 +625,7 @@ const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeO
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
-export const STD_SOURCE = PRELUDE + HTTP;
+export const STD_SOURCE = PRELUDE + HTTP + AST;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -633,21 +634,24 @@ export function stdFor(written: Stmt[]): Stmt[] {
   shiftSpans(all, STD_BASE);
   // The array iterators' generators take names no program can write, so none hides them.
   for (const s of all) if (s.kind === "function" && s.name.startsWith("__array")) s.name = `array ${s.name.slice("__array".length).toLowerCase()}`;
-  const prelude = all.filter((s) => s.start - STD_BASE < PRELUDE.length);
-  const http = all.filter((s) => s.start - STD_BASE >= PRELUDE.length);
-  return usesHttp(written, http) ? all : prelude;
+  const at = (s: Stmt) => s.start - STD_BASE;
+  const prelude = all.filter((s) => at(s) < PRELUDE.length);
+  const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
+  const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length);
+  const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
+  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, ast, astNames) ? ast : [])];
 }
 
-// A program that refers to the HTTP library by name gets it, unless it declares one of the
+// A program that refers to a library by one of its names gets it, unless it declares one of the
 // library's top-level names itself.
-function usesHttp(written: Stmt[], http: Stmt[]): boolean {
+function uses(written: Stmt[], library: Stmt[], wanted: string[]): boolean {
   const declared = new Set(written.map((s) => ("name" in s ? s.name : undefined)));
-  if (http.some((s) => "name" in s && declared.has(s.name))) return false;
+  if (library.some((s) => "name" in s && declared.has(s.name))) return false;
   const names = (v: unknown): boolean => {
     if (Array.isArray(v)) return v.some(names);
     if (typeof v !== "object" || v === null) return false;
     const node = v as Record<string, unknown>;
-    const named = (node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && HTTP_NAMES.includes(node.name);
+    const named = (node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && wanted.includes(node.name);
     return named || Object.values(node).some(names);
   };
   return names(written);

@@ -396,3 +396,30 @@ const T = comptime mk(3);
 function main() {
   console.log(T.v);
 }
+// case: recursive_optional_members
+// expect: 2 0 none
+// expect: ok 1
+type Stmt = { kind: "fn"; name: string; body: Stmt[]; note?: string } | { kind: "ret"; value: i64 };
+type U = { kind: "a"; n: i64 } | { kind: "opt"; o: i64[] | null };
+type T = { kids: T[] | null; v: i64 };
+function size(s: Stmt): i64 {
+  if (s.kind === "fn") {
+    const body = s.body;
+    return body.length as i64;
+  }
+  return 0;
+}
+function note(s: Stmt): string {
+  if (s.kind === "fn") {
+    const n = s.note;
+    return n ?? "none";
+  }
+  return "-";
+}
+function main() {
+  const f: Stmt = { kind: "fn", name: "f", body: [{ kind: "ret", value: 1 }, { kind: "ret", value: 2 }] };
+  console.log(size(f), size({ kind: "ret", value: 3 }), note({ kind: "fn", name: "g", body: [] }));
+  const u: U = { kind: "opt", o: [] };
+  const t: T = { kids: [{ kids: null, v: 2 }], v: 1 };
+  console.log(u.kind === "opt" ? "ok" : "no", t.v);
+}

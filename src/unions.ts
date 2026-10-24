@@ -26,7 +26,7 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
   to = unfold(to);
   // Meeting a union, it takes the shape of the first member it can, as a nested literal of a
   // recursive type does.
-  if (e.kind === "object" && typeof to !== "string" && to.kind === "union") {
+  if ((e.kind === "object" || e.kind === "array") && typeof to !== "string" && to.kind === "union") {
     for (const m of to.members) {
       const shape = literalShape(e, m, types);
       if (shape) return shape;
@@ -61,14 +61,17 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
     const have = field(own, name)!.type;
     if (!want) return undefined;
     const value = p.kind === "property" ? p.value : undefined;
-    const literal = typeof want !== "string" && want.kind === "literal" && !want.owner && value && literalValue(value) === want.value;
+    // A literal's value takes the literal type wanted, alone or in a union of them.
+    const choices = typeof want !== "string" && want.kind === "union" ? want.members : [want];
+    const literal = value && choices.find((c): c is LiteralType => typeof c !== "string" && c.kind === "literal" && !c.owner && literalValue(value) === c.value);
     const nested = value && !literal && !fits(have, want) ? literalShape(value, want, types) : undefined;
     if (!literal && !nested && !fits(have, want)) return undefined;
-    fields.push({ name, type: literal ? want : nested ? nested.type : have });
-    if (literal) steps.push((coercions) => coercions.set(value!, want));
+    fields.push({ name, type: literal ? literal : nested ? nested.type : have });
+    if (literal) steps.push((coercions) => coercions.set(value!, literal));
     if (nested) steps.push(nested.apply);
   }
-  if (to.fields.some((f) => !fields.some((g) => g.name === f.name))) return undefined;
+  // An optional field left out is filled in empty when the value meets the type.
+  if (to.fields.some((f) => !f.optional && !fields.some((g) => g.name === f.name))) return undefined;
   const type = objectType(fields);
   return { type, apply: (coercions) => {
     steps.forEach((step) => step(coercions));

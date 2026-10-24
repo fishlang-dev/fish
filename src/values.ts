@@ -2987,7 +2987,8 @@ export function expressions(ctx: Context) {
         continue;
       }
       if (!want || have === want) continue;
-      const adapted = adapt(p.value, want) || literalArray(p.value, have, want) ? want : adaptFields(p.value, have, want);
+      // An array literal meeting a union becomes the union's array, which then joins the union.
+      const adapted = adapt(p.value, want) ? want : literalArray(p.value, have, want) ? types.get(p.value)! : adaptFields(p.value, have, want);
       if (adapted !== have) {
         types.set(p.value, adapted);
         changed = true;

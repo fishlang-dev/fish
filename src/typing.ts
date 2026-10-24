@@ -745,7 +745,12 @@ export function standsFor(back: RecursiveType, of: Type) {
   array.element = of;
   arrays.set(`[${keyOf(of)}]`, array);
   ties.set(of, back);
+  // Its members stay as they are too, so one narrowed to is still a member of it.
+  if (of.kind === "union") for (const m of of.members) if (typeof m !== "string" && m.kind === "object") members.set(m, back);
 }
+
+// The type holding itself that each member of its union belongs to.
+const members = new WeakMap<Exclude<Type, string>, RecursiveType>();
 
 const ties = new WeakMap<Exclude<Type, string>, RecursiveType>();
 
@@ -910,6 +915,8 @@ export function lower(t: Type): Type {
   // A type holding itself through an array is remade from its type arguments.
   const tied = ties.get(t);
   if (tied && heldBlocks.get(t) !== tied) return tied.args.some((a) => lower(a) !== a) ? instanceRecursive(tied, tied.args.map(lower)).of : t;
+  const loop = members.get(t);
+  if (loop && !loop.args.some((a) => lower(a) !== a)) return t;
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
