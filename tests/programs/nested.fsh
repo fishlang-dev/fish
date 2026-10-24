@@ -142,3 +142,21 @@ function main() {
   grow(1);
   console.log(xs.length);
 }
+// case: nested_async_const
+// expect: 3
+// An async nested function may use constants, whose values can't change after it is made.
+async function main() {
+  const base = 2;
+  async function g(x: i64) { return x + base; }
+  const got = await g(1);
+  console.log(got);
+}
+// case: nested_async_let
+// error: the async nested function 'g' takes its own copy of 'n' when it is made, so a later change to it wouldn't reach the function
+async function main() {
+  let n = 1;
+  async function g() { return n; }
+  n = 5;
+  const got = await g();
+  console.log(got);
+}

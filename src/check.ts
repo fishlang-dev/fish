@@ -1309,6 +1309,10 @@ export function check(written: Stmt[], library = false): Checked {
       if (nested !== undefined) {
         const self = [...inner.captures].find(([, from]) => from === "this");
         if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
+        // An async one takes its own copy of what it uses when it is made, which a later change
+        // to a `let` wouldn't reach, as it would in JavaScript.
+        const changing = e.async ? [...inner.captures].find(([, from]) => from !== "this" && from.mutable) : undefined;
+        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses!.get(changing[0]) ?? e).start, (inner.captureUses!.get(changing[0]) ?? e).end);
         const moved = [...inner.moved!][0];
         if (moved) throw new CompileError(`the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
       }
