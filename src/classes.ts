@@ -193,7 +193,6 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator) throw unsupported("generator methods", m);
-    if (m.typeParams.some((p) => !isLifetime(p))) throw unsupported("generic methods", span(m.typeParams));
     if (!m.body) throw unsupported("method overloads", m);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;

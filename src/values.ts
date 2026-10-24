@@ -131,6 +131,8 @@ export type Context = {
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
+  // The type an arrow argument of a generic body is checked against, once the others are known.
+  callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined;
   // Rejects a constructor call lending a value mutably as a type parameter that would let its
   // read-only fields be written.
   constructs(f: Body, args: Expr[], argTypes: Type[]): void;
@@ -979,7 +981,15 @@ export function expressions(ctx: Context) {
     if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
     else refuseSpread(e.args);
     expectFrom(target, e.args);
-    const argTypes = e.args.map(value);
+    // An arrow given to a generic body is checked once the other arguments decide its types.
+    const argTypes: Type[] = [];
+    e.args.forEach((a, i) => a.kind !== "arrow" && (argTypes[i] = value(a)));
+    e.args.forEach((a, i) => {
+      if (a.kind !== "arrow") return;
+      const want = ctx.callbackType(target, e.typeArgs, argTypes, i, e);
+      if (want) expect(a, want);
+      argTypes[i] = value(a);
+    });
     // The array iterators clone elements: a generic body's instance checks the real element.
     if ((target.name === "array entries" || target.name === "array values") && argTypes[0] !== undefined) {
       const array = lower(isRefType(argTypes[0]) ? argTypes[0].to : argTypes[0]);
@@ -3341,7 +3351,7 @@ export function expressions(ctx: Context) {
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
     if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
-      const own = storedType({ kind: "function", name: field.type.name, params: field.type.params, returns: field.type.returns, fields: [] });
+      const own = storedType({ kind: "function", name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, fields: [] });
       coerce(p.value, field.type, own, `type '${show(field.type)}' is not assignable to type '${show(own)}'`);
       return { ...field, type: own };
     }

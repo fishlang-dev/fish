@@ -81,7 +81,7 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
-export type FunctionType = { kind: "function"; name: string; params: Type[]; returns: Type; fields: Field[] };
+export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[] };
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
@@ -533,7 +533,7 @@ export function generatorElement(t: Type): Type | undefined {
 }
 
 export function functionType(names: string[], params: Type[], returns: Type): FunctionType {
-  const t: FunctionType = { kind: "function", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields: [] };
+  const t: FunctionType = { kind: "function", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, names, params, returns, fields: [] };
   keys.set(t, `function ${declared++}`);
   return t;
 }
@@ -836,6 +836,11 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
+  if (typeof t !== "string" && t.kind === "function") {
+    const params = t.params.map((p) => replaced(p, swap));
+    const returns = replaced(t.returns, swap);
+    return params.some((p, i) => p !== t.params[i]) || returns !== t.returns ? functionType(t.names, params, returns) : t;
+  }
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
   if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), replaced(t.value, swap), t.set);

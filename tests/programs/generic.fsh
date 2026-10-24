@@ -1107,3 +1107,73 @@ function main() {
   print(f(new Wrap(1), 3))
 }
 // error: never ends
+// case: generic_methods
+// expect: n20 40 true
+// expect: 20 a
+// expect: v 3
+// expect: 4 27 abb
+class Box<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  map<U>(f: (x: T) => U): Box<U> { return new Box(f(this.value.clone())); }
+  pair<U>(other: U): [T, U] { return [this.value.clone(), other]; }
+}
+class Util {
+  static of<V>(v: V): Box<V> { return new Box(v); }
+  first<T>(xs: Ref<T[]>): T { return xs[0].clone(); }
+  twice<T>(x: T, f: (y: T) => T): T { return f(f(x)); }
+}
+function main() {
+  const b = new Box(20);
+  const s = b.map((x) => "n" + x);
+  console.log(s.value, b.map((x) => x * 2).value, b.map<boolean>((x) => x > 5).value);
+  const p = b.pair("a");
+  console.log(p[0], p[1]);
+  console.log(Util.of("v").value, Util.of<i64>(3).value);
+  const u = new Util();
+  console.log(u.first([4, 5]), u.twice(3, (y) => y * 3), u.twice("a", (y) => y + "b"));
+}
+// case: generic_methods_bounds_and_folds
+// expect: i3 16 123 3
+// expect: 2 2
+interface Named { name(): string }
+class Item {
+  n: string;
+  constructor(n: string) { this.n = n; }
+  name(): string { return this.n; }
+}
+class Store<T> {
+  items: T[];
+  constructor(items: T[]) { this.items = items; }
+  pick<K extends Named>(k: K): string { return k.name() + this.items.length; }
+  fold<A>(start: A, f: (acc: A, x: Ref<T>) => A): A {
+    let acc = start;
+    for (const x of this.items) acc = f(acc, x);
+    return acc;
+  }
+}
+function total<T>(s: Ref<Store<T>>): i64 {
+  return s.fold(0, (acc, _x) => acc + 1);
+}
+function main() {
+  const s = new Store([1, 2, 3]);
+  console.log(s.pick(new Item("i")), s.fold(10, (a, x) => a + x), s.fold("", (a, x) => a + x), total(s));
+  const w = new Store(["a", "b"]);
+  console.log(w.fold<i64>(0, (a, x) => a + (x.length as i64)), total(w));
+}
+// case: generic_callbacks_typed_from_arguments
+// expect: n2 1
+function apply<T, U>(x: T, f: (y: T) => U): U { return f(x); }
+function main() {
+  console.log(apply(2, (y) => "n" + y), apply("a", (y) => y.length));
+}
+// case: generic_method_type_argument_count
+// error: expected 1 type argument, but got 2
+class Box<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  map<U>(f: (x: T) => U): U { return f(this.value.clone()); }
+}
+function main() {
+  console.log(new Box(1).map<i64, string>((x) => x));
+}

@@ -71,7 +71,6 @@ const CLASSES: [string, string, string][] = [
   ["class A { static {} }", "static blocks", "static {}"],
   ["class A { static get n(): i64 { return 1 } }", "static accessors", "static get n(): i64 { return 1 }"],
   ["class A { *g() {} }", "generator methods", "*g() {}"],
-  ["class A { m<T>() {} }", "generic methods", "T"],
 ];
 
 for (const [decl, what, part] of CLASSES) {

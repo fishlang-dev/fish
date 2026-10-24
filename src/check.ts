@@ -10,7 +10,7 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, genericClasses, instancing } from "./generics.ts";
+import { comptimeName, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
@@ -405,7 +405,7 @@ export function check(written: Stmt[], library = false): Checked {
   const candidates = new Map<Local, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
-  const { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
+  const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
     resolveType, paramType, withScope, members, checking: () => checking,
     signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
@@ -646,9 +646,11 @@ export function check(written: Stmt[], library = false): Checked {
     if (!owner || to === owner) return target;
     const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(target.body)]!;
     const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
-    // Its comptime parameters' values carry over too.
+    // Its comptime parameters' values carry over too, as do a generic method's own type
+    // arguments.
     const fixed = [...target.bindings].filter(([name]) => name.startsWith("comptime "));
-    return instanceOf(body, new Map([...body.scope!, ...implicit, ...fixed]));
+    const own = typeParamsOf(body).map((p): [string, Type] => [p.name, target.bindings.get(p.name)!]);
+    return instanceOf(body, new Map([...body.scope!, ...own, ...implicit, ...fixed]));
   }
 
   // An export in a library is a C function too, so its signature crosses to C as a declared
@@ -929,6 +931,7 @@ export function check(written: Stmt[], library = false): Checked {
       closureBody: (t) => closureBodies.get(t)!,
       resolveType,
       implicitOf,
+      callbackType,
       constructs,
       // A candidate meeting another integer type demands it, for the next pass.
       // A closure's capture stands for the variable it captures. The first demand decides,

@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { elementsOf, field, fits, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -51,6 +51,12 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
     arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
+    // A literal and its base type, as a string literal and a callback taking a string give,
+    // agree on the base type, as TypeScript widens them.
+    if (earlier && earlier !== arg && widenLet(earlier) === widenLet(arg)) {
+      bindings.set(node.name, widenLet(arg));
+      return;
+    }
     if (earlier && !(sameLowered(earlier, arg) && sameLowered(arg, earlier))) {
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);
     }
@@ -60,6 +66,12 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   // `Ref<T>` against a value or a reference borrows a T.
   if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length >= 1 && !names.has(node.name)) {
     infer(node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
+    return;
+  }
+  // A function type against a closure binds through its parameters and what it gives.
+  if (node.kind === "function" && typeof arg !== "string" && arg.kind === "closure") {
+    node.params.forEach((p, i) => p.type && arg.params[i] !== undefined && infer(p.type, arg.params[i]!, names, bindings, at));
+    if (arg.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(node.returns, arg.returns, names, bindings, at);
     return;
   }
   // `Ptr<T>` against a raw pointer points at a T.
@@ -186,6 +198,7 @@ export function comptimeName(p: Param): string {
 export function instancing({ resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
+  const sharedPlaceholders = new Map<TypeParam[], Map<string, Type>>();
   const implicits = new Map<Body, Map<number, Bound>>();
   // Which implicit parameters are references to their type, and how.
   const lent = new Map<Body, Map<number, RefType>>();
@@ -196,7 +209,28 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new WeakMap<Span, Map<string, Type>>();
-  return { instanceOf, instantiate, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf, constructs };
+  return { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf, constructs };
+
+  // The type an arrow given as a generic body's argument is checked against: its parameter's
+  // function type, with the type parameters the other arguments, or the written type
+  // arguments, have decided. What it gives decides the rest, through \`infer\`.
+  function callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined {
+    const written = f.params[i]?.type;
+    if (written?.kind !== "function" || !generic(f)) return undefined;
+    const params = typeParamsOf(f);
+    const bindings = new Map<string, Type>();
+    if (typeArgs.length === params.length) params.forEach((p, k) => bindings.set(p.name, resolveType(typeArgs[k]!)));
+    else {
+      const names = new Set(params.map((p) => p.name));
+      f.params.forEach((p, k) => p.type && argTypes[k] !== undefined && k !== i && infer(p.type, argTypes[k]!, names, bindings, at));
+    }
+    const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, widenLet(lower(t))])]);
+    const t = withScope(scope, () => resolveType(written));
+    if (typeof t === "string" || t.kind !== "function") return undefined;
+    // What it gives is left open while it names a type parameter the call hasn't decided.
+    const open = holdsPart(t.returns, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined, true);
+    return functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns);
+  }
 
   // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.
   function constructs(f: Body, args: Expr[], argTypes: Type[]) {
@@ -247,7 +281,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     let found = definitions.get(f);
     if (found) return found;
     const scope = explicitPlaceholders(f);
-    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), bound));
+    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), sameParams(f, i, bound, new Map([...(f.scope ?? []), ...scope]))));
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
     for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), typeParameter(comptimeName(p), undefined));
     found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
@@ -314,10 +348,16 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
     // A `Generator<T>` bound names the function's own type parameters, which the call has just
     // decided, so the argument is checked against what they stand for.
-    const decided = new Map([...explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])));
+    // So does a function type's, and the class's own parameters stand for what this class
+    // instance gives them.
+    const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
+    const decided = new Map([
+      ...[...explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])),
+      ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
+    ]);
     for (const [i, bound] of implicitOf(f)) {
       const element = generatorElement(bound);
-      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : bound;
+      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : bound.kind === "function" && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
@@ -378,10 +418,28 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const outer = classParams(f);
     const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
     const names = [...typeParamsOf(f).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
-    if (!known(names)) return outer.length > 0 ? scope : instance.bindings;
+    // A function-typed parameter of a class's member is seen in terms of the class's parameters
+    // as this body holds them, even while the parameter itself is still open.
+    if (!known(names)) {
+      if (outer.length === 0) return instance.bindings;
+      // A generic method's own parameters are open here too, offering their bounds.
+      for (const [name, t] of explicitPlaceholders(f)) if (!scope.has(name)) scope.set(name, instance.bindings.get(name) ?? t);
+      for (const [i, bound] of implicitOf(f)) if (bound.kind === "function" && instance.bindings.has(`#${i}`)) scope.set(`#${i}`, wrapped(show(bound), sameParams(f, i, bound, scope), stands(`#${i}`)));
+      return scope;
+    }
     for (const [name, t] of placeholders(typeParamsOf(f), (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
-    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), bound, stands(`#${i}`)));
+    for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), sameParams(f, i, bound, scope), stands(`#${i}`)));
     return scope;
+  }
+
+  // A function-typed parameter's bound as the body sees it: written in terms of the type
+  // parameters the body itself holds, so calling it with one of them fits.
+  function sameParams(f: Body, i: number, bound: Bound, scope: Map<string, Type>): Bound {
+    if (bound.kind !== "function") return bound;
+    const written = f.params[i]!.type!;
+    const t = withScope(scope, () => resolveType(written));
+    const own = typeof t !== "string" && t.kind === "ref" ? t.to : t;
+    return typeof own !== "string" && own.kind === "function" ? own : bound;
   }
 
   function generic(f: Body): boolean {
@@ -392,7 +450,17 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   // callers get a copy they may add to.
   function explicitPlaceholders(f: Body): Map<string, Type> {
     let made = explicit.get(f);
-    if (!made) explicit.set(f, made = placeholders(typeParamsOf(f), (t, scope) => withScope(scope, () => resolveType(t))));
+    if (!made) {
+      // A generic method's own parameters are one placeholder for every instance of its class
+      // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
+      const own = typeParamsOf(f);
+      const outer = classParams(f).map((p) => p.name);
+      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && outer.some((n) => JSON.stringify(p.constraint).includes(`"name":${JSON.stringify(n)}`)));
+      made = shared ? sharedPlaceholders.get(f.typeParams!) : undefined;
+      if (!made) made = placeholders(own, (t, scope) => withScope(scope, () => resolveType(t)));
+      if (shared) sharedPlaceholders.set(f.typeParams!, made);
+      explicit.set(f, made);
+    }
     return new Map(made);
   }
 
