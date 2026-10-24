@@ -209,3 +209,25 @@ interface Named { name(): string }
 function main() {
   let n: Named;
 }
+// case: deferred_await_raises
+// error: 's' is used before being assigned
+class E { constructor(public m: string) {} }
+async function bad(n: i64): Promise<i64> throws E { await sleep(1); if (n > 0) throw new E("e" + n); return n; }
+async function main() {
+  let s: string;
+  try { await bad(1); s = "a" + 1; } catch (e) { console.log(s.length); }
+}
+// case: deferred_await_moved
+// error: 'c.xs.length' can't be used here because 'c' was moved
+class E { constructor(public m: string) {} }
+class C { constructor(public xs: string[]) {} }
+function take(c: C) { console.log(c.xs.length); }
+async function bad(n: i64): Promise<i64> throws E { await sleep(1); if (n > 0) throw new E("e" + n); return n; }
+async function main() {
+  let c = new C(["a" + 1]);
+  try { take(c); await bad(1); } catch (e) { console.log(c.xs.length); }
+}
+// case: deferred_void
+// error: 'y' can't be of type 'void', which no value has
+function f<T>(): i64 { let y: T; return 1; }
+function main() { console.log(f<void>()); }

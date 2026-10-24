@@ -1064,6 +1064,7 @@ export function check(written: Stmt[], library = false): Checked {
     function unassigned(s: Stmt, d: Declarator, name: string): undefined {
       if (!d.type) throw new CompileError(`'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
       const type = stored(resolveType(d.type));
+      if (lower(type) === "void") throw new CompileError(`'${name}' can't be of type 'void', which no value has`, d.start, d.end);
       if (isInterface(type)) throw new CompileError(`'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
       declare(name, type, true, false, s);
       return undefined;

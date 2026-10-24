@@ -548,7 +548,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (e.op === "await") {
           // The future runs across suspensions, after this statement's temporaries are gone.
           for (const s of borrowsFrom.get(e.operand) ?? []) if (lentTemporary(s, true)) throw outlived(s, "the awaited Promise");
-          return expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
+          expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
+          // An awaited async call raises what it throws here, where the await finishes it.
+          if (instance.raises.has(e)) raising();
+          return;
         }
         return expr(e.operand);
       case "template":
