@@ -1,3 +1,4 @@
+import { defaulted, prologues } from "./defaults.ts";
 import { CompileError } from "./diag.ts";
 import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
@@ -239,15 +240,23 @@ export function extend(c: ClassInfo, base: ClassInfo) {
   const explicit = c.node.members.find((m) => m.kind === "constructor");
   const at = { start: c.constructor.start, end: c.constructor.end };
   if (explicit) {
-    const [first, ...rest] = c.constructor.body.slice(c.prelude.length);
+    // Its parameters' defaults are bound first, since `super(...)` may read them.
+    const written = c.constructor.body.slice(c.prelude.length);
+    const defaults = written.filter((s) => prologues.has(s));
+    const [first, ...rest] = written.slice(defaults.length);
     if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
       throw new CompileError("a derived class's constructor must start with 'super(...)'", at.start, at.end);
     }
-    c.constructor.body = [first, ...c.prelude, ...rest];
+    c.constructor.body = [...defaults, first, ...c.prelude, ...rest];
     return;
   }
   // Copies, so each constructor has its own parameters, and none of them is a property here.
-  const params = base.constructor.params.map((p) => ({ ...p, modifiers: [] }));
+  const params = base.constructor.params.map((p) => {
+    const copy = { ...p, modifiers: [] };
+    const declared = defaulted.get(p);
+    if (declared) defaulted.set(copy, declared);
+    return copy;
+  });
   const args: Expr[] = params.map((p) => ({ kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end }));
   const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;

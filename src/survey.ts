@@ -296,7 +296,8 @@ function takesDefault(p: Record<string, unknown>, after: Record<string, unknown>
   const literal = ["int", "float", "string", "bool"].includes(d.kind) || (d.kind === "template" && d.exprs?.length === 0) || (d.kind === "unary" && d.op === "-" && ["int", "float"].includes(d.operand?.kind ?? ""));
   const nullable = (t: unknown): boolean => isNode(t) && ((t.kind === "ref" && (t.name === "null" || t.name === "undefined")) || (t.kind === "union" && (t.types as unknown[]).some(nullable)));
   const empty = d.kind === "null" || (d.kind === "ident" && (d as { name?: string }).name === "undefined");
-  return after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
+  const property = Array.isArray(p.modifiers) && p.modifiers.length > 0;
+  return !property && after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
 }
 
 // `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.

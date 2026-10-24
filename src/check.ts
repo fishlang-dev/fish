@@ -15,7 +15,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { lowerDefaults } from "./defaults.ts";
+import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
 import { functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
@@ -420,7 +420,7 @@ export function check(written: Stmt[], library = false): Checked {
       const param = f.params[i]?.pattern;
       throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
     }
-    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? p.pattern.name : "_")), declaredParams(f), result);
+    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(p) : "_")), declaredParams(f), result);
   }
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
@@ -620,6 +620,7 @@ export function check(written: Stmt[], library = false): Checked {
       throw new CompileError(`a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
     }
     f.params.forEach((p) => {
+      if (defaulted.has(p)) throw new CompileError("an exported function's parameter can't have a default in a library, since C callers pass every argument", p.start, p.end);
       const t = instance.locals.get(p)!.type;
       if (!crosses(t)) throw new CompileError(`an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
@@ -807,7 +808,8 @@ export function check(written: Stmt[], library = false): Checked {
     const unset = new Set(f.self?.constructor ? classOf(f.self.type).required : []);
     let exempt: Expr | undefined;
     // A derived constructor's first statement, `super(...)`, fills the embedded base.
-    const superCall = f.self?.constructor && f.self.type.base ? (f.body[0] as Extract<Stmt, { kind: "expr" }>).expr : undefined;
+    // After its parameters' defaults, which `super(...)` may read.
+    const superCall = f.self?.constructor && f.self.type.base ? (f.body.find((s) => !prologues.has(s)) as Extract<Stmt, { kind: "expr" }>).expr : undefined;
     if (superCall) unset.add(SUPER);
 
     // In a member of a generic class's instance, `this` is the class made from the type
@@ -1140,7 +1142,7 @@ export function check(written: Stmt[], library = false): Checked {
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
-      const type = closureType(e.params.map(paramName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      const type = closureType(e.params.map((p) => (defaulted.has(p) ? writtenName(p) : paramName(p))), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {

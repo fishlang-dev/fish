@@ -143,6 +143,7 @@ test("two Fish libraries link into one C program, from C and C++", () => {
 for (const [src, message] of [
   ["export function f(s: string): i64 { return 1; }", "an exported function's parameter can't be a 'string' in a library"],
   ["export function f(): string { return \"a\"; }", "an exported function can't return a 'string' in a library"],
+  ["export function f(a: i64, b: i64 = 1): i64 { return a + b; }", "an exported function's parameter can't have a default in a library, since C callers pass every argument"],
   ["export function f<T>(x: T): i64 { return 1; }", "a library can't export a generic function to C"],
   ["export function f(): i64 throws string { return 1; }", "a library can't export a function that throws to C"],
   ["export function* f(): Generator<i64> { yield 1; }", "a library can't export a generator to C"],

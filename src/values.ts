@@ -6,12 +6,12 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, withoutNull } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { STD_BASE } from "./std.ts";
-import { admitsNull, defaulted, fallbacks } from "./defaults.ts";
+import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -1012,7 +1012,9 @@ export function expressions(ctx: Context) {
     }
     e.args.forEach((a, i) => {
       if (a.kind !== "arrow") expect(a, type.params[i]!);
-      coerce(a, value(a), type.params[i]!, `argument of type '${show(types.get(a)!)}' is not assignable to parameter of type '${show(type.params[i]!)}'`);
+      const t = value(a);
+      const shown = (written?.[i] && defaultedArg(a, t, written[i]!)) ?? type.params[i]!;
+      coerce(a, t, type.params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(shown)}'`);
     });
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
@@ -1113,7 +1115,7 @@ export function expressions(ctx: Context) {
     runsOften(c, name, "its callback once per element", callback);
     c.params.forEach((p, i) => {
       const at = callback.params[i] ?? callback;
-      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback ${article(show(params[i]!))} here, not ${article(show(p))}`, at.start, at.end);
+      passedExactly(name, params[i]!, p, callback.params[i], at);
     });
     const gives = c.returns;
     if (holdsFuture(gives)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet; await each value in a 'for...of' loop instead`, callback.start, callback.end);
@@ -1154,8 +1156,8 @@ export function expressions(ctx: Context) {
     const c = value(compare);
     if (typeof c === "string" || c.kind !== "closure") throw new CompileError("'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
     runsOften(c, "sort", "its comparator many times", compare);
-    c.params.forEach((p) => {
-      if (!fits(element, p)) throw new CompileError(`'sort' passes its comparator a '${show(element)}' here, not a '${show(p)}'`, compare.start, compare.end);
+    c.params.forEach((p, i) => {
+      passedExactly("sort", element, p, compare.params[i], compare);
     });
     const order = lower(c.returns);
     if (isInteger(order) && !INTEGERS[order].signed) {
@@ -1313,6 +1315,14 @@ export function expressions(ctx: Context) {
     const checked: Expr = { kind: "call", callee: { kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
     if (panics) lengthChecks.add(checked);
     return checked;
+  }
+
+  // A method calling a callback passes exactly this type, with nothing to convert it, so the
+  // callback's parameter has to be that type, and can't be optional: the argument always comes.
+  function passedExactly(name: string, given: Type, written: Type, p: Param | undefined, at: Span) {
+    if (sameLowered(given, written)) return;
+    if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
+    throw new CompileError(`'${name}' passes its callback ${article(show(given))} here, not ${article(show(written))}`, at.start, at.end);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -1566,7 +1576,7 @@ export function expressions(ctx: Context) {
     if (name === "forEach") runsOften(c, name, "its callback once per entry", callback);
     c.params.forEach((p, i) => {
       const at = callback.params[i] ?? callback;
-      if (!fits(params[i]!, p)) throw new CompileError(`'${name}' passes its callback ${article(show(params[i]!))} here, not ${article(show(p))}`, at.start, at.end);
+      passedExactly(name, params[i]!, p, callback.params[i], at);
     });
     if (holdsFuture(c.returns)) throw new CompileError(`'${name}' with a callback giving a Promise isn't supported yet`, callback.start, callback.end);
     return { type: name === "update" ? "boolean" : "void", what: `'${name}'` };
@@ -1763,9 +1773,8 @@ export function expressions(ctx: Context) {
     if (sharing) sharedCallbacks.add(signature);
     expect(callback, signature);
     const c = value(callback);
-    if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1 || (c.params[0] !== undefined && !fits(held, c.params[0]))) {
-      throw new CompileError(`'update' passes its callback a '${show(held)}'`, callback.start, callback.end);
-    }
+    if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1) throw new CompileError(`'update' passes its callback a '${show(held)}'`, callback.start, callback.end);
+    if (c.params[0] !== undefined) passedExactly("update", held, c.params[0], callback.kind === "arrow" ? callback.params[0] : undefined, callback);
     return { type: c.returns, what: "'update'" };
   }
 
@@ -2110,12 +2119,18 @@ export function expressions(ctx: Context) {
     arity(list.length, target.body.params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
-      // A defaulted parameter takes its declared type; leaving the argument out gives the default.
-      const declared = defaulted.get(target.body.params[i]!);
-      if (declared && !admitsNull(declared) && type === "null") throw new CompileError("this parameter has a default, so it takes a value, not null; leave the argument out to use the default", a.start, a.end);
-      const shown = declared && !admitsNull(declared) ? withoutNull(expected) : expected;
+      const shown = defaultedArg(a, type, target.body.params[i]!) ?? expected;
       coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(shown)}'`);
     });
+  }
+
+  // A parameter with a default takes a value of its declared type, which this gives: leaving the
+  // argument out gives the default, so a null or an Option where none is declared is refused.
+  function defaultedArg(a: Expr, type: Type, p: Param): Type | undefined {
+    const declared = declaredTypes.get(p);
+    if (!declared || holdsNull(declared)) return declared;
+    if (holdsNull(type)) throw new CompileError("this parameter has a default, so it takes a value, not null or an Option; leave the argument out to use the default", a.start, a.end);
+    return declared;
   }
 
   function value(e: Expr): Type {
@@ -2602,12 +2617,14 @@ export function expressions(ctx: Context) {
     const option = read(e.left);
     if (!isOption(option)) throw new CompileError(`the left side of '??' is a '${show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
     const inner = held(option);
-    // A parameter's default is checked as an argument for it would be.
-    if (fallbacks.has(e)) {
-      expect(e.right, inner);
-      const given = value(e.right);
-      coerce(e.right, given, inner, `a default of type '${show(given)}' is not assignable to parameter of type '${show(inner)}'`);
-      return inner;
+    // A parameter's default is checked as an argument for it would be; a nullable one's is null.
+    const declared = fallbacks.get(e);
+    if (declared) {
+      const to = holdsNull(resolveType(declared)) ? option : inner;
+      expect(e.right, to);
+      const fallback = value(e.right);
+      coerce(e.right, fallback, to, `a default of type '${show(fallback)}' is not assignable to parameter of type '${show(to)}'`);
+      return to;
     }
     const fallback = value(e.right);
     const to = fits(fallback, inner) || adaptable(e.right, inner) ? inner : option;

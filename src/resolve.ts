@@ -1,4 +1,5 @@
 import { CompileError } from "./diag.ts";
+import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
@@ -172,6 +173,18 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
     if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
+    // A parameter with a default is optional to callers, and holds its declared type in the body.
+    const lowered = defaulted.get(p);
+    if (lowered) {
+      const declared = resolveType(p.type);
+      const low = lower(declared);
+      const kind = typeof low === "string" ? undefined : low.kind;
+      if (kind && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
+        throw new CompileError(`defaults on parameters of type '${show(declared)}' are not supported yet`, p.start, p.end);
+      }
+      if (holdsNull(declared) && !lowered.empty) throw new CompileError(`a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
+      declaredTypes.set(p, declared);
+    }
     // A call may leave out an optional parameter, which is then empty.
     const type = p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
     if (p.rest && (typeof type === "string" || type.kind !== "array")) throw new CompileError(`a rest parameter takes an array of the values, as in '...${name}: ${show(type)}[]'`, p.type.start, p.type.end);
