@@ -2960,7 +2960,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
-      if (e.callee.kind === "ident" && e.callee.name === "array length") {
+      if (e.callee.kind === "ident" && e.callee.name === "fill length") {
         const n = value(e.args[0]!);
         if (!lengthChecks.has(e)) return n;
         const [negative, fail, ok] = [temp(), label(), label()];

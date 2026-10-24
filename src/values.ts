@@ -138,10 +138,13 @@ export const substituted = new WeakSet<Expr>();
 
 // The element types written on `Array.of<T>(...)` calls, which became array literals.
 const ofElements = new WeakMap<Expr, TypeNode>();
+// `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
+const fills = new WeakSet<Expr>();
+const filling = new WeakSet<Expr>();
 
 // The `FixedArray.filled` calls, by the fixed array each makes.
 export const fixedFills = new WeakSet<Expr>();
-// The `array length` checks that panic on a negative length.
+// The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
@@ -729,13 +732,22 @@ export function expressions(ctx: Context) {
       if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
       const [n, x] = [made.args[0]!, e.args[0]!];
       Object.assign(e, { callee: { kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
-      // What the prelude can't do with the value is said at the value, not inside the prelude.
+      fills.add(e);
+      return call(e);
+    }
+    // The rewritten fill, checked again in each generic instance: what the prelude can't do with
+    // the value is said at the value, not inside the prelude.
+    if (fills.has(e) && !filling.has(e)) {
+      const x = e.args[1]!;
+      filling.add(e);
       let result;
       try {
         result = call(e);
       } catch (err) {
         if (err instanceof CompileError && err.start >= STD_BASE) throw new CompileError(`'new Array(n).fill(x)' can't be made from this value: ${err.message}`, x.start, x.end);
         throw err;
+      } finally {
+        filling.delete(e);
       }
       const t = lower(types.get(x)!);
       if (typeof t !== "string" && t.kind === "generator") throw new CompileError("'new Array(n).fill(x)' puts a clone of x in every slot, and a generator can't be cloned: it runs once", x.start, x.end);
@@ -743,7 +755,7 @@ export function expressions(ctx: Context) {
       return result;
     }
     // A length the user wrote, an `i64` or a `usize`; a fill's panics when negative, as JavaScript throws.
-    if (callee.kind === "ident" && callee.name === "array length") {
+    if (callee.kind === "ident" && callee.name === "fill length") {
       const t = read(e.args[0]!);
       if (t !== "i64" && t !== "usize") throw new CompileError(`an array's length is an 'i64' or a 'usize', not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       return { type: "i64", what: "an array length" };
@@ -1290,7 +1302,7 @@ export function expressions(ctx: Context) {
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
   // `panics` a negative one ending the program at n.
   function arrayLength(n: Expr, panics: boolean): Expr {
-    const checked: Expr = { kind: "call", callee: { kind: "ident", name: "array length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
+    const checked: Expr = { kind: "call", callee: { kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
     if (panics) lengthChecks.add(checked);
     return checked;
   }
@@ -2157,7 +2169,8 @@ export function expressions(ctx: Context) {
         // `Array.of<T>(...)`: an array of T, its elements checked against it.
         const written = ofElements.get(e);
         if (written) {
-          const element = resolveType(written);
+          // Resolved as an array's element is, so references and functions get the same rules.
+          const element = (resolveType({ kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
           for (const x of e.elements as Expr[]) {
             expect(x, element);
             const t = value(x);
