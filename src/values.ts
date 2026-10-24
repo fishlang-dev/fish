@@ -333,6 +333,8 @@ export function expressions(ctx: Context) {
   function expect(e: Expr, t: Type) {
     // Callers pass what a parameter list has, which may run out.
     if (t !== undefined) t = unfolded(t);
+    // A literal lent to a reference is a temporary of the type it refers to.
+    if ((e.kind === "object" || e.kind === "array") && isRefType(t)) t = unfolded(t.to);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
@@ -3221,6 +3223,11 @@ export function expressions(ctx: Context) {
       coerce(e.else, types.get(e.else)!, to, message);
       types.set(e, to);
       return;
+    }
+    // A literal lent is a temporary: it meets the type referred to, as its own literals do.
+    if ((e.kind === "object" || e.kind === "array") && !fits(type, to.to)) {
+      coerce(e, type, to.to, message);
+      type = coercions.get(e) ?? types.get(e)!;
     }
     const exact = sameLowered(type, to.to);
     if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);

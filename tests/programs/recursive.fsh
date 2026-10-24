@@ -180,3 +180,36 @@ function main() {
   e = Expr.Num(7);
   console.log(total(e));
 }
+// case: recursive_comptime
+// expect: 6 10 18
+// expect: 6
+// expect: 10
+// expect: 18
+type Node = { value: i64; next: Node | null };
+type Tree = { v: i64; kids: Tree[] };
+enum Expr { Num(i64), Add(Expr, Expr) }
+function sum(n: Node): i64 {
+  const next = n.next;
+  if (next === null) return n.value;
+  return n.value + sum(next);
+}
+function weight(t: Ref<Tree>): i64 {
+  let w = t.v;
+  for (const k of t.kids) w += weight(k);
+  return w;
+}
+function ev(e: Ref<Expr>): i64 {
+  return match (e) {
+    case Expr.Num(n) => n,
+    case Expr.Add(a, b) => ev(a) + ev(b),
+  };
+}
+const TOTAL = comptime sum({ value: 1, next: { value: 2, next: { value: 3, next: null } } });
+const WEIGHT = comptime weight({ v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] });
+const VALUE = comptime ev(Expr.Add(Expr.Num(5), Expr.Add(Expr.Num(6), Expr.Num(7))));
+function main() {
+  console.log(TOTAL, WEIGHT, VALUE);
+  console.log(sum({ value: 1, next: { value: 2, next: { value: 3, next: null } } }));
+  console.log(weight({ v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] }));
+  console.log(ev(Expr.Add(Expr.Num(5), Expr.Add(Expr.Num(6), Expr.Num(7)))));
+}

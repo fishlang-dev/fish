@@ -578,8 +578,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
       return type;
     }
-    // A fresh object literal is checked against the parameter's type when lent into it.
-    if (arg.kind === "object" && holdsRef(bound)) return bound;
+    // A fresh object literal is checked against the parameter's type when it meets it, as its
+    // nested literals then take their shapes from it.
+    if (arg.kind === "object" && (holdsRef(bound) || !fits(type, bound))) return bound;
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
     // A value leaving out an optional field is copied into the parameter's type, which fills
     // it in empty; a reference can't be.
