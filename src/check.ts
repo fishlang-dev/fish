@@ -119,6 +119,26 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 // whether the match gives a value and what they gave.
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: number; wanted?: boolean; gives?: [Expr, Type][] };
 
+// The names a pattern binds.
+function namesIn(p: Pattern): string[] {
+  if (p.kind === "ident") return [p.name];
+  if (p.kind === "default") return namesIn(p.target);
+  if (p.kind === "object") return [...p.props.flatMap((q) => namesIn(q.value)), ...(p.rest ? namesIn(p.rest) : [])];
+  if (p.kind === "array") return [...p.elements.flatMap((e) => (e ? namesIn(e) : [])), ...(p.rest ? namesIn(p.rest) : [])];
+  return [];
+}
+
+// Every name written in a piece of syntax.
+function identifiers(node: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(node)) for (const x of node) identifiers(x, found);
+  else if (node && typeof node === "object") {
+    const n = node as { kind?: string; name?: unknown };
+    if (n.kind === "ident" && typeof n.name === "string") found.add(n.name);
+    for (const v of Object.values(node)) if (v && typeof v === "object") identifiers(v, found);
+  }
+  return found;
+}
+
 // A pattern as written, roughly, naming the variable that holds the value it destructures.
 function patternText(p: Pattern): string {
   const rest = (r: Pattern | undefined) => (r ? [`...${patternText(r)}`] : []);
@@ -235,6 +255,11 @@ const RUNTIME_NAMES = new Set([
 // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
 // again for another instance meets them already made.
 const loopParts = new WeakSet<Declarator>();
+// The arrows nested function declarations became, with their names; they lend what they capture
+// per call.
+export const nestedFunctions = new WeakMap<Expr, string>();
+// A nested function's calls of itself, which run with the calling closure's own captures.
+export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(written: Stmt[], library = false): Checked {
@@ -840,6 +865,7 @@ export function check(written: Stmt[], library = false): Checked {
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
+      selfCall,
       thisReady,
       proves,
       assume,
@@ -984,9 +1010,47 @@ export function check(written: Stmt[], library = false): Checked {
     done.add(instance);
     inProgress.delete(instance);
 
+    // Nested functions go right after the declarations of the variables they use, as early as
+    // that allows, so a call before a function's own statement still finds it, as JavaScript's
+    // hoisting does. A function using another goes after it.
+    function hoist(list: Stmt[]) {
+      const functions = list.filter((s): s is Extract<Stmt, { kind: "function" }> => s.kind === "function" && s.body !== undefined);
+      if (functions.length === 0) return;
+      const declared = (s: Stmt): string[] => (s.kind === "let" ? s.declarations.flatMap((d) => namesIn(d.target)) : s.kind === "function" ? [s.name] : []);
+      for (let pass = 0; pass < functions.length; pass++) {
+        for (const fn of functions) {
+          const used = identifiers(fn.body);
+          list.splice(list.indexOf(fn), 1);
+          let at = 0;
+          list.forEach((s, i) => declared(s).some((n) => n !== fn.name && used.has(n)) && (at = i + 1));
+          list.splice(at, 0, fn);
+        }
+      }
+    }
+
+    // `name(...)` inside the nested function `name`: a call of itself, with its own captures.
+    function selfCall(e: Extract<Expr, { kind: "call" }>): { type: Type; what: string } | undefined {
+      const name = (e.callee as Extract<Expr, { kind: "ident" }>).name;
+      if (f.closure?.self !== name) return undefined;
+      if (!f.returnType) throw new CompileError(`'${name}' calls itself, so its return type has to be written, as TypeScript requires, as in 'function ${name}(...): T'`, e.start, e.end);
+      if (f.async) throw unsupported("async nested functions that call themselves", e);
+      const required = f.params.filter((p) => !p.optional && !p.rest).length;
+      if (e.args.length < required || e.args.length > f.params.length) throw new CompileError(`expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
+      e.args.forEach((a, i) => {
+        const to = locals.get(f.params[i]!)!.type;
+        expect(a, to);
+        const t = value(a);
+        coerce(a, t, to, `argument of type '${show(t)}' is not assignable to parameter of type '${show(to)}'`);
+      });
+      selfCalls.add(e);
+      calls.set(e, instance);
+      return { type: resolveType(f.returnType), what: `'${name}'` };
+    }
+
     // Checks a list of statements in order. What an `if` that leaves early proves holds for
     // the statements after it.
     function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
+      hoist(list);
       const before = facts.length;
       for (let i = 0; i < list.length; i++) {
         const s = list[i]!;
@@ -1212,7 +1276,7 @@ export function check(written: Stmt[], library = false): Checked {
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe },
+        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -1228,6 +1292,14 @@ export function check(written: Stmt[], library = false): Checked {
       withSight(inSight, () => checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
+      // A nested function runs whenever it is called, so it can't take over what it uses.
+      const nested = nestedFunctions.get(e);
+      if (nested !== undefined) {
+        const self = [...inner.captures].find(([, from]) => from === "this");
+        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
+        const moved = [...inner.moved!][0];
+        if (moved) throw new CompileError(`the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
+      }
       // A shared value's `update` callback lends its parameter only through its fields.
       if (f.closure?.expected && sharedCallbacks.has(f.closure.expected)) {
         for (const [alias, from] of inner.captures!) {
@@ -1361,8 +1433,18 @@ export function check(written: Stmt[], library = false): Checked {
           condition(s.cond);
           within({ stmt: s, kind: "loop" }, () => assume(proves(s.cond).yes, () => scoped(s.body)));
           return;
-        case "function":
-          throw unsupported("nested functions", s);
+        // A nested function is a closure under its name, lending what it uses per call.
+        case "function": {
+          if (!s.body) throw unsupported("nested functions without a body", s);
+          if (s.typeParams.length > 0) throw unsupported("generic nested functions", s);
+          if (s.generator) throw unsupported("nested generator functions", s);
+          if (s.macro) throw unsupported("nested macros", s);
+          const at = { start: s.start, end: s.end };
+          const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, body: s.body, ...at };
+          nestedFunctions.set(arrow, s.name);
+          Object.assign(s, { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
+          return statement(s);
+        }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":
           comptimeDepth++;

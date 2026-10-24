@@ -1,0 +1,71 @@
+// Nested function declarations: hoisted in their block, borrowing what they use per call.
+// case: nested_basics
+// expect: 4
+// expect: 136 a-ba+b 9
+// Calls before the declaration, captures, recursion, and a helper inside a method.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function outer(k: i64): i64 {
+  const base = 10;
+  console.log(early(2));
+  function early(x: i64): i64 { return x * 2; }
+  function add(x: i64): i64 { return x + base + k; }
+  function fact(n: i64): i64 { return n <= 1 ? 1 : n * fact(n - 1); }
+  return add(1) + fact(5);
+}
+function names(): string {
+  const parts = ["a", "b"];
+  function joined(sep: string): string { return parts.join(sep); }
+  return joined("-") + joined("+");
+}
+class C { v: i64 = 3; m(): i64 { function sq(x: i64): i64 { return x * x; } return sq(this.v); } }
+function main() {
+  console.log(outer(5), names(), new C().m());
+}
+// case: nested_per_call
+// expect: 1
+// expect: 2
+// expect: 2
+// expect: 1
+// A nested function lends what it changes for each call only, so the variable is usable between
+// calls; passed as a value it is a closure, borrowing from there.
+function twice(f: () => void) { f(); f(); }
+function main() {
+  let n = 0;
+  function inc() { n++; }
+  inc();
+  console.log(n);
+  inc();
+  console.log(n);
+  let m = 0;
+  function bump() { m++; }
+  twice(bump);
+  console.log(m);
+  let k = 0;
+  function up() { k++; }
+  const g = up;
+  g();
+  console.log(k);
+}
+// case: nested_moved_capture
+// error: 'xs' was moved, so it can't be used here
+function main() { let xs = [1]; function add() { xs.push(2); } const r = xs; add(); }
+// case: nested_loop_conflict
+// error: cannot mutably lend 'xs' while a 'for...of' loop is reading 'xs'
+function main() { let xs = [1]; function add() { xs.push(2); } for (const x of xs) { add(); } }
+// case: nested_value_conflict
+// error: cannot use 'n' while 'g' borrows 'n' mutably and is used later
+function main() { let n = 0; function inc() { n++; } const g = inc; console.log(n); g(); }
+// case: nested_recursion_untyped
+// error: 'fact' calls itself, so its return type has to be written, as TypeScript requires
+function main() { function fact(n: i64) { return n <= 1 ? 1 : n * fact(n - 1); } }
+// case: nested_this
+// error: 'this' inside the nested function 'g' isn't the enclosing method's; pass what it needs as a parameter
+class C { v: i64 = 1; m(): i64 { function g(): i64 { return this.v; } return g(); } }
+function main() {}
+// case: nested_moves_out
+// error: the nested function 'take' moves 'p' out of the variables it uses
+class P { n: i64 = 1; }
+function main() { let p = new P(); function take(): P { return p; } }
+// case: nested_generic
+// error: generic nested functions are not supported yet
+function main() { function g<T>(x: T): T { return x; } }

@@ -173,7 +173,7 @@ test("(1, 2)", () => {
 
 // Statements that parse but have no meaning yet, inside main().
 const STATEMENTS: [string, string][] = [
-  ["function inner() {}", "nested functions"],
+  ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
   ["let a = 1, b = 2", "declarations of several variables at once"],
   ["[a] = [1]", "destructuring assignments"],

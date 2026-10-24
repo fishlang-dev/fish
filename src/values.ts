@@ -74,6 +74,8 @@ export type Context = {
   owner: ClassType | undefined;
   // A derived constructor's `super(...)`, the one place a base constructor may be called.
   superCall: Expr | undefined;
+  // A nested function calling itself by name, typed by its own signature.
+  selfCall(e: Call): { type: Type; what: string } | undefined;
   // Whether this `this` may be used: a constructor's can't until every field is assigned.
   thisReady(e: Expr): boolean;
   // Narrowing: what a condition proves, checking under what was proven, and a variable's
@@ -797,6 +799,8 @@ export function expressions(ctx: Context) {
       return traitCall(e, callee, receiver);
     }
     if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    const itself = callee.kind === "ident" ? ctx.selfCall(e) : undefined;
+    if (itself) return itself;
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
     if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
       const stored = field(receiver, callee.name);

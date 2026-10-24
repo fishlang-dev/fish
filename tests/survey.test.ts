@@ -48,7 +48,7 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, regex: 1, forIn: 1, decorators: 1, genericMethods: 1,
-    classForms: 1, math: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1, nestedFunctions: 1,
+    classForms: 1, math: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });

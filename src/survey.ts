@@ -76,7 +76,7 @@ const RULES: Rule[] = [
   { id: "json", action: "unsupported", title: "JSON.parse and JSON.stringify (derive for Json)", feature: "Macros, decorators and derive" },
   { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
   { id: "localDeclarations", action: "unsupported", title: "types, interfaces, enums and classes declared inside a function", feature: "Local declarations" },
-  { id: "nestedFunctions", action: "unsupported", title: "function declarations inside a function (nested functions)", feature: "Nested functions" },
+  { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
@@ -362,7 +362,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, withi
     case "function":
       // A declaration carries `macro` and an expression a body; a function type has neither.
       if (!("macro" in n) && "body" in n) push("A9");
-      else if ("macro" in n && depth > 0) push("nestedFunctions");
+      // Nested functions work, except generic and generator ones.
+      else if ("macro" in n && depth > 0 && ((Array.isArray(n.typeParams) && n.typeParams.length > 0) || n.generator === true)) push("nestedFunctions");
       break;
     case "method":
     case "get":

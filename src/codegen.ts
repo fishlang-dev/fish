@@ -1,4 +1,4 @@
-import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -3509,7 +3509,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
-    const pointer = target.body.closure ? receiver(e.callee) : target.body.self && object ? thisPointer(target, object) : undefined;
+    // A nested function calling itself runs with the captures it was called with.
+    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
