@@ -39,8 +39,8 @@ export type Expr = Span & (
   | { kind: "bigint"; value: bigint }
   | { kind: "null" } | { kind: "this" } | { kind: "super" }
   | { kind: "regex"; pattern: string; flags: string }
-  // Decoded text; `quasis` has one more entry than `exprs`.
-  | { kind: "template"; quasis: string[]; exprs: Expr[] }
+  // Decoded text; `quasis` has one more entry than `exprs`, and `raw` holds each as written.
+  | { kind: "template"; quasis: string[]; raw: string[]; exprs: Expr[] }
   | { kind: "tagged"; tag: Expr; typeArgs: TypeNode[]; template: Expr }
   | { kind: "bool"; value: boolean }
   | { kind: "string"; value: string }

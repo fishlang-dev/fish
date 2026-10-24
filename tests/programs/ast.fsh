@@ -53,9 +53,9 @@ function count(e: Ref<AstExpr>): i64 {
 function kinds(): string {
   const x = quote`b * 2`;
   const sum = quote`a + ${x}`;
-  const s = quote`const y = ${sum};`;
+  const s = quote`const y = ${sum.clone()};`;
   const t = quoteType`Map<string, ${quoteType`i64[]`}>`;
-  const f = quote`function g() { ${s}; return 1; }`;
+  const f = quote`function g() { ${s.clone()}; return 1; }`;
   let out = `${sum.kind} ${count(sum)} ${s.kind} ${t.kind} ${f.kind}`;
   if (f.kind === "function") {
     const body = f.body;
@@ -132,4 +132,60 @@ function main() {
 function main() {
   const e = quote`1 + 2`;
   console.log(e.kind);
+}
+// case: ast_quote_repairs
+// expect: \d+ a\nb
+// expect: function class expr binary
+// expect: y 1
+function texts(): string {
+  const r = quote`/\d+/g`;
+  const s = quote`"a\nb"`;
+  const pattern = r.kind === "regex" ? r.pattern : "";
+  const raw = s.kind === "string" && s.value === "a\nb" ? "a\\nb" : "wrong";
+  return `${pattern} ${raw}`;
+}
+function twice(): AstExpr {
+  return quote`x * 2`;
+}
+function forms(): string {
+  const d = quote`/* doc */ function f() {}`;
+  const c = quote`// a helper
+class C {}`;
+  const e = quote`a + 1`;
+  const s = quote`${e};`;
+  return `${d.kind} ${c.kind} ${s.kind} ${twice().kind}`;
+}
+function spliced(): string {
+  const n = quote`y`;
+  const q = quote`f(${n.clone()}, 1)`;
+  const name = n.kind === "ident" ? n.name : "";
+  return `${name} ${q.kind === "call" ? q.args.length - 1 : 0}`;
+}
+const T = comptime texts();
+const F = comptime forms();
+const S = comptime spliced();
+function main() {
+  console.log(T);
+  console.log(F);
+  console.log(S);
+}
+// case: ast_quote_moves
+// error: 'e' was moved, so it can't be used here
+function make(): string {
+  const e = quote`a`;
+  const q = quote`${e} * ${e}`;
+  return q.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_big_integer
+// error: which an Ast's 'i64' can't hold
+function make(): string {
+  return quote`123456789012345678901234567890n`.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
 }

@@ -560,7 +560,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       // A quote's splices move into the value it makes; other tags became calls.
       case "tagged":
-        if (e.template.kind === "template") for (const x of e.template.exprs) expr(x);
+        if (e.template.kind === "template") for (const x of e.template.exprs) expr(x, (place) => `'${place}' moved here into the quote; use '${place}.clone()' to keep a copy`);
         return;
       case "index":
         if (consume && element(e) && !isCopy(types.get(e)!)) throw elementMove(e, types.get(e)!);

@@ -26,7 +26,7 @@ type AstExpr =
   | { start: i64; end: i64; kind: "this" }
   | { start: i64; end: i64; kind: "super" }
   | { start: i64; end: i64; kind: "regex"; pattern: string; flags: string }
-  | { start: i64; end: i64; kind: "template"; quasis: string[]; exprs: AstExpr[] }
+  | { start: i64; end: i64; kind: "template"; quasis: string[]; raw: string[]; exprs: AstExpr[] }
   | { start: i64; end: i64; kind: "tagged"; tag: AstExpr; typeArgs: AstType[]; template: AstExpr }
   | { start: i64; end: i64; kind: "bool"; value: boolean }
   | { start: i64; end: i64; kind: "string"; value: string }

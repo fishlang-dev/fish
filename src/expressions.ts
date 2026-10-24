@@ -326,23 +326,26 @@ function newExpression(c: Cursor): Expr {
 }
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
-export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; parts: T[]; start: number; end: number } {
+export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; raw: string[]; parts: T[]; start: number; end: number } {
   const first = c.next();
   const quasis = [first.text];
+  const raw = [first.raw ?? ""];
   const parts: T[] = [];
   let piece = first;
   while (piece.kind !== "template" && piece.kind !== "templateTail") {
     parts.push(part(c));
     piece = c.peek();
     if (piece.kind !== "templateMiddle" && piece.kind !== "templateTail") throw c.error("expected '}'");
-    quasis.push(c.next().text);
+    const next = c.next();
+    quasis.push(next.text);
+    raw.push(next.raw ?? "");
   }
-  return { quasis, parts, start: first.start, end: piece.end };
+  return { quasis, raw, parts, start: first.start, end: piece.end };
 }
 
 function template(c: Cursor): Expr {
-  const { quasis, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, () => sequence(c)));
-  return { kind: "template", quasis, exprs: parts, start, end };
+  const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, () => sequence(c)));
+  return { kind: "template", quasis, raw, exprs: parts, start, end };
 }
 
 export function primary(c: Cursor): Expr {

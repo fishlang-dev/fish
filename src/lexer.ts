@@ -14,6 +14,8 @@ export type Token = {
   newlineBefore: boolean;
   // On `/` and `/=`: the template substitutions open there, for rescanning it as a regex.
   substitutions?: number[];
+  // On a template piece: its text as written, escapes undecoded.
+  raw?: string;
 };
 
 // Matches punctuation and keywords, never a literal with the same text.
@@ -182,12 +184,13 @@ export function lexer(src: string): Lexer {
     } else if (c === "`" || (c === "}" && substitutions.at(-1) === 0)) {
       const [value, end, more] = template(src, i + 1);
       i = end;
+      const raw = src.slice(start + 1, end - (more ? 2 : 1));
       if (c === "`") {
         if (more) substitutions.push(0);
-        return token(more ? "templateHead" : "template", value, start);
+        return { ...token(more ? "templateHead" : "template", value, start), raw };
       }
       if (!more) substitutions.pop();
-      return token(more ? "templateMiddle" : "templateTail", value, start);
+      return { ...token(more ? "templateMiddle" : "templateTail", value, start), raw };
     } else if (c === '"' || c === "'") {
       let value = "";
       i++;

@@ -416,7 +416,7 @@ export function expressions(ctx: Context) {
 
   // A call's type, `void` included, or any other expression's.
   function result(e: Expr): Type {
-    if (e.kind === "tagged") untag(e);
+    if (e.kind === "tagged" && !isQuote(e)) untag(e);
     if (e.kind !== "call") return value(e);
     // A call returning a value records it, as reading any other value does.
     const { type } = call(e);
@@ -426,7 +426,7 @@ export function expressions(ctx: Context) {
 
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
-    if (e.kind === "tagged") untag(e);
+    if (e.kind === "tagged" && !isQuote(e)) untag(e);
     if (e.kind === "call") {
       const { type } = call(e);
       if (typeof type !== "string" && type.kind === "future" && leafOf.has(type)) {
@@ -1030,15 +1030,27 @@ export function expressions(ctx: Context) {
     return { type, what: `'${target.name}'` };
   }
 
+  // Whether a tagged template is a quote rather than a call of a tag the program declares.
+  function isQuote(e: Extract<Expr, { kind: "tagged" }>): boolean {
+    const tag = e.tag;
+    return tag.kind === "ident" && (tag.name === "quote" || tag.name === "quoteType") && !lookup(tag.name) && !byName.has(tag.name);
+  }
+
   // `` quote`a + ${x}` ``: the Ast value of the text, an expression's or a statement's, and of
   // `quoteType`, a type's; each splice takes a node of the category its place holds.
   function quote(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
+    if (e.typeArgs.length > 0) throw new CompileError("a quote takes no type arguments", e.start, e.end);
     const q = quoted(e, asType);
     const at = { start: e.start, end: e.end };
     const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
     holesOf(q, types, e).forEach((category, i) => {
       const hole = q.holes[i]!;
       const t = value(hole);
+      // An expression where a statement goes is the statement `e;`.
+      if (category === "AstStmt" && !fits(t, types.AstStmt) && fits(t, types.AstExpr)) {
+        q.asExpressions.add(i);
+        category = "AstExpr";
+      }
       coerce(hole, t, types[category], `a splice where ${category === "AstExpr" ? "an expression" : category === "AstStmt" ? "a statement" : "a type"} goes takes an '${category}', not '${show(t)}'`);
     });
     quotes.set(e, types);
@@ -2856,7 +2868,7 @@ export function expressions(ctx: Context) {
         return c.type;
       }
       case "tagged":
-        if (e.tag.kind === "ident" && (e.tag.name === "quote" || e.tag.name === "quoteType") && !lookup(e.tag.name) && !byName.has(e.tag.name)) return quote(e, e.tag.name === "quoteType");
+        if (isQuote(e)) return quote(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         untag(e);
         return typeOf(e);
       case "call": {
