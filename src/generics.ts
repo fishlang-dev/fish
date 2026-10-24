@@ -129,7 +129,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "interior" || t.kind === "shared" || t.kind === "block") return concrete(t.of);
   if (t.kind === "dyn") return true;
   if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
-  if (t.kind === "array") return concrete(t.element);
+  if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
   if (t.kind === "variant") {
     let known = concreteVariants.get(t);
     if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));

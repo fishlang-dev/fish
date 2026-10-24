@@ -18,6 +18,7 @@ export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
   if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block") return "ptr";
   if (t.kind === "array") return ARRAY;
+  if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
   if (t.kind === "dyn") return DYN;
   if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
   // Atomic instructions need whole bytes, so an atomic boolean is a byte.
@@ -39,6 +40,10 @@ export const DYN = "{ ptr, ptr }";
 
 function size(t: Type): [number, number] {
   if (typeof t !== "string" && t.kind === "array") return [24, 8];
+  if (typeof t !== "string" && t.kind === "fixed") {
+    const [bytes, align] = size(t.element);
+    return [Math.ceil(bytes / align) * align * t.size, align];
+  }
   if (typeof t !== "string" && t.kind === "dyn") return [16, 8];
   if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
   if (t === "f32") return [4, 4];

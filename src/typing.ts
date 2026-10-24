@@ -64,6 +64,10 @@ export type VariantType = {
 // `===` is identity. It has no fields; its length and elements are reached by name and index.
 export type ArrayType = { kind: "array"; element: Type; fields: Field[] };
 
+// `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
+// so `===` is identity.
+export type FixedType = { kind: "fixed"; element: Type; size: number; fields: Field[] };
+
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
 // as its fields, which are never read by name.
@@ -116,7 +120,7 @@ export function holdsPattern(t: Type): boolean {
   let found = patterned.get(t);
   if (found === undefined) {
     patterned.set(t, false);
-    const parts = t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
+    const parts = t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
       : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete]
       : t.kind === "interior" || t.kind === "shared" || t.kind === "block" ? [t.of] : t.kind === "handle" ? [t.gives, ...(t.throws ? [t.throws] : [])]
       : t.kind === "variant" ? [...t.args, ...t.fields.map((f) => f.type)] : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns]
@@ -194,7 +198,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -282,6 +286,7 @@ export function stored(t: Type): Type {
   // A `Promise<T>` stored holds a future, boxed.
   if (t.kind === "interface" && promised.has(t)) return dynType(t);
   if (t.kind === "array") return arrayType(stored(t.element));
+  if (t.kind === "fixed") return fixedType(stored(t.element), t.size);
   return t;
 }
 
@@ -604,6 +609,18 @@ export function refType(to: Type, mutable: boolean, life?: string): RefType {
 
 const refs = new Map<string, RefType>();
 
+export function fixedType(element: Type, size: number): FixedType {
+  const key = `fixed ${size} ${keyOf(element)}`;
+  let t = fixeds.get(key);
+  if (!t) {
+    t = { kind: "fixed", element, size, fields: [] };
+    fixeds.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+const fixeds = new Map<string, FixedType>();
+
 export function arrayType(element: Type): ArrayType {
   const key = `[${keyOf(element)}]`;
   let t = arrays.get(key);
@@ -640,6 +657,8 @@ export function isCopy(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
+  // A fixed array copies when its elements do, as Rust's `[T; N]` does.
+  if (t.kind === "fixed") return isCopy(t.element) && !holdsMut(t.element);
   // A tuple copies when everything in it does, as a union does.
   // A copy of a mutable reference would be a second one, so a tuple holding one moves.
   if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
@@ -652,7 +671,7 @@ export function holdsMut(t: Type): boolean {
   if (t.kind === "ref") return t.mutable;
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
-  if (t.kind === "array") return holdsMut(t.element);
+  if (t.kind === "array" || t.kind === "fixed") return holdsMut(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
   if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
   if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsMut(f.type));
@@ -669,7 +688,7 @@ export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
   // A type parameter holds references when what it stands for, or its bound, does.
   if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
   if (t.kind === "union") return t.members.some(holds);
-  if (t.kind === "array") return holds(t.element);
+  if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
   if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   // A generator borrows what its parameters do; its frame's own references point into itself.
@@ -686,7 +705,7 @@ export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = fa
   if (t.kind === "ref") return throughRefs && holds(t.to);
   if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
   if (t.kind === "union") return t.members.some(holds);
-  if (t.kind === "array") return holds(t.element);
+  if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
   if (t.kind === "interior") return holds(t.of);
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
@@ -747,6 +766,7 @@ export function lower(t: Type): Type {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
     else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
     else if (t.kind === "array") found = arrayType(lower(t.element));
+    else if (t.kind === "fixed") found = fixedType(lower(t.element), t.size);
     else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
     else if (t.kind === "object" && t.tuple) found = tupleType(elementsOf(t).map(lower));
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
@@ -755,7 +775,7 @@ export function lower(t: Type): Type {
   return found;
 }
 
-const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType | VariantType, Type>();
+const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType | FixedType | VariantType, Type>();
 
 // A type with some of its parts swapped for others, looking inside objects and unions.
 export function replaced(t: Type, swap: Map<Type, Type>): Type {
@@ -767,6 +787,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
+  if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
   if (typeof t !== "string" && t.kind === "variant") {
     const args = t.args.map((a) => replaced(a, swap));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
@@ -849,6 +870,7 @@ export function shapeKey(t: Type): string {
     if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}]`;
     else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
     else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
+    else if (t.kind === "fixed") found = `FixedArray<${shapeKey(t.element)},${t.size}>`;
     else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
     else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;
     // A type parameter standing for a concrete type has that type's shape.
@@ -976,6 +998,7 @@ export function show(t: Type): string {
     const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure" || (e.kind === "dyn" && callableOf.has(e.of)));
     return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
   }
+  if (t.kind === "fixed") return `FixedArray<${show(t.element)}, ${t.size}>`;
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;

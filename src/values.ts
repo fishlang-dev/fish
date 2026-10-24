@@ -7,7 +7,7 @@ import { bindings, literalOf, made, missing, objectFields, uncovered, type Patte
 import { channel, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
-import type { Access, ArrayType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
+import type { Access, ArrayType, FixedType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { STD_BASE } from "./std.ts";
@@ -173,6 +173,7 @@ export function expressions(ctx: Context) {
   // a generic function takes a tuple, which are a tuple of their own elements' types.
   const tuples = new Map<Expr, ObjectType>();
   const shaped = new WeakSet<Expr>();
+  const fixedLiterals = new Map<Expr, FixedType>();
   // Objects of index expressions already checked, which their next read takes as checked.
   const once = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
@@ -289,6 +290,12 @@ export function expressions(ctx: Context) {
       wanted.set(e, t.element);
       for (const x of e.elements) if (x) expect(x, t.element);
     }
+    // A literal where a fixed array is expected is that fixed array.
+    if (e.kind === "array" && isFixed(t)) {
+      fixedLiterals.set(e, t);
+      for (const x of e.elements) if (x) expect(x, t.element);
+    }
+    if (e.kind === "call" && isFixed(t)) wanted.set(e, t);
     // A literal where a tuple is expected is that tuple, each element expected to be its own; an
     // Option or union holding one tuple expects that tuple.
     if ((e.kind === "array" || tupleLiterals.has(e)) && typeof t !== "string" && t.kind === "union" && t.members.filter(isTuple).length === 1) t = t.members.find(isTuple)!;
@@ -703,6 +710,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
       return tcpStatic(e, callee, callee.object.name);
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
@@ -715,6 +723,9 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
+    if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
+      throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
+    }
     // A field holding a stored callable, through an object-typed parameter's bound too.
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param" && receiver.bound?.kind === "object") {
       const stored = field(receiver.bound, callee.name);
@@ -1185,6 +1196,20 @@ export function expressions(ctx: Context) {
     return e.kind === "object" ? e.props.map((p) => (p.kind === "property" ? p.value : undefined)) : [];
   }
 
+  // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
+  function filled(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name !== "filled") throw new CompileError(`'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
+    const written = e.typeArgs.length > 0 ? resolveType({ kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
+    if (!written || !isFixed(written)) throw new CompileError("say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
+    if (e.args.length !== 1) throw new CompileError("'FixedArray.filled' takes the value to fill it with", e.start, e.end);
+    clonable(written.element, e, "FixedArray.filled");
+    const v = e.args[0]!;
+    expect(v, written.element);
+    const t = value(v);
+    coerce(v, t, written.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(written.element)}'`);
+    return { type: written, what: "'FixedArray.filled'" };
+  }
+
   // A closure that moves a capture out of itself can run only once, which a method calling it
   // again and again can't allow.
   function runsOften(c: ClosureType, name: string, calls: string, at: Span) {
@@ -1576,7 +1601,8 @@ export function expressions(ctx: Context) {
   function element(e: Expr): e is Extract<Expr, { kind: "index" }> {
     if (e.kind !== "index") return false;
     const object = types.get(e.object);
-    return object !== undefined && isArray(isRefType(object) ? object.to : object);
+    const held = object !== undefined && (isRefType(object) ? object.to : object);
+    return held !== false && (isArray(held) || isFixed(held));
   }
 
   // A string read where a string's property or method is used: a literal becomes its string,
@@ -1936,6 +1962,13 @@ export function expressions(ctx: Context) {
         if (untuple(e)) return typeOf(e);
         const through = value(e.object);
         const object = isRefType(through) ? through.to : through;
+        // A fixed array's element, checked against its known length when the program runs.
+        if (isFixed(object)) {
+          if (e.optional) throw unsupported("optional index expressions", e);
+          const index = value(e.index);
+          coerce(e.index, index, "usize", `a fixed array's index is a 'usize', not '${show(index)}'`);
+          return object.element;
+        }
         const array = isArray(object);
         if (!stringLike(object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
@@ -1973,6 +2006,12 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional(shared, e) : shared;
         }
         if (typeof object !== "string" && object.kind === "class") classOf(object);
+        // A fixed array's one property is its length, known while compiling.
+        if (isFixed(object)) {
+          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          load();
+          return "usize";
+        }
         // An array's properties are its length and its capacity, the room before a push grows it;
         // capacity isn't JavaScript's.
         if (isArray(object)) {
@@ -2028,6 +2067,18 @@ export function expressions(ctx: Context) {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
+        const inline = fixedLiterals.get(e);
+        if (inline) {
+          const given = e.elements as Expr[];
+          if (given.length !== inline.size) throw new CompileError(`type '${show(inline)}' holds ${inline.size} element${inline.size === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
+          const spread = given.find((x) => x.kind === "spread");
+          if (spread) throw unsupported("spread elements in fixed array literals", spread);
+          for (const x of given) {
+            const t = value(x);
+            coerce(x, t, inline.element, `type '${show(t)}' is not assignable to type '${show(inline.element)}'`);
+          }
+          return inline;
+        }
         if (shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
           return tupleLiteral(e, tupleType((e.elements as Expr[]).map((x) => widenLet(value(x)))));
         }
@@ -3092,6 +3143,7 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
 };
 
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
+const isFixed = (t: Type): t is FixedType => typeof t !== "string" && t.kind === "fixed";
 
 // The methods an array has.
 // A type's name with its article, as `an 'i64'` or `a 'string'`.

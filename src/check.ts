@@ -1294,6 +1294,14 @@ export function check(written: Stmt[], library = false): Checked {
             scopes.pop();
             return;
           }
+          // A fixed array's elements, as an array's: borrowed, or copies when they copy.
+          if (typeof object !== "string" && object.kind === "fixed") {
+            scopes.push(new Map());
+            declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);
+            within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+            scopes.pop();
+            return;
+          }
           if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());

@@ -8,11 +8,17 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { arrayType, type ClosureType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
+import { arrayType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type UnionType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
+// Whether indexing a value reads an element: an array's, or a fixed array's, through a
+// reference too.
+const indexes = (t: Type): boolean => {
+  const held = typeof t !== "string" && t.kind === "ref" ? t.to : t;
+  return typeof held !== "string" && (held.kind === "array" || held.kind === "fixed");
+};
 
 // What a reference points to, or the type itself.
 const isDyn = (t: Type): t is DynType => typeof t !== "string" && t.kind === "dyn";
@@ -1022,6 +1028,57 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return resuming ? `%loop.${current.frame!.loops.get(s)! + i}` : alloca(type);
   }
 
+  // `for...of` over a fixed array: each element where it lives, as an array's loop gives them;
+  // a temporary is held in a slot of the loop's own.
+  function fixedLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, type: FixedType) {
+    const local = resolved(s.left as Stmt);
+    scopes.push([]);
+    let base: string;
+    if (isRef(types.get(s.right)!)) base = evaluate(s.right);
+    else if (lendable(s.right)) base = address(s.right);
+    else {
+      base = loopSlot(s, 0, llvm(type));
+      own(base, type);
+      emit(`store ${llvm(type)} ${owned(s.right)}, ptr ${base}`);
+    }
+    settle();
+    const counter = loopSlot(s, 1, "i64");
+    emit(`store i64 0, ptr ${counter}`);
+    const [test, loop, next, end] = [label(), label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${counter}`);
+    emit(`${more} = icmp ult i64 ${i}, ${type.size}`);
+    emit(`br i1 ${more}, label %${loop}, label %${end}`);
+    startBlock(loop);
+    exits.set(s, { exit: end, next, depth: scopes.length });
+    scopes.push([]);
+    reserve(local);
+    own(slot(local), local.type);
+    const at = temp();
+    emit(`${at} = getelementptr ${llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
+    if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
+    else {
+      const v = temp();
+      emit(`${v} = load ${llvm(type.element)}, ptr ${at}`);
+      emit(`store ${llvm(local.type)} ${copied(v, type.element)}, ptr ${slot(local)}`);
+    }
+    s.body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
+    emit(`br label %${next}`);
+    startBlock(next);
+    const [now, after] = [temp(), temp()];
+    emit(`${now} = load i64, ptr ${counter}`);
+    emit(`${after} = add i64 ${now}, 1`);
+    emit(`store i64 ${after}, ptr ${counter}`);
+    emit(`br label %${test}`);
+    startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
+  }
+
   // `for...of` over a string: each code point as a new string, until the runtime gives none. The
   // loop holds a reference to the string, so changing the variable it came from changes nothing.
   function stringLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>) {
@@ -1237,6 +1294,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           return generatorLoop(s, iterated);
         }
         if (lower(valueType(s.right)) === "string") return stringLoop(s);
+        const inline = isRef(types.get(s.right)!) ? (types.get(s.right) as RefType).to : types.get(s.right)!;
+        if (typeof inline !== "string" && inline.kind === "fixed") return fixedLoop(s, inline);
         const type = valueType(s.right) as ArrayType;
         const local = resolved(s.left as Stmt);
         scopes.push([]);
@@ -1784,6 +1843,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function parts(type: Exclude<Type, string>): [Type, number][] {
     // A Lock is its word, then what it holds.
     if (type.kind === "interior") return type.which === "Lock" ? [[type.of, 1]] : [];
+    // A fixed array is its elements, each reached by its index.
+    if (type.kind === "fixed") return Array.from({ length: type.size }, (_, i): [Type, number] => [type.element, i]);
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
@@ -2606,6 +2667,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // one runs first, as JavaScript runs an index's object. An index an assignment already ran is
   // reused, with the bounds checked again.
   function element(e: Extract<Expr, { kind: "index" }>): string {
+    const held = types.get(e.object)!;
+    const inline = isRef(held) ? held.to : held;
+    if (typeof inline !== "string" && inline.kind === "fixed") return fixedElement(e, inline);
     const type = valueType(e.object) as ArrayType;
     let index = fixed.get(e.index);
     let array: string;
@@ -2621,6 +2685,66 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     bounds(length, index, e);
     emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
     emit(`${at} = getelementptr ${llvm(type.element)}, ptr ${data}, i64 ${index}`);
+    return at;
+  }
+
+  // `FixedArray.filled<T, N>(v)`: a copy of `v` in each slot but the last, which takes `v`
+  // itself, filled in a loop so a large one stays small.
+  function fixedFilled(e: Extract<Expr, { kind: "call" }>, type: FixedType): string {
+    const element = type.element;
+    const v = owned(e.args[0]!);
+    if (type.size === 0) {
+      dispose(v, element);
+      return "undef";
+    }
+    const at = alloca(llvm(type));
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp ult i64 ${i}, ${type.size - 1}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    const [slot, after] = [temp(), temp()];
+    emit(`${slot} = getelementptr ${llvm(type)}, ptr ${at}, i64 0, i64 ${i}`);
+    emit(`store ${llvm(element)} ${copied(v, element)}, ptr ${slot}`);
+    emit(`${after} = add i64 ${i}, 1`);
+    emit(`store i64 ${after}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    const last = temp();
+    emit(`${last} = getelementptr ${llvm(type)}, ptr ${at}, i64 0, i64 ${type.size - 1}`);
+    emit(`store ${llvm(element)} ${v}, ptr ${last}`);
+    const result = temp();
+    emit(`${result} = load ${llvm(type)}, ptr ${at}`);
+    if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
+    return result;
+  }
+
+  // A pointer to a fixed array's element, after the bounds check against its known length: the
+  // array is where it lives, through a reference, or a temporary spilled to a slot.
+  function fixedElement(e: Extract<Expr, { kind: "index" }>, type: FixedType): string {
+    const held = types.get(e.object)!;
+    let index = fixed.get(e.index);
+    let base: string;
+    if (isRef(held)) {
+      base = evaluate(e.object);
+      index ??= value(e.index);
+    } else if (lendable(e.object)) {
+      index ??= value(e.index);
+      base = address(e.object);
+    } else {
+      const v = value(e.object);
+      index ??= value(e.index);
+      base = alloca(llvm(type));
+      emit(`store ${llvm(type)} ${v}, ptr ${base}`);
+    }
+    bounds(String(type.size), index, e);
+    const at = temp();
+    emit(`${at} = getelementptr ${llvm(type)}, ptr ${base}, i64 0, i64 ${index}`);
     return at;
   }
 
@@ -2649,7 +2773,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return calls.has(e) || current.copiesOut.has(e) || computed.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
-        return !isArray(valueType(e.object));
+        return !indexes(valueType(e.object));
       default:
         return false;
     }
@@ -2773,6 +2897,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A method's receiver runs before its arguments, as in JavaScript. A method called in an
   // optional chain runs only when the chain isn't empty.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
+    const made = types.get(e);
+    if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "FixedArray" && typeof made !== "string" && made?.kind === "fixed") return fixedFilled(e, made);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
   }
@@ -3087,7 +3213,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // outermost first, so each runs once and before the value, as in JavaScript.
   function fixing(target: Expr, run: () => string): string {
     const nodes: Expr[] = [];
-    for (let e = target; e.kind === "member" || e.kind === "index"; e = e.object) if (e.kind === "index" && isArray(valueType(e.object))) nodes.unshift(e.index);
+    for (let e = target; e.kind === "member" || e.kind === "index"; e = e.object) if (e.kind === "index" && indexes(valueType(e.object))) nodes.unshift(e.index);
     for (const index of nodes) fixed.set(index, value(index));
     const result = run();
     for (const index of nodes) fixed.delete(index);
@@ -3117,6 +3243,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return read;
     };
     if (shared === "string") return convert(units(whole()), "usize", types.get(e)!);
+    // A fixed array's length is known while compiling.
+    if (typeof shared !== "string" && shared.kind === "fixed") return convert(String(shared.size), "usize", types.get(e)!);
     if (typeof shared !== "string" && shared.kind === "array") {
       const length = temp();
       emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);
@@ -3861,9 +3989,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return "undef";
       case "index": {
         const object = valueType(e.object);
-        if (typeof object !== "string" && object.kind === "array") {
+        if (indexes(object)) {
+          const held = isRef(object) ? object.to : object;
           const v = temp();
-          emit(`${v} = load ${llvm(object.element)}, ptr ${element(e)}`);
+          emit(`${v} = load ${llvm((held as ArrayType | FixedType).element)}, ptr ${element(e)}`);
           return v;
         }
         const s = operand(e.object, [e.index]);
@@ -3875,7 +4004,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       // The elements run first, then fill a buffer just long enough.
       case "array": {
-        const type = types.get(e) as ArrayType;
+        const made = types.get(e)!;
+        // A fixed array's literal is its elements in place.
+        if (typeof made !== "string" && made.kind === "fixed") {
+          const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), made.element)));
+          return values.reduce((whole, v, i) => {
+            const next = temp();
+            emit(`${next} = insertvalue ${llvm(made)} ${whole}, ${llvm(made.element)} ${v}, ${i}`);
+            return next;
+          }, "undef");
+        }
+        const type = made as ArrayType;
         const t = llvm(type.element);
         const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), type.element)));
         const n = String(values.length);
@@ -4173,7 +4312,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (e.kind === "this") return true;
     // An array's element lives in its buffer, wherever the array itself is.
-    if (e.kind === "index") return isArray(valueType(e.object));
+    if (e.kind === "index") return indexes(valueType(e.object));
     const local = e.kind === "ident" ? locals.get(e) : undefined;
     const type = types.get(e);
     return local !== undefined && (type === local.type || typeof type === "string" || type?.kind !== "union");

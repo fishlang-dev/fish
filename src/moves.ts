@@ -1262,7 +1262,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function array(e: Expr): boolean {
     const t = types.get(e);
     const held = t !== undefined && isRef(t) ? t.to : t;
-    return held !== undefined && typeof held !== "string" && held.kind === "array";
+    return held !== undefined && typeof held !== "string" && (held.kind === "array" || held.kind === "fixed");
   }
 
   // Moving a value out of an array by index would leave a hole in it, as in Rust.

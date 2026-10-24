@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { field, fits, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
 import { mutates, owns } from "./classes.ts";
@@ -197,6 +197,18 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return arrayType(element);
   }
 
+  // `FixedArray<T, N>`: N elements of T held inline, N a number written in place.
+  function fixedArray(t: Extract<TypeNode, { kind: "ref" }>): Type {
+    if (t.args.length !== 2) throw new CompileError("'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
+    const [of, n] = t.args as [TypeNode, TypeNode];
+    const size = n.kind === "literal" && n.value.kind === "int" ? n.value.value : undefined;
+    if (size === undefined) throw new CompileError("a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
+    if (size > 1_000_000n) throw new CompileError("a FixedArray holds at most 1,000,000 elements inline; use an array, 'T[]', for more", n.start, n.end);
+    const element = storable(resolveType(of), of);
+    if (typeof element !== "string" && element.kind === "interface") throw new CompileError(`a FixedArray can't hold the interface type '${element.name}' directly; use 'Dyn<${element.name}>'`, of.start, of.end);
+    return fixedType(element, Number(size));
+  }
+
   function resolveType(t: TypeNode): Type {
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
@@ -241,6 +253,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
     }
     if (t.name === "Array" && t.args.length === 1) return array(resolveType(t.args[0]!), t);
+    if (t.name === "FixedArray") return fixedArray(t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "never" && t.args.length === 0) return "never";
@@ -711,7 +724,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values" };
+const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
