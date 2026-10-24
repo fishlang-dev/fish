@@ -274,6 +274,7 @@ export const nestedFunctions = new WeakMap<Expr, string>();
 // statement that declared it.
 const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
 let lifts = 0;
+let destructures = 0;
 
 // Whether a piece of syntax holds a node `found` picks out.
 export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen = new Set<unknown>()): boolean {
@@ -1116,11 +1117,38 @@ export function check(written: Stmt[], library = false): Checked {
       return undefined;
     }
 
+    // `[a, b] = [b, a]`: the right side is taken apart whole into fresh variables, as a
+    // declaration would, then each target is assigned its part in order, so a swap swaps.
+    function destructuring(e: Extract<Expr, { kind: "destructure" }>): Stmt {
+      const at = { start: e.start, end: e.end };
+      const assigned: Stmt[] = [];
+      const rebind = (p: Pattern): Pattern => {
+        if (p.kind === "ident" || p.kind === "expr") {
+          const name = `destructured ${destructures++}`;
+          const target: Expr = p.kind === "ident" ? { kind: "ident", name: p.name, start: p.start, end: p.end } : p.expr;
+          const read: Expr = { kind: "ident", name, start: p.start, end: p.end };
+          assigned.push({ kind: "expr", expr: { kind: "assign", op: "=", target, value: read, start: p.start, end: p.end }, start: p.start, end: p.end });
+          return { kind: "ident", name, start: p.start, end: p.end };
+        }
+        if (p.kind === "default") return { ...p, target: rebind(p.target) };
+        if (p.kind === "array") return { ...p, elements: p.elements.map((x) => x && rebind(x)), rest: p.rest && rebind(p.rest) };
+        if (p.kind === "object") return { ...p, props: p.props.map((q) => ({ ...q, value: rebind(q.value) })), rest: p.rest && rebind(p.rest) };
+        throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
+      };
+      const pattern = rebind(e.pattern);
+      const parts: Stmt = { kind: "let", keyword: "const", declarations: [{ target: pattern, type: undefined, init: e.value, ...at }], ...at };
+      return { kind: "block", body: [parts, ...assigned], ...at };
+    }
+
     // `let a = 1, b = a` is a declaration per name, in order, each seeing those before it. A
     // `for` head's go in a block around the loop, which scopes them as the head does.
     function separate(list: Stmt[]) {
       for (let i = list.length - 1; i >= 0; i--) {
         const s = list[i]!;
+        if (s.kind === "expr" && s.expr.kind === "destructure") {
+          list[i] = destructuring(s.expr);
+          continue;
+        }
         if (s.kind === "let" && s.declarations.length > 1) {
           list.splice(i, 1, ...s.declarations.map((d, n): Stmt => ({ ...s, declarations: [d], start: n === 0 ? s.start : d.start, end: d.end })));
           continue;

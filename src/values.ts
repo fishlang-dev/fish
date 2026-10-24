@@ -2497,6 +2497,8 @@ export function expressions(ctx: Context) {
         return "f64";
       case "regex":
         return regexLiteral(e.pattern, e.flags, e);
+      case "destructure":
+        throw new CompileError("a destructuring assignment can only be a statement of its own, as in '[a, b] = [b, a];', since its value can't be used here", e.start, e.end);
       case "null":
         return "null";
       // A throw expression never gives a value, so it fits wherever it is.

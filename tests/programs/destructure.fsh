@@ -150,3 +150,83 @@ function main() {
 // case: destructure_tuple_rest
 // error: rest elements in tuple patterns are not supported yet
 function main() { const t: [i64, i64, i64] = [1, 2, 3]; const [a, ...r] = t; }
+// case: destructuring_assignment
+// expect: b2 a1
+// expect: p1 2
+// expect: 5 0 6
+// expect: 1 2
+// expect: 1 20
+// expect: in1 9
+// expect: 2 1
+// expect: 7 8
+// expect: 5 8
+class Point {
+  x: i64;
+  y: i64;
+  constructor(x: i64, y: i64) { this.x = x; this.y = y; }
+  flip(this: Mut<this>): void { [this.x, this.y] = [this.y, this.x]; }
+}
+function pair(): [string, i64] { return ["p" + 1, 2]; }
+function main() {
+  let a = "a" + 1;
+  let b = "b" + 2;
+  [a, b] = [b, a];
+  console.log(a, b);
+  let n = 0;
+  let s = "";
+  [s, n] = pair();
+  console.log(s, n);
+  let x = 0, y = 0, z = 0;
+  ({ x, y: z } = { x: 5, y: 6 });
+  console.log(x, y, z);
+  let first = 0;
+  let rest: i64[] = [];
+  [first, ...rest] = [1, 2, 3];
+  console.log(first, rest.length);
+  let d = 0;
+  let e = 0;
+  [d = 10, e = 20] = [1];
+  console.log(d, e);
+  let deep = "";
+  let k = 0;
+  const inner: [string[], { k: i64 }] = [["in" + 1], { k: 9 }];
+  [[deep], { k }] = inner;
+  console.log(deep, k);
+  let p = new Point(1, 2);
+  p.flip();
+  console.log(p.x, p.y);
+  let xs = [0, 0];
+  [xs[0], xs[1]] = [7, 8];
+  console.log(xs[0], xs[1]);
+  let i = 0, j = 1;
+  for (let t = 0; t < 5; t++) [i, j] = [j, i + j];
+  console.log(i, j);
+}
+// case: destructuring_assignment_value
+// error: a destructuring assignment can only be a statement of its own, as in '[a, b] = [b, a];', since its value can't be used here
+function main() {
+  let a = 1, b = 2;
+  console.log([a, b] = [b, a]);
+}
+// case: destructuring_assignment_constant
+// error: cannot assign to 'a' because it is a constant
+function main() {
+  const a = 1;
+  let b = 2;
+  [a, b] = [3, 4];
+}
+// case: destructuring_assignment_readonly
+// error: cannot assign to 'x' because it is a read-only property
+class P {
+  readonly x: i64 = 1;
+}
+function main() {
+  let p = new P();
+  [p.x] = [2];
+}
+// case: destructuring_assignment_forupdate
+// error: a destructuring assignment can only be a statement of its own, as in '[a, b] = [b, a];', since its value can't be used here
+function main() {
+  let i = 0, j = 1;
+  for (let t = 0; t < 3; [i, j] = [j, i + j]) t++;
+}
