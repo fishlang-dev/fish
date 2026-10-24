@@ -716,6 +716,14 @@ export function expressions(ctx: Context) {
       return tcpStatic(e, callee, callee.object.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
+    // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
+    if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
+      const made = callee.object;
+      if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [made.args[0], e.args[0]], typeArgs: made.typeArgs });
+      return call(e);
+    }
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
@@ -1216,6 +1224,38 @@ export function expressions(ctx: Context) {
     fixedFills.add(e);
     types.set(e, written);
     return { type: written, what: "'FixedArray.filled'" };
+  }
+
+  // `Array.of(a, b)` is the array literal `[a, b]`; `Array.from(x, f?)` is the array of what x
+  // holds, clones of an array's elements, a string's code points or a generator's values, or of
+  // `0` to `n - 1` from `{ length: n }`, mapped by f when there is one.
+  function arrayStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const at = { start: callee.start, end: callee.end };
+    if (callee.name === "of") {
+      const literal = Object.assign(e, { kind: "array", elements: e.args }) as unknown as Expr;
+      if (e.typeArgs.length === 1) expect(literal, arrayType(resolveType(e.typeArgs[0]!)));
+      return { type: value(literal), what: "'Array.of'" };
+    }
+    if (callee.name !== "from") throw new CompileError(`'Array' has no '${callee.name}'; arrays are made with 'Array.of', 'Array.from' or 'new Array(n).fill(x)'`, callee.start, callee.end);
+    if (e.args.length < 1 || e.args.length > 2) throw new CompileError("'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
+    const [source, f] = e.args as [Expr, Expr | undefined];
+    const prelude = (name: string, args: Expr[]): Expr => ({ kind: "call", callee: { kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
+    const length = source.kind === "object" && source.props.length === 1 && source.props[0]!.kind === "property" && source.props[0]!.key === "length" ? source.props[0]!.value : undefined;
+    let made: Expr;
+    if (length) {
+      if (!f) throw new CompileError("'Array.from({ length: n })' alone would hold n undefined values, which Fish has no way to make; give it a function, as in 'Array.from({ length: n }, (_, i) => i)'", e.start, e.end);
+      made = prelude("array range", [length]);
+    } else {
+      const t = value(source);
+      const held = isRefType(t) ? t.to : t;
+      if (isArray(held)) made = f ? source : { kind: "call", callee: { kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+      else if (stringLike(held)) made = prelude("array chars", [source]);
+      else if (yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
+      else throw new CompileError(`'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${show(t)}'`, source.start, source.end);
+    }
+    if (f) made = { kind: "call", callee: { kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
+    Object.assign(e, made);
+    return call(e as Call);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -2155,6 +2195,10 @@ export function expressions(ctx: Context) {
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
         if (named) expectFrom(named.constructor, list);
+        // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
+        if (e.callee.kind === "ident" && e.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
+          throw new CompileError(list.length === 1 ? "'new Array(n)' would hold n empty slots, which Fish has no way to make; fill it, as in 'new Array(n).fill(0)', or use 'Array.from({ length: n }, (_, i) => ...)'" : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
+        }
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);

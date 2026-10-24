@@ -18,6 +18,29 @@ function* __arrayKeys<T>(xs: Ref<T[]>): Generator<i64> {
 function* __arrayValues<T>(xs: Ref<T[]>): Generator<T> {
   for (const x of xs) yield x.clone();
 }
+function __arrayChars(s: string): string[] {
+  let out: string[] = [];
+  for (const c of s) out.push(c);
+  return out;
+}
+function __arrayCollect<T>(g: Generator<T>): T[] {
+  let out: T[] = [];
+  for (const x of g) out.push(x);
+  return out;
+}
+function __arrayRange(n: i64): i64[] {
+  let out: i64[] = [];
+  for (let i = 0; i < n; i++) out.push(i);
+  return out;
+}
+function __arrayFilled<T>(n: i64, x: T): T[] {
+  let out: T[] = [];
+  if (n === 0) return out;
+  out.reserve(n);
+  for (let i = 1; i < n; i++) out.push(x.clone());
+  out.push(x);
+  return out;
+}
 class AbortError { message: string = "This operation was aborted"; }
 class IoError { message: string; constructor(message: string) { this.message = message; } }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
