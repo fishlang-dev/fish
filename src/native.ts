@@ -488,6 +488,32 @@ static void fsh_array_room(fsh_array *a, int64_t need, int64_t size) {
   a->capacity = capacity;
 }
 
+// Makes room for at least more elements beyond the length, as Rust's Vec::reserve does. A
+// negative count is no count at all.
+void fsh_rt_array_grow(fsh_array *a, int64_t more, int64_t size, const char *at) {
+  if (more < 0 || more > INT64_MAX / (size ? size : 1) - a->length) {
+    fflush(NULL);
+    fputs(at, stderr);
+    fsh_rt_panic("capacity overflow\n");
+  }
+  if (a->length + more <= a->capacity) return;
+  char *data = fsh_rt_alloc((a->length + more) * size);
+  if (a->length) memcpy(data, a->data, a->length * size);
+  fsh_rt_free(a->data);
+  a->data = data;
+  a->capacity = a->length + more;
+}
+
+// Gives back the room past the length, the whole buffer when the array is empty.
+void fsh_rt_array_shrink(fsh_array *a, int64_t size) {
+  if (a->capacity == a->length) return;
+  char *data = a->length ? fsh_rt_alloc(a->length * size) : NULL;
+  if (a->length) memcpy(data, a->data, a->length * size);
+  fsh_rt_free(a->data);
+  a->data = data;
+  a->capacity = a->length;
+}
+
 // Moves every element of from onto the end of a, then frees from's buffer, whose elements
 // now belong to a.
 void fsh_rt_array_extend(fsh_array *a, fsh_array *from, int64_t size) {

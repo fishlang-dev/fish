@@ -1120,12 +1120,14 @@ export function expressions(ctx: Context) {
     const counts: Record<string, [number, number, string]> = {
       shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
       splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
+      reserve: [1, 1, "a count of elements to make room for"], shrinkToFit: [0, 0, "no arguments"],
     };
     const [least, most, takes] = counts[name]!;
     if (e.args.length < least || e.args.length > most) throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
     if (name === "unshift") e.args.forEach(element);
     if (name === "splice") e.args.forEach((a, i) => (i < 2 ? position(a) : element(a)));
     if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
+    if (name === "reserve") position(e.args[0]!);
     const what = `'${name}', which changes its array in place,`;
     if (name === "shift") return { type: unionType([array.element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
@@ -1974,7 +1976,8 @@ export function expressions(ctx: Context) {
         // An array's one property is its length.
         if (isArray(object)) {
           if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          // Its capacity too, the room it has before a push grows it; neither is JavaScript's.
+          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -2624,7 +2627,8 @@ export function expressions(ctx: Context) {
     }
     const holder = target.kind === "member" ? types.get(target.object) : undefined;
     if (holder && isArray(isRefType(holder) ? holder.to : holder)) {
-      throw new CompileError("an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
+      const capacity = (target as { name: string }).name === "capacity";
+      throw new CompileError(capacity ? "an array's 'capacity' can't be set; use 'reserve(n)' to make room, or 'shrinkToFit()' to give it back" : "an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
     }
     if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
@@ -3101,7 +3105,7 @@ const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
-const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill"]);
+const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);

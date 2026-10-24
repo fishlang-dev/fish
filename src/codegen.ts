@@ -2558,6 +2558,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (callee.name === "sort") return sorted(e, type, at);
     if (callee.name === "at") return elementAt(e, type, at);
+    if (callee.name === "reserve") {
+      // A count below zero panics, which drops what is live here.
+      unwinding(`call void @fsh_rt_array_grow(ptr ${at}, i64 ${value(e.args[0]!)}, i64 ${bytes(type.element, "1")}, ptr ${panicAt(e)})`);
+      return undefined;
+    }
+    if (callee.name === "shrinkToFit") {
+      emit(`call void @fsh_rt_array_shrink(ptr ${at}, i64 ${bytes(type.element, "1")})`);
+      return undefined;
+    }
     if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
     if (["shift", "unshift", "splice", "reverse", "fill"].includes(callee.name)) return changed(e, callee.name, type, at);
     if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
@@ -3110,7 +3119,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (shared === "string") return convert(units(whole()), "usize", types.get(e)!);
     if (typeof shared !== "string" && shared.kind === "array") {
       const length = temp();
-      emit(`${length} = extractvalue ${ARRAY} ${whole()}, 1`);
+      emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);
       return convert(length, "usize", types.get(e)!);
     }
     if (typeof shared !== "string" && shared.kind === "union") return unionField(whole(), shared, e.name, types.get(e)!);
