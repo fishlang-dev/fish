@@ -4747,6 +4747,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (p.kind === "shorthand") {
         const local = resolved(p);
+        const to = field(type, p.name)!.type;
+        // A shorthand lent to a reference field points at its variable.
+        if (isRef(to) && !isRef(local.type)) {
+          put(p.name, slot(local), to);
+          continue;
+        }
         const read = temp();
         emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
         put(p.name, copied(read, local.type), local.type);

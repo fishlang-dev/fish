@@ -293,3 +293,22 @@ function main() {
   const p: { n: u8 } = { n: 1, ...{ n: 70000 } };
   console.log(p.n);
 }
+// case: object_spread_adapts_last
+// expect: 7 4 2 0
+// expect: a1 0
+function main() {
+  const o: { n: u8; m: i64 } = { ...{ m: 4 }, n: 7 };
+  const q: { n: u8; xs: string[] } = { n: 300 - 299, ...{ n: 2 as u8 }, xs: [] };
+  console.log(o.n, o.m, q.n, q.xs.length);
+  const d = { s: "a" + 1 };
+  const r: { s: string; xs: string[] } = { ...d, xs: [] };
+  console.log(r.s, r.xs.length);
+}
+// case: object_spread_lends_shorthand
+// expect: a1 1
+type O = { s: string };
+function main() {
+  const a: O = { s: "a" + 1 };
+  const o: { a: Ref<O>; k: i64 } = { a, ...{ k: 1 } };
+  console.log(o.a.s, o.k);
+}

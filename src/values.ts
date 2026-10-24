@@ -2640,12 +2640,22 @@ export function expressions(ctx: Context) {
   // A fresh object literal's literal properties take the number types of the fields they meet,
   // in nested literals too; the literal's type is then made again from its properties.
   function adaptFields(e: Expr, type: Type, to: Type): Type {
-    // A literal with spreads keeps the types its parts give.
-    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class") || e.props.some((p) => p.kind === "spread")) return type;
+    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
+    // Only a property no later part replaces gives its field, so only that one adapts.
+    const supplies = (q: ObjectProp, name: string) => {
+      if (q.kind === "property") return q.key === name;
+      if (q.kind === "shorthand") return q.name === name;
+      if (q.kind !== "spread") return false;
+      const t = types.get(q.value)!;
+      const source = typeof t !== "string" && t.kind === "ref" ? t.to : t;
+      return typeof source === "string" || field(source, name) !== undefined;
+    };
+    const winners = e.props.filter((p, i): p is Extract<ObjectProp, { kind: "property" }> =>
+      p.kind === "property" && typeof p.key === "string" && !e.props.slice(i + 1).some((q) => supplies(q, p.key as string)));
     let changed = false;
-    for (const p of e.props) {
-      if (p.kind !== "property" || typeof p.key !== "string") continue;
-      const want = field(to, p.key)?.type;
+    for (const p of winners) {
+      const key = p.key as string;
+      const want = field(to, key)?.type;
       const have = types.get(p.value)!;
       // A string literal widened for the object keeps its literal type where one is wanted.
       if (want && want !== "string" && coercions.get(p.value) === "string" && fits(have, want)) {
@@ -2662,7 +2672,7 @@ export function expressions(ctx: Context) {
     }
     if (!changed) return type;
     const remade = objectType((type as ObjectType).fields.map((f) => {
-      const p = e.props.find((q) => q.kind === "property" && q.key === f.name) as { value: Expr } | undefined;
+      const p = winners.find((q) => q.key === f.name);
       return p ? { ...f, type: coercions.get(p.value) ?? types.get(p.value)! } : f;
     }));
     types.set(e, remade);
