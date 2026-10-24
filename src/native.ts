@@ -1263,17 +1263,33 @@ int fsh_rt_parse_number(fsh_str *s, double *out) {
   if (n - i > 2 && p[i] == '0') {
     int radix = p[i + 1] == 'x' || p[i + 1] == 'X' ? 16 : p[i + 1] == 'o' || p[i + 1] == 'O' ? 8 : p[i + 1] == 'b' || p[i + 1] == 'B' ? 2 : 0;
     if (radix != 0) {
-      double v = 0;
+      // The top 64 bits, the last one also standing for any 1 below them, round once to a
+      // double as an exact value would.
+      int bits = radix == 16 ? 4 : radix == 8 ? 3 : 1, used = 0, sticky = 0;
+      uint64_t top = 0;
+      int64_t shift = 0;
       for (int64_t k = i + 2; k < n; k++) {
-        if (fsh_digit(p[k]) >= radix) return 0;
-        v = v * radix + fsh_digit(p[k]);
+        int d = fsh_digit(p[k]);
+        if (d >= radix) return 0;
+        for (int b = bits - 1; b >= 0; b--) {
+          int bit = (d >> b) & 1;
+          if (used == 0 && bit == 0) continue;
+          if (used < 64) {
+            top = top << 1 | bit;
+            used++;
+          } else {
+            shift++;
+            sticky |= bit;
+          }
+        }
       }
-      *out = v;
+      *out = ldexp((double)(top | (uint64_t)sticky), (int)(shift > 2000 ? 2000 : shift));
       return 1;
     }
   }
   int64_t sign = p[i] == '-' || p[i] == '+';
-  if (fsh_js_decimal(p + i + sign, n - i - sign) != n - i - sign) return 0;
+  int64_t length = fsh_js_decimal(p + i + sign, n - i - sign);
+  if (length == 0 || length != n - i - sign) return 0;
   *out = fsh_js_strtod(p + i, n - i);
   return 1;
 }

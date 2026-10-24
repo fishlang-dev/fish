@@ -67,7 +67,7 @@ const RULES: Rule[] = [
   { id: "genericMethods", action: "unsupported", title: "type parameters on methods and arrow functions (generic methods, interfaces and arrows)", feature: "Generic methods, interfaces and arrows" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
-  { id: "math", action: "unsupported", title: "Math.random, and Math.fround, clz32 and imul", feature: "Randomness" },
+  { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process (process environment)", feature: "Process environment" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
@@ -417,7 +417,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (named(callee, "eval") || named(callee, "Function")) push("R1");
   if (memberOf(callee, "Object", ["defineProperty", "defineProperties", "setPrototypeOf"])) push("R2");
   if (named(callee, "isNaN") || memberOf(callee, "Number", ["isNaN"])) push("G8");
-  if (memberOf(callee, "Math", ["random", "fround", "clz32", "imul"])) push("math");
+  if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
   if (["setTimeout", "setInterval", "clearTimeout", "clearInterval"].some((name) => named(callee, name))) push("timers");
   if (memberOf(callee, "console", ["error", "warn"]) || memberOf(callee, "Date", ["now"]) || memberOf(callee, "performance", ["now"])) push("stderr");

@@ -164,7 +164,8 @@ export const maths = new WeakSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
 export const MATH_FLOAT: Record<string, number> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
-  sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1, pow: 2, atan2: 2, hypot: 2,
+  sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1, asinh: 1, acosh: 1, atanh: 1,
+  pow: 2, atan2: 2, hypot: 2,
 };
 export const MATH_CONSTANTS: Record<string, number> = {
   PI: Math.PI, E: Math.E, LN2: Math.LN2, LN10: Math.LN10, LOG2E: Math.LOG2E, LOG10E: Math.LOG10E, SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
@@ -752,8 +753,12 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
-    if (callee.kind === "member" && isMath(callee.object)) return mathCall(e, callee.name);
+    if (callee.kind === "member" && isMath(callee.object)) {
+      if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
+      return mathCall(e, callee.name);
+    }
     const parser = parserOf(callee);
+    if (parser && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError(`'${parser}' is always there, so it is called without '?.'`, e.start, e.end);
     if (parser) return parse(e, parser);
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
@@ -1313,6 +1318,8 @@ export function expressions(ctx: Context) {
   function toFixed(e: Call): { type: Type; what: string } {
     if (e.args.length > 1) throw new CompileError("'toFixed' takes how many digits to print after the point, 0 when not given", e.start, e.end);
     const digits = e.args[0];
+    const receiver = (e.callee as Extract<Expr, { kind: "member" }>).object;
+    loaded(receiver, types.get(receiver)!);
     fixedPrints.add(e);
     if (!digits) return { type: "string", what: "'toFixed'" };
     const t = value(digits);
@@ -1323,7 +1330,7 @@ export function expressions(ctx: Context) {
   // The global `parseInt`, `parseFloat`, `Number` and `Number.parse...` a call makes, unless a
   // name of the program's hides it.
   function parserOf(callee: Expr): "parseInt" | "parseFloat" | "Number" | undefined {
-    const global = (name: string) => !lookup(name) && !classes.has(name) && !byName.has(name);
+    const global = (name: string) => !lookup(name) && !classes.has(name) && !byName.has(name) && !byName.has(`const ${name}`) && !enums.has(name);
     if (callee.kind === "ident" && (callee.name === "parseInt" || callee.name === "parseFloat" || callee.name === "Number") && global(callee.name)) return callee.name;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Number" && global("Number") && (callee.name === "parseInt" || callee.name === "parseFloat")) return callee.name;
     return undefined;
@@ -1352,7 +1359,7 @@ export function expressions(ctx: Context) {
 
   // The global `Math`, unless a name of the program's hides it.
   function isMath(e: Expr): boolean {
-    return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math");
+    return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math") && !byName.has("const Math") && !enums.has("Math");
   }
 
   // `Math.abs`, `sign`, `min` and `max` keep the numeric type they are given, a literal taking
@@ -1365,7 +1372,7 @@ export function expressions(ctx: Context) {
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError(`${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
       for (const a of e.args) {
-        const t = value(a);
+        const t = read(a);
         if (t === "f64" || adapt(a, "f64")) continue;
         throw new CompileError(isNumeric(t) ? `${what} takes a '${show("f64")}', an f64, not '${show(t)}'; convert it with 'as', as in 'n as f64'` : `${what} takes a number, not '${show(t)}'`, a.start, a.end);
       }
@@ -1375,7 +1382,7 @@ export function expressions(ctx: Context) {
     if (!["abs", "sign", "min", "max"].includes(name)) throw new CompileError(`'Math' has no '${name}' in Fish yet`, e.start, e.end);
     const many = name === "min" || name === "max";
     if (many ? e.args.length === 0 : e.args.length !== 1) throw new CompileError(many ? `${what} takes one or more numbers` : `${what} takes one number`, e.start, e.end);
-    const given = e.args.map((a) => value(a));
+    const given = e.args.map((a) => read(a));
     given.forEach((t, i) => {
       if (!isNumeric(t)) throw new CompileError(`${what} takes numbers, not '${show(t)}'`, e.args[i]!.start, e.args[i]!.end);
     });

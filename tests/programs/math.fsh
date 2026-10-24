@@ -312,3 +312,41 @@ function main() {
 function main() {
   console.log((1.5).toFixed(1.5));
 }
+// case: parse_lone_sign
+// expect: true true
+function main(): void {
+  const a = Number("-");
+  const b = Number(" + ");
+  console.log(a === null, b === null);
+}
+// case: math_hidden_by_top_level_const
+// expect: 3 1
+const Math = { PI: 3.0, E: 1.0 };
+function main(): void { console.log(Math.PI, Math.E); }
+// case: math_optional_call
+// error: 'Math' is always there, so its functions are called without '?.'
+function main(): void {
+  const x = Math?.sqrt(4.0);
+  console.log(x);
+}
+// case: parse_prefix_rounding
+// expect: true
+// expect: 144115188075855900
+function main(): void {
+  const a = Number("0b1" + "0".repeat(52) + "11");
+  if (a !== null) console.log(a === 18014398509481988.0);
+  const b = Number("0x200000000000011");
+  if (b !== null) console.log(b);
+}
+// case: to_fixed_through_ref
+// expect: 1.25
+function f(r: Ref<f64>): string { return r.toFixed(2); }
+function main(): void { console.log(f(1.25)); }
+// case: math_through_ref
+// expect: 6
+function f(r: Ref<f64>): f64 { return Math.sqrt(r) + r; }
+function main(): void { console.log(f(4.0)); }
+// case: math_enum_named_math
+// expect: 1
+enum Math { A = 1 }
+function main(): void { console.log(Math.A); }
