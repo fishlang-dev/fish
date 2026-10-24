@@ -319,6 +319,8 @@ function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at
 export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
+const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index", "staticBlock"]);
+
 // A macro takes the declaration it is applied to, and no type parameters.
 function macroShape(f: Func) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
@@ -337,6 +339,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
     if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
+    // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
+    const member = n as { kind?: string; decorators?: Expr[]; modifiers?: unknown };
+    if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
   written = [...written, ...hoistLocals(written)];

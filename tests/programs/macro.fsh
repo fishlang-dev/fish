@@ -461,7 +461,7 @@ macro function named(input: AstStmt, name: string): Ast {
 @named("a", "b") function f() {}
 function main() {}
 // case: macro_argument_type
-// error: this argument is a 'i64', but the macro 'named' takes 'name' as a 'string'
+// error: this argument is a 'i64', but the macro takes a 'string' here
 macro function named(input: AstStmt, name: string): Ast {
   return input;
 }
@@ -562,3 +562,167 @@ class A {
   m(@keep x: i64) {}
 }
 function main() {}
+// case: macro_c_w1
+// expect: HELLO extra ran
+// expect: own ran
+// a member macro that replaces its member: the member's outer decorator and the class's own should still apply
+macro function loud(input: AstStmt, member: usize): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const k = quote`class X { hello(): string { return "HELLO"; } }`;
+    if (k.kind === "class") c.members[member] = k.members[0].clone();
+  }
+  return c;
+}
+macro function extra(input: AstStmt, member: i64): Ast[] {
+  return [input, quote`function ${ident("extraRan")}(): string { return "extra ran"; }`];
+}
+macro function own(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("ownRan")}(): string { return "own ran"; }`];
+}
+macro function rebuild(input: AstStmt, member: i64): AstStmt {
+  return quote`class C { hello(): string { return "rebuilt"; } }`;
+}
+class A {
+  @extra @loud hello(): string { return "hello"; }
+}
+@own class B {
+  @rebuild hello(): string { return "hello"; }
+}
+function main() { console.log(new A().hello(), extraRan()); console.log(ownRan()); }
+// case: macro_c_w2
+// expect: own ran
+// a member macro that replaces its member: the member's outer decorator and the class's own should still apply
+macro function loud(input: AstStmt, member: usize): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const k = quote`class X { hello(): string { return "HELLO"; } }`;
+    if (k.kind === "class") c.members[member] = k.members[0].clone();
+  }
+  return c;
+}
+macro function extra(input: AstStmt, member: i64): Ast[] {
+  return [input, quote`function ${ident("extraRan")}(): string { return "extra ran"; }`];
+}
+macro function own(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("ownRan")}(): string { return "own ran"; }`];
+}
+macro function rebuild(input: AstStmt, member: i64): AstStmt {
+  return quote`class ${ident("B")} { hello(): string { return "rebuilt"; } }`;
+}
+class A {
+  @extra @loud hello(): string { return "hello"; }
+}
+@own class B {
+  @rebuild hello(): string { return "hello"; }
+}
+function main() { console.log(ownRan()); }
+// case: macro_c_x1
+// expect: 1 outer ran
+// the inner macro gives the declaration back as an export; the outer decorator must still run
+macro function exp(input: AstStmt): AstStmt {
+  return quote`export ${input}`;
+}
+macro function also(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("ran")}(): string { return "outer ran"; }`];
+}
+@also @exp function f(): i64 { return 1; }
+function main() { console.log(f(), ran()); }
+// case: macro_c_q1
+// expect: 1 1
+// an optional and a defaulted macro parameter, the argument left out
+macro function e(input: AstStmt, label: string = "dflt"): Ast[] {
+  return [input, quote`function ${ident(label)}(): i64 { return 1; }`];
+}
+@e function f() {}
+@e("given") function g() {}
+function main() { console.log(dflt(), given()); }
+// case: macro_c_a2
+// expect: ok
+// u8 parameter given a literal
+macro function small(input: AstStmt, v: u8): Ast {
+  return input;
+}
+@small(5) function f() {}
+function main() { console.log("ok"); }
+// case: macro_c_r1
+// expect: 64
+macro function keep(input: AstStmt, member: i64): Ast { return input; }
+@own class C {
+  @keep f1: i64 = 1;
+  @keep f2: i64 = 2;
+  @keep f3: i64 = 3;
+  @keep f4: i64 = 4;
+  @keep f5: i64 = 5;
+  @keep f6: i64 = 6;
+  @keep f7: i64 = 7;
+  @keep f8: i64 = 8;
+  @keep f9: i64 = 9;
+  @keep f10: i64 = 10;
+  @keep f11: i64 = 11;
+  @keep f12: i64 = 12;
+  @keep f13: i64 = 13;
+  @keep f14: i64 = 14;
+  @keep f15: i64 = 15;
+  @keep f16: i64 = 16;
+  @keep f17: i64 = 17;
+  @keep f18: i64 = 18;
+  @keep f19: i64 = 19;
+  @keep f20: i64 = 20;
+  @keep f21: i64 = 21;
+  @keep f22: i64 = 22;
+  @keep f23: i64 = 23;
+  @keep f24: i64 = 24;
+  @keep f25: i64 = 25;
+  @keep f26: i64 = 26;
+  @keep f27: i64 = 27;
+  @keep f28: i64 = 28;
+  @keep f29: i64 = 29;
+  @keep f30: i64 = 30;
+  @keep f31: i64 = 31;
+  @keep f32: i64 = 32;
+  @keep f33: i64 = 33;
+  @keep f34: i64 = 34;
+  @keep f35: i64 = 35;
+  @keep f36: i64 = 36;
+  @keep f37: i64 = 37;
+  @keep f38: i64 = 38;
+  @keep f39: i64 = 39;
+  @keep f40: i64 = 40;
+  @keep f41: i64 = 41;
+  @keep f42: i64 = 42;
+  @keep f43: i64 = 43;
+  @keep f44: i64 = 44;
+  @keep f45: i64 = 45;
+  @keep f46: i64 = 46;
+  @keep f47: i64 = 47;
+  @keep f48: i64 = 48;
+  @keep f49: i64 = 49;
+  @keep f50: i64 = 50;
+  @keep f51: i64 = 51;
+  @keep f52: i64 = 52;
+  @keep f53: i64 = 53;
+  @keep f54: i64 = 54;
+  @keep f55: i64 = 55;
+  @keep f56: i64 = 56;
+  @keep f57: i64 = 57;
+  @keep f58: i64 = 58;
+  @keep f59: i64 = 59;
+  @keep f60: i64 = 60;
+  @keep f61: i64 = 61;
+  @keep f62: i64 = 62;
+  @keep f63: i64 = 63;
+  @keep f64: i64 = 64;
+}
+macro function own(input: AstStmt): Ast { return input; }
+function main() { console.log(new C().f64); }
+// case: macro_member_outside_top_level
+// error: a macro on a member applies in a top-level class
+macro function keep(input: AstStmt, member: i64): Ast {
+  return input;
+}
+function main() {
+  class Local {
+    @keep x: i64 = 1;
+  }
+}
