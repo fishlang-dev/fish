@@ -11,8 +11,9 @@ const SPLICE = "__fishSplice";
 
 export type Category = "AstExpr" | "AstStmt" | "AstType";
 // `asExpressions` are the splices written as statements that are expressions, each the
-// expression of its statement, as `e;` is.
-export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: Expr[]; asExpressions: Set<number> };
+// expression of its statement, as `e;` is; `names` are those where a name goes, each taking an
+// identifier's name.
+export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: Expr[]; asExpressions: Set<number>; names: Set<number> };
 
 const parsed = new WeakMap<Expr, Quote>();
 
@@ -39,7 +40,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
     } catch (error) {
       tree = fail(error);
     }
-    quote = { tree, category: "AstType", holes: template.exprs, asExpressions: new Set() };
+    quote = { tree, category: "AstType", holes: template.exprs, asExpressions: new Set(), names: new Set() };
   } else {
     // As JavaScript reads a statement, one starting with `function`, `class` or `{` is no
     // expression.
@@ -50,7 +51,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
     } catch {
       tree = undefined;
     }
-    if (tree) quote = { tree, category: "AstExpr", holes: template.exprs, asExpressions: new Set() };
+    if (tree) quote = { tree, category: "AstExpr", holes: template.exprs, asExpressions: new Set(), names: new Set() };
     else {
       let stmts: Stmt[] = [];
       try {
@@ -59,7 +60,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
         fail(error);
       }
       if (stmts.length !== 1) throw new CompileError(`a quote holds one expression, statement or declaration, not ${stmts.length}`, e.start, e.end);
-      quote = { tree: stmts[0]!, category: "AstStmt", holes: template.exprs, asExpressions: new Set() };
+      quote = { tree: stmts[0]!, category: "AstStmt", holes: template.exprs, asExpressions: new Set(), names: new Set() };
     }
   }
   parsed.set(e, quote);
@@ -82,6 +83,13 @@ function startsStatement(text: string): boolean {
   }
 }
 
+// Which splice a name stands for, if it is one.
+function nameSplice(text: unknown): number | undefined {
+  if (typeof text !== "string" || !text.startsWith(SPLICE)) return undefined;
+  const i = text.slice(SPLICE.length);
+  return /^\d+$/.test(i) ? Number(i) : undefined;
+}
+
 // Which splice a node stands for, if it is one.
 function spliceOf(node: unknown): number | undefined {
   if (!node || typeof node !== "object") return undefined;
@@ -95,7 +103,7 @@ function spliceOf(node: unknown): number | undefined {
 // it makes; a splice anywhere else, as a name, is an error.
 export function holesOf(q: Quote, types: Record<Category, Type>, at: Span): Category[] {
   const found: (Category | undefined)[] = q.holes.map(() => undefined);
-  walk(q.tree, types[q.category], types, q.asExpressions, (i, category) => {
+  walk(q.tree, types[q.category], types, q, (i, category) => {
     if (i >= q.holes.length) throw new CompileError(`'${SPLICE}${i}' is the name a quote's splices are parsed under, so a quote can't use it`, at.start, at.end);
     found[i] = category;
   });
@@ -124,21 +132,27 @@ function memberFor(node: unknown, union: UnionType): Type | undefined {
   });
 }
 
-function walk(node: unknown, type: Type, types: Record<Category, Type>, asExpressions: Set<number>, hole: (i: number, category: Category) => void) {
+function walk(node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: number, category: Category) => void) {
   const t = unfolded(type);
+  // A splice where a name goes takes an identifier, its name put there.
+  const name = nameSplice(node);
+  if (name !== undefined) {
+    q.names.add(name);
+    return hole(name, "AstExpr");
+  }
   if (node === null || node === undefined || typeof t === "string") return;
   if (t.kind === "union") {
-    const splice = spliceIn(node, t, types, asExpressions);
+    const splice = spliceIn(node, t, types, q.asExpressions);
     if (splice) return hole(splice.i, splice.category);
     const member = memberFor(node, t);
-    if (member) walk(node, member, types, asExpressions, hole);
+    if (member) walk(node, member, types, q, hole);
     return;
   }
   if (t.kind === "array" && Array.isArray(node)) {
-    for (const x of node) walk(x, t.element, types, asExpressions, hole);
+    for (const x of node) walk(x, t.element, types, q, hole);
     return;
   }
-  if (t.kind === "object") for (const f of t.fields) walk((node as Record<string, unknown>)[f.name], f.type, types, asExpressions, hole);
+  if (t.kind === "object") for (const f of t.fields) walk((node as Record<string, unknown>)[f.name], f.type, types, q, hole);
 }
 
 // The splice a node in a union's place stands for: a statement written as a splice alone, or a
@@ -167,6 +181,7 @@ export type Builder<V> = {
   array(items: V[]): V;
   member(value: V, of: Type, member: Type): V;
   splice(i: number, into: Type): V;
+  name(i: number): V;
   int(n: bigint): V;
   none: V;
 };
@@ -184,6 +199,7 @@ export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | und
       return b.member(make(node, member), t, member);
     }
     if (node === null || node === undefined || t === "null") return b.none;
+    if (t === "string" && nameSplice(node) !== undefined) return b.name(nameSplice(node)!);
     if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), at ?? { start: 0, end: 0 })) : (node as V);
     if (t.kind === "literal") return t.value as V;
     if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element)));

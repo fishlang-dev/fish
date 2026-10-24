@@ -1,8 +1,8 @@
 import type { Checked } from "./check.ts";
 import { astValues, comptimeCall, type Value } from "./comptime.ts";
-import { CompileError } from "./diag.ts";
+import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import type { Expr, Func, Stmt } from "./parser.ts";
-import { built, type Category } from "./quote.ts";
+import { built, quoted, type Category } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 
@@ -124,7 +124,7 @@ function expanded(program: Stmt[], sites: Site[], macros: Map<string, Func>, che
     const input = instance.locals.get(param)!.type;
     const bare = { ...site.decl, decorators: site.decl.kind === "class" ? [] : undefined } as Stmt;
     const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
-    const value = built<Value>({ tree: bare, category: "AstStmt", holes: [], asExpressions: new Set() }, types, undefined, astValues(() => null));
+    const value = built<Value>({ tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
     const result = comptimeCall(instance, [value], nearest);
     const given = (Array.isArray(nodeOf(result)) ? nodeOf(result) : [nodeOf(result)]) as Decl[];
     const replacing = given.map((d) => {
@@ -134,9 +134,82 @@ function expanded(program: Stmt[], sites: Site[], macros: Map<string, Func>, che
       const decl = rest.length > 0 ? ({ ...d, decorators: [...rest, ...(d.decorators ?? [])] } as Decl) : d;
       return site.exported ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
     });
+    hygienic(replacing, macro);
     out.splice(site.index, 1, ...replacing);
   }
   return out;
+}
+
+let expansions = 0;
+
+// Makes the names a macro's quotes declare private to this expansion: each declaration, binding
+// and use written in the macro, of a name its quotes declare, takes a name no other code can
+// write. Names from the input, or made with `ident`, are where nothing in the macro is.
+function hygienic(given: Stmt[], macro: Func) {
+  const declared = quotedNames(macro);
+  if (declared.size === 0) return;
+  const suffix = `@m${expansions++}`;
+  const inMacro = (n: { start?: unknown; end?: unknown }) => typeof n.start === "number" && typeof n.end === "number" && n.start >= macro.start && n.end <= macro.end && n.end > n.start;
+  const renamed = (name: string) => {
+    LOCAL_NAMES.add(`${name}${suffix}`);
+    return `${name}${suffix}`;
+  };
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(visit);
+    const n = node as { kind?: string; name?: unknown; start?: unknown; end?: unknown };
+    if (typeof n.name === "string" && NAMED.has(n.kind!) && inMacro(n)) {
+      const [head, ...rest] = n.name.split(".");
+      if (declared.has(head!)) n.name = [renamed(head!), ...rest].join(".");
+    }
+    Object.values(n).forEach(visit);
+  };
+  visit(given);
+}
+
+// The nodes whose `name` is one a quote may declare or use: identifiers, type references,
+// declarations and their kin.
+const NAMED = new Set(["ident", "ref", "function", "class", "typeAlias", "interface", "enum", "variant"]);
+
+// The names a macro's quotes declare: functions, classes, types and enums, and the variables and
+// parameters they bind.
+function quotedNames(macro: Func): Set<string> {
+  const found = new Set<string>();
+  const binding = (p: unknown) => {
+    if (!p || typeof p !== "object") return;
+    const n = p as { kind?: string; name?: unknown; target?: unknown; props?: { value: unknown }[]; elements?: unknown[]; rest?: unknown };
+    if (n.kind === "ident" && typeof n.name === "string") found.add(n.name);
+    if (n.kind === "default") binding(n.target);
+    for (const x of n.props ?? []) binding(x.value);
+    for (const x of n.elements ?? []) binding(x);
+    binding(n.rest);
+  };
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(visit);
+    const n = node as Record<string, unknown> & { kind?: string };
+    if (["function", "class", "typeAlias", "interface", "enum"].includes(n.kind!) && typeof n.name === "string") found.add(n.name);
+    if (n.kind === "let") for (const d of n.declarations as { target: unknown }[]) binding(d.target);
+    if (Array.isArray(n.params)) for (const p of n.params as { pattern: unknown }[]) binding(p.pattern);
+    if (n.kind === "try") binding(n.param);
+    Object.values(n).forEach(visit);
+  };
+  const quotes = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach(quotes);
+    const n = node as Expr;
+    if (n.kind === "tagged" && n.tag.kind === "ident" && (n.tag.name === "quote" || n.tag.name === "quoteType")) {
+      try {
+        visit(quoted(n, n.tag.name === "quoteType").tree);
+      } catch {
+        // A quote that doesn't parse was reported when the macro was checked.
+      }
+    }
+    Object.values(n).forEach(quotes);
+  };
+  quotes(macro.body);
+  for (const name of [...found]) if (name.startsWith("__fishSplice")) found.delete(name);
+  return found;
 }
 
 // A value made while compiling as the syntax tree it stands for.

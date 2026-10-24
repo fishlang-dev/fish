@@ -4,7 +4,7 @@ macro function keep(input: Ast): Ast {
   return input;
 }
 macro function withExtra(input: AstStmt): Ast[] {
-  return [input, quote`function extra(): i64 { return 2; }`];
+  return [input, quote`function ${ident("extra")}(): i64 { return 2; }`];
 }
 @keep function one(): i64 { return 1; }
 @withExtra function three(): i64 { return 3; }
@@ -26,7 +26,7 @@ function main() {
 // case: macro_on_types_and_classes
 // expect: 3 point
 macro function described(input: Ast): Ast[] {
-  if (input.kind === "class") return [input, quote`function describe(): string { return "point"; }`];
+  if (input.kind === "class") return [input, quote`function ${ident("describe")}(): string { return "point"; }`];
   return [input];
 }
 macro function keep(input: Ast): Ast {
@@ -47,7 +47,7 @@ function count(): i64 {
 }
 macro function counted(input: Ast): Ast[] {
   const n = count();
-  return n > 0 ? [input, quote`function four(): i64 { return 4; }`] : [input];
+  return n > 0 ? [input, quote`function ${ident("four")}(): i64 { return 4; }`] : [input];
 }
 macro function addsDecorated(input: Ast): Ast[] {
   return [input, quote`@counted function helper() {}`];
@@ -110,4 +110,29 @@ macro function keep(input: Ast): Ast {
 }
 function main() {
   @keep function inner() {}
+}
+// case: macro_hygiene
+// expect: 42 1 5
+macro function counted(input: AstStmt): Ast[] {
+  const name = input.kind === "function" ? `${input.name}Count` : "count";
+  return [
+    input,
+    quote`function helper(): i64 { const total = 40; return total; }`,
+    quote`function ${ident(name)}(): i64 { return helper() + 2; }`,
+  ];
+}
+function helper(): i64 { return 1; }
+@counted function items() {}
+function main() {
+  const total = 5;
+  console.log(itemsCount(), helper(), total);
+}
+// case: macro_hygiene_private
+// error: unknown function 'secret'
+macro function withSecret(input: AstStmt): Ast[] {
+  return [input, quote`function secret(): i64 { return 1; }`];
+}
+@withSecret function f() {}
+function main() {
+  console.log(secret());
 }

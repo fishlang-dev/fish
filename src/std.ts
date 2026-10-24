@@ -625,7 +625,14 @@ const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeO
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
-export const STD_SOURCE = PRELUDE + HTTP + AST;
+// What a macro builds syntax with besides quotes: `ident("x")`, a name the macro's user sees.
+const AST_HELPERS = String.raw`
+function ident(name: string): AstExpr {
+  return { kind: "ident", name, start: 0, end: 0 };
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + AST + AST_HELPERS;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -639,7 +646,10 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
   const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, ast, [...astNames, "quote", "quoteType"]) ? ast : [])];
+  // A program declaring one of the Ast library's names keeps the rest of it.
+  const declared = new Set(written.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : [])));
+  const astLibrary = ast.filter((s) => !("name" in s && typeof s.name === "string" && declared.has(s.name)));
+  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, astLibrary, [...astNames, "quote", "quoteType", "ident"]) ? astLibrary : [])];
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the

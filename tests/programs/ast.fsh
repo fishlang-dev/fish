@@ -99,10 +99,32 @@ function main() {
   console.log(K);
 }
 // case: ast_quote_name_splice
-// error: splicing a name isn't supported yet
+// expect: function made x
 function make(): string {
-  const n = quote`x`;
-  const f = quote`function ${n}() {}`;
+  const n = ident("made");
+  const f = quote`function ${n}() { const ${ident("x")} = 1; }`;
+  let out: string = f.kind;
+  if (f.kind === "function") {
+    out = `${out} ${f.name}`;
+    const body = f.body;
+    if (body !== null) {
+      const first = body[0].clone();
+      if (first.kind === "let") {
+        const target = first.declarations[0].target.clone();
+        if (target.kind === "ident") out = `${out} ${target.name}`;
+      }
+    }
+  }
+  return out;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_name_not_ident
+// error: a splice where a name goes takes an identifier
+function make(): string {
+  const f = quote`function ${quote`1 + 2`}() {}`;
   return f.kind;
 }
 const K = comptime make();

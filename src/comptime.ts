@@ -108,11 +108,17 @@ export function comptimeCall(instance: Instance, args: Value[], site: Span): Val
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
-export const astValues = (splice: (i: number, into: Type) => Value): Builder<Value> => ({
+export const astValues = (splice: (i: number, into: Type) => Value, holes: Value[] = [], at: Span = { start: 0, end: 0 }): Builder<Value> => ({
   record: (t, fields) => ({ kind: "record", type: t, fields }),
   array: (items) => ({ kind: "array", items }),
   member: (v, _, m) => ({ kind: "member", type: m, value: v }),
   splice,
+  // A splice where a name goes: the name of the identifier it is.
+  name: (i) => {
+    const v = untagged(holes[i]);
+    if (v && typeof v === "object" && v.kind === "record" && v.fields.get("kind") === "ident") return v.fields.get("name");
+    throw new Stop("a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", at, false);
+  },
   int: (n) => n,
   none: null,
 });
@@ -447,7 +453,7 @@ function interpreter() {
         if (!types) return unsupported("this tagged template", e);
         const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
-        return built<Value>(q, types, e, astValues((i, into) => retag(holes[i]!.value, holes[i]!.type, into)));
+        return built<Value>(q, types, e, astValues((i, into) => retag(holes[i]!.value, holes[i]!.type, into), holes.map((h) => h.value), e));
       }
       case "template": {
         let text = e.quasis[0] ?? "";
