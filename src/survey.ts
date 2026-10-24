@@ -60,7 +60,8 @@ const RULES: Rule[] = [
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
-  { id: "regex", action: "unsupported", title: "regex literals", feature: "Regex" },
+  { id: "regex", action: "unsupported", title: "string methods taking a regex: replace, replaceAll, split, match, matchAll and search", feature: "Regex string methods" },
+  { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
@@ -370,7 +371,13 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       break;
   }
   if (n.kind === "spread" && argument) push("spread");
-  const simple: Record<string, string> = { destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
+  // A regex literal ports; a string method taking one waits, and one built at run time can't.
+  if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" && ["replace", "replaceAll", "split", "match", "matchAll", "search"].includes(n.callee.name as string)) {
+    const [first] = n.args as Node[];
+    if (isNode(first) && (first.kind === "regex" || (first.kind === "new" && named(first.callee, "RegExp")))) push("regex");
+  }
+  if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every((a) => isNode(a) && a.kind === "string")) push("dynamicRegex");
+  const simple: Record<string, string> = { destructure: "destructuringAssignment", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
