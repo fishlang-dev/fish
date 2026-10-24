@@ -88,7 +88,6 @@ for (const [decl, what, part] of CLASSES) {
 const SIGNATURES: [string, string, string][] = [
   ["(x: i64): x is i64", "type predicates", "x is i64"],
   ["(this: i64)", "'this' parameters", "this: i64"],
-  ["(x: i64 = 1)", "default parameter values", "x: i64 = 1"],
   ["({ a }: i64)", "destructuring patterns", "{ a }"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
   ["(@inject x: i64)", "decorators", "@inject x: i64"],

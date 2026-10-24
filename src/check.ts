@@ -15,6 +15,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
+import { lowerDefaults } from "./defaults.ts";
 import { functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { checkMoves } from "./moves.ts";
@@ -224,6 +225,7 @@ const loopParts = new WeakSet<Declarator>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(written: Stmt[], library = false): Checked {
+  lowerDefaults(written);
   const program = [...stdFor(written), ...written];
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();

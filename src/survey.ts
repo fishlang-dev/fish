@@ -53,7 +53,7 @@ const RULES: Rule[] = [
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "unsupported", title: "destructuring in declarations and parameters", feature: "Destructuring" },
   { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
-  { id: "defaults", action: "unsupported", title: "default parameter values", feature: "Default parameter values" },
+  { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
   { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
@@ -289,6 +289,16 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   }
 }
 
+// Whether Fish takes a parameter's default as written: trailing, on a type without null, and
+// typed or a literal that says its type.
+function takesDefault(p: Record<string, unknown>, after: Record<string, unknown>[]): boolean {
+  const d = p.default as { kind: string; op?: string; operand?: { kind: string }; exprs?: unknown[] };
+  const literal = ["int", "float", "string", "bool"].includes(d.kind) || (d.kind === "template" && d.exprs?.length === 0) || (d.kind === "unary" && d.op === "-" && ["int", "float"].includes(d.operand?.kind ?? ""));
+  const nullable = (t: unknown): boolean => isNode(t) && ((t.kind === "ref" && (t.name === "null" || t.name === "undefined")) || (t.kind === "union" && (t.types as unknown[]).some(nullable)));
+  const empty = d.kind === "null" || (d.kind === "ident" && (d as { name?: string }).name === "undefined");
+  return after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
+}
+
 // `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.
 function callsMain(e: unknown): boolean {
   if (!isNode(e) || e.kind !== "call") return false;
@@ -297,8 +307,8 @@ function callsMain(e: unknown): boolean {
 }
 
 function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void) {
-  for (const p of list) {
-    if (isNode(p.default)) note("defaults", p.default.start);
+  for (const [i, p] of list.entries()) {
+    if (isNode(p.default) && !takesDefault(p, list.slice(i + 1))) note("defaults", p.default.start);
     if (p.rest) note("spread", p.start as number);
     if (isNode(p.pattern) && p.pattern.kind !== "ident") note("destructuring", p.pattern.start);
     if (p.optional) note("A2", p.start as number);

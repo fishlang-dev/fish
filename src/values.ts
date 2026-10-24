@@ -6,11 +6,12 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, withoutNull } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { STD_BASE } from "./std.ts";
+import { admitsNull, defaulted, fallbacks } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -2109,7 +2110,11 @@ export function expressions(ctx: Context) {
     arity(list.length, target.body.params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
-      coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(expected)}'`);
+      // A defaulted parameter takes its declared type; leaving the argument out gives the default.
+      const declared = defaulted.get(target.body.params[i]!);
+      if (declared && !admitsNull(declared) && type === "null") throw new CompileError("this parameter has a default, so it takes a value, not null; leave the argument out to use the default", a.start, a.end);
+      const shown = declared && !admitsNull(declared) ? withoutNull(expected) : expected;
+      coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(shown)}'`);
     });
   }
 
@@ -2597,6 +2602,13 @@ export function expressions(ctx: Context) {
     const option = read(e.left);
     if (!isOption(option)) throw new CompileError(`the left side of '??' is a '${show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
     const inner = held(option);
+    // A parameter's default is checked as an argument for it would be.
+    if (fallbacks.has(e)) {
+      expect(e.right, inner);
+      const given = value(e.right);
+      coerce(e.right, given, inner, `a default of type '${show(given)}' is not assignable to parameter of type '${show(inner)}'`);
+      return inner;
+    }
     const fallback = value(e.right);
     const to = fits(fallback, inner) || adaptable(e.right, inner) ? inner : option;
     coerce(e.right, fallback, to, `type '${show(fallback)}' is not assignable to type '${show(to)}', what '${show(option)}' holds`);
