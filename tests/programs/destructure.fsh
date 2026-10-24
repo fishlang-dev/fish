@@ -461,7 +461,6 @@ function main() {
 // expect: b
 // expect: 1 2
 // expect: get
-// expect: get
 // expect: g1 2
 // expect: x
 // expect: y
@@ -526,4 +525,76 @@ function pick<T>(x: T, fallback: T): T {
 function main() {
   console.log(pick<i64 | null>(null, 3));
   console.log(pick<i64>(1, 3));
+}
+// case: destructuring_assignment_third_getter2
+// expect: get
+// expect: g1 2
+// expect: get
+// expect: get
+class G {
+  n: i64 = 0;
+  get pair(): [string, i64] { console.log("get"); return ["g" + 1, 2]; }
+}
+class H { g: G = new G(); }
+function main() {
+  const g = new G();
+  let s = "";
+  let n = 0;
+  [s, n] = g.pair;
+  console.log(s, n);
+  const h = new H();
+  [s, n] = h.g.pair;
+  ({ 0: s } = g.pair);
+}
+// case: destructuring_assignment_third_miss
+// expect: 1 5
+// expect: 1 5
+function main() {
+  const xs: i64[] = [1];
+  const [p, q = 5] = xs;
+  console.log(p, q);
+  let a = 0, b = 0;
+  [a, b = 5] = xs;
+  console.log(a, b);
+}
+// case: destructuring_assignment_third_pm
+// expect: ra1 rc1
+// expect: t0 t11
+// expect: q
+class C { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let r = { a: new C("ra" + 1), b: new C("rb" + 1), c: new C("rc" + 1) };
+  ({ a: r.b } = r);
+  console.log(r.b.s, r.c.s);
+  let t: [C, [C, C]] = [new C("t0"), [new C("t10"), new C("t11")]];
+  let x = new C("x"), y = new C("y");
+  [x, [, y]] = t;
+  console.log(x.s, y.s);
+  let u: { p: { q: C; w: C }; z: C } = { p: { q: new C("q"), w: new C("w") }, z: new C("z") };
+  ({ p: { q: u.z } } = u);
+  console.log(u.z.s);
+}
+// case: destructuring_assignment_third_setter
+// expect: set5q1
+// expect: set7r
+class W { log: string = ""; set v(n: i64) { this.log = "set" + n; } set t(s: string) { this.log = this.log + s; } }
+function main() {
+  let w = new W();
+  [w.v, w.t] = [5, "q" + 1];
+  console.log(w.log);
+  const src: [i64, string] = [7, "r"];
+  [w.v, w.t] = src;
+  console.log(w.log);
+}
+// case: destructuring_assignment_third_refsrc
+// expect: x1 q1 2 p1 x1
+function f(r: Ref<[string, string]>, o: Ref<{ x: string; y: i64 }>): void {
+  let a = "", b = "", n = 0;
+  [a, b] = r;
+  ({ x: a, y: n } = o);
+  console.log(a, b, n, r[0], o.x);
+}
+function main() {
+  const t: [string, string] = ["p" + 1, "q" + 1];
+  f(t, { x: "x" + 1, y: 2 });
 }

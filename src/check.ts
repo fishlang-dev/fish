@@ -275,6 +275,9 @@ export const nestedFunctions = new WeakMap<Expr, string>();
 const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
 let lifts = 0;
 let destructures = 0;
+// Every name a class or object literal gives a getter, so a destructuring source reading one
+// runs it once.
+let getterNames = new Set<string>();
 // The fresh variable a destructuring assignment's literal part goes into, by the target whose
 // type it takes; and the defaults it adds, which an Option's absence takes and anything else
 // never needs.
@@ -316,6 +319,12 @@ export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 export function check(written: Stmt[], library = false): Checked {
+  getterNames = new Set();
+  holdsNode(written, (n) => {
+    if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") getterNames.add((n as { name: string }).name);
+    if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") getterNames.add((n as { key: string }).key);
+    return false;
+  });
   lowerDefaults(written);
   const program = [...stdFor(written), ...written];
   const funcs: Func[] = [];
@@ -1153,7 +1162,8 @@ export function check(written: Stmt[], library = false): Checked {
       };
       // A place is read where it is, piece by piece, so only the pieces named move out of it,
       // as a declaration's destructuring does; anything else is held in a fresh variable first.
-      const place = (v: Expr): boolean => v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && place(v.object));
+      // A chain reading a getter isn't one: its getter runs once, into a fresh variable.
+      const place = (v: Expr): boolean => v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && !getterNames.has(v.name) && place(v.object));
       const from = (p: Pattern, value: Expr) => {
         if (p.kind !== "array" && p.kind !== "object") throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
         // A literal is taken part by part, each part typed as its target.
@@ -1200,31 +1210,35 @@ export function check(written: Stmt[], library = false): Checked {
           reads.push(declare({ kind: "ident", name, start: value.start, end: value.end }, value, value));
           whole = ident(name, value);
         }
+        // Each top-level piece is read by a declaration naming only it, nested patterns down to
+        // their leaves, so only the leaves move out of a place. A slot with a default reads
+        // nothing past the end; the default itself is taken at the target.
         const span = { start: p.start, end: p.end };
-        const slot = (q: Pattern) => {
-          const name = fresh();
-          return { name, pattern: { kind: "ident", name, start: q.start, end: q.end } as Pattern };
+        const leaves: [Pattern, string][] = [];
+        const shape = (q: Pattern): Pattern => {
+          const at = { start: q.start, end: q.end };
+          if (q.kind === "default" && (q.target.kind === "ident" || q.target.kind === "expr")) {
+            const name = fresh();
+            leaves.push([q, name]);
+            return { kind: "default", target: { kind: "ident", name, ...at }, value: { kind: "null", ...at }, ...at };
+          }
+          if (q.kind === "ident" || q.kind === "expr") {
+            const name = fresh();
+            leaves.push([q, name]);
+            return { kind: "ident", name, ...at };
+          }
+          if (q.kind === "array") return { ...q, elements: q.elements.map((x) => x && shape(x)), rest: q.rest && shape(q.rest) };
+          if (q.kind === "object") return { ...q, props: q.props.map((x) => ({ ...x, value: shape(x.value) })), rest: q.rest && shape(q.rest) };
+          throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
         };
         if (p.kind === "array") {
-          const pieces = p.elements.map((q, i) => {
-            if (!q) return undefined;
-            const s = slot(q);
-            reads.push(declare({ kind: "array", elements: [...Array<undefined>(i).fill(undefined), s.pattern], rest: undefined, ...span }, whole, q));
-            return s.name;
-          });
-          const rest = p.rest && slot(p.rest);
-          if (rest) reads.push(declare({ kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: rest.pattern, ...span }, whole, p.rest!));
-          p.elements.forEach((q, i) => q && write(q, ident(pieces[i]!, q)));
-          if (rest) write(p.rest!, ident(rest.name, p.rest!));
-          return;
-        }
-        // An object's pieces, and its rest, are read by one declaration, which knows which
-        // properties the rest leaves out.
-        const named = p.props.map((prop) => ({ prop, ...slot(prop.value) }));
-        const rest = p.rest && slot(p.rest);
-        if (p.rest || named.length > 0) reads.push(declare({ kind: "object", props: named.map(({ prop, pattern }): PatternProp => ({ ...prop, value: pattern })), rest: rest?.pattern, ...span }, whole, p));
-        for (const { prop, name } of named) write(prop.value, ident(name, prop.value));
-        if (rest) write(p.rest!, ident(rest.name, p.rest!));
+          p.elements.forEach((q, i) => q && reads.push(declare({ kind: "array", elements: [...Array<undefined>(i).fill(undefined), shape(q)], rest: undefined, ...span }, whole, q)));
+          if (p.rest) reads.push(declare({ kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: shape(p.rest), ...span }, whole, p.rest));
+        } else if (p.rest) {
+          // An object's rest is read with every property it leaves out, in one declaration.
+          reads.push(declare(shape(p), whole, p));
+        } else for (const prop of p.props) reads.push(declare({ kind: "object", props: [{ ...prop, value: shape(prop.value) }], rest: undefined, ...span }, whole, prop.value));
+        for (const [q, name] of leaves) write(q, ident(name, q));
       };
       from(e.pattern, e.value);
       return [...reads, ...writes];
