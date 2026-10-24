@@ -3018,9 +3018,14 @@ export function expressions(ctx: Context) {
   // `a ?? b` is what `a` holds, or `b` when `a` is empty, which only then runs. With an Option
   // for `b`, the result may still be empty.
   function orElse(e: Extract<Expr, { kind: "binary" }>): Type {
-    const option = read(e.left);
+    // A destructuring default in a generic instance meets the Option its type parameter is.
+    const option = unusedDefaults.has(e) ? lower(read(e.left)) : read(e.left);
     // A default a destructuring assignment adds is only for an Option's absence.
-    if (!isOption(option) && unusedDefaults.has(e)) return option;
+    // Its default is still checked, as TypeScript checks it.
+    if (!isOption(lower(option)) && unusedDefaults.has(e)) {
+      value(e.right);
+      return option;
+    }
     if (!isOption(option)) throw new CompileError(`the left side of '??' is a '${show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
     const inner = held(option);
     // A parameter's default is checked as an argument for it would be; a nullable one's is null.

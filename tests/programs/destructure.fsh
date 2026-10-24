@@ -309,3 +309,221 @@ function main() {
   ({ r } = { r: x });
   console.log(r.s);
 }
+// case: destructuring_assignment_rereview_place
+// expect: 1 2 1
+// expect: m1 n2 m1
+function main() {
+  const point = { x: 1, y: 2 };
+  let x = 0, y = 0;
+  ({ x, y } = point);
+  console.log(x, y, point.x);
+  const pair: [string, string] = ["m" + 1, "n" + 2];
+  let u = "", w = "";
+  [u, w] = pair;
+  console.log(u, w, pair[0]);
+}
+// case: destructuring_assignment_rereview_t1
+// expect: q2 p1
+// expect: m1 n2 m1 n2
+// expect: X1 Y2 X1
+function main() {
+  let s1 = "p" + 1, s2 = "q" + 2;
+  [s1, s2] = [s2, s1];
+  console.log(s1, s2);
+  // place source
+  let pair: [string, string] = ["m" + 1, "n" + 2];
+  let u = "", w = "";
+  [u, w] = pair;
+  console.log(u, w, pair[0], pair[1]);
+  // object source
+  let pt = { x: "X" + 1, y: "Y" + 2 };
+  let px = "", py = "";
+  ({ x: px, y: py } = pt);
+  console.log(px, py, pt.x);
+}
+// case: destructuring_assignment_rereview_own
+// expect: t0 t1
+// expect: took m0
+// expect: m1
+// expect: q0 p0
+// expect: u1
+// expect: k0 1 1
+class C { s: string; constructor(s: string) { this.s = s; } }
+function take(c: C): void { console.log("took", c.s); }
+function main() {
+  // tuple of instances, place source: partial move
+  let t: [C, C] = [new C("t" + 0), new C("t" + 1)];
+  let a = new C("a" + 0);
+  let b = new C("b" + 0);
+  [a, b] = t;
+  console.log(a.s, b.s);
+  // moved target re-assigned
+  let m = new C("m" + 0);
+  take(m);
+  ({ m } = { m: new C("m" + 1) });
+  console.log(m.s);
+  // swap through a tuple-typed temporary
+  let p = new C("p" + 0), q = new C("q" + 0);
+  const sw: [C, C] = [q, p];
+  [p, q] = sw;
+  console.log(p.s, q.s);
+  // object source with instance fields, temporary
+  let u = new C("u" + 0);
+  ({ u } = { u: new C("u" + 1) });
+  console.log(u.s);
+  // object place source, partial move
+  let o = { k: new C("k" + 0), n: 1 };
+  let kk = new C("kk");
+  let nn = 0;
+  ({ k: kk, n: nn } = o);
+  console.log(kk.s, nn, o.n);
+}
+// case: destructuring_assignment_rereview_r2e
+// expect: 3
+// expect: d3
+// expect: 5
+function pick<T>(x: T, init: T, d: T): T {
+  let b = init;
+  [b = d] = [x];
+  return b;
+}
+function main() {
+  console.log(pick<i64 | null>(null, 1, 3));
+  console.log(pick<string | null>(null, "i" + 1, "d" + 3));
+  console.log(pick<i64>(5, 1, 3));
+}
+// case: destructuring_assignment_rereview_r2b
+// expect: 7
+// expect: 2
+// expect: q1
+// expect: v1
+class C { s: string; constructor(s: string) { this.s = s; } }
+function pick<T>(xs: [T, T], fallback: T): T {
+  let a = fallback.clone();
+  let b = fallback;
+  [a, b = a] = xs;
+  return b;
+}
+function main() {
+  const n: [i64 | null, i64 | null] = [7, null];
+  console.log(pick<i64 | null>(n, 0));
+  console.log(pick<i64>([1, 2], 0));
+  const m: [string | null, string | null] = ["q" + 1, null];
+  console.log(pick<string | null>(m, "f"));
+  console.log(pick<string>(["u" + 1, "v" + 1], "f"));
+}
+// case: destructuring_assignment_rereview_nested
+// expect: n m
+class C { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let x = new C("a"), b = new C("b");
+  [[x], b] = [[new C("n")], new C("m")];
+  console.log(x.s, b.s);
+}
+// case: destructuring_assignment_rereview_r2a
+// expect: mk
+// expect: a1 b1
+// expect: mk
+// expect: b1
+// expect: mk
+// expect: a1 c1
+// expect: obj
+// expect: p1 r1
+// expect: obj
+// expect: p1 q1 r1
+// expect: q2 tt1 u1 1
+class C { s: string; constructor(s: string) { this.s = s; } }
+function mk(): [C, C, C] { console.log("mk"); return [new C("a" + 1), new C("b" + 1), new C("c" + 1)]; }
+function obj(): { p: C; q: C; r: string } { console.log("obj"); return { p: new C("p" + 1), q: new C("q" + 1), r: "r" + 1 }; }
+function main() {
+  let a = new C("x"), b = new C("y");
+  [a, b] = mk();
+  console.log(a.s, b.s);
+  [, b] = mk();
+  console.log(b.s);
+  [a, , b] = mk();
+  console.log(a.s, b.s);
+  let p = new C("p"), r = "";
+  ({ p, r } = obj());
+  console.log(p.s, r);
+  let rest = { q: new C("z"), r: "" };
+  ({ p, ...rest } = obj());
+  console.log(p.s, rest.q.s, rest.r);
+  let n1 = [new C("n")];
+  let x = new C("x0");
+  let t: [C, string] = [new C("t"), "s"];
+  [a, t] = [new C("q" + 2), [new C("tt" + 1), "u" + 1]];
+  console.log(a.s, t[0].s, t[1], n1.length);
+}
+// case: destructuring_assignment_rereview_r2l
+// expect: a
+// expect: c
+// expect: b
+// expect: 1 2
+// expect: get
+// expect: get
+// expect: g1 2
+// expect: x
+// expect: y
+// expect: z
+// expect: 7 8
+function f(tag: string, n: i64): i64 { console.log(tag); return n; }
+class G { get pair(): [string, i64] { console.log("get"); return ["g" + 1, 2]; } }
+function main() {
+  let a = 0, b = 0;
+  ({ b, a } = { a: f("a", 1), c: f("c", 3), b: f("b", 2) });
+  console.log(a, b);
+  const g = new G();
+  let s = "";
+  let n = 0;
+  [s, n] = g.pair;
+  console.log(s, n);
+  [a, b] = [f("x", 7), f("y", 8), f("z", 9)];
+  console.log(a, b);
+}
+// case: destructuring_assignment_rereview_r2h
+// expect: 5
+// expect: z1 9
+// expect: q1 1
+function at(f: () => usize): usize { return f(); }
+function put<T>(xs: Mut<T[]>, v: T): void {
+  let k: usize = 1;
+  [xs[at((): usize => k)]] = [v];
+}
+class Box { items: string[] = ["a" + 1, "b" + 1]; n: usize = 0;
+  set(this: Mut<this>, s: string): void { [this.items[at((): usize => 0)], this.n] = [s, 1]; }
+}
+function main() {
+  let xs: i64[] = [0, 0];
+  let k: usize = 1;
+  [xs[at((): usize => k)]] = [5];
+  console.log(xs[1]);
+  let ss = ["x" + 1, "y" + 1];
+  put<string>(ss, "z" + 1);
+  put<i64>(xs, 9);
+  console.log(ss[1], xs[1]);
+  let b = new Box();
+  b.set("q" + 1);
+  console.log(b.items[0], b.n);
+}
+// case: destructuring_assignment_rereview_r2f
+// error: type '"str"' is not assignable to type 'i64 | null', what 'i64 | null' holds
+function pick<T>(x: T, init: T): T {
+  let b = init;
+  [b = "str"] = [x];
+  return b;
+}
+function main() {
+  console.log(pick<i64 | null>(null, 1));
+}
+// case: destructuring_assignment_rereview_r2d
+// error: 'fallback' was moved, so it can't be used here
+function pick<T>(x: T, fallback: T): T {
+  let b = fallback;
+  [b = fallback] = [x];
+  return b;
+}
+function main() {
+  console.log(pick<i64 | null>(null, 3));
+  console.log(pick<i64>(1, 3));
+}

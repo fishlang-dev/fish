@@ -1128,7 +1128,10 @@ export function check(written: Stmt[], library = false): Checked {
     // part by part, each part typed as its target is, so a swap of values that move needs no
     // array and a literal meets its target's type.
     function destructuring(e: Extract<Expr, { kind: "destructure" }>): Stmt[] {
-      const out: Stmt[] = [];
+      // Every part is read first, then every target written, so a target can't change what a
+      // later part reads, as in '({ a: o.b, b: o.a } = o)'.
+      const reads: Stmt[] = [];
+      const writes: Stmt[] = [];
       const fresh = () => `destructured ${destructures++}`;
       const ident = (name: string, at: Span): Expr => ({ kind: "ident", name, start: at.start, end: at.end });
       const declare = (target: Pattern, init: Expr, at: Span, typedAs?: Expr): Stmt => {
@@ -1136,89 +1139,95 @@ export function check(written: Stmt[], library = false): Checked {
         if (typedAs) destructuredParts.set(s, typedAs);
         return s;
       };
-      const assign = (target: Expr, value: Expr, at: Span): Stmt => ({ kind: "expr", expr: { kind: "assign", op: "=", target, value, start: at.start, end: at.end }, start: at.start, end: at.end });
       const targetOf = (p: Pattern): Expr | undefined => (p.kind === "ident" ? ident(p.name, p) : p.kind === "expr" ? p.expr : p.kind === "default" ? targetOf(p.target) : undefined);
-      // Puts what `part` reads into the pattern, the whole of it.
-      const put = (p: Pattern, part: Expr) => {
-        if (p.kind === "ident" || p.kind === "expr") return void out.push(assign(targetOf(p)!, part, p));
+      // Writes what `part` reads to a target, its default taken when the part is an empty Option.
+      const write = (p: Pattern, part: Expr) => {
         if (p.kind === "default") {
           const or: Expr = { kind: "binary", op: "??", left: part, right: p.value, start: p.start, end: p.end };
           unusedDefaults.add(or);
-          return put(p.target, or);
+          return write(p.target, or);
         }
-        if (p.kind !== "array" && p.kind !== "object") throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
-        // A part that is itself taken apart: each piece read out of it in turn.
-        const whole = part.kind === "ident" ? part : (() => {
-          const name = fresh();
-          out.push(declare({ kind: "ident", name, start: p.start, end: p.end }, part, p));
-          return ident(name, p);
-        })();
-        // One piece of it, read by a declaration whose pattern names only that piece.
-        const piece = (shape: (slot: Pattern) => Pattern, q: Pattern) => {
-          const name = fresh();
-          const at = { start: q.start, end: q.end };
-          const slot: Pattern = q.kind === "default" ? { kind: "default", target: { kind: "ident", name, ...at }, value: q.value, ...at } : { kind: "ident", name, ...at };
-          out.push(declare(shape(slot), whole, q));
-          put(q.kind === "default" ? q.target : q, ident(name, q));
-        };
-        const span = { start: p.start, end: p.end };
-        if (p.kind === "array") {
-          p.elements.forEach((q, i) => q && piece((slot) => ({ kind: "array", elements: [...Array<undefined>(i).fill(undefined), slot], rest: undefined, ...span }), q));
-          if (p.rest) piece((slot) => ({ kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: slot, ...span }), p.rest);
-          return;
-        }
-        if (!p.rest) {
-          for (const prop of p.props) piece((slot) => ({ kind: "object", props: [{ ...prop, value: slot }], rest: undefined, ...span }), prop.value);
-          return;
-        }
-        // With a rest, the named properties and the rest are read by one declaration, which
-        // knows which properties the rest leaves out.
-        const named = p.props.map((prop) => ({ prop, name: fresh() }));
-        const rest = fresh();
-        const slot = (q: Pattern, name: string): Pattern => (q.kind === "default" ? { kind: "default", target: { kind: "ident", name, start: q.start, end: q.end }, value: q.value, start: q.start, end: q.end } : { kind: "ident", name, start: q.start, end: q.end });
-        out.push(declare({ kind: "object", props: named.map(({ prop, name }): PatternProp => ({ ...prop, value: slot(prop.value, name) })), rest: { kind: "ident", name: rest, start: p.rest.start, end: p.rest.end }, ...span }, whole, p));
-        for (const { prop, name } of named) put(prop.value.kind === "default" ? prop.value.target : prop.value, ident(name, prop.value));
-        put(p.rest, ident(rest, p.rest));
+        if (p.kind === "ident" || p.kind === "expr") return void writes.push({ kind: "expr", expr: { kind: "assign", op: "=", target: targetOf(p)!, value: part, start: p.start, end: p.end }, start: p.start, end: p.end });
+        // A nested pattern takes apart what the part holds, from its fresh variable.
+        from(p, part);
       };
-      const p = e.pattern;
-      const value = e.value;
-      // A literal on the right, its parts evaluated first, in order, each typed as its target.
-      if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x?.kind === "spread" || x === undefined)) {
-        const parts = (value.elements as Expr[]).map((x, i) => {
-          const name = fresh();
-          const q = p.elements[i];
-          out.push(declare({ kind: "ident", name, start: x.start, end: x.end }, x, x, q && targetOf(q)));
-          return ident(name, x);
-        });
-        p.elements.forEach((q, i) => {
-          if (!q) return;
-          if (parts[i]) return put(q, parts[i]!);
-          if (q.kind !== "default") throw new CompileError(`the array on the right has no element at index ${i} for this target`, q.start, q.end);
-          put(q.target, q.value);
-        });
-        if (p.rest) put(p.rest, { kind: "array", elements: parts.slice(p.elements.length), start: value.start, end: value.end });
-        return out;
-      }
-      if (p.kind === "object" && !p.rest && value.kind === "object" && value.props.every((x) => x.kind === "property" && typeof x.key === "string")) {
-        const parts = new Map(value.props.map((x) => {
-          const prop = x as Extract<ObjectProp, { kind: "property" }>;
-          const name = fresh();
-          const q = p.props.find((y) => y.key === prop.key)?.value;
-          out.push(declare({ kind: "ident", name, start: prop.start, end: prop.end }, prop.value, prop, q && targetOf(q)));
-          return [prop.key as string, ident(name, prop)];
-        }));
-        for (const prop of p.props) {
-          const part = typeof prop.key === "string" ? parts.get(prop.key) : undefined;
-          if (part) put(prop.value, part);
-          else if (prop.value.kind === "default") put(prop.value.target, prop.value.value);
-          else throw new CompileError(`the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+      // A place is read where it is, piece by piece, so only the pieces named move out of it,
+      // as a declaration's destructuring does; anything else is held in a fresh variable first.
+      const place = (v: Expr): boolean => v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && place(v.object));
+      const from = (p: Pattern, value: Expr) => {
+        if (p.kind !== "array" && p.kind !== "object") throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
+        // A literal is taken part by part, each part typed as its target.
+        if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x?.kind === "spread" || x === undefined)) {
+          const parts = (value.elements as Expr[]).map((x, i) => {
+            const q = p.elements[i];
+            const inner = q && (q.kind === "default" ? q.target : q);
+            // A nested literal for a nested pattern is taken apart in turn.
+            if (inner && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q.kind !== "default") return { nested: x };
+            const name = fresh();
+            reads.push(declare({ kind: "ident", name, start: x.start, end: x.end }, x, x, q && targetOf(q)));
+            return { read: ident(name, x) };
+          });
+          p.elements.forEach((q, i) => {
+            if (!q) return;
+            const part = parts[i];
+            if (part?.nested) return from(q, part.nested);
+            if (part?.read) return write(q, part.read);
+            if (q.kind !== "default") throw new CompileError(`the array on the right has no element at index ${i} for this target`, q.start, q.end);
+            write(q.target, q.value);
+          });
+          if (p.rest) write(p.rest, { kind: "array", elements: parts.slice(p.elements.length).map((x) => x.read!), start: value.start, end: value.end });
+          return;
         }
-        return out;
-      }
-      const name = fresh();
-      out.push(declare({ kind: "ident", name, start: value.start, end: value.end }, value, value));
-      put(p, ident(name, value));
-      return out;
+        if (p.kind === "object" && !p.rest && value.kind === "object" && value.props.every((x) => x.kind === "property" && typeof x.key === "string") && p.props.every((x) => typeof x.key === "string")) {
+          const parts = new Map(value.props.map((x) => {
+            const prop = x as Extract<ObjectProp, { kind: "property" }>;
+            const name = fresh();
+            const q = p.props.find((y) => y.key === prop.key)?.value;
+            reads.push(declare({ kind: "ident", name, start: prop.start, end: prop.end }, prop.value, prop, q && targetOf(q)));
+            return [prop.key as string, ident(name, prop)];
+          }));
+          for (const prop of p.props) {
+            const part = parts.get(prop.key as string);
+            if (part) write(prop.value, part);
+            else if (prop.value.kind === "default") write(prop.value.target, prop.value.value);
+            else throw new CompileError(`the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+          }
+          return;
+        }
+        let whole = value;
+        if (!place(value)) {
+          const name = fresh();
+          reads.push(declare({ kind: "ident", name, start: value.start, end: value.end }, value, value));
+          whole = ident(name, value);
+        }
+        const span = { start: p.start, end: p.end };
+        const slot = (q: Pattern) => {
+          const name = fresh();
+          return { name, pattern: { kind: "ident", name, start: q.start, end: q.end } as Pattern };
+        };
+        if (p.kind === "array") {
+          const pieces = p.elements.map((q, i) => {
+            if (!q) return undefined;
+            const s = slot(q);
+            reads.push(declare({ kind: "array", elements: [...Array<undefined>(i).fill(undefined), s.pattern], rest: undefined, ...span }, whole, q));
+            return s.name;
+          });
+          const rest = p.rest && slot(p.rest);
+          if (rest) reads.push(declare({ kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: rest.pattern, ...span }, whole, p.rest!));
+          p.elements.forEach((q, i) => q && write(q, ident(pieces[i]!, q)));
+          if (rest) write(p.rest!, ident(rest.name, p.rest!));
+          return;
+        }
+        // An object's pieces, and its rest, are read by one declaration, which knows which
+        // properties the rest leaves out.
+        const named = p.props.map((prop) => ({ prop, ...slot(prop.value) }));
+        const rest = p.rest && slot(p.rest);
+        if (p.rest || named.length > 0) reads.push(declare({ kind: "object", props: named.map(({ prop, pattern }): PatternProp => ({ ...prop, value: pattern })), rest: rest?.pattern, ...span }, whole, p));
+        for (const { prop, name } of named) write(prop.value, ident(name, prop.value));
+        if (rest) write(p.rest!, ident(rest.name, p.rest!));
+      };
+      from(e.pattern, e.value);
+      return [...reads, ...writes];
     }
 
     // The type a destructured part's fresh variable takes: its target's, as declared.
@@ -1228,8 +1237,14 @@ export function check(written: Stmt[], library = false): Checked {
       if (target.kind === "ident") return lookup(target.name)?.type;
       // A field of 'this' has its declared type, which a constructor may not read yet.
       if (target.kind === "member" && target.object.kind === "this" && f.self) return allFields(f.self.type as ClassType).find((x) => x.name === target.name)?.type;
-      const t = value(structuredClone(target));
-      return typeof t !== "string" && t.kind === "ref" ? undefined : t;
+      // A target with only a setter can't be read for its type; its part keeps its own.
+      try {
+        const t = value(structuredClone(target));
+        return typeof t !== "string" && t.kind === "ref" ? undefined : t;
+      } catch (err) {
+        if (err instanceof CompileError) return undefined;
+        throw err;
+      }
     }
 
     // `let a = 1, b = a` is a declaration per name, in order, each seeing those before it. A

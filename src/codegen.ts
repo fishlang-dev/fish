@@ -4818,7 +4818,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "binary": {
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
-        if (e.op === "??" && !isOption(valueType(e.left))) return value(e.left);
+        if (e.op === "??" && !isOption(lower(valueType(e.left)))) return owned(e.left);
         if (e.op === "??") return orElse(e);
         if (e.op === "+" && types.get(e) === "string") return concat(written(operand(e.left, [e.right]), valueType(e.left)), written(value(e.right), valueType(e.right)));
         const first = (x: Expr) => (x === e.left ? operand(x, [e.right]) : value(x));
