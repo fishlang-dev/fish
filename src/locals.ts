@@ -76,7 +76,7 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
           else throw new CompileError(`the local ${what} can't use '${used}' from the function around it, which it may outlive; ${local.kind === "class" ? "pass it to its constructor" : "use a constant from the top level"}`, local.start, local.end);
         }
         const early = stmts.slice(0, stmts.indexOf(local)).find((s) => runsUse(s, name));
-        if (early) throw new CompileError(`${what(local)} '${name}' is used before its declaration`, early.start, early.end);
+        if (early && !captured) throw new CompileError(`${what(local)} '${name}' is used before its declaration`, early.start, early.end);
       }
       if (params.length > 0 && local.kind === "enum" && !Array.isArray((local as { typeParams?: unknown }).typeParams)) {
         throw new CompileError(`the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
@@ -200,6 +200,8 @@ function runsUse(node: unknown, name: string): boolean {
   if (Array.isArray(node)) return node.some((x) => runsUse(x, name));
   const n = node as { kind?: string; name?: unknown };
   if (BODIED.has(n.kind!) || n.kind === "class") return false;
+  // An inner block, loop or catch clause binding the name hides it.
+  if (headNames(n).includes(name) || Object.values(n).some((v) => Array.isArray(v) && v.every(isStmt) && v.some((s) => valueNames(s as Stmt).includes(name)))) return false;
   if (n.kind === "ident" && n.name === name) return true;
   return Object.values(n).some((v) => runsUse(v, name));
 }

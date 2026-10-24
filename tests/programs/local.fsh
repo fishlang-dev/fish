@@ -150,3 +150,18 @@ function main() {
   const p: P = new P();
   const s: string = p;
 }
+// case: local_before_shadowed
+// expect: 5
+// expect: 1
+// expect: 2
+// expect: 1 7
+function main() {
+  {
+    const P = 5;
+    console.log(P);
+  }
+  for (const E of [1, 2]) console.log(E);
+  class P { x: i64 = 1; }
+  enum E { A = 7 }
+  console.log(new P().x, E.A);
+}

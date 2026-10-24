@@ -257,8 +257,6 @@ export function grade(score: number): string {
   return GRADES.find(([, top]) => score <= top)?.[0] ?? "F";
 }
 
-// Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
-// counts the functions a node sits in, and `ambient` marks declarations under `declare`.
 // Where each local class or enum using its function's variables starts. Hoisting renames the
 // tree it reads, so it reads a copy, and a file it can't hoist adds none.
 function captures(program: Stmt[]): number[] {
@@ -271,6 +269,8 @@ function captures(program: Stmt[]): number[] {
   return found;
 }
 
+// Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
+// counts the functions a node sits in, and `ambient` marks declarations under `declare`.
 function scan(program: unknown[], note: (id: string, offset: number, module?: string) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
