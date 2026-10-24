@@ -13,7 +13,7 @@ import { comparable, objectsMeet } from "./unions.ts";
 import { comptimeName, genericClasses, instancing } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
-import { addAlias, paramName, resolver, restParams, tagStrings, typeName } from "./resolve.ts";
+import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
 import { functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
@@ -301,14 +301,14 @@ export function check(written: Stmt[], library = false): Checked {
   }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
-    // Only a tag's values fill a rest parameter so far.
-    if (f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest) restParams.add(f.params[1]!);
-    else if (f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
+    // A tag takes its strings, then its values as a rest parameter.
+    const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
+    if (!tag && f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
       const strings = f.params[0]!;
       throw new CompileError(`'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
-    } else if (f.params[0]?.comptime && f.params.at(-1)?.rest) {
+    } else if (!tag && f.params[0]?.comptime && f.params.at(-1)?.rest) {
       const rest = f.params.at(-1)!;
-      throw new CompileError("a tag's rest parameter comes right after its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'; rest parameters elsewhere aren't supported yet", rest.start, rest.end);
+      throw new CompileError("a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
     }
     if (f.async && f.generator) throw unsupported("async generators", f);
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
@@ -1168,6 +1168,7 @@ export function check(written: Stmt[], library = false): Checked {
         throw new CompileError(`'${show(expected)}' passes ${n} argument${n === 1 ? "" : "s"}, so this closure can't take '${paramName(p)}'`, p.start, p.end);
       }
       if (p.comptime) throw unsupported("comptime parameters on closures", p);
+      if (p.rest) throw unsupported("rest parameters on arrow functions", p);
       const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && paramName(p) !== "this";
       const type = !p.type && given && plain ? given : paramType(p);
       const to = isRef(type) ? type.to : type;

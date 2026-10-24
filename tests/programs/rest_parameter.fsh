@@ -1,6 +1,6 @@
 function f(...xs: i64) {}
 
 function main() {}
-// error: rest parameters are only supported on tags so far
+// error: a rest parameter takes an array of the values, as in '...xs: i64[]'
 // error: function f(...xs: i64) {}
-// error:            ^^^^^^^^^^
+// error:                   ^^^

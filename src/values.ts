@@ -142,6 +142,8 @@ const ofElements = new WeakMap<Expr, TypeNode>();
 // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
 const fills = new WeakSet<Expr>();
 const filling = new WeakSet<Expr>();
+// Calls whose trailing arguments have been packed into their rest parameter's array.
+const packed = new WeakSet<Expr>();
 // The pairs of a `new Map([[k, v]])` given no types, each a tuple of what it holds.
 const pairs = new WeakSet<Expr>();
 
@@ -302,7 +304,7 @@ export function expressions(ctx: Context) {
     // properties their fields'.
     if (e.kind === "array" && isArray(t)) {
       wanted.set(e, t.element);
-      for (const x of e.elements) if (x) expect(x, t.element);
+      for (const x of e.elements) if (x) expect(x.kind === "spread" ? x.value : x, x.kind === "spread" ? t : t.element);
     }
     // A literal where a fixed array is expected is that fixed array; an Option or union holding
     // one fixed array expects that one.
@@ -919,9 +921,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
     if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
-    if (target.params.at(-1)?.rest && !tagCalls.has(e)) {
-      throw new CompileError(`'${target.name}' takes a rest parameter, which so far only a tag's values fill; call it as a tag, as in ${target.name}\`text \${value}\``, e.start, e.end);
-    }
+    if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
+    else refuseSpread(e.args);
     expectFrom(target, e.args);
     const argTypes = e.args.map(value);
     // The array iterators clone elements: a generic body's instance checks the real element.
@@ -986,6 +987,11 @@ export function expressions(ctx: Context) {
 
   // A call gives every parameter but the optional ones it leaves out, which come last.
   function arity(given: number, params: Param[], at: Span) {
+    // A rest parameter's array is packed from what follows the others, when they are all given.
+    if (params.at(-1)?.rest && given < params.length - 1) {
+      const least = params.filter((p) => !p.optional && !p.rest).length;
+      if (given < least) throw new CompileError(`expected at least ${least} argument${least === 1 ? "" : "s"}, but got ${given}`, at.start, at.end);
+    }
     const required = params.filter((p) => !p.optional).length;
     if (given >= required && given <= params.length) return;
     const expected = required === params.length ? `${required}` : `${required}-${params.length}`;
@@ -1325,6 +1331,53 @@ export function expressions(ctx: Context) {
     if (sameLowered(given, written) || (converted && !isRefType(given) && fits(given, written))) return;
     if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     throw new CompileError(`'${name}' passes its callback ${article(show(given))} here, not ${article(show(written))}`, at.start, at.end);
+  }
+
+  // The element type of a spread, `...x`. An array spreads its elements, cloned unless it was made
+  // for the spread; a string, a generator, a Map or a Set is first made into the array
+  // `Array.from` would make of it.
+  function spreadElements(x: Extract<Expr, { kind: "spread" }>): Type {
+    const source = x.value;
+    const t = value(source);
+    const held = lower(isRefType(t) ? t.to : t);
+    const at = { start: source.start, end: source.end };
+    const made = (callee: Expr, args: Expr[] = []): Expr => ({ kind: "call", callee, args, typeArgs: [], optional: false, ...at });
+    let from: Expr | undefined;
+    if (stringLike(held)) from = made({ kind: "ident", name: "array chars", ...at }, [source]);
+    else if (yieldsOf(held) !== undefined) from = made({ kind: "ident", name: "array collect", ...at }, [source]);
+    else if (typeof held !== "string" && held.kind === "map") from = made({ kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
+    else if (!isArray(held)) throw new CompileError(`'...' spreads an array, a string, a generator, a Map or a Set, not '${show(t)}'`, source.start, source.end);
+    if (from) {
+      once.add(source);
+      x.value = from;
+    }
+    const array = from ? value(from) : t;
+    const lowered = lower(isRefType(array) ? array.to : array) as ArrayType;
+    if (isRefType(array)) coercions.set(x.value, lowered);
+    clonable(lowered.element, x, "a spread");
+    // Codegen converts each element from this type.
+    types.set(x, lowered.element);
+    return lowered.element;
+  }
+
+  // A call's arguments after the fixed parameters fill its rest parameter, as one array literal,
+  // where a spread argument spreads as in any literal. Packed once, as a generic body is
+  // checked again for each instance.
+  function packRest(e: Expr, list: Expr[], params: Param[]) {
+    if (packed.has(e)) return;
+    const fixed = params.length - 1;
+    refuseSpread(list.slice(0, fixed));
+    if (list.length < fixed) return;
+    const rest = list.splice(fixed);
+    const at = rest.length > 0 ? { start: rest[0]!.start, end: rest.at(-1)!.end } : { start: e.end - 1, end: e.end - 1 };
+    list.push({ kind: "array", elements: rest, ...at });
+    packed.add(e);
+  }
+
+  // A spread argument fills only a rest parameter, since an array's length isn't known while compiling.
+  function refuseSpread(list: Expr[]) {
+    const spread = list.find((a) => a.kind === "spread");
+    if (spread) throw new CompileError("a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling", spread.start, spread.end);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -2353,13 +2406,20 @@ export function expressions(ctx: Context) {
           return tupleLiteral(e, tupleType((e.elements as Expr[]).map((x) => widenLet(value(x)))));
         }
         const elements = e.elements as Expr[];
-        const spread = elements.find((x) => x.kind === "spread");
-        if (spread) throw unsupported("spread elements", spread);
+        // A spread gives an array's elements: those of an array itself, or of what a string, a
+        // generator, a Map or a Set gives, as `Array.from` would. Its elements type the others
+        // when nothing else does.
+        const spreads = new Map<Expr, Type>();
+        for (const x of elements) if (x.kind === "spread") spreads.set(x, spreadElements(x));
+        const first = [...spreads.values()][0];
+        if (first !== undefined && !wanted.has(e)) for (const x of elements) if (x.kind !== "spread") expect(x, first);
         // Closures meeting the callable an annotation expects of each element are boxed into it.
         const want = wanted.get(e);
         const callable = typeof want !== "string" && want?.kind === "dyn" && callableOf.has(want.of) ? want : undefined;
         const promise = typeof want !== "string" && want?.kind === "dyn" && promiseElement(want.of) !== undefined ? want : undefined;
         const given = elements.map((x) => {
+          const spread = spreads.get(x);
+          if (spread !== undefined) return spread;
           const t = value(x);
           const boxed = typeof t !== "string" && ((t.kind === "closure" && callable) || (t.kind === "future" && promise));
           if (boxed) {
@@ -2373,8 +2433,17 @@ export function expressions(ctx: Context) {
           if (widened !== t) coerce(x, t, widened, "");
           return widened;
         });
-        const element = given.length === 0 ? "never" : unionType(given);
-        elements.forEach((x, i) => given[i] !== element && coerce(x, given[i]!, element, ""));
+        const fromSpreads = spreads.size > 0 && !wanted.has(e);
+        const element = given.length === 0 ? "never" : fromSpreads ? unionType([...spreads.values()]) : unionType(given);
+        elements.forEach((x, i) => {
+          if (given[i] === element || sameLowered(given[i]!, element)) return;
+          // A spread's elements are each converted to the array's type, which has to hold them.
+          if (spreads.has(x)) {
+            if (!fits(given[i]!, element)) throw new CompileError(`this spread gives '${show(given[i]!)}' elements, which an array of '${show(element)}' can't hold`, x.start, x.end);
+            return;
+          }
+          coerce(x, types.get(x)!, element, `type '${show(types.get(x)!)}' is not assignable to type '${show(element)}', the type of the spread's elements`);
+        });
         return arrayType(element);
       }
       case "arrow":
@@ -2417,6 +2486,8 @@ export function expressions(ctx: Context) {
           return blockType("AbortController");
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
+        if (named?.constructor.params.at(-1)?.rest && e.args) packRest(e, e.args, named.constructor.params);
+        else refuseSpread(list);
         if (named) expectFrom(named.constructor, list);
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
         if (e.callee.kind === "ident" && e.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {

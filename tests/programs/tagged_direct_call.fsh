@@ -1,3 +1,4 @@
-// error: 'sql' takes a rest parameter, which so far only a tag's values fill
+// expect: a
+// A tag called directly, its strings an array literal known while compiling.
 function sql(comptime strings: TemplateStringsArray, ...values: string[]): string { return strings[0]; }
 function main() { console.log(sql(["a"], "x")); }

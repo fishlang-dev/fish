@@ -17,7 +17,6 @@ export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...other
   aliases.set(s.name, s);
 }
 // The rest parameters given a meaning so far: a tag's, which the template's values fill.
-export const restParams = new WeakSet<Param>();
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
 export function tagStrings(p: Param | undefined): boolean {
@@ -166,7 +165,6 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
   // constructor's parameters may carry modifiers, which make them parameter properties.
   function paramType(p: Param, property = false): Type {
-    if (p.rest && !restParams.has(p)) throw new CompileError("rest parameters are only supported on tags so far, as in 'function tag(comptime strings: TemplateStringsArray, ...values: T[])'", p.start, p.end);
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);

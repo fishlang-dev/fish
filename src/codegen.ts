@@ -2439,6 +2439,38 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return built(copy, length, length);
   }
 
+  // An array literal with spreads: each part runs in order, then the array is built from them,
+  // a spread array made for it giving up its elements and others giving clones.
+  function spreadArray(written: Expr[], type: ArrayType): string {
+    const parts = delivered((hand) => written.map((x) => {
+      if (x.kind !== "spread") return { v: hand(owned(x), type.element) };
+      const taken = fresh(x.value);
+      const from = types.get(x)!;
+      return { v: taken ? hand(owned(x.value), arrayType(from)) : value(x.value), spread: true, taken, from };
+    }));
+    const out = alloca(ARRAY);
+    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    for (const part of parts) {
+      if (!part.spread) {
+        appended(out, type.element, part.v);
+        continue;
+      }
+      const [data, length] = [temp(), temp()];
+      emit(`${data} = extractvalue ${ARRAY} ${part.v}, 0`);
+      emit(`${length} = extractvalue ${ARRAY} ${part.v}, 1`);
+      const from = part.from!;
+      elements(from, data, length, (at) => {
+        const v = temp();
+        emit(`${v} = load ${llvm(from)}, ptr ${at}`);
+        appended(out, type.element, convert(part.taken ? v : copied(v, from), from, type.element));
+      });
+      if (part.taken) emit(`call void @fsh_rt_free(ptr ${data})`);
+    }
+    const v = temp();
+    emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    return v;
+  }
+
   // Puts `v` at the end of the array at `at`, growing it when it is full.
   function appended(at: string, element: Type, v: string) {
     const t = llvm(element);
@@ -4468,6 +4500,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         }
         const type = made as ArrayType;
         const t = llvm(type.element);
+        if (e.elements.some((x) => x?.kind === "spread")) return spreadArray(e.elements as Expr[], type);
         const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), type.element)));
         const n = String(values.length);
         const data = temp();

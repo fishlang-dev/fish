@@ -677,8 +677,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         release(local);
         return;
       }
+      // A spread of a place reads it, cloning its elements; one made for the spread is taken over.
       case "array":
-        for (const x of e.elements) if (x) expr(x, (place) => `'${place}' moved here into the new array; use '${place}.clone()' to keep a copy`);
+        for (const x of e.elements) {
+          if (x?.kind === "spread") expr(x.value);
+          else if (x) expr(x, (place) => `'${place}' moved here into the new array; use '${place}.clone()' to keep a copy`);
+        }
         return;
       case "float":
       case "null":
@@ -1449,7 +1453,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         expr(e.left);
         return expr(e.right);
       case "array":
-        for (const x of e.elements) if (x) expr(x);
+        for (const x of e.elements) if (x) expr(x.kind === "spread" ? x.value : x);
         return;
       case "yield":
         if (e.value) expr(e.value);

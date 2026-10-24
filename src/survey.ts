@@ -56,7 +56,7 @@ const RULES: Rule[] = [
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
-  { id: "spread", action: "unsupported", title: "rest parameters and array spread", feature: "Rest parameters and array spread" },
+  { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
   { id: "objectSpread", action: "unsupported", title: "object spread", feature: "Object spread" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
@@ -264,8 +264,10 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
   const heads = new WeakSet<object>();
-  // Spreads written in an object literal, which a different feature lifts than array spread.
+  // Spreads written in an object literal, which a different feature lifts than array spread, and
+  // those written as call arguments, which fill only a rest parameter.
   const inObjects = new WeakSet<object>();
+  const inCalls = new WeakSet<object>();
   while (stack.length > 0) {
     const [value, depth, ambient] = stack.pop()!;
     if (Array.isArray(value)) {
@@ -280,8 +282,9 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
       if (o.kind === "object" && Array.isArray(o.props)) for (const p of o.props) if (isNode(p) && p.kind === "spread") inObjects.add(p);
-      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inObjects.has(o))) note(id, at, module);
-      if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note);
+      if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
+      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inObjects.has(o) ? "object" : inCalls.has(o) ? "call" : "array")) note(id, at, module);
+      if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
     }
@@ -307,10 +310,10 @@ function callsMain(e: unknown): boolean {
   return isNode(e.callee) && e.callee.kind === "member" && ["catch", "then"].includes(e.callee.name as string) && callsMain(e.callee.object);
 }
 
-function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void) {
+function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void, arrow: boolean) {
   for (const [i, p] of list.entries()) {
     if (isNode(p.default) && !takesDefault(p, list.slice(i + 1))) note("defaults", p.default.start);
-    if (p.rest) note("spread", p.start as number);
+    if (p.rest && arrow) note("spread", p.start as number);
     if (isNode(p.pattern) && p.pattern.kind !== "ident") note("destructuring", p.pattern.start);
     if (p.optional) note("A2", p.start as number);
   }
@@ -318,7 +321,7 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
-function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObject: boolean): [string, number, string?][] {
+function classify(n: Node, depth: number, ambient: boolean, head: boolean, within: "object" | "call" | "array"): [string, number, string?][] {
   const found: [string, number, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -369,7 +372,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, inObj
       memberRules(n, push);
       break;
   }
-  if (n.kind === "spread") push(inObject ? "objectSpread" : "spread");
+  if (n.kind === "spread" && within !== "array") push(within === "object" ? "objectSpread" : "spread");
   const simple: Record<string, string> = { destructure: "destructuringAssignment", regex: "regex", tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");

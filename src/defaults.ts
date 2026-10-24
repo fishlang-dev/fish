@@ -31,6 +31,7 @@ export function lowerDefaults(node: unknown) {
 function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
+    if (p.rest && i !== f.params.length - 1) throw new CompileError("a rest parameter has to be the last one, since it takes every argument after those before it", p.start, p.end);
     if (!p.default) return;
     const later = f.params.slice(i + 1).find((q) => !q.default && !q.optional && !q.rest);
     if (later) throw new CompileError("a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments", p.start, p.end);
