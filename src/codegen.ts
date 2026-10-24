@@ -1909,7 +1909,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const local = resolved(s);
         reserve(local);
         own(slot(local), local.type);
-        emit(`store ${llvm(local.type)} ${owned(s.declarations[0]!.init!)}, ptr ${slot(local)}`);
+        // A variable declared without a value starts empty, as a moved-out one is.
+        const init = s.declarations[0]!.init;
+        emit(`store ${llvm(local.type)} ${init ? owned(init) : "zeroinitializer"}, ptr ${slot(local)}`);
         settle();
         return;
       }

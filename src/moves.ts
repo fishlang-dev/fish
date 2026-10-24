@@ -15,7 +15,8 @@ import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yield
 
 // Where a place moved, the note explaining it, and the pass of each loop it moved on. A place
 // is a local's id, or `this`, followed by a field path, like `3.inner.x`.
-type Move = { start: number; end: number; note: string; passes: Map<Stmt, number> };
+// A variable declared without a value is moved from the start, `unassigned`.
+type Move = { start: number; end: number; note: string; passes: Map<Stmt, number>; unassigned?: boolean };
 
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
@@ -183,9 +184,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const local = locals.get(s)!;
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
-        expr(d.init!, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
+        if (!d.init) {
+          state?.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new Map(passes), unassigned: true });
+          return;
+        }
+        expr(d.init, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
         revive(String(local.id));
-        if (holdsRef(local.type)) rehold(local, d.init!);
+        if (holdsRef(local.type)) rehold(local, d.init);
         return;
       }
       case "if": {
@@ -831,6 +836,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     for (const [moved, move] of state.moves) {
       if (!overlaps(moved, place)) continue;
       const name = text(e);
+      if (move.unassigned) {
+        const root = pathOf(moved);
+        throw new CompileError(`'${root}' is used before being assigned; give it a value on every path that reaches here, as TypeScript requires`, e.start, e.end, { message: move.note, start: move.start, end: move.end });
+      }
       const what = moved === place ? `'${name}' was moved, so it can't be used here`
         : place.startsWith(`${moved}.`) ? `'${name}' can't be used here because '${pathOf(moved)}' was moved`
         : `'${name}' can't be used as a whole here because '${pathOf(moved)}' was moved out of it`;
@@ -1157,6 +1166,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!state) return;
     for (const [moved, move] of state.moves) {
       if (place.startsWith(`${moved}.`)) {
+        if (move.unassigned) throw new CompileError(`'${pathOf(moved)}' is used before being assigned, so '${text(target)}' can't be set; assign all of '${pathOf(moved)}' first`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
         throw new CompileError(`can't assign to '${text(target)}' because '${pathOf(moved)}' was moved`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
       }
     }
@@ -1356,7 +1366,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(s.expr);
       case "let":
         declared.set(locals.get(s)!, [...loops]);
-        return expr(s.declarations[0]!.init!);
+        return s.declarations[0]!.init && expr(s.declarations[0]!.init);
       case "if":
         expr(s.cond);
         stmts(s.then);

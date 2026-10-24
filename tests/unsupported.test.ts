@@ -184,14 +184,6 @@ const STATEMENTS: [string, string][] = [
   ["declare const x: i64", "ambient declarations"],
 ];
 
-test("let x: i64", () => {
-  const src = "function main() {\n  let x: i64\n}";
-  const start = src.indexOf("x: i64");
-  expect(() => check(parse(src))).toThrow(expect.objectContaining({
-    message: "declarations without an initializer are not supported yet", start, end: start + 6,
-  }));
-});
-
 for (const [stmt, what] of STATEMENTS) {
   test(stmt, () => {
     const src = `function main() {\n  ${stmt}\n}`;

@@ -1059,6 +1059,16 @@ export function check(written: Stmt[], library = false): Checked {
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
 
+    // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
+    // every use before that, as TypeScript's definite assignment does.
+    function unassigned(s: Stmt, d: Declarator, name: string): undefined {
+      if (!d.type) throw new CompileError(`'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
+      const type = stored(resolveType(d.type));
+      if (isInterface(type)) throw new CompileError(`'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
+      declare(name, type, true, false, s);
+      return undefined;
+    }
+
     // `let a = 1, b = a` is a declaration per name, in order, each seeing those before it. A
     // `for` head's go in a block around the loop, which scopes them as the head does.
     function separate(list: Stmt[]) {
@@ -1102,7 +1112,8 @@ export function check(written: Stmt[], library = false): Checked {
       if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
       // A place is read part by part where it is, so only the parts named move out of it, as in
       // Rust; any other value goes to a variable named for the pattern, as messages show it.
-      const init = d.init!;
+      if (!d.init) throw new CompileError("a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
+      const init = d.init;
       const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
       // A getter along the path runs each time the path is read, so its result is kept once.
       const computed = (e: Expr): boolean => (e.kind === "member" && calls.has(e)) || ((e.kind === "member" || e.kind === "index") && computed(e.object));
@@ -1434,7 +1445,7 @@ export function check(written: Stmt[], library = false): Checked {
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (!d.init && s.keyword === "const") throw new CompileError("a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
-          if (!d.init) throw unsupported("declarations without an initializer", d);
+          if (!d.init) return unassigned(s, d, d.target.name);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.
           const annotated = (d.type && stored(resolveType(d.type))) || demands.get(s);
