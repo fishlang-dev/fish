@@ -67,7 +67,7 @@ const RULES: Rule[] = [
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
-  { id: "genericMethods", action: "unsupported", title: "type parameters on methods and arrow functions (generic methods, interfaces and arrows)", feature: "Generic methods, interfaces and arrows" },
+  { id: "genericMethods", action: "unsupported", title: "generic function types, generic arrows not held by a const, and generic methods in interfaces", feature: "Functions as values" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
@@ -320,6 +320,11 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
+// Generic arrows a const holds, which Fish declares as generic functions, and the members of
+// interfaces, whose generic methods Fish doesn't have.
+const heldArrows = new WeakSet<object>();
+const interfaceMembers = new WeakSet<object>();
+
 function classify(n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
   const found: [string, number, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
@@ -390,7 +395,9 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
   if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
-  if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0) push("genericMethods");
+  if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0 && !heldArrows.has(n)) push("genericMethods");
+  if (n.kind === "function" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && Array.isArray(n.params) && "returns" in n) push("genericMethods");
+  if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
   // A dynamic `import("x")` names its module as its first argument.
   const [first] = Array.isArray(n.args) ? n.args : [];
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
@@ -465,6 +472,7 @@ function fishPattern(p: Node): boolean {
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; type: unknown; init: unknown }[];
+  if (n.keyword === "const") for (const d of declarations) if (isNode(d.init) && d.init.kind === "arrow" && d.target.kind === "ident") heldArrows.add(d.init);
   if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (!head && !ambient && declarations.some((d) => !d.init && !d.type)) push("declarators");
@@ -475,7 +483,7 @@ function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) =
 function memberRules(n: Node, push: (id: string) => void) {
   if (n.optional === true) push("A2");
   if (isPrivate(n.name) || (Array.isArray(n.modifiers) && n.modifiers.includes("abstract"))) push("classForms");
-  if (n.kind === "method" && Array.isArray(n.typeParams) && n.typeParams.length > 0) push("genericMethods");
+  if (n.kind === "method" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && interfaceMembers.has(n)) push("genericMethods");
 }
 
 // The report as text: what was read, the grade, the rewrites that cost most, then what Fish

@@ -47,7 +47,7 @@ test("each rule counts what the sample shows", () => {
   const got = Object.fromEntries([...r.rules, ...r.waiting].filter((x) => x.count > 0).map((x) => [x.id, x.count]));
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
-    numberKeys: 1, forIn: 1, decorators: 1, genericMethods: 1,
+    numberKeys: 1, forIn: 1, decorators: 1,
     classForms: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
@@ -68,6 +68,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({ math: 1 });
   expect(counts("const a = /x+/.test(s) && /(y)/.exec(s);\nconst b = new RegExp(\"z\", \"i\");\nconst c = new RegExp(`w`);\n")).toEqual({});
   expect(counts("const a = /x+/g.test(s);\nconst i = re.lastIndex;\n")).toEqual({ regexState: 2 });
+  expect(counts("const id = <T>(x: T) => x;\nconst g = f(<T>(x: T) => x);\ntype F = <T>(x: T) => T;\ninterface I { m<T>(x: T): T }\nclass C { m<T>(x: T): T { return x; } }\n")).toEqual({ genericMethods: 3 });
   expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3, replaceAllString: 1 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
