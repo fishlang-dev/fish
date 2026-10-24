@@ -1,6 +1,8 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
+import { built, quoted } from "./quote.ts";
+import { quotes } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -423,6 +425,21 @@ function interpreter() {
         return e.value;
       case "null":
         return null;
+      // A quote's value: its tree as records of the Ast types, each splice its hole's value.
+      case "tagged": {
+        const types = quotes.get(e);
+        if (!types) return unsupported("this tagged template", e);
+        const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
+        const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
+        return built<Value>(q, types, e, {
+          record: (t, fields) => ({ kind: "record", type: t, fields }),
+          array: (items) => ({ kind: "array", items }),
+          member: (v, _, m) => ({ kind: "member", type: m, value: v }),
+          splice: (i, into) => retag(holes[i]!.value, holes[i]!.type, into),
+          int: (n) => n,
+          none: null,
+        });
+      }
       case "template": {
         let text = e.quasis[0] ?? "";
         e.exprs.forEach((x, i) => {

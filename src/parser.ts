@@ -383,6 +383,22 @@ export function parse(src: string): Stmt[] {
   return program;
 }
 
+// One expression filling the whole text, as a quote's is.
+export function parseExpression(src: string): Expr {
+  const c = cursor(src);
+  const e = expression(c);
+  if (c.peek().kind !== "eof") throw c.error("expected the end of the expression");
+  return e;
+}
+
+// One type filling the whole text.
+export function parseType(src: string): TypeNode {
+  const c = cursor(src);
+  const t = type(c);
+  if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
+  return t;
+}
+
 // Only `export default function` may leave out the name, so `name` is "" there.
 export function func(c: Cursor, anonymous = false): Func {
   const start = c.peek().start;

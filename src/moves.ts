@@ -558,6 +558,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "template":
         for (const x of e.exprs) expr(x);
         return;
+      // A quote's splices move into the value it makes; other tags became calls.
+      case "tagged":
+        if (e.template.kind === "template") for (const x of e.template.exprs) expr(x);
+        return;
       case "index":
         if (consume && element(e) && !isCopy(types.get(e)!)) throw elementMove(e, types.get(e)!);
         if (key(e) === undefined) expr(e.object);
@@ -1448,6 +1452,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return expr(e.operand);
       case "template":
         for (const x of e.exprs) expr(x);
+        return;
+      case "tagged":
+        if (e.template.kind === "template") for (const x of e.template.exprs) expr(x);
         return;
       case "index":
         expr(e.object);

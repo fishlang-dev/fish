@@ -41,3 +41,95 @@ function main() {
   console.log(e.kind === "null" ? "AstExpr" : "other");
   console.log(kinds.length);
 }
+// case: ast_quote
+// expect: binary 5 let ref function 2 let Map 2
+// expect: a binary true
+// expect: function class block object
+function count(e: Ref<AstExpr>): i64 {
+  if (e.kind === "binary") return 1 + count(e.left) + count(e.right);
+  if (e.kind === "call") return 1 + (e.args.length as i64);
+  return 1;
+}
+function kinds(): string {
+  const x = quote`b * 2`;
+  const sum = quote`a + ${x}`;
+  const s = quote`const y = ${sum};`;
+  const t = quoteType`Map<string, ${quoteType`i64[]`}>`;
+  const f = quote`function g() { ${s}; return 1; }`;
+  let out = `${sum.kind} ${count(sum)} ${s.kind} ${t.kind} ${f.kind}`;
+  if (f.kind === "function") {
+    const body = f.body;
+    if (body !== null) out = out + ` ${body.length} ${body[0].kind}`;
+  }
+  if (t.kind === "ref") out = out + ` ${t.name} ${t.args.length}`;
+  return out;
+}
+function parts(): string {
+  const e = quote`a + ${quote`b * 2`}`;
+  if (e.kind !== "binary") return "";
+  const left = e.left;
+  const right = e.right;
+  const name = left.kind === "ident" ? left.name : "";
+  return `${name} ${right.kind} ${e.start < e.end}`;
+}
+function forms(): string {
+  const d = quote`function f() {}`;
+  const c = quote`class C {}`;
+  const b = quote`{ a; }`;
+  const o = quote`({ a: 1 })`;
+  return `${d.kind} ${c.kind} ${b.kind} ${o.kind}`;
+}
+const K = comptime kinds();
+const P = comptime parts();
+const F = comptime forms();
+function main() {
+  console.log(K);
+  console.log(P);
+  console.log(F);
+}
+// case: ast_quote_wrong_splice
+// error: a splice where an expression goes takes an 'AstExpr', not 'AstStmt'
+function make(): string {
+  const s = quote`return 1;`;
+  const e = quote`a + ${s}`;
+  return e.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_name_splice
+// error: splicing a name isn't supported yet
+function make(): string {
+  const n = quote`x`;
+  const f = quote`function ${n}() {}`;
+  return f.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_parse
+// error: this quote's text doesn't parse
+function make(): string {
+  return quote`a +`.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_many
+// error: a quote holds one expression, statement or declaration, not 2
+function make(): string {
+  return quote`a; b;`.kind;
+}
+const K = comptime make();
+function main() {
+  console.log(K);
+}
+// case: ast_quote_at_run_time
+// panic: a quote builds syntax while compiling, so it can't run in the program
+function main() {
+  const e = quote`1 + 2`;
+  console.log(e.kind);
+}

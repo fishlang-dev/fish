@@ -13,6 +13,7 @@ import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { unusedDefaults } from "./check.ts";
 import { STD_BASE } from "./std.ts";
+import { holesOf, quoted, type Category } from "./quote.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { literalValue, type Facts, type Guard } from "./narrow.ts";
@@ -196,6 +197,8 @@ export const MATH_CONSTANTS: Record<string, number> = {
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
 const tagCalls = new WeakSet<Expr>();
+// Each quote, by the Ast types it was checked with, for comptime to build its value from.
+export const quotes = new WeakMap<Expr, Record<Category, Type>>();
 
 // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
 // body's next instance checks again as tuples.
@@ -1025,6 +1028,21 @@ export function expressions(ctx: Context) {
     // was lent to the call, its receiver included.
     if (holdsRef(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, object, e, lends));
     return { type, what: `'${target.name}'` };
+  }
+
+  // `` quote`a + ${x}` ``: the Ast value of the text, an expression's or a statement's, and of
+  // `quoteType`, a type's; each splice takes a node of the category its place holds.
+  function quote(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
+    const q = quoted(e, asType);
+    const at = { start: e.start, end: e.end };
+    const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
+    holesOf(q, types, e).forEach((category, i) => {
+      const hole = q.holes[i]!;
+      const t = value(hole);
+      coerce(hole, t, types[category], `a splice where ${category === "AstExpr" ? "an expression" : category === "AstStmt" ? "a statement" : "a type"} goes takes an '${category}', not '${show(t)}'`);
+    });
+    quotes.set(e, types);
+    return types[q.category];
   }
 
   // `` tag`a ${x} b` `` calls the tag with the template's text, known while compiling, then an
@@ -2838,6 +2856,7 @@ export function expressions(ctx: Context) {
         return c.type;
       }
       case "tagged":
+        if (e.tag.kind === "ident" && (e.tag.name === "quote" || e.tag.name === "quoteType") && !lookup(e.tag.name) && !byName.has(e.tag.name)) return quote(e, e.tag.name === "quoteType");
         untag(e);
         return typeOf(e);
       case "call": {

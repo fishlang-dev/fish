@@ -5001,6 +5001,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${llvm(type)} ${a}, ${b}`);
         return result;
       }
+      // A quote is made only while compiling; one reached when the program runs panics.
+      case "tagged": {
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\na quote builds syntax while compiling, so it can't run in the program\n`)})`);
+        emit("unreachable");
+        startBlock(label());
+        return "undef";
+      }
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
