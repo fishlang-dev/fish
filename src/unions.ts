@@ -2,7 +2,7 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unionType , lower } from "./typing.ts";
+import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
@@ -23,6 +23,16 @@ export type Union = {
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
 export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type: Type; apply(coercions: Map<Expr, Type>): void } | undefined {
+  to = unfold(to);
+  // Meeting a union, it takes the shape of the first member it can, as a nested literal of a
+  // recursive type does.
+  if (e.kind === "object" && typeof to !== "string" && to.kind === "union") {
+    for (const m of to.members) {
+      const shape = literalShape(e, m, types);
+      if (shape) return shape;
+    }
+    return undefined;
+  }
   // A literal with spreads takes its fields' types from them, which no literal narrows.
   if (e.kind !== "object" || typeof to === "string" || to.kind !== "object" || e.props.some((p) => p.kind === "spread")) return undefined;
   const fields: Field[] = [];

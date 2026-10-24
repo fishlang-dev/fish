@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -331,6 +331,8 @@ export function expressions(ctx: Context) {
   // What a closure or a generic enum's member is expected to be, from where it goes, since
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
   function expect(e: Expr, t: Type) {
+    // Callers pass what a parameter list has, which may run out.
+    if (t !== undefined) t = unfolded(t);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
@@ -371,6 +373,17 @@ export function expressions(ctx: Context) {
     if (e.kind === "unsafe") expect(e.expr, t);
     if (e.kind === "match") for (const arm of e.arms) for (const v of armValues(arm.body)) expect(v, t);
     if (e.kind === "pipe") expect(e.body, t);
+    // An object literal where a union is expected is expected to be the member it names: the one
+    // with all its names whose literal fields its literals match.
+    if (e.kind === "object" && typeof t !== "string" && t.kind === "union") {
+      const props = e.props.filter((p): p is Extract<typeof p, { kind: "property" }> => p.kind === "property" && typeof p.key === "string");
+      const named = t.members.map(unfold).filter((m): m is ObjectType => typeof m !== "string" && m.kind === "object" && props.every((p) => field(m, p.key as string)));
+      const matching = named.filter((m) => props.every((p) => {
+        const f = field(m, p.key as string)!.type;
+        return typeof f === "string" || f.kind !== "literal" || (p.value.kind === "string" && p.value.value === f.value);
+      }));
+      if (matching.length === 1) t = matching[0]!;
+    }
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
@@ -2560,7 +2573,7 @@ export function expressions(ctx: Context) {
           if (e.optional) throw unsupported("optional index expressions", e);
           const index = value(e.index);
           coerce(e.index, index, "usize", `a fixed array's index is a 'usize', not '${show(index)}'`);
-          return object.element;
+          return unfolded(object.element);
         }
         const array = isArray(object);
         if (!stringLike(object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
@@ -2569,7 +2582,7 @@ export function expressions(ctx: Context) {
         if (!array) text(e.object, object, false);
         const index = value(e.index);
         coerce(e.index, index, "usize", `${array ? "an array" : "a string"}'s index is a 'usize', not '${show(index)}'`);
-        return array ? object.element : "string";
+        return array ? unfolded(object.element) : "string";
       }
       // Text alone is a literal; with substitutions, a new string.
       case "template":
@@ -2663,7 +2676,7 @@ export function expressions(ctx: Context) {
           calls.set(e, instance);
         }
         if (!calls.has(e)) load();
-        return linked(e) ? optional(found.type, e) : found.type;
+        return linked(e) ? optional(unfolded(found.type), e) : unfolded(found.type);
       }
       case "object": {
         const tuple = tuples.get(e);
@@ -3111,6 +3124,12 @@ export function expressions(ctx: Context) {
       if (type !== to) types.set(e, coercions.has(e.expr) ? coercions.get(e.expr)! : types.get(e.expr)!);
       return;
     }
+    // A value meeting a recursive type meets the type it stands for, then moves into a block.
+    if (typeof to !== "string" && to.kind === "recursive" && type !== to) {
+      coerce(e, type, to.of, message);
+      coercions.set(e, to);
+      return;
+    }
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
@@ -3309,7 +3328,23 @@ export function expressions(ctx: Context) {
   }
 
   function excess(e: Expr, to: Type) {
+    to = unfold(to);
     if (e.kind !== "object" || typeof to === "string") return;
+    // Against a union, a name no member has is excess, and the literal is checked as the one
+    // member that has all its names, when one does.
+    if (to.kind === "union") {
+      const names = e.props.flatMap((p) => (p.kind === "spread" ? [] : [p.kind === "shorthand" ? p.name : (p as { key: string }).key]));
+      const objects = to.members.map(unfold).filter((m): m is ObjectType | ClassType => typeof m !== "string" && (m.kind === "object" || m.kind === "class"));
+      if (objects.length === 0) return;
+      const missing = names.find((n) => !objects.some((m) => field(m, n)));
+      if (missing !== undefined) {
+        const p = e.props.find((p) => p.kind !== "spread" && (p.kind === "shorthand" ? p.name : (p as { key: string }).key) === missing)!;
+        throw new CompileError(`object literal may only specify known properties, and '${missing}' does not exist in type '${show(to)}'`, p.start, p.end);
+      }
+      const whole = objects.filter((m) => names.every((n) => field(m, n)));
+      if (whole.length === 1) excess(e, whole[0]!);
+      return;
+    }
     for (const p of e.props) {
       // A spread's fields aren't checked as excess, as in TypeScript.
       if (p.kind === "spread") continue;

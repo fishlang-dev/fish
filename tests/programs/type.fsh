@@ -23,7 +23,7 @@ type A = B
 type B = A
 
 function main() {}
-// error: type 'A' refers to itself, so it would have infinite size
+// error: type 'A' circularly references itself; a type can hold itself only inside an object, a tuple or an array
 // case: type_alias_duplicate
 type Count = i64
 type Count = boolean
@@ -55,8 +55,14 @@ function main() {
 // case: type_alias_recursive
 type Node = { value: i64; next: Node }
 
-function main() {}
-// error: type 'Node' refers to itself, so it would have infinite size
+function value(n: Node): i64 {
+  return n.value
+}
+
+function main() {
+  console.log("no value of it can be built")
+}
+// expect: no value of it can be built
 // case: type_as_name
 function main() {
   let type = 1

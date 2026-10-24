@@ -16,7 +16,7 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // union is its member's index, then enough 64-bit words for its largest member.
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex") return "ptr";
+  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return "ptr";
   if (t.kind === "array") return ARRAY;
   if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
   if (t.kind === "dyn") return DYN;
@@ -55,7 +55,7 @@ function size(t: Type): [number, number] {
   if (t === "null" || t === "never") return [0, 1];
   if (t === "string") return [8, 8];
   if (typeof t === "string") return [0, 1];
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex") return [8, 8];
+  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
   if (t.kind === "interior" && t.which !== "Lock") return size(t.of);
@@ -184,6 +184,21 @@ export function conversions(b: Slots) {
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // A recursive type's value lives in its block: read where another type is wanted, it is
+    // loaded, and a value meeting one moves into a new block.
+    // A union holding the block itself takes it, or gives it, as is.
+    const within = (t: Type, u: Type) => typeof u !== "string" && u.kind === "union" && u.members.includes(t);
+    if (typeof from !== "string" && from.kind === "recursive" && !within(from, to)) {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(from.of)}, ptr ${v}`);
+      return convert(loaded, from.of, to);
+    }
+    if (typeof to !== "string" && to.kind === "recursive" && !within(to, from)) {
+      const block = temp();
+      emit(`${block} = call ptr @fsh_rt_alloc(i64 ${byteSize(to.of)})`);
+      emit(`store ${llvm(to.of)} ${convert(v, from, to.of)}, ptr ${block}`);
+      return block;
+    }
     // Raw pointers are addresses, whatever they point at or may write.
     if (typeof from !== "string" && from.kind === "pointer" && typeof to !== "string" && to.kind === "pointer") return v;
     // Every regex is a pointer to its program.
@@ -238,6 +253,12 @@ export function conversions(b: Slots) {
   // one member of the union `from`, or else a slot holding a copy converted to `to`.
   function lend(v: string, from: Type, to: Type): string {
     if (from === to) return v;
+    // A reference to a place holding a recursive type's block lends the block itself.
+    if (typeof from !== "string" && from.kind === "recursive" && to !== from) {
+      const block = temp();
+      emit(`${block} = load ptr, ptr ${v}`);
+      return lend(block, from.of, to);
+    }
     if (typeof from !== "string" && from.kind === "union" && from.members.includes(to)) {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(from)}, ptr ${v}, i32 0, i32 1`);

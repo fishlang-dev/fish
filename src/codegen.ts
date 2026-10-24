@@ -9,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, matchType, regexType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -2351,7 +2351,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
-    if (type.kind === "array" || type.kind === "map" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn") return true;
+    if (type.kind === "array" || type.kind === "map" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn" || type.kind === "recursive") return true;
     if (type.kind === "fixed") return type.size > 0 && needsDrop(type.element);
     if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
@@ -2445,6 +2445,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         result = temp();
         emit(`${result} = load ${t}, ptr ${slot}`);
       }
+    } else if (type.kind === "recursive") {
+      result = kind === "drop" ? dropBlock(type) : copyBlock(type);
     } else if (type.kind === "shared") {
       if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
       else dropShared(type);
@@ -2518,6 +2520,40 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // In an array's drop function: drops each element, then frees the buffer.
+  // A recursive type's block, or a copy of it holding copies of what it owns. A block moved out
+  // of its place left it empty, with nothing to drop or copy.
+  function dropBlock(type: RecursiveType): string {
+    const [held, done] = [label(), label()];
+    const empty = temp();
+    emit(`${empty} = icmp eq ptr %v, null`);
+    emit(`br i1 ${empty}, label %${done}, label %${held}`);
+    startBlock(held);
+    const v = temp();
+    emit(`${v} = load ${llvm(type.of)}, ptr %v`);
+    dispose(v, type.of);
+    emit("call void @fsh_rt_free(ptr %v)");
+    emit(`br label %${done}`);
+    startBlock(done);
+    return "%v";
+  }
+
+  function copyBlock(type: RecursiveType): string {
+    const [held, done] = [label(), label()];
+    const empty = temp();
+    emit(`${empty} = icmp eq ptr %v, null`);
+    emit(`br i1 ${empty}, label %${done}, label %${held}`);
+    startBlock(held);
+    const v = temp();
+    emit(`${v} = load ${llvm(type.of)}, ptr %v`);
+    const copy = convert(copied(v, type.of), type.of, type);
+    const from = block;
+    emit(`br label %${done}`);
+    startBlock(done);
+    const result = temp();
+    emit(`${result} = phi ptr [ null, %entry ], [ ${copy}, %${from} ]`);
+    return result;
+  }
+
   function dropArray(type: ArrayType): string {
     const [data, length] = [temp(), temp()];
     emit(`${data} = extractvalue ${ARRAY} %v, 0`);
@@ -3374,21 +3410,90 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       else if (!fresh(e)) v = copied(v, type);
       return box(v, type, to);
     }
+    // A value moving into a recursive type's block is taken, or copied, first.
+    if (to && boxes(types.get(e)!, to)) {
+      const type = types.get(e)!;
+      let v = known.get(e) ?? evaluate(e);
+      if (current.consumes.has(e) && lendable(e)) take(e);
+      else if (!fresh(e)) v = copied(v, type);
+      return convert(v, type, to);
+    }
     const whole = !to || keepsAll(types.get(e)!, to);
     if (whole && fresh(e)) return value(e, true);
+    // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
+    if (to && !needsDrop(types.get(e)!) && holdsPart(to, (t) => typeof t !== "string" && t.kind === "recursive")) return value(e, true);
     const v = value(e);
     if (whole && current.consumes.has(e) && lendable(e)) {
-      emit(`store ${llvm(e.kind === "member" ? stored(e) : types.get(e)!)} zeroinitializer, ptr ${address(e)}`);
+      take(e);
       return v;
     }
     return e.kind === "string" ? v : copied(v, valueType(e));
+  }
+
+  // Leaves a place empty once its value is moved out. A value read out of a recursive type's
+  // block leaves the block behind, which is freed.
+  function take(e: Expr) {
+    const at = address(e);
+    const place = placeType(e);
+    if (place !== types.get(e)) {
+      const held = temp();
+      emit(`${held} = load ${llvm(place)}, ptr ${at}`);
+      freeBlocks(held, place);
+    }
+    emit(`store ${llvm(place)} zeroinitializer, ptr ${at}`);
+  }
+
+  // The type a place holds its value as: a field's or an element's own, or the variable's.
+  function placeType(e: Expr): Type {
+    if (e.kind === "member") return stored(e);
+    if (e.kind === "index" && indexes(valueType(e.object))) {
+      const object = valueType(e.object);
+      return ((isRef(object) ? object.to : object) as ArrayType | FixedType).element;
+    }
+    return types.get(e)!;
+  }
+
+  // Frees a value's own recursive block, or the one its union holds, without what is in it.
+  function freeBlocks(v: string, type: Type) {
+    if (typeof type !== "string" && type.kind === "recursive") return emit(`call void @fsh_rt_free(ptr ${v})`);
+    if (typeof type === "string" || type.kind !== "union") return;
+    const blocks = type.members.filter((m) => typeof m !== "string" && m.kind === "recursive");
+    if (blocks.length === 0) return;
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
+    const [cases, end] = [blocks.map(() => label()), label()];
+    emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${type.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+    blocks.forEach((m, i) => {
+      startBlock(cases[i]!);
+      emit(`call void @fsh_rt_free(ptr ${convert(v, type, m)})`);
+      emit(`br label %${end}`);
+    });
+    startBlock(end);
+  }
+
+  // Whether converting a value moves some of it into a recursive type's block.
+  function boxes(from: Type, to: Type): boolean {
+    const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+    return from !== to && members(to).some((m) => typeof m !== "string" && m.kind === "recursive") && members(from).some((m) => !members(to).includes(m));
   }
 
   // Whether converting a value from one type to another keeps all it owns: putting it in a
   // union, taking a union's member out, or moving it to a union holding all its members.
   function keepsAll(from: Type, to: Type): boolean {
     const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
-    return !needsDrop(from) || isDyn(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to);
+    if (!needsDrop(from) || isDyn(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
+    return members(from).every((m) => members(to).some((t) => keepsPart(m, t)));
+  }
+
+  // Whether a member converts to another keeping all it owns: moved into a recursive type's
+  // block, or an object whose fields each do.
+  function keepsPart(from: Type, to: Type): boolean {
+    if (typeof to !== "string" && to.kind === "recursive") return keepsAll(from, to.of);
+    if (typeof from === "string" || typeof to === "string" || from.kind !== "object" || to.kind !== "object") return false;
+    return from.fields.every((f) => {
+      const kept = field(to, f.name);
+      return kept ? keepsAll(f.type, kept.type) : !needsDrop(f.type);
+    });
   }
 
   // A receiver copied into a slot for an owning method: the copy is its own, pending until the
@@ -4541,7 +4646,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const result = known.get(e) ?? evaluate(e);
     // Nothing runs after a value of `never`, so it stands for any value at all.
     if (type === "never") return "undef";
-    // A value meeting a Dyn moves into its block; a temporary then drops as the Dyn.
+    // A value meeting a Dyn, or a recursive type, moves into its block; a temporary then drops
+    // as what it became.
+    if (to && boxes(type, to)) {
+      const boxed = convert(result, type, to);
+      if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
+      return boxed;
+    }
     if (to && isDyn(to) && !isDyn(type)) {
       const boxed = box(result, type, to);
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
@@ -4608,10 +4719,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "index": {
         const object = valueType(e.object);
         if (indexes(object)) {
-          const held = isRef(object) ? object.to : object;
+          const held = (isRef(object) ? object.to : object) as ArrayType | FixedType;
           const v = temp();
-          emit(`${v} = load ${llvm((held as ArrayType | FixedType).element)}, ptr ${element(e)}`);
-          return v;
+          emit(`${v} = load ${llvm(held.element)}, ptr ${element(e)}`);
+          return convert(v, held.element, types.get(e)!);
         }
         const s = operand(e.object, [e.index]);
         const index = value(e.index);
@@ -4989,9 +5100,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (typeof referent(types.get(target.object)!) !== "string" && (referent(types.get(target.object)!) as Exclude<Type, string>).kind === "shared") return sharedField(target)[2];
     const holder = stored(target.object);
-    const object = referent(holder) as ObjectType | ClassType;
-    // Through a reference, the field is inside what it points to.
-    const base = isRef(holder) ? evaluate(target.object) : address(target.object);
+    const object = unfold(referent(holder)) as ObjectType | ClassType;
+    // Through a reference, the field is inside what it points to, and in a recursive type's
+    // block, inside the block.
+    let base = isRef(holder) ? evaluate(target.object) : address(target.object);
+    if (typeof holder !== "string" && holder.kind === "recursive") {
+      const block = temp();
+      emit(`${block} = load ptr, ptr ${base}`);
+      base = block;
+    }
     const result = temp();
     const path = fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
     emit(`${result} = getelementptr ${llvm(object)}, ptr ${base}, i32 0, ${path}`);
@@ -5019,8 +5136,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The type a place is stored as. Read through a type parameter's bound, a field may have a
   // wider type than the one it is stored with.
   function stored(e: Expr): Type {
+    if (e.kind === "index" && indexes(valueType(e.object))) return placeType(e);
     if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
-    const holder = referent(stored(e.object));
+    const holder = unfold(referent(stored(e.object)));
     // A shared value's field is stored in its block's value.
     const object = typeof holder !== "string" && holder.kind === "shared" ? holder.of : holder;
     return field(object as ObjectType | ClassType, e.name)!.type;

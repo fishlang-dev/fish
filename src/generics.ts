@@ -3,9 +3,9 @@ import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.t
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { unfold, elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -47,7 +47,28 @@ export function typeParamsOf(f: Body): TypeParam[] {
 }
 
 // Binds the type parameters `node` names by matching it against an argument's type.
+// The program's type aliases, which inference looks through; set by the checker.
+let aliasNamed: (name: string) => TypeAlias | undefined = () => undefined;
+export function infersAliases(f: typeof aliasNamed) {
+  aliasNamed = f;
+}
+// The aliases being looked through, so one that holds itself is looked into once.
+const expanding = new Set<string>();
+
 export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
+  arg = unfold(arg);
+  // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
+  // as written.
+  const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? aliasNamed(node.name) : undefined;
+  if (node.kind === "ref" && alias && alias.typeParams.length === node.args.length && !expanding.has(alias.name)) {
+    const given = new Map(alias.typeParams.map((p, i) => [p.name, node.args[i]!]));
+    expanding.add(alias.name);
+    try {
+      return infer(substituted(alias.type, given), arg, names, bindings, at);
+    } finally {
+      expanding.delete(alias.name);
+    }
+  }
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
     arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
@@ -142,6 +163,19 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   }
 }
 
+// A type written with some names standing for other types, as an alias's body with its
+// parameters given.
+function substituted(node: TypeNode, given: Map<string, TypeNode>): TypeNode {
+  const walk = (n: unknown): unknown => {
+    if (Array.isArray(n)) return n.map(walk);
+    if (!n || typeof n !== "object") return n;
+    const t = n as { kind?: string; name?: unknown; args?: unknown[] };
+    if (t.kind === "ref" && typeof t.name === "string" && t.args?.length === 0 && given.has(t.name)) return given.get(t.name);
+    return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, walk(v)]));
+  };
+  return walk(node) as TypeNode;
+}
+
 // A type argument must satisfy its parameter's bound: an interface by shape, an object type
 // by fitting it.
 export function checkBound(type: Type, bound: Type, members: Members, at: Span) {
@@ -171,6 +205,7 @@ export function concrete(t: Type): boolean {
   if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
   if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
   if (t.kind === "map") return concrete(t.key) && concrete(t.value);
+  if (t.kind === "recursive") return t.args.every(concrete);
   if (t.kind === "variant") {
     let known = concreteVariants.get(t);
     if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));
@@ -531,6 +566,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     else if (typeof type !== "string" && type.kind === "ref") {
       throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
     }
+    // A recursive type's value stands for the type it stands for.
+    type = unfold(type);
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
     if (bound.kind === "function") {
       if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);

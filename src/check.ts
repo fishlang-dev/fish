@@ -10,7 +10,7 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, infersAliases, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
@@ -440,6 +440,7 @@ export function check(written: Stmt[], library = false): Checked {
   const { classNamed, construct, start, define } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
+  infersAliases((name) => aliases.get(name));
   const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)));

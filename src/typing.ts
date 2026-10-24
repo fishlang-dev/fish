@@ -203,7 +203,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -455,6 +455,36 @@ export function regexType(pattern: string, flags: string, captures: RegexType["c
     keys.set(t, key);
   }
   return t;
+}
+
+// Where a type leads back to itself, as `next` does in `type Node = { next: Node | null }`: a
+// pointer to a block holding `of`, the type it stands for, which is set once that is made. It
+// is that type everywhere but in its layout, and every walk over types stops at it.
+// `args` are the alias's type arguments, so one made from type parameters is remade for what
+// they stand for.
+export type RecursiveType = { kind: "recursive"; name: string; args: Type[]; of: Type; fields: Field[] };
+
+// One per alias instance a program's types lead back to; the checker keeps them by instance.
+export function recursiveType(name: string, args: Type[]): RecursiveType {
+  const t: RecursiveType = { kind: "recursive", name, args, of: "never", fields: [] };
+  keys.set(t, `recursive ${declared++}`);
+  return t;
+}
+
+// The same recursive type made with other type arguments, which only the checker can make.
+let instanceRecursive = (t: RecursiveType, _args: Type[]): RecursiveType => t;
+export function lowersRecursive(f: typeof instanceRecursive) {
+  instanceRecursive = f;
+}
+
+// The type a recursive type stands for, or the type itself.
+export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
+
+// What reading a place of `t` gives: a recursive type, or a union's recursive members, as the
+// types they stand for, held in a value of their own rather than in a block.
+export function unfolded(t: Type): Type {
+  if (typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "recursive")) return unionType(t.members.map(unfold), t.name);
+  return unfold(t);
 }
 
 const pointers = new Map<string, PointerType>();
@@ -715,6 +745,7 @@ export function isCopy(t: Type): boolean {
 export function holdsMut(t: Type): boolean {
   if (typeof t === "string") return false;
   if (t.kind === "ref") return t.mutable;
+  if (t.kind === "recursive") return holdsPart(t.of, (u) => typeof u !== "string" && u.kind === "ref" && u.mutable);
   if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
   if (t.kind === "union") return t.members.some(holdsMut);
   if (t.kind === "array" || t.kind === "fixed") return holdsMut(t.element);
@@ -735,6 +766,7 @@ export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
   // A type parameter holds references when what it stands for, or its bound, does.
   if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
   if (t.kind === "union") return t.members.some(holds);
+  if (t.kind === "recursive") return holds(t.of);
   if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
   if (t.kind === "map") return holds(t.value);
   if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
@@ -758,7 +790,7 @@ export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = fa
   if (t.kind === "union") return t.members.some(holds);
   if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
   if (t.kind === "map") return holds(t.key) || holds(t.value);
-  if (t.kind === "interior") return holds(t.of);
+  if (t.kind === "interior" || t.kind === "recursive") return holds(t.of);
   if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
   if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
   return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holds(f.type));
@@ -817,6 +849,7 @@ export function lower(t: Type): Type {
   if (t.kind === "shared") return sharedType(lower(t.of));
   if (t.kind === "block") return blockType(t.which, lower(t.of));
   if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
+  if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? instanceRecursive(t, t.args.map(lower)) : t;
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -858,6 +891,10 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   if (typeof t !== "string" && t.kind === "variant") {
     const args = t.args.map((a) => replaced(a, swap));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
+  }
+  if (typeof t !== "string" && t.kind === "recursive") {
+    const args = t.args.map((a) => replaced(a, swap));
+    return args.some((a, i) => a !== t.args[i]) ? instanceRecursive(t, args) : t;
   }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   if (t.kind === "object" && t.match) return t;
@@ -1007,6 +1044,8 @@ export function derives(t: ClassType, base: ClassType): boolean {
 
 // Whether a value of `from` fits where `to` is declared: the same type, or an object or
 // instance with at least the fields of the object type `to`, each fitting in turn.
+const assumed = new Set<string>();
+
 export function fits(from: Type, to: Type): boolean {
   // A string literal fits a pattern it matches; a pattern is a string. Both are strings once
   // lowered, so this comes first.
@@ -1021,8 +1060,9 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
   // A reference reads the value where it lives, so it fits only a reference to the same type;
   // a mutable one also lends itself as shared. Lifetimes are checked on their own.
+  // A reference into a recursive type's block is one to the type it stands for.
   if (typeof to !== "string" && to.kind === "ref") {
-    return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
+    return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(unfold(from.to)) === lower(to.to);
   }
   // Any regex is a \`RegExp\`; all of them are the same pointer to a program.
   if (to === ANY_REGEX) return typeof from !== "string" && (from.kind === "regex" || (from.kind === "param" && from.bound?.kind === "regex"));
@@ -1036,6 +1076,18 @@ export function fits(from: Type, to: Type): boolean {
   }
   // A union fits where every member it may hold does, as an enum fits an i64.
   if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
+  // A recursive type is the type it stands for. Its type holds it again, so a pair being
+  // compared is taken to fit while its parts are.
+  if ((typeof from !== "string" && from.kind === "recursive") || (typeof to !== "string" && to.kind === "recursive")) {
+    const pair = `${keyOf(from)} ${keyOf(to)}`;
+    if (assumed.has(pair)) return true;
+    assumed.add(pair);
+    try {
+      return fits(unfold(from), unfold(to));
+    } finally {
+      assumed.delete(pair);
+    }
+  }
   if (typeof from !== "string" && from.kind === "pattern") return to === "string";
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // A closure fits a function type taking the same parameters, or the first of them, and

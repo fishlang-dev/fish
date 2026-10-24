@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, recursiveType, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -69,6 +69,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }, () => deferring > 0, conforms);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
+  // Where an alias instance leads back to itself, by its key, and the alias each is made from.
+  const recursives = new Map<string, RecursiveType>();
+  const recursiveAliases = new Map<RecursiveType, TypeAlias>();
   const traits = new Map<Interface, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   const combined = new Map<string, InterfaceType>();
@@ -97,6 +100,19 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   const making = new Set<DataEnum>();
   // The instance of a generic interface for other type arguments.
   const interfaceInstance = (t: InterfaceType, args: Type[]) => interfaceOf(interfaces.get(t.generic!.name)!, args);
+  lowersRecursive((t, args) => {
+    const a = recursiveAliases.get(t);
+    if (!a) return t;
+    const key = `${a.name}<${args.map(keyOf).join(",")}>`;
+    const of = aliasType(a, args, a);
+    let back = recursives.get(key);
+    if (!back) {
+      recursives.set(key, back = recursiveType(`${a.name}<${args.map(show).join(", ")}>`, args));
+      back.of = of;
+      recursiveAliases.set(back, a);
+    }
+    return back;
+  });
   return { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance };
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
@@ -487,7 +503,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return t;
   }
 
-  // An object type holds its fields inline, so one that contains itself has no finite size.
+  // An alias met again while its own type is made leads back to itself: that is where the
+  // compiler puts a pointer, a recursive type standing for the alias's type.
   function aliasType(a: TypeAlias, args: Type[], at: Span): Type {
     if (args.length !== a.typeParams.length) {
       throw new CompileError(`type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
@@ -502,7 +519,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (layouts.some((s) => s.has(key))) {
       throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
-    if (resolving.has(key)) throw new CompileError(`type '${a.name}' refers to itself, so it would have infinite size`, a.start, a.end);
+    if (resolving.has(key)) {
+      let back = recursives.get(key);
+      if (!back) recursives.set(key, back = recursiveType(args.length > 0 ? `${a.name}<${args.map(show).join(", ")}>` : a.name, args));
+      return back;
+    }
     // A type that branches as it recurses grows exponentially, so the whole program's type
     // evaluation has a budget, as TypeScript caps instantiations.
     if (resolving.size === 0) computed = 0;
@@ -515,6 +536,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       type = withSight(undefined, () => withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => resolveType(a.type)));
     } finally {
       resolving.delete(key);
+    }
+    const back = recursives.get(key);
+    // Only a structure can hold a type again: `type A = B | null` with `type B = A` would be a
+    // name for nothing but itself.
+    if (back && (type === back || (typeof type !== "string" && type.kind === "union" && type.members.includes(back)))) {
+      throw new CompileError(`type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
+    }
+    if (back) {
+      back.of = type;
+      recursiveAliases.set(back, a);
     }
     resolved.set(key, type);
     return type;
@@ -766,7 +797,7 @@ function merged(a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType 
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes" };
+const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
