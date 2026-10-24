@@ -160,7 +160,17 @@ export const lengthChecks = new WeakSet<Expr>();
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
-export const regexStringCalls = new WeakMap<Expr, { name: string; type: Type }>();
+export const regexStringCalls = new WeakMap<Expr, string>();
+
+// What a string method given a regex gives, from the regex: one whose captures aren't known may
+// have one that takes no part. Each instance of a generic body works it out from its own regex.
+export function regexStringType(name: string, rx: RegexType, unknown: boolean): Type {
+  if (name === "search") return "i64";
+  if (name === "match") return rx.flags.includes("g") ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
+  if (name === "matchAll") return arrayType(matchType(rx));
+  if (name === "split") return arrayType(rx.captures.some((c) => c.optional) || unknown ? unionType(["string", "null"]) : "string");
+  return "string";
+}
 // The regex method calls, by method.
 export const regexCalls = new WeakMap<Expr, "test" | "exec">();
 // The `new RegExp(...)` expressions, which are regexes known while compiling.
@@ -1115,25 +1125,15 @@ export function expressions(ctx: Context) {
     // doesn't show.
     if (!typed && (name === "match" || name === "matchAll" || name === "replaceAll")) throw unknown();
     if ((name === "matchAll" || name === "replaceAll") && !global) throw new CompileError(`${what} needs a regex with the 'g' flag, as JavaScript requires`, e.args[0]!.start, e.args[0]!.end);
-    let type: Type;
-    if (name === "search") type = "i64";
-    else if (name === "match") {
-      if (!global && !typed) throw unknown();
-      type = global ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
-    } else if (name === "matchAll") {
-      if (!typed) throw unknown();
-      type = arrayType(matchType(rx));
-    } else if (name === "split") {
+    if (name === "matchAll" && !typed) throw unknown();
+    if (name === "split" && e.args[1]) {
       const limit = e.args[1];
-      if (limit) {
-        const t = value(limit);
-        if (t !== "i64" && t !== "usize" && !adapt(limit, "i64")) throw new CompileError(`a limit is an 'i64', not '${show(t)}'`, limit.start, limit.end);
-      }
-      // A regex whose captures aren't known here may have one that takes no part.
-      type = arrayType(rx.captures.some((c) => c.optional) || !typed ? unionType(["string", "null"]) : "string");
-    } else type = replacement(e, rx, typed, unknown);
-    regexStringCalls.set(e, { name, type });
-    return { type, what };
+      const t = value(limit);
+      if (t !== "i64" && t !== "usize" && !adapt(limit, "i64")) throw new CompileError(`a limit is an 'i64', not '${show(t)}'`, limit.start, limit.end);
+    }
+    if (name.startsWith("replace")) replacement(e, rx, typed, unknown);
+    regexStringCalls.set(e, name);
+    return { type: regexStringType(name, rx, !typed), what };
   }
 
   // What replaces each match: a string with $ patterns, or an arrow function given the match,
@@ -1145,7 +1145,7 @@ export function expressions(ctx: Context) {
       if (!stringLike(t)) throw new CompileError(`what replaces each match is a string or an arrow function, not '${show(t)}'`, given.start, given.end);
       // With named groups, $<name> must name one, as JavaScript's early check would if it had one.
       const names = new Set(rx.captures.flatMap((c) => (c.name === undefined ? [] : [c.name])));
-      const missing = given.kind === "string" && names.size > 0 ? [...given.value.matchAll(/\$<([^>]*)>/g)].find((m) => !names.has(m[1]!)) : undefined;
+      const missing = given.kind === "string" && names.size > 0 ? [...given.value.matchAll(/\$\$|\$<([^>]*)>/g)].find((m) => m[1] !== undefined && !names.has(m[1])) : undefined;
       if (missing) throw new CompileError(`the regex has no group named '${missing[1]}' for '${missing[0]}'`, given.start, given.end);
       if (t !== "string") coerce(given, t, "string", "");
       return "string";

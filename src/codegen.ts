@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -3511,7 +3511,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);
-      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!.name, regexStringCalls.get(e)!.type);
+      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
       if (regexCalls.get(e) === "test") {
         const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
         const [found, yes] = [temp(), temp()];
@@ -5260,13 +5260,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A string method given a regex: search, match, matchAll, split, replace and replaceAll.
-  function regexString(e: Extract<Expr, { kind: "call" }>, name: string, checked: Type): string {
+  function regexString(e: Extract<Expr, { kind: "call" }>, name: string): string {
     const callee = e.callee as Extract<Expr, { kind: "member" }>;
     const regexT = lower(valueType(e.args[0]!)) as RegexType;
     const s = operand(callee.object, e.args);
     const re = value(e.args[0]!);
-    // A call used as a statement has no type of its own; what it makes is dropped at its end.
-    const type = types.get(e) ?? lower(checked);
+    // A call used as a statement has no type of its own; what it makes, from this instance's
+    // regex, is dropped at its end.
+    const type = types.get(e) ?? regexStringType(name, regexT, regexT.any === true);
     const call = (line: string) => {
       const v = temp();
       emit(`${v} = call ${line}`);

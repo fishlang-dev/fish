@@ -394,3 +394,21 @@ function main() {
   const xs: i64[] = [];
   console.log("a1b2".replace(/(\d)/g, (m) => m + xs[5]));
 }
+// case: regex_statements_in_generic_bodies
+// expect: ok
+function fm(re: RegExp, s: string): void { s.match(re); }
+function fs(re: RegExp, s: string): void { s.split(re); }
+function main() {
+  fm(/(\d)(x)?/, "a1b2");
+  fm(/\d/g, "a1b2");
+  fm(/(?<n>\d)(?<m>\d)?(?<o>z)?/, "a1");
+  fm(/q/g, "zz");
+  fs(/(\d)(x)?/, "a1b2");
+  fs(/\d/g, "a1b2");
+  console.log("ok");
+}
+// case: regex_replace_escaped_dollar
+// expect: $<y>b $ab
+function main() {
+  console.log("ab".replace(/(?<x>a)/, "$$<y>"), "ab".replace(/(?<x>a)/, "$$$<x>"));
+}

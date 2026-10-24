@@ -380,7 +380,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     const name = n.callee.name as string;
     if (literal && ["match", "matchAll", "search"].includes(name)) push("regexStrings");
     if (name === "next" && isNode(n.callee.object) && n.callee.object.kind === "call" && isNode(n.callee.object.callee) && n.callee.object.callee.kind === "member" && n.callee.object.callee.name === "matchAll") push("regexStrings");
-    if (name === "replaceAll" && isNode(first) && first.kind !== "regex") push("replaceAllString");
+    if (name === "replaceAll" && literal) push("replaceAllString");
   }
   const literal = (a: unknown) => isNode(a) && (a.kind === "string" || (a.kind === "template" && (a.exprs as unknown[]).length === 0));
   if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every(literal)) push("dynamicRegex");
