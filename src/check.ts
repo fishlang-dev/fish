@@ -1293,10 +1293,13 @@ export function check(written: Stmt[], library = false): Checked {
           const object = isRef(through) ? through.to : through;
           // A loop borrows what it reads from as long as it runs, so it can't read a part of a
           // value made for the statement, which is gone before the first pass.
+          // A reference reaches a value living elsewhere, wherever it came from.
+          const lent = (x: Expr) => isRef(types.get(x)!);
           let root = s.right;
-          while ((root.kind === "member" && !calls.has(root)) || root.kind === "index" || root.kind === "nonNull") root = root.kind === "nonNull" ? root.expr : root.object;
-          if (root !== s.right && root.kind !== "ident" && root.kind !== "this" && !(root.kind === "member" && calls.has(root)) && !stringLike(object)) {
-            throw new CompileError("this loop would read a part of a value made just for it, which is gone before the loop's first pass; give the value a name first, as in 'const xs = ...;'", s.right.start, s.right.end);
+          // A getter's result is made for the read, so the walk ends at it.
+          while (!lent(root) && ((root.kind === "member" && !calls.has(root)) || root.kind === "index" || root.kind === "nonNull")) root = root.kind === "nonNull" ? root.expr : root.object;
+          if (root !== s.right && !lent(root) && root.kind !== "ident" && root.kind !== "this" && !stringLike(object)) {
+            throw new CompileError("this loop would read from a value made just for it, which is gone before the loop's first pass; give the value a name first, as in 'const xs = ...;'", s.right.start, s.right.end);
           }
           // A string gives each of its code points, as a string of its own.
           if (stringLike(object)) {
