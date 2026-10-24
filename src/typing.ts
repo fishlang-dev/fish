@@ -550,6 +550,45 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
   }
 }
 
+// The part of a type that keeps `JSON.stringify` and `JSON.parse` from taking its values, or
+// undefined when every part is Json: booleans, numbers, strings and literals, and objects,
+// tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
+// `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
+export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
+  if (typeof t === "string") return t === "void" || t === "never" ? t : undefined;
+  if (seen.has(t)) return undefined;
+  seen.add(t);
+  const part = (u: Type) => unjson(u, json, seen);
+  const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
+  switch (t.kind) {
+    case "literal":
+    case "pattern":
+      return undefined;
+    case "ref":
+      return part(t.to);
+    case "recursive":
+      return part(t.of);
+    case "param":
+      return t.concrete ? part(t.concrete) : undefined;
+    case "union":
+      return first(t.members);
+    case "array":
+    case "fixed":
+      return part(t.element);
+    case "object":
+      return t.match ? t : first(t.fields.map((f) => f.type));
+    case "map":
+      return t.set || lower(t.key) !== "string" ? t : part(t.value);
+    case "class":
+      return json(t) ? first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]) : t;
+    case "variant":
+      if (!json(t)) return t;
+      return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
+    default:
+      return t;
+  }
+}
+
 // The type a recursive type stands for, or the type itself.
 export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
 

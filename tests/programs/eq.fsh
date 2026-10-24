@@ -108,9 +108,9 @@ function main() {
   console.log(a === Cmd.Move(1, 2), a === Cmd.Move(2, 1), a === Cmd.Stop);
   console.log(Cmd.Say("hi") === Cmd.Say("hi"));
 }
-// case: eq_derive_json
-// error: 'derive' knows 'Eq' so far; 'Json' isn't one it can derive yet
-@derive(Json)
+// case: eq_derive_unknown
+// error: 'derive' knows 'Eq' and 'Json' so far; 'Hash' isn't one it can derive yet
+@derive(Hash)
 class P { x: i64 = 1; }
 function main() {}
 // case: eq_equals_shape

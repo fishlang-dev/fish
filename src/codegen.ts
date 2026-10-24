@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, equalities, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -9,7 +9,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -128,6 +128,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
   // The function comparing two values of each compound type, made once.
   const comparers = new Map<Type, string>();
+  const jsonWriters = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
@@ -2624,6 +2625,251 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }));
   }
 
+  // `JSON.stringify(x)`: x written into a new writer, whose text becomes the string.
+  function stringifyCall(e: Extract<Expr, { kind: "call" }>): string {
+    const x = e.args[0]!;
+    const v = operand(x, []);
+    const w = temp();
+    emit(`${w} = call ptr @fsh_rt_json_new()`);
+    jsonWrite(w, v, coercions.get(x) ?? types.get(x)!);
+    const result = temp();
+    emit(`${result} = call ptr @fsh_rt_json_done(ptr ${w})`);
+    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    return result;
+  }
+
+  // Writes a value as JSON, through the function made for its type when it has parts.
+  function jsonWrite(w: string, v: string, type: Type) {
+    const t = lower(type);
+    if (typeof t === "string" || t.kind === "literal") return jsonScalar(w, v, t);
+    let name = jsonWriters.get(t);
+    if (!name) {
+      name = `@"fsh.json.${jsonWriters.size}"`;
+      jsonWriters.set(t, name);
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      jsonParts("%w", "%v", t);
+      emit("ret void");
+      out.push(`define internal void ${name}(ptr %w, ${llvm(t)} %v) {`, "entry:", ...allocas, ...body, "}", "");
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    }
+    emit(`call void ${name}(ptr ${w}, ${llvm(t)} ${v})`);
+  }
+
+  function jsonRaw(w: string, s: string) {
+    emit(`call void @fsh_rt_json_raw(ptr ${w}, ptr ${cString(s)}, i64 ${new TextEncoder().encode(s).length})`);
+  }
+
+  function jsonScalar(w: string, v: string, t: Type) {
+    if (typeof t !== "string" && t.kind === "literal") return jsonRaw(w, typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value));
+    if (t === "null") return jsonRaw(w, "null");
+    if (t === "string") return void emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${v})`);
+    if (t === "boolean") {
+      const [yes, no, done] = [label(), label(), label()];
+      emit(`br i1 ${v}, label %${yes}, label %${no}`);
+      startBlock(yes);
+      jsonRaw(w, "true");
+      emit(`br label %${done}`);
+      startBlock(no);
+      jsonRaw(w, "false");
+      emit(`br label %${done}`);
+      startBlock(done);
+      return;
+    }
+    if (isFloat(t)) {
+      let wide = v;
+      if (t === "f32") {
+        wide = temp();
+        emit(`${wide} = fpext float ${v} to double`);
+      }
+      return void emit(`call void @fsh_rt_json_f64(ptr ${w}, double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
+    }
+    const { bits, signed } = INTEGERS[t as Integer];
+    let wide = v;
+    if (bits < 64) {
+      wide = temp();
+      emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+    }
+    emit(`call void @fsh_rt_json_${signed ? "i64" : "u64"}(ptr ${w}, i64 ${wide})`);
+  }
+
+  // The parts of a value with them: an array's elements, an object's fields by name, an
+  // instance's fields as declared, a base's first, a union's member, an enum's member tagged by
+  // its name as serde writes it.
+  function jsonParts(w: string, v: string, t: Exclude<Type, string>) {
+    if (t.kind === "ref" || t.kind === "recursive") {
+      const to = t.kind === "ref" ? t.to : t.of;
+      const held = temp();
+      emit(`${held} = load ${llvm(lower(to))}, ptr ${v}`);
+      return jsonWrite(w, held, to);
+    }
+    if (t.kind === "array" || t.kind === "fixed") return jsonElements(w, v, t);
+    if (t.kind === "map") return jsonEntries(w, v, t);
+    if (t.kind === "union") return jsonMember(w, v, t);
+    if (t.kind === "variant") {
+      if (t.fields.length === 0) return jsonRaw(w, JSON.stringify(t.member));
+      jsonRaw(w, `{${JSON.stringify(t.member)}:`);
+      if (t.fields.length > 1) jsonRaw(w, "[");
+      t.fields.forEach((f, i) => {
+        if (i > 0) jsonRaw(w, ",");
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+        jsonWrite(w, x, f.type);
+      });
+      jsonRaw(w, t.fields.length > 1 ? "]}" : "}");
+      return;
+    }
+    if (t.kind === "class") return jsonObject(w, v, t, jsonFields(t));
+    const object = t as ObjectType;
+    if (isTuple(object)) {
+      const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      jsonRaw(w, "[");
+      order.forEach(({ f, i }, n) => {
+        if (n > 0) jsonRaw(w, ",");
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+        jsonWrite(w, x, f.type);
+      });
+      jsonRaw(w, "]");
+      return;
+    }
+    jsonObject(w, v, t, object.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] })));
+  }
+
+  // A class's fields JSON writes, a base's first, each with where it sits in the instance.
+  function jsonFields(c: ClassType): { name: string; type: Type; path: number[] }[] {
+    return c.base ? [...jsonFields(c.base).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
+  }
+
+  function ownJsonFields(c: ClassType, offset: number) {
+    return c.fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i] }]));
+  }
+
+  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: number[] }[]) {
+    jsonRaw(w, "{");
+    fields.forEach((f, n) => {
+      jsonRaw(w, `${n > 0 ? "," : ""}${JSON.stringify(f.name)}:`);
+      const x = temp();
+      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
+      jsonWrite(w, x, f.type);
+    });
+    jsonRaw(w, "}");
+  }
+
+  function jsonElements(w: string, v: string, t: ArrayType | FixedType) {
+    const element = llvm(lower(t.element));
+    const [length, data] = [temp(), temp()];
+    if (t.kind === "array") {
+      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+    } else {
+      const slot = alloca(llvm(t));
+      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
+      emit(`${length} = add i64 0, ${t.size}`);
+      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+    }
+    jsonRaw(w, "[");
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, loop, comma, item, done] = [label(), label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    startBlock(loop);
+    const first = temp();
+    emit(`${first} = icmp eq i64 ${i}, 0`);
+    emit(`br i1 ${first}, label %${item}, label %${comma}`);
+    startBlock(comma);
+    jsonRaw(w, ",");
+    emit(`br label %${item}`);
+    startBlock(item);
+    const [at, x, next] = [temp(), temp(), temp()];
+    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    emit(`${x} = load ${element}, ptr ${at}`);
+    jsonWrite(w, x, t.element);
+    emit(`${next} = add i64 ${i}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    jsonRaw(w, "]");
+  }
+
+  // A string-keyed Map's live entries, in the order they went in, as an object's fields.
+  function jsonEntries(w: string, map: string, t: MapType) {
+    const entry = entryType(t);
+    jsonRaw(w, "{");
+    const [counter, wrote] = [alloca("i64"), alloca("i1")];
+    emit(`store i64 0, ptr ${counter}`);
+    emit(`store i1 false, ptr ${wrote}`);
+    const [test, live, loop, comma, item, next, end] = [label(), label(), label(), label(), label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [i, used, more] = [temp(), temp(), temp()];
+    emit(`${i} = load i64, ptr ${counter}`);
+    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    emit(`br i1 ${more}, label %${live}, label %${end}`);
+    startBlock(live);
+    const [at, state, alive] = [temp(), temp(), temp()];
+    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${state} = load i64, ptr ${at}`);
+    emit(`${alive} = icmp eq i64 ${state}, 1`);
+    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    startBlock(loop);
+    const after = temp();
+    emit(`${after} = load i1, ptr ${wrote}`);
+    emit(`br i1 ${after}, label %${comma}, label %${item}`);
+    startBlock(comma);
+    jsonRaw(w, ",");
+    emit(`br label %${item}`);
+    startBlock(item);
+    emit(`store i1 true, ptr ${wrote}`);
+    const [keyAt, key, valueAt, x] = [temp(), temp(), temp(), temp()];
+    emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    emit(`${key} = load ptr, ptr ${keyAt}`);
+    emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${key})`);
+    jsonRaw(w, ":");
+    emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+    emit(`${x} = load ${llvm(lower(t.value))}, ptr ${valueAt}`);
+    jsonWrite(w, x, t.value);
+    emit(`br label %${next}`);
+    startBlock(next);
+    const step = temp();
+    emit(`${step} = add i64 ${i}, 1`);
+    emit(`store i64 ${step}, ptr ${counter}`);
+    emit(`br label %${test}`);
+    startBlock(end);
+    jsonRaw(w, "}");
+  }
+
+  // A union's value, written as the member its tag says it holds.
+  function jsonMember(w: string, v: string, t: UnionType) {
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
+    const done = label();
+    const cases = t.members.map(() => label());
+    emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+    t.members.forEach((m, i) => {
+      startBlock(cases[i]!);
+      const member = lower(m);
+      if (typeof member === "string" && (member === "null" || member === "never")) jsonRaw(w, "null");
+      else if (typeof member !== "string" && member.kind === "literal") jsonScalar(w, "", member);
+      else {
+        const slot = alloca(llvm(t));
+        emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
+        const [at, x] = [temp(), temp()];
+        emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
+        emit(`${x} = load ${llvm(member)}, ptr ${at}`);
+        jsonWrite(w, x, member);
+      }
+      emit(`br label %${done}`);
+    });
+    startBlock(done);
+  }
+
   // In an array's drop function: drops each element, then frees the buffer.
   // A recursive type's block, or a copy of it holding copies of what it owns. A block moved out
   // of its place left it empty, with nothing to drop or copy.
@@ -3745,6 +3991,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
+      if (jsonCalls.get(e) === "stringify") return stringifyCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);

@@ -1356,6 +1356,102 @@ fsh_str *fsh_rt_str_from_f32(float x) {
   fsh_format(x, 1, text);
   return fsh_str_of(text, strlen(text));
 }
+
+// JSON text being written, in a buffer that doubles as it fills.
+typedef struct fsh_json_out {
+  char *bytes;
+  int64_t length;
+  int64_t room;
+} fsh_json_out;
+
+fsh_json_out *fsh_rt_json_new(void) {
+  fsh_json_out *w = fsh_rt_alloc(sizeof(fsh_json_out));
+  w->room = 64;
+  w->length = 0;
+  w->bytes = fsh_rt_alloc(w->room);
+  return w;
+}
+
+void fsh_rt_json_raw(fsh_json_out *w, const char *p, int64_t n) {
+  if (w->length + n > w->room) {
+    int64_t room = w->room * 2;
+    while (room < w->length + n) room *= 2;
+    char *bytes = fsh_rt_alloc(room);
+    memcpy(bytes, w->bytes, w->length);
+    fsh_rt_free(w->bytes);
+    w->bytes = bytes;
+    w->room = room;
+  }
+  memcpy(w->bytes + w->length, p, n);
+  w->length += n;
+}
+
+void fsh_rt_json_i64(fsh_json_out *w, int64_t v) {
+  char text[24];
+  fsh_rt_json_raw(w, text, snprintf(text, sizeof text, "%lld", (long long)v));
+}
+
+void fsh_rt_json_u64(fsh_json_out *w, uint64_t v) {
+  char text[24];
+  fsh_rt_json_raw(w, text, snprintf(text, sizeof text, "%llu", (unsigned long long)v));
+}
+
+// JSON has no NaN or infinities, which JavaScript writes as null.
+void fsh_rt_json_f64(fsh_json_out *w, double x, int32_t single) {
+  if (isnan(x) || isinf(x)) {
+    fsh_rt_json_raw(w, "null", 4);
+    return;
+  }
+  char text[32];
+  fsh_format(x, single, text);
+  fsh_rt_json_raw(w, text, strlen(text));
+}
+
+// A string as JSON.stringify writes it: quotes, backslashes and control characters escaped, and
+// a lone surrogate as its escape of four hex digits, so the text is well-formed UTF-8.
+void fsh_rt_json_string(fsh_json_out *w, fsh_str *s) {
+  const unsigned char *p = (const unsigned char *)s->bytes;
+  int64_t n = s->length, from = 0, i = 0;
+  fsh_rt_json_raw(w, "\"", 1);
+  while (i < n) {
+    unsigned char c = p[i];
+    char hex[8];
+    const char *escape = NULL;
+    int64_t width = 1;
+    if (c == '"') escape = "\\\"";
+    else if (c == '\\') escape = "\\\\";
+    else if (c == '\b') escape = "\\b";
+    else if (c == '\f') escape = "\\f";
+    else if (c == '\n') escape = "\\n";
+    else if (c == '\r') escape = "\\r";
+    else if (c == '\t') escape = "\\t";
+    else if (c < 0x20) {
+      snprintf(hex, sizeof hex, "\\" "u%04x", c);
+      escape = hex;
+    } else if (i + 2 < n && (fsh_high_at(p + i) || fsh_low_at(p + i))) {
+      snprintf(hex, sizeof hex, "\\" "u%04x", fsh_three(p + i));
+      escape = hex;
+      width = 3;
+    }
+    if (!escape) {
+      i++;
+      continue;
+    }
+    fsh_rt_json_raw(w, (const char *)p + from, i - from);
+    fsh_rt_json_raw(w, escape, strlen(escape));
+    i += width;
+    from = i;
+  }
+  fsh_rt_json_raw(w, (const char *)p + from, n - from);
+  fsh_rt_json_raw(w, "\"", 1);
+}
+
+fsh_str *fsh_rt_json_done(fsh_json_out *w) {
+  fsh_str *s = fsh_str_of(w->bytes, w->length);
+  fsh_rt_free(w->bytes);
+  fsh_rt_free(w);
+  return s;
+}
 ` + CASEMAP + String.raw`
 // A code point found in a sorted table of pairs, by its first column.
 static const uint32_t *fsh_lookup(const uint32_t (*table)[2], int64_t n, uint32_t cp) {

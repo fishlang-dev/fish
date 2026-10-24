@@ -7,7 +7,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, unjson, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -161,6 +161,8 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The `JSON.stringify` and `JSON.parse` calls, by which each is.
+export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
 // The string methods that may take a regex, and the calls that did, by method.
@@ -802,6 +804,9 @@ export function expressions(ctx: Context) {
       if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return mathCall(e, callee.name);
     }
+    const json = jsonOf(callee);
+    if (json && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError("'JSON' is always there, so its functions are called without '?.'", e.start, e.end);
+    if (json === "stringify") return stringify(e);
     const parser = parserOf(callee);
     if (parser && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError(`'${parser}' is always there, so it is called without '?.'`, e.start, e.end);
     if (parser) return parse(e, parser);
@@ -1589,6 +1594,41 @@ export function expressions(ctx: Context) {
   }
 
   // The global `Math`, unless a name of the program's hides it.
+  // `JSON.stringify` and `JSON.parse`, unless a name of the program's hides `JSON`.
+  function jsonOf(callee: Expr): "stringify" | "parse" | undefined {
+    if (callee.kind !== "member" || callee.object.kind !== "ident" || callee.object.name !== "JSON") return undefined;
+    if (lookup("JSON") || classes.has("JSON") || byName.has("JSON") || byName.has("const JSON") || enums.has("JSON")) return undefined;
+    return callee.name === "stringify" || callee.name === "parse" ? callee.name : undefined;
+  }
+
+  // `JSON.stringify(x)`: x written as JSON text, which its type decides.
+  function stringify(e: Call): { type: Type; what: string } {
+    if (e.typeArgs.length > 0) throw new CompileError("'JSON.stringify' takes no type argument; the value's type decides how it is written", e.start, e.end);
+    if (e.args.length > 1) throw unsupported("'JSON.stringify' replacer and indent arguments", e.args[1]!);
+    const x = e.args[0];
+    if (!x) throw new CompileError("'JSON.stringify' takes the value to write", e.start, e.end);
+    jsonable(read(x), x);
+    jsonCalls.set(e, "stringify");
+    return { type: "string", what: "'JSON.stringify'" };
+  }
+
+  // Refuses a type with a part JSON can't hold, saying why.
+  function jsonable(t: Type, at: Span) {
+    const part = unjson(t, derivesJson);
+    if (!part) return;
+    const why = typeof part === "string" ? "it has no JSON form"
+      : part.kind === "class" ? `a class is written as JSON when it has '@derive(Json)', which '${part.name}' doesn't`
+      : part.kind === "variant" ? `an enum holding values is written as JSON when it has '@derive(Json)', which '${part.enum}' doesn't`
+      : part.kind === "map" ? (part.set ? "a Set has no JSON form; write an array of its members" : "only a Map with string keys has a JSON form, an object")
+      : "it has no JSON form";
+    throw new CompileError(`values of type '${show(part)}' can't be written as JSON: ${why}`, at.start, at.end);
+  }
+
+  function derivesJson(t: ClassType | VariantType): boolean {
+    if (t.kind === "variant") return [...enums.values()].some((e) => e.data?.name === t.enum && e.data.json);
+    return classOf(t).node.derives?.includes("Json") ?? false;
+  }
+
   function isMath(e: Expr): boolean {
     return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math") && !byName.has("const Math") && !enums.has("Math");
   }

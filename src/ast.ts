@@ -45,7 +45,7 @@ type AstExpr =
   | { start: i64; end: i64; kind: "import"; args: AstExpr[] }
   | { start: i64; end: i64; kind: "nonNull"; expr: AstExpr }
   | { start: i64; end: i64; kind: "throw"; value: AstExpr }
-  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; kind: "class" }
+  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[]; kind: "class" }
   | { start: i64; end: i64; kind: "privateName"; name: string }
   | { start: i64; end: i64; kind: "unary"; op: AstUnaryOp; operand: AstExpr }
   | { start: i64; end: i64; kind: "update"; op: "++" | "--"; prefix: boolean; operand: AstExpr }
@@ -82,7 +82,7 @@ type AstStmt =
   | { start: i64; end: i64; kind: "block"; body: AstStmt[] }
   | { start: i64; end: i64; kind: "empty" }
   | { start: i64; end: i64; kind: "debugger" }
-  | { start: i64; end: i64; kind: "enum"; name: string; const: boolean; typeParams: AstTypeParam[]; members: AstEnumMember[]; decorators?: AstExpr[] }
+  | { start: i64; end: i64; kind: "enum"; name: string; const: boolean; typeParams: AstTypeParam[]; members: AstEnumMember[]; decorators?: AstExpr[]; derives?: string[] }
   | { start: i64; end: i64; kind: "namespace"; name: string; quoted: boolean; global: boolean; body: AstStmt[] | null }
   | { start: i64; end: i64; kind: "declare"; body: AstStmt }
   | { start: i64; end: i64; kind: "comptime"; body: AstStmt[] }
@@ -98,7 +98,7 @@ type AstStmt =
   | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[] }
   | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[] }
   | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[] }
-  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; kind: "class" };
+  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[]; kind: "class" };
 type AstTupleElement =
   | { start: i64; end: i64; name: string | null; optional: boolean; rest: boolean; type: AstType };
 type AstPropertyName =
@@ -121,7 +121,7 @@ type AstObjectProp =
 type AstModifier =
   "public" | "private" | "protected" | "static" | "readonly" | "abstract" | "override" | "declare" | "accessor" | "async";
 type AstClassNode =
-  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[] };
+  | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[] };
 type AstClassMember =
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "field"; name: AstPropertyName; optional: boolean; definite: boolean; type: AstType | null; init: AstExpr | null }
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "method"; name: AstPropertyName; optional: boolean; generator: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null }

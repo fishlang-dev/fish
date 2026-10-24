@@ -116,7 +116,8 @@ export type Stmt = Span & (
   | { kind: "block"; body: Stmt[] }
   | { kind: "empty" }
   | { kind: "debugger" }
-  | { kind: "enum"; name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; decorators?: Expr[] }
+  // `derives`: what `@derive` gave it, which `===` and `JSON` read.
+  | { kind: "enum"; name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; decorators?: Expr[]; derives?: string[] }
   // `name` is dotted (`A.B`), or the module string in `declare module "m"`, where `quoted` is
   // set; `global` marks `declare global`. `body` is undefined for `declare module "m";`.
   | { kind: "namespace"; name: string; quoted: boolean; global: boolean; body: Stmt[] | undefined }
@@ -172,6 +173,8 @@ export type ClassNode = Span & {
   name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
   // An instantiation expression when written with type arguments, as in `extends Base<T>`.
   extends: Expr | undefined; implements: TypeNode[]; members: ClassMember[];
+  // What `@derive` gave it, which `JSON` reads.
+  derives?: string[];
 };
 
 // A private name is a string starting with "#". A missing body is an overload signature.

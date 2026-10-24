@@ -114,19 +114,20 @@ function builtin(d: Expr, macros: Map<string, Func>): boolean {
   return callee.kind === "ident" && callee.name === "derive" && !macros.has("derive");
 }
 
-// `@derive(Eq)`: on a class, the `equals` comparing every field that `===` calls, unless the
-// class has one; on a data enum, a mark letting `===` compare its values.
+// `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
+// with Eq, the `equals` comparing every field that `===` calls, unless the class has one.
 function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
   const at = pending.decorator;
   if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
   const traits = at.kind === "call" ? at.args : [];
   if (traits.length === 0) throw new CompileError("'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
-  for (const t of traits) {
-    if (t.kind !== "ident" || t.name !== "Eq") throw new CompileError(`'derive' knows 'Eq' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
-  }
+  const names = traits.map((t) => {
+    if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError(`'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
+    return t.name;
+  });
   const decl = { ...d, decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
-  if (decl.kind === "enum") Object.assign(decl, { derives: ["Eq"] });
-  if (decl.kind === "class" && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
+  if (decl.kind === "class" || decl.kind === "enum") decl.derives = [...(decl.derives ?? []), ...names];
+  if (decl.kind === "class" && names.includes("Eq") && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
     const fields = decl.members.flatMap((m) => {
       if (m.kind === "field" && typeof m.name === "string" && !m.modifiers.includes("static")) return [m.name];
       if (m.kind === "constructor") return m.params.flatMap((p) => (p.modifiers.length > 0 && p.pattern.kind === "ident" ? [p.pattern.name] : []));
