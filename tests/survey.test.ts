@@ -48,7 +48,7 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, regex: 1, forIn: 1, decorators: 1, genericMethods: 1,
-    classForms: 1, math: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1,
+    classForms: 1, process: 1, fetch: 1, timers: 1, stderr: 1, json: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
@@ -64,7 +64,8 @@ test("forms that look alike are told apart", () => {
   expect(counts("class A { #x = 1; get #g() { return 1; } m() { return this.#x; } }\n")).toEqual({ classForms: 3 });
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
   expect(counts("function f(a?: string) { return () => class {}; }\n")).toEqual({ A2: 1 });
-  expect(counts("const a = Number.parseInt(s);\nconst f = Function(\"x\");\n")).toEqual({ math: 1, R1: 1 });
+  expect(counts("const a = Number.parseInt(s);\nconst f = Function(\"x\");\n")).toEqual({ R1: 1 });
+  expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({ math: 1 });
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
