@@ -97,7 +97,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
   }
   // The data-carrying enums being made, to catch one that holds itself.
-  const making = new Set<DataEnum>();
+  const making = new Map<DataEnum, string>();
+  // Where a data-carrying enum instance holds itself, by enum and type arguments.
+  const enumBlocks = new Map<string, RecursiveType>();
   // The instance of a generic interface for other type arguments.
   const interfaceInstance = (t: InterfaceType, args: Type[]) => interfaceOf(interfaces.get(t.generic!.name)!, args);
   lowersRecursive((t, args) => {
@@ -143,8 +145,15 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const key = args.map(keyOf).join(",");
     const made = data.instances.get(key);
     if (made) return made;
-    if (making.has(data)) throw new CompileError(`enum '${data.name}' holds itself, which would make it infinitely large; this isn't supported yet`, at.start, at.end);
-    making.add(data);
+    const shown = args.length > 0 ? `${data.name}<${args.map(show).join(", ")}>` : data.name;
+    // Met again while its members are made, it holds itself there, in a block.
+    if (making.get(data) === key) {
+      let back = enumBlocks.get(`${data.id} ${key}`);
+      if (!back) enumBlocks.set(`${data.id} ${key}`, back = recursiveType(shown, args));
+      return { type: back, variants: new Map() };
+    }
+    if (making.has(data)) throw new CompileError(`enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
+    making.set(data, key);
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
       const variants = new Map(data.members.map((m) => {
@@ -159,9 +168,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         }));
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
       }));
-      const shown = args.length > 0 ? `${data.name}<${args.map(show).join(", ")}>` : data.name;
       const type = unionType([...variants.values()], shown);
       for (const v of variants.values()) v.of = type;
+      const back = enumBlocks.get(`${data.id} ${key}`);
+      if (back) back.of = type;
       const instance = { type, variants };
       data.instances.set(key, instance);
       return instance;

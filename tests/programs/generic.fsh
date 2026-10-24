@@ -843,8 +843,10 @@ class Node<T> {
   constructor(public value: T, public next: Node<T>) {}
 }
 
-function main() {}
-// error: contains itself, so it would have infinite size
+function main() {
+  console.log("no instance of it can be built")
+}
+// expect: no instance of it can be built
 // case: generic_class_static
 class Box<T> {
   static make(): i64 {

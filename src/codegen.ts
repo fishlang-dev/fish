@@ -3410,6 +3410,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       else if (!fresh(e)) v = copied(v, type);
       return box(v, type, to);
     }
+    // A value read out of a recursive type's block, when it is given up, leaves the block to be
+    // freed.
+    if (to && unboxes(types.get(e)!, to)) {
+      const type = types.get(e)!;
+      const v = known.get(e) ?? evaluate(e);
+      const out = convert(v, type, to);
+      if (fresh(e)) freeBlocks(v, type);
+      else if (current.consumes.has(e) && lendable(e)) {
+        freeBlocks(v, type);
+        emit(`store ${llvm(placeType(e))} zeroinitializer, ptr ${address(e)}`);
+      } else return copied(out, to);
+      return out;
+    }
     // A value moving into a recursive type's block is taken, or copied, first.
     if (to && boxes(types.get(e)!, to)) {
       const type = types.get(e)!;
@@ -3443,6 +3456,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`store ${llvm(place)} zeroinitializer, ptr ${at}`);
   }
 
+  // Where a place's value lives: in the place, or in the block a recursive type's place holds.
+  function blockOf(at: string, place: Type): string {
+    if (typeof place === "string" || place.kind !== "recursive") return at;
+    const block = temp();
+    emit(`${block} = load ptr, ptr ${at}`);
+    return block;
+  }
+
   // The type a place holds its value as: a field's or an element's own, or the variable's.
   function placeType(e: Expr): Type {
     if (e.kind === "member") return stored(e);
@@ -3469,6 +3490,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`br label %${end}`);
     });
     startBlock(end);
+  }
+
+  // Whether converting a value reads some of it out of a recursive type's block.
+  function unboxes(from: Type, to: Type): boolean {
+    const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+    return from !== to && members(from).some((m) => typeof m !== "string" && m.kind === "recursive" && !members(to).includes(m));
   }
 
   // Whether converting a value moves some of it into a recursive type's block.
@@ -4628,7 +4655,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
-    if (lendable(object)) return address(object);
+    if (lendable(object)) return blockOf(address(object), stored(object));
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
     const read = value(object);
@@ -4658,6 +4685,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
       return boxed;
     }
+    // A temporary taken out of a recursive type's block leaves the block to be freed.
+    if (consume && to && unboxes(type, to) && fresh(e) && !known.has(e)) {
+      const out = convert(result, type, to);
+      freeBlocks(result, type);
+      return out;
+    }
     if (!consume && fresh(e) && !known.has(e)) pending.push({ v: result, type });
     return to ? convert(result, type, to) : result;
   }
@@ -4670,7 +4703,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A pointer to a value lent to a reference: where a place holding exactly that type lives,
   // or else a slot holding a copy converted to it.
   function borrowed(e: Expr, to: Type): string {
-    if (lendable(e) && stored(e) === to) return address(e);
+    if (lendable(e) && (stored(e) === to || unfold(stored(e)) === to)) return blockOf(address(e), stored(e));
     const slot = alloca(llvm(to));
     const made = evaluate(e);
     if (fresh(e)) pending.push({ v: made, type: types.get(e)! });

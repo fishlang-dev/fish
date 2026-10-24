@@ -33,8 +33,8 @@ function main() {
 }
 // error: argument of type '{ x: i64 }' is not assignable to parameter of type 'Point'
 // case: class_generic_contains_itself
-// error: class 'Node<T>' contains itself, so it would have infinite size
-// A generic class holding itself inline is refused like a plain one, not left to overflow.
+// expect: true
+// A generic class holding itself keeps itself in a block, as a plain one does.
 class Node<T> { v: T; next: Node<T> | null; constructor(v: T) { this.v = v; this.next = null; } }
 function main() { const n = new Node<i64>(1); console.log(n.next === null); }
 // case: class_getter_assign
@@ -261,8 +261,10 @@ class Node {
   constructor(public next: Node) {}
 }
 
-function main() {}
-// error: class 'Node' contains itself, so it would have infinite size
+function main() {
+  console.log("no instance of it can be built")
+}
+// expect: no instance of it can be built
 // case: class_return_early
 class Point {
   x: i64

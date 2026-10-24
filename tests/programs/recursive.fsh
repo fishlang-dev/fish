@@ -93,3 +93,90 @@ function main() {
     if (inner !== null) console.log(a.n, b.m, inner.n);
   }
 }
+// case: recursive_class
+// expect: 6
+// expect: 11
+// expect: 2 3
+// expect: y 2
+class Node {
+  value: i64;
+  next: Node | null;
+  constructor(value: i64, next: Node | null) {
+    this.value = value;
+    this.next = next;
+  }
+  sum(): i64 {
+    const next = this.next.clone();
+    if (next === null) return this.value;
+    return this.value + next.sum();
+  }
+  replaceNext(this: Mut<this>, v: i64) {
+    this.next = new Node(v, null);
+  }
+}
+class A { n: i64; b: B | null; constructor(n: i64, b: B | null) { this.n = n; this.b = b; } }
+class B { m: i64; a: A | null; constructor(m: i64, a: A | null) { this.m = m; this.a = a; } }
+class Chain<T> {
+  head: T;
+  tail: Chain<T> | null;
+  constructor(head: T, tail: Chain<T> | null) {
+    this.head = head;
+    this.tail = tail;
+  }
+  size(): i64 {
+    const tail = this.tail.clone();
+    return tail === null ? 1 : 1 + tail.size();
+  }
+}
+function main() {
+  let list = new Node(1, new Node(2, new Node(3, null)));
+  console.log(list.sum());
+  list.replaceNext(10);
+  console.log(list.sum());
+  const a = new A(1, new B(2, new A(3, null)));
+  const b = a.b;
+  if (b !== null) {
+    const inner = b.a;
+    if (inner !== null) console.log(b.m, inner.n);
+  }
+  const cells = new Chain<string>("x", new Chain<string>("y", null));
+  const size = cells.size();
+  const tail = cells.tail;
+  if (tail !== null) console.log(tail.head, size);
+}
+// case: recursive_enum
+// expect: -4
+// expect: 10 3
+// expect: 7
+enum Expr { Num(i64), Add(Expr, Expr), Neg(Expr) }
+function ev(e: Ref<Expr>): i64 {
+  return match (e) {
+    case Expr.Num(n) => n,
+    case Expr.Add(a, b) => ev(a) + ev(b),
+    case Expr.Neg(x) => -ev(x),
+  };
+}
+function make(n: i64): Expr {
+  return n === 0 ? Expr.Num(0) : Expr.Add(Expr.Num(n), make(n - 1));
+}
+function total(e: Expr): i64 {
+  return match (e) {
+    case Expr.Num(n) => n,
+    case Expr.Add(a, b) => total(a.clone()) + total(b.clone()),
+    case Expr.Neg(x) => -total(x.clone()),
+  };
+}
+function left(n: i64): i64 {
+  return match (make(n)) {
+    case Expr.Num(v) => v,
+    case Expr.Add(a, _) => total(a),
+    case Expr.Neg(x) => total(x),
+  };
+}
+function main() {
+  console.log(ev(Expr.Add(Expr.Num(1), Expr.Neg(Expr.Add(Expr.Num(2), Expr.Num(3))))));
+  console.log(total(make(4)), left(3));
+  let e = make(2);
+  e = Expr.Num(7);
+  console.log(total(e));
+}

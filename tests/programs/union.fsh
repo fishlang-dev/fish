@@ -230,8 +230,12 @@ class Node {
   constructor(public value: i64, public next: Node | "none") {}
 }
 
-function main() {}
-// error: class 'Node' contains itself, so it would have infinite size
+function main() {
+  const n = new Node(1, new Node(2, "none"))
+  const next = n.next
+  if (next !== "none") console.log(n.value, next.value, next.next === "none")
+}
+// expect: 1 2 true
 // case: union_type
 type Dir = "up" | "down"
 type Point = { x: i64; y: i64 }

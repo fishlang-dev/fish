@@ -5,7 +5,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { fits, holdsPattern, optionalField, show, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { elementsOf, fits, holdsPattern, objectType, optionalField, recursiveType, show, tupleType, unionType, widenEnum, type ClassType, type Type } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -41,9 +41,6 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   function settle(c: ClassInfo) {
     layout(c);
     implemented(c);
-    if (contains(c.type, c.type, new Set())) {
-      throw new CompileError(`class '${c.type.name}' contains itself, so it would have infinite size`, c.constructor.start, c.constructor.end);
-    }
     bodiesOf(c).forEach((f) => checkBody(definition(f)));
   }
 
@@ -92,6 +89,8 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     const patterned = c.type.fields.findIndex((f) => holdsPattern(f.type));
     if (patterned >= 0 && !c.type.generic?.args.some(holdsPattern)) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
     laying.delete(c);
+    // Before any body reads its fields, a class that contains itself holds itself in a block.
+    if (contains(c.type, c.type, new Set())) holdItself(c.type);
     return true;
   }
 
@@ -132,6 +131,27 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     return c.wraps;
   }
 
+  // A class that contains itself, directly or through other classes, holds itself behind a
+  // pointer wherever it appears inside the classes it contains, as an alias that holds itself
+  // does.
+  function holdItself(c: ClassType) {
+    const back = recursiveType(show(c), c.generic?.args ?? []);
+    back.of = c;
+    const holders = new Set<ClassType>();
+    const reach = (t: Type) => {
+      if (typeof t === "string") return;
+      if (t.kind === "class") {
+        if (holders.has(t)) return;
+        holders.add(t);
+        t.fields.forEach((f) => reach(f.type));
+        if (t.base) reach(t.base);
+      } else if (t.kind === "union") t.members.forEach(reach);
+      else if (t.kind === "object") t.fields.forEach((f) => reach(f.type));
+    };
+    reach(c);
+    for (const h of holders) for (const f of h.fields) f.type = swapped(f.type, c, back);
+  }
+
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
@@ -144,4 +164,13 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     layout(c);
     return c;
   }
+}
+
+// A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
+function swapped(t: Type, from: ClassType, to: Type): Type {
+  if (t === from) return to;
+  if (typeof t === "string") return t;
+  if (t.kind === "union") return unionType(t.members.map((m) => swapped(m, from, to)), t.name);
+  if (t.kind === "object" && !t.match) return t.tuple ? tupleType(elementsOf(t).map((e) => swapped(e, from, to))) : objectType(t.fields.map((f) => ({ ...f, type: swapped(f.type, from, to) })));
+  return t;
 }

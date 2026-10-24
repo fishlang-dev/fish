@@ -2274,7 +2274,8 @@ export function expressions(ctx: Context) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
     clonable(receiver, e);
-    return { type: receiver, what: "'clone'" };
+    // A clone of what a recursive type's block holds is a value of its own.
+    return { type: unfold(receiver), what: "'clone'" };
   }
 
   // Refuses a value that can't be cloned, for `clone()` and for the array methods that give
@@ -3122,6 +3123,13 @@ export function expressions(ctx: Context) {
     if (e.kind === "unsafe") {
       coerce(e.expr, type, to, message);
       if (type !== to) types.set(e, coercions.has(e.expr) ? coercions.get(e.expr)! : types.get(e.expr)!);
+      return;
+    }
+    // A recursive type's value meeting another type is the type it stands for, read out of
+    // its block.
+    if (typeof type !== "string" && type.kind === "recursive" && type !== to && !(typeof to !== "string" && to.kind === "union" && to.members.includes(type))) {
+      coerce(e, type.of, to, message);
+      if (!coercions.has(e)) coercions.set(e, type.of);
       return;
     }
     // A value meeting a recursive type meets the type it stands for, then moves into a block.

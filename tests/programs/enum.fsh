@@ -79,8 +79,17 @@ enum List {
   Nil,
 }
 
-function main() {}
-// error: enum 'List' holds itself, which would make it infinitely large; this isn't supported yet
+function sum(l: Ref<List>): i64 {
+  return match (l) {
+    case List.Cons(v, rest) => v + sum(rest),
+    case List.Nil => 0,
+  }
+}
+
+function main() {
+  console.log(sum(List.Cons(1, List.Cons(2, List.Nil))))
+}
+// expect: 3
 // case: enum_data_uncalled
 enum E {
   A(i64),
