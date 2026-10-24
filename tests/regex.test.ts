@@ -45,10 +45,10 @@ test("regex syntax is accepted and refused as JavaScript does", () => {
 
 // Patterns put together from atoms and quantifiers, each run against a short string by a Fish
 // program and by the engine running the compiler, which must agree on every result.
-const ATOMS = ["a", "b", "c", ".", "[ab]", "[^a]", "\\d", "\\w", "\\s", "\\b", "\\B", "^", "$", "(a)", "(b|c)", "(?:ab)", "(a|)", "(?<n>a)", "\\1", "\\k<n>", "(?=a)", "(?!b)", "(?<=a)", "(?<!b)", "x", "\\n", "[a-c]", "(a*)", "(?:a|b)", "A", "😀", "[😀a]", "ß", "K", "k", "ſ", "s", "(?i:a)"];
+const ATOMS = ["\\p{L}", "\\p{Lu}", "[\\p{L}--[a-z]]", "[\\q{ab|c}x]", "σ", "ς", "\\uD83D", "[😀-😂]", "a", "b", "c", ".", "[ab]", "[^a]", "\\d", "\\w", "\\s", "\\b", "\\B", "^", "$", "(a)", "(b|c)", "(?:ab)", "(a|)", "(?<n>a)", "\\1", "\\k<n>", "(?=a)", "(?!b)", "(?<=a)", "(?<!b)", "x", "\\n", "[a-c]", "(a*)", "(?:a|b)", "A", "😀", "[😀a]", "ß", "K", "k", "ſ", "s", "(?i:a)"];
 const QUANTIFIERS = ["", "", "", "*", "+", "?", "{2}", "{1,2}", "{0,}", "*?", "+?", "??"];
-const TEXT = [..."abc 1\nAaBb😀xßSsKkſ_"];
-const MATCH_FLAGS = ["", "i", "m", "s", "u", "iu", "im", "su"];
+const TEXT = [..."abc 1\nAaBb😀😂xßSsKkſ_σΣςαΩ"];
+const MATCH_FLAGS = ["", "i", "m", "s", "u", "iu", "im", "su", "v", "iv"];
 
 function corpus(count: number): { p: string; f: string; s: string }[] {
   let seed = 3;
@@ -81,7 +81,7 @@ test("regex test agrees with JavaScript", async () => {
   writeFileSync(file, `function main() {\n${cases.map((c) => `  console.log(/${c.p}/${c.f}.test(${JSON.stringify(c.s)}));`).join("\n")}\n}\n`);
   await buildAsync(file, join(dir, "corpus"), false, "unwind", []);
   const run = Bun.spawnSync([join(dir, "corpus")], { env: { ...process.env, FISH_LEAKS: "1" } });
-  const got = run.stdout.toString().trim().split("\n");
+  const got = run.stdout.toString().replace(/\n$/, "").split("\n");
   const wrong = cases.flatMap((c, i) => (String(new RegExp(c.p, c.f).test(c.s)) === got[i] ? [] : [`/${c.p}/${c.f}.test(${JSON.stringify(c.s)}) gave ${got[i]}`]));
   expect(wrong).toEqual([]);
   expect(run.stderr.toString()).not.toContain("fish: leaked");
@@ -98,7 +98,7 @@ test("regex exec agrees with JavaScript", async () => {
   writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
   await buildAsync(file, join(dir, "exec"), false, "unwind", []);
   const run = Bun.spawnSync([join(dir, "exec")], { env: { ...process.env, FISH_LEAKS: "1" } });
-  const got = run.stdout.toString().trim().split("\n");
+  const got = run.stdout.toString().replace(/\n$/, "").split("\n");
   const wrong = cases.flatMap((c, i) => {
     const m = new RegExp(c.p, c.f).exec(c.s);
     const want = m === null ? "null" : [m.index, ...m.map((x) => x ?? "-")].join(" ");

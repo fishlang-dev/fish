@@ -212,3 +212,15 @@ function main() {
   if (back !== null) console.log(back[1], back[2], back.index);
   console.log(/(?<=\1(a))b/.test("aab"), /(ß)\1/iu.test("ßẞ"), /(ſ)\1/iu.test("sS"));
 }
+// case: regex_unicode
+// expect: true true true true true
+// expect: 4 false true
+// expect: true true true false true 2
+// expect: true false true true
+function main() {
+  const lone = "a\uD83Db";
+  console.log(/\uD83D/.test(lone), /^.\uD83D.$/.test(lone), /^...$/u.test(lone), /^.$/u.test("😀"), /^..$/.test("😀"));
+  console.log(/\p{Script=Greek}+/u.exec("abc αβγ d")?.index ?? -1, /[\p{L}--[a-z]]/v.test("abc"), /[\p{L}--[a-z]]/v.test("abcÉ"));
+  console.log(/σ/iu.test("ς"), /Σ/i.test("ς"), /k/iu.test("K"), /k/i.test("K"), /ß/iu.test("ẞ"), /[\q{abc|d}]/v.exec("xxabc")?.index ?? -1);
+  console.log(/\w/iu.test("ſ"), /\w/i.test("ſ"), /\bſ/iu.test("ſ"), /[^\P{Lu}]/u.test("A"));
+}
