@@ -1,7 +1,7 @@
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
-import { built, quoted, type Builder } from "./quote.ts";
+import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { quotes } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
@@ -101,8 +101,32 @@ export function comptimeArgument(instance: Instance, arg: Expr): Value {
 // A comptime string array's binding: a literal type standing for exactly that array, so equal
 // arrays share an instance. It is never the interned literal of an ordinary string, which a
 // string parameter may be given with the same text.
-// The bindings each quote made while a macro runs, for a quote it is spliced into.
+// The bindings each quote made while a macro runs, for a quote it is spliced into; the names it
+// left free, for that quote to bind; and the spans of the quotes its nodes came from, the only
+// nodes those names are renamed in, never the program's own, spliced in as input.
 const scopes = new WeakMap<object, Map<string, string>>();
+const frees = new WeakMap<object, Free>();
+const quotedSpans = new WeakMap<object, Set<string>>();
+
+// Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
+function renameQuoted(v: Value, from: string, to: string) {
+  const spans = quotedSpans.get(untagged(v) as object) ?? new Set<string>();
+  const visit = (x: Value) => {
+    const u = untagged(x);
+    if (!u || typeof u !== "object") return;
+    if (u.kind === "array") return u.items.forEach(visit);
+    if (u.kind !== "record") return;
+    const kind = u.fields.get("kind");
+    const at = `${u.fields.get("start")}:${u.fields.get("end")}`;
+    const name = u.fields.get("name");
+    if (spans.has(at) && typeof name === "string" && (kind === "ident" || kind === "ref" || kind === "variant")) {
+      const [head, ...rest] = name.split(".");
+      if (head === from) u.fields.set("name", [to, ...rest].join("."));
+    }
+    for (const f of u.fields.values()) visit(f);
+  };
+  visit(v);
+}
 
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
@@ -456,10 +480,28 @@ function interpreter() {
         if (!types) return unsupported("this tagged template", e);
         const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
-        // A quote spliced in shares its bindings with this one.
+        // A quote spliced in shares its bindings with this one, and a name it leaves free means
+        // this one's binding of it; what this one leaves free, a quote around it may bind.
         const scope = new Map(holes.flatMap((h) => [...(scopes.get(untagged(h.value) as object) ?? [])]));
-        const made = built<Value>(q, types, e, astValues((i, into) => retag(holes[i]!.value, holes[i]!.type, into), holes.map((h) => h.value), e), scope);
-        if (made && typeof made === "object") scopes.set(untagged(made) as object, scope);
+        const free: Free = new Map();
+        const splice = (i: number, into: Type) => {
+          const v = holes[i]!.value;
+          const inner = frees.get(untagged(v) as object);
+          if (inner) {
+            for (const [name, spelling] of inner) {
+              const to = scope.get(name);
+              if (to) renameQuoted(v, spelling, to);
+              else free.set(name, spelling);
+            }
+          }
+          return retag(v, holes[i]!.type, into);
+        };
+        const made = built<Value>(q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
+        if (made && typeof made === "object") {
+          scopes.set(untagged(made) as object, scope);
+          frees.set(untagged(made) as object, free);
+          quotedSpans.set(untagged(made) as object, new Set([...holes.flatMap((h) => [...(quotedSpans.get(untagged(h.value) as object) ?? [])]), `${e.start}:${e.end}`]));
+        }
         return made;
       }
       case "template": {
@@ -1013,9 +1055,13 @@ function cloned(v: Value): Value {
   if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
   const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
-  // A clone of a quote's value keeps its bindings for a quote it is spliced into.
+  // A clone of a quote's value keeps its bindings and free names for a quote it is spliced into.
   const scope = scopes.get(v);
   if (scope) scopes.set(copy, scope);
+  const free = frees.get(v);
+  if (free) frees.set(copy, new Map(free));
+  const spans = quotedSpans.get(v);
+  if (spans) quotedSpans.set(copy, spans);
   return copy;
 }
 

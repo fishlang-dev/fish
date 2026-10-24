@@ -401,3 +401,39 @@ macro function seven(input: AstStmt): Ast[] {
 function main() {
   console.log(sevenA(), sevenB(), y);
 }
+// case: macro_outer_param_in_inner
+// expect: 5
+macro function m(input: AstStmt): Ast[] {
+  const body = quote`return x;`;
+  return [input, quote`function ${ident("id")}(x: i64): i64 { ${body}; }`];
+}
+@m function f() {}
+function main() { console.log(id(5)); }
+// case: macro_outer_param_inner_pinned
+// expect: 5
+const x: i64 = 99;
+macro function m(input: AstStmt): Ast[] {
+  const body = quote`return x;`;
+  return [input, quote`function ${ident("id")}(x: i64): i64 { ${body}; }`];
+}
+@m function f() {}
+function main() { console.log(id(5)); }
+// case: macro_helper_twice
+// expect: 7 8
+function decl(): AstStmt { return quote`const total: i64 = 7;`; }
+macro function m(input: AstStmt): Ast[] {
+  return [input,
+    quote`function ${ident("seven")}(): i64 { ${decl()}; return total; }`,
+    quote`function ${ident("eight")}(): i64 { ${decl()}; return total + 1; }`];
+}
+@m function f() {}
+function main() { console.log(seven(), eight()); }
+// case: macro_nested_two_levels
+// expect: 7
+macro function m(input: AstStmt): Ast[] {
+  const inner = quote`const total: i64 = 7;`;
+  const block = quote`if (true) { ${inner}; console.log(total); }`;
+  return [input, quote`function ${ident("show")}() { ${block}; }`];
+}
+@m function f() {}
+function main() { show(); }
