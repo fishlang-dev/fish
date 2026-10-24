@@ -509,7 +509,7 @@ function remade(t: RecursiveType, of: () => Type, args: Type[]): RecursiveType {
 export function partOfItself(type: Type, to: Type): boolean {
   if (typeof to === "string" || to.kind !== "param" || to.concrete || to.bound === undefined || lower(type) !== lower(to.bound)) return false;
   const bound = to.bound;
-  return holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
+  return ties.has(bound) || holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
 }
 
 // The type a recursive type stands for, or the type itself.
@@ -732,12 +732,23 @@ export function arrayType(element: Type): ArrayType {
 
 const arrays = new Map<string, ArrayType>();
 
-// Sets the type a recursive type stands for. An array of either is then one type, whose
-// elements are the blocks, so `Tree[]` written anywhere is the array a `Tree` holds.
+// Sets the type a recursive type stands for. An array is on the heap already, so where the
+// type reaches itself through one, that array holds the type itself rather than a block, and is
+// the array `Tree[]` means wherever it is written. The type then holds itself, a loop the walks
+// over types stop at by the recursive type kept for it.
 export function standsFor(back: RecursiveType, of: Type) {
   back.of = of;
-  arrays.set(`[${keyOf(of)}]`, arrayType(back));
+  const array = arrays.get(`[${keyOf(back)}]`);
+  if (!array || typeof of === "string") return;
+  array.element = of;
+  arrays.set(`[${keyOf(of)}]`, array);
+  ties.set(of, back);
 }
+
+const ties = new WeakMap<Exclude<Type, string>, RecursiveType>();
+
+// The recursive type a type holding itself through an array was made with.
+export const tiedBy = (t: Type): RecursiveType | undefined => (typeof t === "string" ? undefined : ties.get(t));
 
 export function mapType(key: Type, value: Type, set = false): MapType {
   const id = `${set ? "Set" : "Map"}<${keyOf(key)},${keyOf(value)}>`;
@@ -784,18 +795,20 @@ export function isCopy(t: Type): boolean {
 }
 
 // Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
-export function holdsMut(t: Type): boolean {
-  if (typeof t === "string") return false;
+export function holdsMut(t: Type, seen = new Set<Type>()): boolean {
+  if (typeof t === "string" || seen.has(t)) return false;
+  seen.add(t);
+  const inner = (u: Type) => holdsMut(u, seen);
   if (t.kind === "ref") return t.mutable;
   if (t.kind === "recursive") return holdsPart(t.of, (u) => typeof u !== "string" && u.kind === "ref" && u.mutable);
-  if (t.kind === "param") return t.concrete ? holdsMut(t.concrete) : t.bound !== undefined && holdsMut(t.bound);
-  if (t.kind === "union") return t.members.some(holdsMut);
-  if (t.kind === "array" || t.kind === "fixed") return holdsMut(t.element);
-  if (t.kind === "map") return holdsMut(t.value);
-  if (t.kind === "variant") return t.fields.some((f) => holdsMut(f.type));
-  if (t.kind === "class") return t.fields.some((f) => holdsMut(f.type)) || (t.base !== undefined && holdsMut(t.base));
-  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holdsMut(f.type));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holdsMut(f.type));
+  if (t.kind === "param") return t.concrete ? inner(t.concrete) : t.bound !== undefined && inner(t.bound);
+  if (t.kind === "union") return t.members.some(inner);
+  if (t.kind === "array" || t.kind === "fixed") return inner(t.element);
+  if (t.kind === "map") return inner(t.value);
+  if (t.kind === "variant") return t.fields.some((f) => inner(f.type));
+  if (t.kind === "class") return t.fields.some((f) => inner(f.type)) || (t.base !== undefined && inner(t.base));
+  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => inner(f.type));
+  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => inner(f.type));
 }
 
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid. A
@@ -892,6 +905,9 @@ export function lower(t: Type): Type {
   if (t.kind === "block") return blockType(t.which, lower(t.of));
   if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
   if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? remade(t, () => lower(t.of), t.args.map(lower)) : t;
+  // A type holding itself through an array is remade from its type arguments.
+  const tied = ties.get(t);
+  if (tied && heldBlocks.get(t) !== tied) return tied.args.some((a) => lower(a) !== a) ? instanceRecursive(tied, tied.args.map(lower)).of : t;
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -933,6 +949,11 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   if (typeof t !== "string" && t.kind === "variant") {
     const args = t.args.map((a) => replaced(a, swap));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
+  }
+  const tied = typeof t !== "string" ? ties.get(t) : undefined;
+  if (tied && heldBlocks.get(t as UnionType) !== tied) {
+    const args = tied.args.map((a) => replaced(a, swap));
+    return args.some((a, i) => a !== tied.args[i]) ? instanceRecursive(tied, args).of : t;
   }
   if (typeof t !== "string" && t.kind === "recursive") {
     const args = t.args.map((a) => replaced(a, swap));
@@ -1044,6 +1065,7 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
 // blind to which fields are marked optional, so `{ a?: T }` and `{ a: T | null }` share one.
 export function shapeKey(t: Type): string {
   if (typeof t === "string") return t;
+  if (ties.has(t)) return keyOf(t);
   let found = shapeKeys.get(t);
   if (found === undefined) {
     if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}]`;
@@ -1183,6 +1205,9 @@ export function unlocks(from: Type, to: Type, path = ""): string | undefined {
 export function show(t: Type): string {
   if (t === "f64") return "number";
   if (typeof t === "string") return t;
+  // A type holding itself is shown by its name.
+  const tied = ties.get(t);
+  if (tied) return tied.name;
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind === "pattern") {

@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { unfold, elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { unfold, tiedBy, elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -206,6 +206,8 @@ export function concrete(t: Type): boolean {
   if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
   if (t.kind === "map") return concrete(t.key) && concrete(t.value);
   if (t.kind === "recursive") return t.args.every(concrete);
+  const tied = tiedBy(t);
+  if (tied) return tied.args.every(concrete);
   if (t.kind === "variant") {
     let known = concreteVariants.get(t);
     if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));

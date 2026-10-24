@@ -2769,10 +2769,7 @@ export function expressions(ctx: Context) {
           }
           coerce(x, types.get(x)!, element, `type '${show(types.get(x)!)}' is not assignable to type '${show(element)}', the type of the spread's elements`);
         });
-        // An array of a type that holds itself holds each element in a block.
-        const made = arrayType(element);
-        if (made.element !== element) for (const x of elements) if (!spreads.has(x)) coerce(x, coercions.get(x) ?? types.get(x)!, made.element, "");
-        return made;
+        return arrayType(element);
       }
       case "arrow":
         return closure(e, expecting.get(e), unsafeDepth > 0, owning.has(e));
@@ -3276,7 +3273,7 @@ export function expressions(ctx: Context) {
     // A field read through a type parameter may be stored as a different type by the concrete
     // type; at a definition, where nothing is concrete, each instance decides.
     if (e.kind === "member" && lower(stored(e)) !== lower(type)) return false;
-    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : sameLowered(type, to.to) && sameLowered(to.to, type);
+    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : (sameLowered(type, to.to) && sameLowered(to.to, type)) || partOfItself(type, to.to);
   }
 
   // Without lifetimes, a reference variable can only be pointed at something that lives as long

@@ -290,3 +290,65 @@ function main() {
   const direct = m.values();
   console.log(sum(t), sum(d), vs.length, sum(vs[0]), direct.length);
 }
+// case: recursive_through_arrays
+// expect: 2 3
+// expect: 1
+// expect: 5 6
+// expect: 1 -1
+// expect: 1 true 2 false
+// expect: changed
+// expect: 2 0 3 1
+type Tree = { v: i64; kids: Tree[] };
+type Named = { v: string; kids: Named[] };
+type Json = { kind: "num"; n: i64 } | { kind: "arr"; items: Json[] };
+type Node = { v: i64; next: Node | null };
+enum Expr { Num(i64), Neg(Expr) }
+class Holder {
+  items: Link[];
+  constructor() { this.items = []; }
+}
+class Link {
+  v: i64;
+  next: Link | null;
+  constructor(v: i64, next: Link | null) { this.v = v; this.next = next; }
+}
+function two<T>(a: T, b: T): T[] {
+  let out: T[] = [];
+  out.push(a);
+  out.push(b);
+  return out;
+}
+function pick(t: Mut<Named>): Mut<Named> {
+  return t.kids[0];
+}
+function main() {
+  const ys = two<Tree>({ v: 1, kids: [] }, { v: 2, kids: [{ v: 3, kids: [] }] });
+  console.log(ys[1].v, ys[1].kids[0].v);
+  let h = new Holder();
+  h.items.push(new Link(1, null));
+  console.log(h.items[0].v);
+  const items: Json[] = [{ kind: "num", n: 5 }, { kind: "num", n: 6 }];
+  const ns = items.map((x) => (x.kind === "num" ? x.n : 0));
+  console.log(ns[0], ns[1]);
+  const es: Expr[] = [Expr.Num(1), Expr.Neg(Expr.Num(2))];
+  const vs = es.map((x) => match (x) {
+    case Expr.Num(n) => n,
+    case Expr.Neg(_) => -1,
+  });
+  console.log(vs[0], vs[1]);
+  const nodes: Node[] = [{ v: 1, next: null }, { v: 2, next: { v: 3, next: null } }];
+  let shown = "";
+  for (const n of nodes) {
+    const { v } = n;
+    shown = shown + (shown === "" ? "" : " ") + `${v} ${n.next === null}`;
+  }
+  console.log(shown);
+  let named: Named = { v: "r", kids: [{ v: "a", kids: [] }] };
+  const p = pick(named);
+  p.v = "changed";
+  console.log(named.kids[0].v);
+  const t: Tree = { v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] };
+  let line = "";
+  for (const k of t.kids.values()) line = line + (line === "" ? "" : " ") + `${k.v} ${k.kids.length}`;
+  console.log(line);
+}

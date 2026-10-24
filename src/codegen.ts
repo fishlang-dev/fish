@@ -2626,10 +2626,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // Puts `v` at the end of the array at `at`, growing it when it is full.
-  function appended(at: string, given: Type, v: string) {
-    // An array of a type that holds itself holds each element in a block.
-    const element = arrayType(given).element;
-    if (element !== given) v = convert(v, given, element);
+  function appended(at: string, element: Type, v: string) {
     const t = llvm(element);
     emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(element, "1")})`);
     const [lengthAt, dataAt, length, data, slot, more] = [temp(), temp(), temp(), temp(), temp(), temp()];
