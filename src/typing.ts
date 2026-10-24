@@ -528,8 +528,9 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
       return part(t.to);
     case "recursive":
       return part(t.of);
+    // An open type parameter is judged in each instance, where it is concrete.
     case "param":
-      return t.concrete ? part(t.concrete) : t;
+      return t.concrete ? part(t.concrete) : undefined;
     case "union":
       return t.members.map(part).find((p) => p !== undefined);
     case "array":

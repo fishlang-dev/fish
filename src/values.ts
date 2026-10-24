@@ -1,4 +1,5 @@
 import { inherited, type Body, type ClassInfo } from "./classes.ts";
+import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
@@ -3138,13 +3139,17 @@ export function expressions(ctx: Context) {
       const part = unequal(t, comparesAsValue);
       if (part) throw new CompileError(`values of type '${show(part)}' can't be compared with '${e.op}': ${uncomparable(part)}`, e.start, e.end);
     }
+    // A comparison over type parameters is checked again in each instance, once they're concrete.
+    if (openParam(l, true) || openParam(r, true)) return "boolean";
     const common = fits(l, r) ? r : fits(r, l) ? l : undefined;
     // Two unions that share a member compare as unions do, member by member.
     const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
     const overlap = members(l).some((x) => members(r).some((y) => fits(x, y) || fits(y, x)));
     if (!common && !overlap) throw new CompileError(`this comparison appears to be unintentional because the types '${show(l)}' and '${show(r)}' have no overlap`, e.start, e.end);
-    if (common && left !== common) coerce(e.left, left, common, "");
-    if (common && right !== common) coerce(e.right, right, common, "");
+    // A reference is compared through, reading the value it borrows.
+    const [a, b] = [loaded(e.left, left), loaded(e.right, right)];
+    if (common && a !== common) coerce(e.left, a, common, "");
+    if (common && b !== common) coerce(e.right, b, common, "");
     return "boolean";
   }
 
@@ -3166,7 +3171,7 @@ export function expressions(ctx: Context) {
     if (!method) return false;
     const instance = instanceOf(method);
     const [arg, ...more] = paramTypes(instance);
-    const shaped = more.length === 0 && arg !== undefined && isRefType(arg) && !arg.mutable && (lower(arg.to) === lower(t) || (typeof arg.to !== "string" && arg.to.kind === "class" && derives(t, arg.to))) && returnOf(instance, method) === "boolean";
+    const shaped = !method.self?.mutable && !method.self?.owned && more.length === 0 && arg !== undefined && isRefType(arg) && !arg.mutable && (lower(arg.to) === lower(t) || (typeof arg.to !== "string" && arg.to.kind === "class" && derives(t, arg.to))) && returnOf(instance, method) === "boolean";
     if (!shaped) throw new CompileError(`'${t.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
     equalities.set(t, instance);
     return true;
@@ -3231,6 +3236,8 @@ export function expressions(ctx: Context) {
       coercions.set(e, to);
       return;
     }
+    // A derived `equals` lends its argument to the base's, which reads the embedded base.
+    if ((e as { upcast?: true }).upcast && isRefType(type) && isRefType(to) && !to.mutable && typeof type.to !== "string" && type.to.kind === "class" && typeof to.to !== "string" && to.to.kind === "class" && derives(type.to, to.to)) return;
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;

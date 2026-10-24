@@ -2523,7 +2523,6 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  // In an array's drop function: drops each element, then frees the buffer.
   // Whether two values of one compound type are equal, part by part, through the function made
   // for the type, which a type holding itself calls again.
   function deepEquals(a: string, b: string, type: Type): string {
@@ -2625,6 +2624,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }));
   }
 
+  // In an array's drop function: drops each element, then frees the buffer.
   // A recursive type's block, or a copy of it holding copies of what it owns. A block moved out
   // of its place left it empty, with nothing to drop or copy.
   function dropBlock(type: RecursiveType): string {

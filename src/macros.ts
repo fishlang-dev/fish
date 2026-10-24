@@ -124,19 +124,32 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
   }
   const decl = { ...d, decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
   if (decl.kind === "enum") Object.assign(decl, { derives: ["Eq"] });
-  if (decl.kind === "class" && !decl.members.some((m) => (m as { name?: unknown }).name === "equals")) {
+  if (decl.kind === "class" && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
     const fields = decl.members.flatMap((m) => {
       if (m.kind === "field" && typeof m.name === "string" && !m.modifiers.includes("static")) return [m.name];
       if (m.kind === "constructor") return m.params.flatMap((p) => (p.modifiers.length > 0 && p.pattern.kind === "ident" ? [p.pattern.name] : []));
       return [];
     });
-    const test = fields.length === 0 ? "true" : fields.map((f) => `this.${f} === other.${f}`).join(" && ");
+    // A base's fields compare through the base's own `equals`.
+    const parts = [...(decl.extends ? ["super.equals(other)"] : []), ...fields.map((f) => `this.${f} === other.${f}`)];
+    const test = parts.length === 0 ? "true" : parts.join(" && ");
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
+    upcasting(method);
     decl.members = [...decl.members, method];
   }
   return [exported ? ({ kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
+}
+
+// Marks `other` in a derived `super.equals(other)`: the base's `equals` reads the embedded
+// base, which a reference to the class points at, though Fish code can't upcast it itself.
+function upcasting(node: unknown) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) return node.forEach(upcasting);
+  const n = node as Record<string, unknown>;
+  if (n.kind === "call" && (n.callee as { object?: { kind?: string } }).object?.kind === "super") Object.assign((n.args as object[])[0]!, { upcast: true });
+  Object.values(n).forEach(upcasting);
 }
 
 // Gives every node of a tree one span, as code a decorator made.

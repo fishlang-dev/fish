@@ -135,3 +135,90 @@ function main() {
 @derive(Eq)
 function f() {}
 function main() {}
+// case: eq_equals_mut_receiver
+// error: 'P.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean
+class P {
+  xs: i64[] = [1];
+  equals(this: Mut<this>, other: Ref<this>): boolean { this.xs.push(2); return true; }
+}
+function main() {
+  console.log(new P() === new P());
+}
+// case: eq_through_refs
+// expect: true false
+// expect: true true
+// expect: true
+type P = { x: i64; name: string };
+class Pt { constructor(public x: i64) {} equals(other: Ref<this>): boolean { return this.x === other.x; } }
+function same(a: Ref<P>, b: Ref<P>): boolean { return a === b; }
+function sameArrays(a: Ref<i64[]>, b: i64[]): boolean { return a === b; }
+function samePts(a: Ref<Pt>, b: Ref<Pt>): boolean { return a === b; }
+function main() {
+  const a: P = { x: 1, name: "a" };
+  const b: P = { x: 1, name: "a" };
+  const c: P = { x: 2, name: "a" };
+  console.log(same(a, b), same(a, c));
+  const ys = [1, 2];
+  let found = false;
+  for (const xs of [[1, 2]]) found = xs === ys;
+  console.log(sameArrays([1, 2], [1, 2]), found);
+  console.log(samePts(new Pt(3), new Pt(3)));
+}
+// case: eq_object_params
+// expect: true false
+// expect: true
+type P = { x: i64; name: string };
+function same(a: P, b: P): boolean { return a === b; }
+function first(xs: P[], p: P): boolean { return xs[0] === p; }
+function main() {
+  console.log(same({ x: 1, name: "a" }, { x: 1, name: "a" }), same({ x: 1, name: "a" }, { x: 1, name: "b" }));
+  console.log(first([{ x: 1, name: "a" }], { x: 1, name: "a" }));
+}
+// case: eq_generic_classes
+// expect: true false
+// expect: true false
+@derive(Eq)
+class Box<T> {
+  constructor(public v: T) {}
+}
+class Pair<T> {
+  constructor(public a: T, public b: T) {}
+  equals(other: Ref<this>): boolean { return this.a === other.a; }
+}
+function main() {
+  console.log(new Box(1) === new Box(1), new Box<string>("a") === new Box<string>("b"));
+  console.log(new Pair(1, 2) === new Pair(1, 3), new Pair("a", "b") === new Pair("c", "b"));
+}
+// case: eq_derived_base
+// expect: false true false
+@derive(Eq)
+class B { constructor(public x: i64, public s: string) {} }
+@derive(Eq)
+class D extends B {
+  y: i64;
+  constructor(x: i64, y: i64) { super(x, "k"); this.y = y; }
+}
+function main() {
+  console.log(new D(1, 2) === new D(9, 2), new D(1, 2) === new D(1, 2), new D(1, 2) === new D(1, 3));
+}
+// case: eq_derived_base_without_equals
+// error: 'B' has no method 'equals'
+class B { constructor(public x: i64) {} }
+@derive(Eq)
+class D extends B {
+  constructor(x: i64) { super(x); }
+}
+function main() {
+  console.log(new D(1) === new D(1));
+}
+// case: eq_comptime_equals
+// expect: true true
+class Money {
+  constructor(public cents: i64, public note: string) {}
+  equals(other: Ref<this>): boolean { return this.cents === other.cents; }
+}
+function same(): boolean { return new Money(5, "a") === new Money(5, "b"); }
+const SAME = comptime same();
+function main() {
+  console.log(SAME, same());
+}

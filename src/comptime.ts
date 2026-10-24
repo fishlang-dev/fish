@@ -2,7 +2,7 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { quotes } from "./values.ts";
+import { equalities, quotes } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -279,6 +279,14 @@ function interpreter() {
   }
 
   // Calls a function, a `Mut` parameter given the place its argument names.
+  // Instances of a class with an `equals` compare through it, as they do at run time.
+  function byEquals(at: Span): Equals {
+    return (a, b) => {
+      const method = a.type.kind === "class" ? equalities.get(a.type) : undefined;
+      return method && call(method, [b], a, at) === true;
+    };
+  }
+
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
@@ -731,9 +739,9 @@ function interpreter() {
     const [a, b] = [expr(f, e.left), expr(f, e.right)];
     switch (e.op) {
       case "===":
-        return equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right));
+        return equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
       case "!==":
-        return !equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right));
+        return !equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
       case "<":
         return (unwrap(a) as number) < (unwrap(b) as number);
       case "<=":
@@ -1012,13 +1020,16 @@ function memberType(v: Value, t: Type | undefined): Type | undefined {
 
 // `===` on two values of the types they are written as: a union compares its member, then the
 // value it holds.
-function equal(a: Value, ta: Type | undefined, b: Value, tb: Type | undefined): boolean {
+// A class instance's comparison through its `equals`, or nothing for other records.
+type Equals = (a: Record, b: Record) => boolean | undefined;
+
+function equal(a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, eq?: Equals): boolean {
   const [ma, mb] = [memberType(a, ta), memberType(b, tb)];
   // A literal stands for its base type: members of two enums that share a value are equal, as
   // they are at run time.
   const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (baseOf(t) ?? t) : t);
   if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
-  return same(a, b);
+  return same(a, b, eq);
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
@@ -1032,7 +1043,7 @@ function enumName(e: Expr): boolean {
 }
 
 // Values compare as `===` compares them: primitives by value, variants by member and payload.
-function same(x: Value, y: Value): boolean {
+function same(x: Value, y: Value, eq?: Equals): boolean {
   // Two members of a union are equal when they are the same member holding equal values.
   if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
     const plain = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
@@ -1040,14 +1051,16 @@ function same(x: Value, y: Value): boolean {
   }
   const [a, b] = [unwrap(x), unwrap(y)];
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
-    return a.type === b.type && a.args.every((v, i) => same(v, b.args[i]));
+    return a.type === b.type && a.args.every((v, i) => same(v, b.args[i], eq));
   }
   // Objects and arrays compare part by part.
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "record" && b.kind === "record") {
-    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(v, b.fields.get(k)));
+    const written = eq?.(a, b);
+    if (written !== undefined) return written;
+    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(v, b.fields.get(k), eq));
   }
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
-    return a.items.length === b.items.length && a.items.every((v, i) => same(v, b.items[i]));
+    return a.items.length === b.items.length && a.items.every((v, i) => same(v, b.items[i], eq));
   }
   return a === b;
 }

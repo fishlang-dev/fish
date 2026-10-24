@@ -97,8 +97,6 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
-  // In a member's signature, the type `this` names the class, as in `equals(other: Ref<this>)`.
-  const members = new Map([...scope, ["this", type]]);
   const methods = new Map<string, Body>();
   const statics = new Map<string, Body>();
   const getters = new Map<string, Body>();
@@ -202,10 +200,11 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const [first, ...rest] = m.params;
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
+    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
     table.set(m.name, {
       // A static method has its own symbol, since an instance method may share its name.
       name: `${name}.${isStatic ? "static " : ""}${m.name}`,
-      scope: members,
+      scope,
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,
@@ -218,6 +217,18 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       start: m.start,
       end: m.end,
     });
+  }
+
+  // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
+  function namesClass(t: unknown) {
+    if (!t || typeof t !== "object") return;
+    if (Array.isArray(t)) return t.forEach(namesClass);
+    const n = t as { kind?: string; name?: string; args?: unknown[] };
+    if (n.kind === "ref" && n.name === "this" && n.args?.length === 0) {
+      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
+      return;
+    }
+    Object.values(n).forEach(namesClass);
   }
 
   function add(f: FieldDecl): FieldDecl {
