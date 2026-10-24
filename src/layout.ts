@@ -68,10 +68,14 @@ function size(t: Type): [number, number] {
 
 // What converting needs besides emitting: a slot in the function's entry block.
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
-export type Slots = Builder & { alloca(type: string): string; text(value: string): string };
+// `deep` compares two values of one type holding objects, arrays or instances, part by part.
+export type Slots = Builder & { alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string };
+
+// Whether values of a type compare part by part rather than as one word.
+export const compound = (t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(t.kind);
 
 export function conversions(b: Slots) {
-  const { emit, temp, label, startBlock, alloca } = b;
+  const { emit, temp, label, startBlock, alloca, deep } = b;
   return { convert, test, equals, unionField, holds };
 
   // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
@@ -118,6 +122,7 @@ export function conversions(b: Slots) {
     if (typeof aType !== "string" && aType.kind === "literal" && typeof bType !== "string" && bType.kind === "literal") {
       return String(aType.value === bType.value);
     }
+    if (base(aType) === base(bType) && compound(aType) && deep) return deep(a, b, aType);
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
     if (base(aType) === "null") return "true";
     if (base(aType) === "string") {

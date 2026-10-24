@@ -512,6 +512,39 @@ export function partOfItself(type: Type, to: Type): boolean {
   return ties.has(bound) || holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
 }
 
+// The part of a type that keeps `===` from comparing its values, or undefined when every part
+// compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
+// class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
+export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
+  if (typeof t === "string" || seen.has(t)) return undefined;
+  seen.add(t);
+  const part = (u: Type) => unequal(u, eq, seen);
+  switch (t.kind) {
+    case "literal":
+    case "pattern":
+    case "pointer":
+      return undefined;
+    case "ref":
+      return part(t.to);
+    case "recursive":
+      return part(t.of);
+    case "param":
+      return t.concrete ? part(t.concrete) : t;
+    case "union":
+      return t.members.map(part).find((p) => p !== undefined);
+    case "array":
+    case "fixed":
+      return part(t.element);
+    case "object":
+      return t.match ? t : t.fields.map((f) => part(f.type)).find((p) => p !== undefined);
+    case "class":
+    case "variant":
+      return eq(t) ? undefined : t;
+    default:
+      return t;
+  }
+}
+
 // The type a recursive type stands for, or the type itself.
 export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
 

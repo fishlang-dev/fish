@@ -1033,9 +1033,21 @@ function enumName(e: Expr): boolean {
 
 // Values compare as `===` compares them: primitives by value, variants by member and payload.
 function same(x: Value, y: Value): boolean {
+  // Two members of a union are equal when they are the same member holding equal values.
+  if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
+    const plain = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
+    if (plain(x.type) !== plain(y.type)) return false;
+  }
   const [a, b] = [unwrap(x), unwrap(y)];
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
     return a.type === b.type && a.args.every((v, i) => same(v, b.args[i]));
+  }
+  // Objects and arrays compare part by part.
+  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "record" && b.kind === "record") {
+    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(v, b.fields.get(k)));
+  }
+  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
+    return a.items.length === b.items.length && a.items.every((v, i) => same(v, b.items[i]));
   }
   return a === b;
 }

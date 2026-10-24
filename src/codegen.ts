@@ -7,7 +7,7 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, conversions, llvm } from "./layout.ts";
+import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy } from "./typing.ts";
 
@@ -126,6 +126,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const texts = new Map<string, string>();
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
+  // The function comparing two values of each compound type, made once.
+  const comparers = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
@@ -136,7 +138,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // default order.
   const orders = new Map<string, string>();
   let comparators = 0;
-  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call) };
+  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type) };
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
@@ -2522,6 +2524,99 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // In an array's drop function: drops each element, then frees the buffer.
+  // Whether two values of one compound type are equal, part by part, through the function made
+  // for the type, which a type holding itself calls again.
+  function deepEquals(a: string, b: string, type: Type): string {
+    let name = comparers.get(type);
+    if (!name) {
+      name = `@"fsh.eq.${comparers.size}"`;
+      comparers.set(type, name);
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      const t = llvm(type);
+      emit(`ret i1 ${compareParts("%a", "%b", type as Exclude<Type, string>)}`);
+      out.push(`define internal i1 ${name}(${t} %a, ${t} %b) {`, "entry:", ...allocas, ...body, "}", "");
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    }
+    const result = temp();
+    emit(`${result} = call i1 ${name}(${llvm(type)} ${a}, ${llvm(type)} ${b})`);
+    return result;
+  }
+
+  // Whether every part of two values of a compound type is equal.
+  function compareParts(a: string, b: string, type: Exclude<Type, string>): string {
+    const both = (x: string, y: string, t: Type) => equals(x, t, y, t);
+    const all = (results: string[]) => results.reduce((acc, r) => {
+      if (acc === "true") return r;
+      const next = temp();
+      emit(`${next} = and i1 ${acc}, ${r}`);
+      return next;
+    }, "true");
+    if (type.kind === "recursive") {
+      const [x, y] = [temp(), temp()];
+      emit(`${x} = load ${llvm(type.of)}, ptr ${a}`);
+      emit(`${y} = load ${llvm(type.of)}, ptr ${b}`);
+      return both(x, y, type.of);
+    }
+    if (type.kind === "array" || type.kind === "fixed") {
+      // Element by element in a loop, once the lengths agree.
+      const element = llvm(type.element);
+      const result = alloca("i1");
+      emit(`store i1 true, ptr ${result}`);
+      const [length, other, data, otherData] = [temp(), temp(), temp(), temp()];
+      if (type.kind === "array") {
+        emit(`${length} = extractvalue ${ARRAY} ${a}, 1`);
+        emit(`${other} = extractvalue ${ARRAY} ${b}, 1`);
+        emit(`${data} = extractvalue ${ARRAY} ${a}, 0`);
+        emit(`${otherData} = extractvalue ${ARRAY} ${b}, 0`);
+      } else {
+        const [sa, sb] = [alloca(llvm(type)), alloca(llvm(type))];
+        emit(`store ${llvm(type)} ${a}, ptr ${sa}`);
+        emit(`store ${llvm(type)} ${b}, ptr ${sb}`);
+        emit(`${length} = add i64 0, ${type.size}`);
+        emit(`${other} = add i64 0, ${type.size}`);
+        emit(`${data} = getelementptr ${llvm(type)}, ptr ${sa}, i32 0, i32 0`);
+        emit(`${otherData} = getelementptr ${llvm(type)}, ptr ${sb}, i32 0, i32 0`);
+      }
+      const same = temp();
+      emit(`${same} = icmp eq i64 ${length}, ${other}`);
+      const index = alloca("i64");
+      emit(`store i64 0, ptr ${index}`);
+      const [head, loop, differ, done] = [label(), label(), label(), label()];
+      emit(`br i1 ${same}, label %${head}, label %${differ}`);
+      startBlock(head);
+      const [i, more] = [temp(), temp()];
+      emit(`${i} = load i64, ptr ${index}`);
+      emit(`${more} = icmp ult i64 ${i}, ${length}`);
+      emit(`br i1 ${more}, label %${loop}, label %${done}`);
+      startBlock(loop);
+      const [at, bt, x, y, next] = [temp(), temp(), temp(), temp(), temp()];
+      emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+      emit(`${bt} = getelementptr ${element}, ptr ${otherData}, i64 ${i}`);
+      emit(`${x} = load ${element}, ptr ${at}`);
+      emit(`${y} = load ${element}, ptr ${bt}`);
+      const equal = both(x, y, type.element);
+      emit(`${next} = add i64 ${i}, 1`);
+      emit(`store i64 ${next}, ptr ${index}`);
+      emit(`br i1 ${equal}, label %${head}, label %${differ}`);
+      startBlock(differ);
+      emit(`store i1 false, ptr ${result}`);
+      emit(`br label %${done}`);
+      startBlock(done);
+      const out = temp();
+      emit(`${out} = load i1, ptr ${result}`);
+      return out;
+    }
+    // An object, an instance or an enum's member: its fields, a base first.
+    const parts = type.kind === "class" && type.base ? [[type.base, 0] as const, ...type.fields.map((f, i) => [f.type, i + 1] as const)] : (type as ObjectType).fields.map((f, i) => [f.type, i] as const);
+    return all(parts.map(([t, i]) => {
+      const [x, y] = [temp(), temp()];
+      emit(`${x} = extractvalue ${llvm(type)} ${a}, ${i}`);
+      emit(`${y} = extractvalue ${llvm(type)} ${b}, ${i}`);
+      return both(x, y, t);
+    }));
+  }
+
   // A recursive type's block, or a copy of it holding copies of what it owns. A block moved out
   // of its place left it empty, with nothing to drop or copy.
   function dropBlock(type: RecursiveType): string {
@@ -4982,6 +5077,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           const same = temp();
           emit(`${same} = icmp ${condition} ptr ${a}, ${b}`);
           return same;
+        }
+        // Values holding objects, arrays or instances compare part by part.
+        if (compound(type)) {
+          const same = deepEquals(a, b, type);
+          if (e.op === "===") return same;
+          const differ = temp();
+          emit(`${differ} = xor i1 ${same}, true`);
+          return differ;
         }
         if (typeof type !== "string") return String(e.op === "===");
         const result = temp();

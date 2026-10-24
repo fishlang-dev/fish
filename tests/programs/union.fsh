@@ -39,7 +39,7 @@ function main() {
   const x: { a: i64 } | i64 = 1
   print(x === p)
 }
-// error: comparisons of objects are not supported yet
+// expect: false
 // case: union_compare_objects
 class C {}
 
@@ -49,18 +49,18 @@ function main() {
   const b: C | i64 = c
   print(a === b)
 }
-// error: comparisons of objects are not supported yet
+// error: a class compares through 'equals(other: Ref<this>): boolean', which 'C' doesn't have
 // case: union_compare_objects_width
 type X = { a: i64 } | i64
 type Y = { b: i64 } | i64
 
 function main() {
   const o = { a: 1, b: 2 }
-  const x: X = o
+  const x: X = o.clone()
   const y: Y = o
   print(x === y)
 }
-// error: comparisons of objects are not supported yet
+// expect: false
 // case: union_compare_unions_no_overlap
 function main() {
   const a: i64 | boolean = 1

@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -2968,7 +2968,7 @@ export function expressions(ctx: Context) {
           return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = typeofComparison(e, unions) ?? unionComparison(e, unions, adapt);
+          const special = typeofComparison(e, unions) ?? equality(e) ?? unionComparison(e, unions, adapt);
           if (special) return special;
         }
         if (e.op === "instanceof") return instanceofCheck(e, unions);
@@ -3117,6 +3117,45 @@ export function expressions(ctx: Context) {
     }
     types.set(e, to);
     return true;
+  }
+
+  // `===` between values holding objects, arrays or instances compares them by value, as Fish's
+  // Eq does, where TypeScript compares objects by identity: every part has to compare, and the
+  // wider value is compared as the narrower.
+  function equality(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
+    const [left, right] = [value(e.left), value(e.right)];
+    once.add(e.left);
+    once.add(e.right);
+    const deref = (t: Type) => unfold(isRefType(t) ? t.to : t);
+    const [l, r] = [deref(left), deref(right)];
+    if (!objectsMeet(l, r)) return undefined;
+    once.delete(e.left);
+    once.delete(e.right);
+    for (const t of [l, r]) {
+      const part = unequal(t, comparesAsValue);
+      if (part) throw new CompileError(`values of type '${show(part)}' can't be compared with '${e.op}': ${uncomparable(part)}`, e.start, e.end);
+    }
+    const common = fits(l, r) ? r : fits(r, l) ? l : undefined;
+    // Two unions that share a member compare as unions do, member by member.
+    const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+    const overlap = members(l).some((x) => members(r).some((y) => fits(x, y) || fits(y, x)));
+    if (!common && !overlap) throw new CompileError(`this comparison appears to be unintentional because the types '${show(l)}' and '${show(r)}' have no overlap`, e.start, e.end);
+    if (common && left !== common) coerce(e.left, left, common, "");
+    if (common && right !== common) coerce(e.right, right, common, "");
+    return "boolean";
+  }
+
+  // Why values of a type can't be compared.
+  function uncomparable(t: Type): string {
+    if (typeof t !== "string" && t.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${t.name}' doesn't have; add one, or '@derive(Eq)'`;
+    if (typeof t !== "string" && t.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
+    if (typeof t !== "string" && t.kind === "map") return `a ${t.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
+    return "it has no value equality";
+  }
+
+  // Whether a class or a data enum's values compare.
+  function comparesAsValue(_t: ClassType | VariantType): boolean {
+    return false;
   }
 
   // `+` with a string on either side joins the two into a new string.

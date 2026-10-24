@@ -3,7 +3,7 @@ function main() {
   const a = { x: 1 }
   print(a === a)
 }
-// error: comparisons of objects are not supported yet
+// expect: true
 // case: object_const_field
 function main() {
   const p = { inner: { n: 1 } }
