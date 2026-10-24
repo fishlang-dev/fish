@@ -608,6 +608,8 @@ export const STD_FILE = "<fish std>";
 export function stdFor(written: Stmt[]): Stmt[] {
   const all = parse(STD_SOURCE);
   shiftSpans(all, STD_BASE);
+  // The array iterators' generators take names no program can write, so none hides them.
+  for (const s of all) if (s.kind === "function" && s.name.startsWith("__array")) s.name = `array ${s.name.slice("__array".length).toLowerCase()}`;
   const prelude = all.filter((s) => s.start - STD_BASE < PRELUDE.length);
   const http = all.filter((s) => s.start - STD_BASE >= PRELUDE.length);
   return usesHttp(written, http) ? all : prelude;

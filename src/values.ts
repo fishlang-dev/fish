@@ -975,11 +975,10 @@ export function expressions(ctx: Context) {
   function arrayCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
-    const held = types.get(callee.object)!;
-    if (isRefType(held)) coercions.set(callee.object, array);
-    if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
-    if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
-    if (callee.name === "sort") return sortCall(e, callee, array);
+    if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
+    // Methods giving clones of the elements refuse elements that can't be cloned.
+    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) clonable(array.element, callee, callee.name);
+    if (callee.name === "flat" && isArray(lower(array.element))) clonable((lower(array.element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
@@ -987,6 +986,11 @@ export function expressions(ctx: Context) {
       Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
       return call(e);
     }
+    const held = types.get(callee.object)!;
+    if (isRefType(held)) coercions.set(callee.object, array);
+    if (CALLBACK_METHODS.has(callee.name)) return callbackCall(e, callee, array);
+    if (READING_METHODS.has(callee.name)) return readingCall(e, callee, array);
+    if (callee.name === "sort") return sortCall(e, callee, array);
     // `at(i)`: a clone of the element at a position counted from either end, or nothing.
     if (callee.name === "at") {
       if (e.args.length !== 1) throw new CompileError("'at' takes a position, like 'at(-1)' for the last element", e.start, e.end);
@@ -1646,15 +1650,23 @@ export function expressions(ctx: Context) {
     if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
       return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
-    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
-    if (permit) throw new CompileError("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead", e.start, e.end);
-    if ((typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw new CompileError("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one", e.start, e.end);
-    const inner = holdsInterior(stored);
-    if (inner) throw new CompileError(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`, e.start, e.end);
-    if (holdsHandle(stored)) throw new CompileError("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself", e.start, e.end);
-    // Two mutable references to one thing can't be.
-    if (holdsMut(receiver)) throw new CompileError("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing", e.start, e.end);
+    clonable(receiver, e);
     return { type: receiver, what: "'clone'" };
+  }
+
+  // Refuses a value that can't be cloned, for `clone()` and for the array methods that give
+  // clones of elements, named by `by`.
+  function clonable(type: Type, at: Span, by?: string) {
+    const stored = lower(type);
+    const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
+    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
+    if (permit) throw say("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead");
+    if ((typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
+    const inner = holdsInterior(stored);
+    if (inner) throw say(`can't clone ${inner === stored ? "an" : "a value holding an"} '${inner.which}', which is changed in place wherever it is shared; make a new one from what it holds`);
+    if (holdsHandle(stored)) throw say("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself");
+    // Two mutable references to one thing can't be.
+    if (holdsMut(type)) throw say("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing");
   }
 
   // The type of a member call's receiver, unless it is `super` or a class's name.
@@ -3084,7 +3096,7 @@ const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "
 // The methods that change an array in place, beside push, pop and sort.
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill"]);
 // The methods giving an iterator over an array, as generators in the prelude.
-const ITERATORS: Record<string, string> = { entries: "__arrayEntries", keys: "__arrayKeys", values: "__arrayValues" };
+const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
 // Whether a type is a data-carrying enum, or one of its variants.
