@@ -13,8 +13,9 @@ import { fits, show, type Type } from "./typing.ts";
 // and the declarations they use, are checked and run on their own first, so a macro can't use
 // what an expansion makes.
 
-// How many rounds of expansion a program may take, each running the macros its last round gave.
-const ROUNDS = 16;
+// How many rounds of expansion a program may take: each applies one decorator per declaration,
+// and runs the macros its last round gave.
+const ROUNDS = 64;
 // The declarations a macro may give: what can stand at the top level.
 const TOP_LEVEL = new Set(["function", "class", "typeAlias", "interface", "enum", "let", "comptime", "declare"]);
 // A declaration given as exported, by a macro wanting it imported from its file.
@@ -46,13 +47,14 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
       const s = of.get(site.module.statements[site.index]!)!;
       return (s.kind === "export" ? s.body : s) as Decl;
     };
-    for (const site of sites) for (const x of linked(site).decorators!) macroOf(x, macros);
+    for (const site of sites) for (const x of allDecorators(linked(site))) macroOf(x, macros);
     // Each argument a macro takes as a value is computed while compiling, as a constant checked
-    // with the macros, typed as its parameter.
-    const args = new Map(sites.map((site) => [site, argumentsOf(linked(site).decorators!.at(-1)!, macros)] as const));
+    // with the macros. A macro on a member or a parameter takes its index before its arguments.
+    const pending = new Map(sites.map((site) => [site, pendingOf(site.decl), pendingOf(linked(site))] as const).map(([site, o, l]) => [site, { ...o, linked: l.decorator }] as const));
+    const args = new Map(sites.map((site) => [site, argumentsOf(pending.get(site)!.linked, macros, pending.get(site)!.where)] as const));
     const macroCode = macroProgram(program, macros, new Set(sites.map(linked)), [...args.values()].flat().flatMap((a) => (a.constant ? [a.constant] : [])));
     const checked = checkMacros(macroCode);
-    for (const site of [...sites].reverse()) run(site, linked(site), macros, checked, macroCode, loaded, pins, library, args.get(site)!);
+    for (const site of [...sites].reverse()) run(site, pending.get(site)!, macros, checked, macroCode, loaded, pins, library, args.get(site)!);
   }
 }
 
@@ -106,8 +108,44 @@ function decorated(module: Module): Site[] {
   return module.statements.flatMap((s, index) => {
     const exported = s.kind === "export";
     const decl = (s.kind === "export" ? s.body : s) as Decl;
-    return decl && (decl.decorators?.length ?? 0) > 0 ? [{ module, index, decl, exported }] : [];
+    return decl && allDecorators(decl).length > 0 ? [{ module, index, decl, exported }] : [];
   });
+}
+
+// Every decorator a declaration holds: its own, its members' and its parameters'.
+function allDecorators(d: Decl): Expr[] {
+  const members = d.kind === "class" ? d.members.flatMap((m) => [...m.decorators, ...("params" in m ? m.params.flatMap((p) => p.decorators) : [])]) : [];
+  const params = d.kind === "function" ? d.params.flatMap((p) => p.decorators) : [];
+  return [...(d.decorators ?? []), ...members, ...params];
+}
+
+// The decorator that applies next: a member's or a parameter's, nearest first, before the
+// declaration's own.
+type Pending = { where: "own" | "member" | "param"; index: number; decorator: Expr };
+function pendingOf(d: Decl): Pending {
+  if (d.kind === "class") {
+    for (const m of d.members) {
+      const p = "params" in m ? m.params.find((x) => x.decorators.length > 0) : undefined;
+      if (p) throw new CompileError("decorators on method and constructor parameters aren't supported yet; decorate the method, or a top-level function's parameter", p.decorators[0]!.start, p.decorators[0]!.end);
+    }
+    const index = d.members.findIndex((m) => m.decorators.length > 0);
+    if (index >= 0) return { where: "member", index, decorator: d.members[index]!.decorators.at(-1)! };
+  }
+  if (d.kind === "function") {
+    const index = d.params.findIndex((p) => p.decorators.length > 0);
+    if (index >= 0) return { where: "param", index, decorator: d.params[index]!.decorators.at(-1)! };
+  }
+  return { where: "own", index: 0, decorator: d.decorators!.at(-1)! };
+}
+
+// The declaration without the decorator that applies, as its macro takes it: for its own, without
+// any of its own, which go on with what replaces it.
+function without(d: Decl, p: Pending): Stmt {
+  if (p.where === "own") return { ...d, decorators: d.kind === "class" ? [] : undefined } as Stmt;
+  const drop = <T extends { decorators: Expr[] }>(x: T) => ({ ...x, decorators: x.decorators.slice(0, -1) });
+  if (p.where === "member" && d.kind === "class") return { ...d, members: d.members.map((m, i) => (i === p.index ? drop(m) : m)) };
+  if (d.kind === "function") return { ...d, params: d.params.map((x, i) => (i === p.index ? drop(x) : x)) };
+  return d;
 }
 
 function macroFunctions(program: Stmt[]): Map<string, Func> {
@@ -136,8 +174,17 @@ function macroOf(d: Expr, macros: Map<string, Func>): Func {
 type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string };
 let constants = 0;
 
-function argumentsOf(d: Expr, macros: Map<string, Func>, before = 1): Argument[] {
+function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
   const macro = macroOf(d, macros);
+  const before = where === "own" ? 1 : 2;
+  if (before === 2) {
+    const t = macro.params[1]?.type;
+    // An index as an array is indexed, `usize`, or as an integer is written, `i64`.
+    if (t?.kind !== "ref" || (t.name !== "i64" && t.name !== "usize")) {
+      const what = where === "member" ? "the class and the member's index, as in 'macro function log(input: Ast, member: i64): Ast'" : "the function and the parameter's index, as in 'macro function check(input: Ast, param: i64): Ast'";
+      throw new CompileError(`a macro on a ${where === "member" ? "member" : "parameter"} takes ${what}`, d.start, d.end);
+    }
+  }
   const given = d.kind === "call" ? d.args : [];
   const wanted = macro.params.length - before;
   if (given.length !== wanted) {
@@ -242,17 +289,18 @@ function quoteDeclarations(s: Stmt): string[] {
 
 // Runs a site's nearest decorator's macro on its declaration, and puts what it gives in the
 // declaration's place, the other decorators kept on each declaration given for a later round.
-function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded, pins: Set<string>, library: boolean, args: Argument[]) {
-  const nearest = linked.decorators!.at(-1)!;
-  const rest = site.decl.decorators!.slice(0, -1);
+function run(site: Site, pending: Pending & { linked: Expr }, macros: Map<string, Func>, checked: Checked, code: Stmt[], loaded: Loaded, pins: Set<string>, library: boolean, args: Argument[]) {
+  const nearest = pending.linked;
+  const rest = pending.where === "own" ? site.decl.decorators!.slice(0, -1) : [];
   const macro = macroOf(nearest, macros);
+  const before = pending.where === "own" ? 1 : 2;
   const instance = checked.instances.find((i) => i.body.name === macro.name && i.body.start === macro.start);
   if (!instance) throw new Error(`internal error: the macro '${macro.name}' wasn't checked`);
   const param = macro.params[0]!;
   const returns = instance.returns;
   if (typeof returns === "string" || returns.kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${returns}'`, macro.start, macro.end);
   const input = instance.locals.get(param)!.type;
-  const bare = { ...site.decl, decorators: site.decl.kind === "class" ? [] : undefined } as Stmt;
+  const bare = without(site.decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
   let value: Value;
   try {
@@ -275,27 +323,32 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
   })));
   const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
   // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
-  const written_ = site.decl.decorators!.at(-1)!;
-  const original = written_.kind === "call" ? written_.args : [];
+  const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   const values = args.map((a, i) => {
-    const t = instance.locals.get(macro.params[i + 1]!)!.type;
+    const t = instance.locals.get(macro.params[i + before]!)!.type;
     if (!a.syntax) {
       const constant = checked.instances.find((c) => c.body.name === `const ${a.name}`)!;
       if (!fits(constant.returns, t)) {
-        const name = (macro.params[i + 1]!.pattern as { name?: string }).name ?? "it";
+        const name = (macro.params[i + before]!.pattern as { name?: string }).name ?? "it";
         throw new CompileError(`this argument is a '${show(constant.returns)}', but the macro '${written(macro.name)}' takes '${name}' as a '${show(t)}'`, a.expr.start, a.expr.end);
       }
       return comptimeBody(constant);
     }
     return built<Value>({ tree: original[i]!, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
-  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...values], nearest));
+  const index = before === 2 ? [BigInt(pending.index)] : [];
+  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
   const name = namesOf(site.decl)[0];
+  // A macro on a member gives the class back, and one on a parameter its function.
+  const container = site.decl.kind;
+  if (pending.where !== "own" && !given.some((d) => d && typeof d === "object" && (d.kind === container || (isExport(d) && (d as { body?: Stmt }).body?.kind === container)))) {
+    throw new CompileError(`a macro on a ${pending.where === "member" ? "member gives the class back" : "parameter gives the function back"}, changed as it likes, but '${written(macro.name)}' gave none`, nearest.start, nearest.end);
+  }
   const replacing = given.map((d) => {
     if (!d || typeof d !== "object" || !(TOP_LEVEL.has(d.kind) || isExport(d))) {
       throw new CompileError(`the macro '${written(macro.name)}' gave ${d && typeof d === "object" ? `a '${d.kind}'` : "nothing"}, but a macro gives declarations that can stand at the top level`, nearest.start, nearest.end);

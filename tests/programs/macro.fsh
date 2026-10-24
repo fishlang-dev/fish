@@ -467,3 +467,98 @@ macro function named(input: AstStmt, name: string): Ast {
 }
 @named(1) function f() {}
 function main() {}
+// case: macro_members_and_params
+// expect: 3 counted
+// expect: 10 a.b
+// expect: 4
+// expect: 0
+macro function counted(input: AstStmt, member: i64): Ast[] {
+  return [input, quote`function ${ident("countedMember")}(): string { return "counted"; }`];
+}
+macro function getter(input: AstStmt, member: usize): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const field = c.members[member].clone();
+    if (field.kind === "field") {
+      const n = field.name;
+      if (typeof n === "string") c.members.push(getterOf(n));
+    }
+  }
+  return c;
+}
+function getterOf(n: string): AstClassMember {
+  const k = quote`class X { get ${ident(`${n}Twice`)}(): i64 { return this.${ident(n)} * 2; } }`;
+  if (k.kind === "class") return k.members[0].clone();
+  return { kind: "staticBlock", modifiers: [], decorators: [], body: [], start: 0, end: 0 };
+}
+macro function joined(input: AstStmt, sep: string): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const sepNode: AstExpr = { kind: "string", value: sep, start: 0, end: 0 };
+    c.members.push(getterNamed("joined", quote`this.a + ${sepNode} + this.b`));
+  }
+  return c;
+}
+function getterNamed(name: string, body: AstExpr): AstClassMember {
+  const k = quote`class X { get ${ident(name)}(): string { return ${body}; } }`;
+  if (k.kind === "class") return k.members[0].clone();
+  return { kind: "staticBlock", modifiers: [], decorators: [], body: [], start: 0, end: 0 };
+}
+macro function nonNegative(input: AstStmt, param: usize): AstStmt {
+  let f = input;
+  if (f.kind === "function") {
+    const p = f.params[param].pattern.clone();
+    const body = f.body.clone();
+    if (p.kind === "ident" && body !== null) {
+      let guarded: AstStmt[] = [quote`if (${ident(p.name)} < 0) return 0;`];
+      for (const s of body) guarded.push(s.clone());
+      f.body = guarded;
+    }
+  }
+  return f;
+}
+class Point {
+  @getter x: i64 = 5;
+  @counted y: i64 = 3;
+}
+@joined(".") class Pair {
+  a: string = "a";
+  b: string = "b";
+}
+function double(@nonNegative n: i64): i64 {
+  return n * 2;
+}
+function main() {
+  const p = new Point();
+  console.log(p.y, countedMember());
+  console.log(p.xTwice, new Pair().joined);
+  console.log(double(2));
+  console.log(double(-5));
+}
+// case: macro_member_without_index
+// error: a macro on a member takes the class and the member's index
+macro function keep(input: AstStmt): Ast {
+  return input;
+}
+class A {
+  @keep x: i64 = 1;
+}
+function main() {}
+// case: macro_member_no_class
+// error: a macro on a member gives the class back, changed as it likes, but 'drop' gave none
+macro function drop(input: AstStmt, member: i64): Ast[] {
+  return [];
+}
+class A {
+  @drop x: i64 = 1;
+}
+function main() {}
+// case: macro_method_parameter
+// error: decorators on method and constructor parameters aren't supported yet
+macro function keep(input: AstStmt, param: i64): Ast {
+  return input;
+}
+class A {
+  m(@keep x: i64) {}
+}
+function main() {}
