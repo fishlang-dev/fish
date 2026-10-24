@@ -79,7 +79,7 @@ test("each file names the planned features it waits on", () => {
   }, (dir) => {
     expect(Object.fromEntries(scanFiles(dir).map((f) => [f.file, featuresOf(f)]))).toEqual({
       "a.ts": [],
-      "b.ts": ["Destructuring assignment", "Several declarators and deferred initialization"],
+      "b.ts": ["Destructuring assignment"],
       "c.ts": ["parser gaps"],
       "d.ts": [],
     });

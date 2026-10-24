@@ -54,7 +54,7 @@ const RULES: Rule[] = [
   { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
   { id: "destructuringAssignment", action: "unsupported", title: "destructuring assignments", feature: "Destructuring assignment" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
-  { id: "declarators", action: "unsupported", title: "several declarators, or a declaration assigned later", feature: "Several declarators and deferred initialization" },
+  { id: "declarators", action: "guided", title: "a let with neither a type nor a value: write its type, as in 'let x: string', since Fish doesn't work it out from later assignments" },
   { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
   { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
@@ -448,10 +448,10 @@ function fishPattern(p: Node): boolean {
 }
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
-  const declarations = n.declarations as { target: Node; init: unknown }[];
+  const declarations = n.declarations as { target: Node; type: unknown; init: unknown }[];
   if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
-  if (declarations.length > 1 || (!head && !ambient && declarations.some((d) => !d.init))) push("declarators");
+  if (!head && !ambient && declarations.some((d) => !d.init && !d.type)) push("declarators");
   // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.
   if (declarations.some((d) => d.target.kind !== "ident" && !(head ? plainPattern(d.target) : fishPattern(d.target)))) push("destructuring");
 }
