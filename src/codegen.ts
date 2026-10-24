@@ -3511,7 +3511,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);
-      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
+      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!.name, regexStringCalls.get(e)!.type);
       if (regexCalls.get(e) === "test") {
         const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
         const [found, yes] = [temp(), temp()];
@@ -5260,12 +5260,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A string method given a regex: search, match, matchAll, split, replace and replaceAll.
-  function regexString(e: Extract<Expr, { kind: "call" }>, name: string): string {
+  function regexString(e: Extract<Expr, { kind: "call" }>, name: string, checked: Type): string {
     const callee = e.callee as Extract<Expr, { kind: "member" }>;
     const regexT = lower(valueType(e.args[0]!)) as RegexType;
     const s = operand(callee.object, e.args);
     const re = value(e.args[0]!);
-    const type = types.get(e)!;
+    // A call used as a statement has no type of its own; what it makes is dropped at its end.
+    const type = types.get(e) ?? lower(checked);
     const call = (line: string) => {
       const v = temp();
       emit(`${v} = call ${line}`);
@@ -5350,8 +5351,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`store ${llvm(groups!.type)} ${g}, ptr ${kept}`);
         return `ptr ${kept}`;
       });
+      // The match is read back from a slot in the landing pad: at -O0 a value carried in
+      // registers into one may be lost.
+      const stash = alloca(llvm(match));
+      emit(`store ${llvm(match)} ${whole}, ptr ${stash}`);
       const unwound = () => {
-        dispose(whole, match);
+        const held = temp();
+        emit(`${held} = load ${llvm(match)}, ptr ${stash}`);
+        dispose(held, match);
         emit(`call void @fsh_rt_regex_close(ptr ${it})`);
         if (needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
       };

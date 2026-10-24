@@ -353,3 +353,44 @@ function main() {
 function main() {
   console.log("a,b".split(/,/, 1.5));
 }
+// case: regex_replace_callback_changes_receiver
+// error: cannot mutably lend 's' while 's' is lent to 'replace' for this call
+function main() {
+  let s = "a1b22c333" + "x";
+  const r = s.replace(/\d+/g, (m) => { s = "zzzzzzzzzzzzzzzzzzzzzzzz" + m; return "<" + m + ">"; });
+  console.log(r, s);
+}
+// case: regex_methods_as_statements
+// expect: 1,2,2
+function main() {
+  const s = "a1b22";
+  let out: string[] = [];
+  s.split(/\d/);
+  s.matchAll(/(\d)/g);
+  s.match(/\d/g);
+  s.match(/(\d)/);
+  s.search(/b/);
+  s.replace(/\d/g, "x");
+  s.replace(/\d/g, (m) => {
+    out.push(m);
+    return m;
+  });
+  console.log(out.join(","));
+}
+// case: regex_replace_unknown_name
+// error: the regex has no group named 'y' for '$<y>'
+function main() {
+  console.log("ab".replace(/(?<x>a)/, "[$<y>]"));
+}
+// case: regex_split_limits
+// expect: 0 1 2 3
+function main() {
+  const n: usize = 3;
+  console.log("a,b,c".split(/,/, -4294967296).length, "a,b,c".split(/,/, -4294967295).length, "a,b,c".split(/,/, 2).length, "a,b,c".split(/,/, n).length);
+}
+// case: regex_replace_callback_panic
+// panic: index out of bounds
+function main() {
+  const xs: i64[] = [];
+  console.log("a1b2".replace(/(\d)/g, (m) => m + xs[5]));
+}

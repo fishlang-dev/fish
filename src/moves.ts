@@ -3,7 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
-import { computed, dynCalls, isPrint, MAP_CHANGES } from "./values.ts";
+import { computed, dynCalls, isPrint, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { selfCalls } from "./check.ts";
 import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -518,8 +518,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const builtin = object !== undefined && !calls.has(e) && e.callee.kind === "member" && e.callee.name !== "clone";
           const method = (e.callee as { name: string }).name;
           const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has(method)) || (mapped(object) && MAP_CHANGES.has(method)));
-          // Any other array, Map or Set method reads it, lent shared while its callback runs.
-          const reads = builtin && !changes && (array(object) || mapped(object));
+          // Any other array, Map or Set method reads it, lent shared while its callback runs, as
+          // a string is while a regex goes through it.
+          const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           for (const c of captures) {

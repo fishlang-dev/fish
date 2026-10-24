@@ -3249,7 +3249,7 @@ void fsh_rt_regex_split(fsh_array *out, const int32_t *code, fsh_str *s, int64_t
   fsh_rx r;
   fsh_rx_open(&r, code, s);
   int64_t *slots = fsh_rt_alloc(code[0] * 2 * sizeof(int64_t));
-  uint64_t lim = limit < 0 ? UINT32_MAX : (uint64_t)limit & UINT32_MAX;
+  uint64_t lim = (uint64_t)limit & UINT32_MAX;
   if (lim == 0) goto done;
   if (r.n == 0) {
     if (!fsh_rx_find(&r, 0, 1, slots)) fsh_rx_list_push(out, fsh_rt_str_slice(s, 0, 0, 1), tagged, null_tag, string_tag);
