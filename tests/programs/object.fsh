@@ -312,3 +312,32 @@ function main() {
   const o: { a: Ref<O>; k: i64 } = { a, ...{ k: 1 } };
   console.log(o.a.s, o.k);
 }
+// case: object_spread_lend_overridden
+// error: type '{ a: { s: string }; k: i64 }' is not assignable to type '{ a: Ref<{ s: string }>; k: i64 }'
+type O = { s: string };
+function main() {
+  const a: O = { s: "a" + 1 };
+  const b: O = { s: "b" + 1 };
+  const o: { a: Ref<O>; k: i64 } = { a, ...{ a: b, k: 1 } };
+  console.log(o.a.s);
+}
+// case: object_spread_generic_adapts
+// expect: 1
+type HasM = { m: i64 };
+function g<T extends HasM>(t: T): u8 {
+  const o: { n: u8; m: i64 } = { n: 1, ...t };
+  return o.n;
+}
+function main() {
+  console.log(g({ m: 1 }));
+}
+// case: object_spread_generic_supplies
+// error: type '{ m: i64; n: i64 }' is not assignable to type '{ m: i64; n: u8 }'
+type HasM = { m: i64 };
+function g<T extends HasM>(t: T): u8 {
+  const o: { n: u8; m: i64 } = { n: 1, ...t };
+  return o.n;
+}
+function main() {
+  console.log(g({ m: 1, n: 300 }));
+}

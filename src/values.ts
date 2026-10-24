@@ -2639,19 +2639,25 @@ export function expressions(ctx: Context) {
 
   // A fresh object literal's literal properties take the number types of the fields they meet,
   // in nested literals too; the literal's type is then made again from its properties.
-  function adaptFields(e: Expr, type: Type, to: Type): Type {
-    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
-    // Only a property no later part replaces gives its field, so only that one adapts.
-    const supplies = (q: ObjectProp, name: string) => {
+  // The part of an object literal that gives its field `name`: the last that has it. A spread of
+  // an object-typed parameter has its bound's fields, each instance being checked with its own.
+  function winner(e: Extract<Expr, { kind: "object" }>, name: string): ObjectProp | undefined {
+    return e.props.findLast((q) => {
       if (q.kind === "property") return q.key === name;
       if (q.kind === "shorthand") return q.name === name;
       if (q.kind !== "spread") return false;
       const t = types.get(q.value)!;
-      const source = typeof t !== "string" && t.kind === "ref" ? t.to : t;
-      return typeof source === "string" || field(source, name) !== undefined;
-    };
-    const winners = e.props.filter((p, i): p is Extract<ObjectProp, { kind: "property" }> =>
-      p.kind === "property" && typeof p.key === "string" && !e.props.slice(i + 1).some((q) => supplies(q, p.key as string)));
+      const low = lower(isRefType(t) ? t.to : t);
+      const source = typeof low !== "string" && low.kind === "param" && low.bound?.kind === "object" ? low.bound : low;
+      return typeof source === "string" || source.kind === "param" || field(source, name) !== undefined;
+    });
+  }
+
+  function adaptFields(e: Expr, type: Type, to: Type): Type {
+    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
+    // Only a property no later part replaces gives its field, so only that one adapts.
+    const winners = e.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> =>
+      p.kind === "property" && typeof p.key === "string" && winner(e, p.key) === p);
     let changed = false;
     for (const p of winners) {
       const key = p.key as string;
@@ -2957,8 +2963,8 @@ export function expressions(ctx: Context) {
     const own = types.get(e) as ObjectType;
     const lent = own.fields.map((f) => {
       const want = field(to, f.name)?.type;
-      const p = e.props.find((p) => (p.kind === "property" && p.key === f.name) || (p.kind === "shorthand" && p.name === f.name));
-      if (!want || !p || !holdsRef(want) || fits(f.type, want)) return f;
+      const p = winner(e, f.name);
+      if (!want || !p || p.kind === "spread" || !holdsRef(want) || fits(f.type, want)) return f;
       if (p.kind === "property") coerce(p.value, types.get(p.value)!, want, message);
       else if (p.kind === "shorthand") {
         // A shorthand lends its variable where it lives, so only as exactly what it holds.
