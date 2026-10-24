@@ -69,7 +69,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }, () => deferring > 0, conforms);
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
-  const traits = new Map<Interface, InterfaceType>();
+  const traits = new Map<Interface, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
@@ -95,7 +95,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
   // The data-carrying enums being made, to catch one that holds itself.
   const making = new Set<DataEnum>();
-  return { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate };
+  // The instance of a generic interface for other type arguments.
+  const interfaceInstance = (t: InterfaceType, args: Type[]) => interfaceOf(interfaces.get(t.generic!.name)!, args);
+  return { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance };
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
   // uses it. Run once classes are linked, since an alias may read a class's fields.
@@ -109,7 +111,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         if (a.typeParams.length > 0) deferring--;
       }
     });
-    interfaces.forEach(interfaceOf);
+    // A generic interface is checked once with placeholders for its parameters.
+    interfaces.forEach((i) => interfaceOf(i, [...placeholders(i.typeParams, (t, s) => withScope(s, () => resolveType(t))).values()]));
   }
 
   // A data-carrying enum made with these type arguments: a variant per member, its payload
@@ -350,8 +353,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (e && name === undefined) return e.type;
     if (e && e.members.has(name!)) return e.members.get(name!)!;
     const trait = interfaces.get(t.name);
-    if (trait && args.length > 0) throw unsupported("generic interfaces", t);
-    if (trait) return interfaceOf(trait);
+    if (trait) return interfaceOf(trait, args, t);
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
@@ -429,13 +431,26 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return found;
   }
 
-  // The interface is registered before its members resolve, so a member may name it.
-  function interfaceOf(i: Interface): InterfaceType {
-    const found = traits.get(i);
+  // The interface is registered before its members resolve, so a member may name it. A generic
+  // interface is one interface per list of type arguments, its members seeing them.
+  function interfaceOf(i: Interface, args: Type[] = [], at: Span = i): InterfaceType {
+    if (args.length !== i.typeParams.length) {
+      throw new CompileError(`interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+    }
+    let byArgs = traits.get(i);
+    if (!byArgs) traits.set(i, byArgs = new Map());
+    const key = args.map(keyOf).join(",");
+    const found = byArgs.get(key);
     if (found) return found;
-    const t = interfaceType(i.name);
-    traits.set(i, t);
-    if (i.typeParams.length > 0) throw unsupported("generic interfaces", { start: i.typeParams[0]!.start, end: i.typeParams.at(-1)!.end });
+    if (byArgs.size > 64) throw new CompileError(`instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    const t = interfaceType(args.length > 0 ? `${i.name}<${args.map(show).join(", ")}>` : i.name);
+    if (args.length > 0) t.generic = { name: i.name, args };
+    byArgs.set(key, t);
+    // Its members are written where it is declared, with its parameters standing for the arguments.
+    return withSight(undefined, () => withScope(new Map(i.typeParams.map((p, k) => [p.name, args[k]!])), () => members(i, t)));
+  }
+
+  function members(i: Interface, t: InterfaceType): InterfaceType {
     const add = (name: string, at: Span) => {
       if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
         throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);

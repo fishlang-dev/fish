@@ -105,6 +105,17 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
     return;
   }
+  // `Dyn<I>` against a Dyn matches the interface it holds.
+  if (node.kind === "ref" && node.name === "Dyn" && node.args.length === 1 && !names.has("Dyn") && typeof arg !== "string" && arg.kind === "dyn") {
+    infer(node.args[0]!, arg.of, names, bindings, at);
+    return;
+  }
+  // So does a generic interface, given as one or held by a Dyn of one.
+  const trait = typeof arg !== "string" && arg.kind === "dyn" ? arg.of : arg;
+  if (node.kind === "ref" && typeof trait !== "string" && trait.kind === "interface" && trait.generic?.name === node.name) {
+    node.args.forEach((n, i) => trait.generic!.args[i] && infer(n, trait.generic!.args[i]!, names, bindings, at));
+    return;
+  }
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(node.args[0]!, yieldsOf(arg)!, names, bindings, at);

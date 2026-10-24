@@ -26,7 +26,8 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // An interface's method; `mutable` and `owned` when it declares `this: Mut<this>` or
 // `this: Own<this>`, which a call through a Dyn must allow for.
 export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean };
-export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[] };
+// A generic interface's instance knows the interface and the type arguments it was made from.
+export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 
 // A type parameter: it stands for any type satisfying its bound, and offers only the bound's
 // fields. At the definition it stands for nothing in particular. In an instance it also holds
@@ -801,6 +802,9 @@ const wrappers = new Map<string, ParamType>();
 // A type with each instance's type parameter replaced by the concrete type it stands for. A
 // generic class made from one becomes the class made from what it stands for.
 export function lower(t: Type): Type {
+  // A generic interface made from type parameters is the one made from what they stand for.
+  if (typeof t !== "string" && t.kind === "interface" && t.generic?.args.some((a) => lower(a) !== a)) return instanceInterface(t, t.generic.args.map(lower));
+  if (typeof t !== "string" && t.kind === "dyn" && t.of.generic?.args.some((a) => lower(a) !== a)) return dynType(lower(t.of) as InterfaceType);
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn" || t.kind === "regex") return t;
   if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
   if (t.kind === "pattern") return "string";
@@ -863,6 +867,10 @@ export function lowersClasses(f: typeof instanceClass) {
 // The same variant of a generic enum made with other type arguments, which only the checker
 // can make.
 let instanceVariant = (v: VariantType, _args: Type[]): VariantType => v;
+let instanceInterface = (t: InterfaceType, _args: Type[]): InterfaceType => t;
+export function lowersInterfaces(f: typeof instanceInterface) {
+  instanceInterface = f;
+}
 export function lowersVariants(f: typeof instanceVariant) {
   instanceVariant = f;
 }

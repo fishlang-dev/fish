@@ -445,3 +445,87 @@ function main() {
   print(run(new Doubler()), new Doubler().visit(new Square(2)))
 }
 // expect: 18 8
+// case: generic_interfaces
+// expect: 10 w0/1 1 two
+// expect: 20
+interface Container<T> {
+  size: i64;
+  get(i: i64): T;
+}
+interface Pair<A, B> {
+  first(): A;
+  second(): B;
+}
+class Numbers implements Container<i64> {
+  size: i64 = 2;
+  get(i: i64): i64 { return i * 10; }
+}
+class Words implements Container<string> {
+  size: i64 = 1;
+  get(i: i64): string { return "w" + i; }
+}
+class Both implements Pair<i64, string> {
+  first(): i64 { return 1; }
+  second(): string { return "two"; }
+}
+function last<C extends Container<i64>>(c: Ref<C>): i64 {
+  return c.get(c.size - 1);
+}
+function describe(c: Container<string>): string {
+  return c.get(0) + "/" + c.size;
+}
+function sum(cs: Ref<Dyn<Container<i64>>[]>): i64 {
+  let total = 0;
+  for (const c of cs) total += c.get(1);
+  return total;
+}
+function main() {
+  const n = new Numbers();
+  console.log(last(n), describe(new Words()), new Both().first(), new Both().second());
+  const many: Dyn<Container<i64>>[] = [new Numbers(), new Numbers()];
+  console.log(sum(many));
+}
+// case: generic_interfaces_in_generic_code
+// expect: b 2 x 2
+// expect: 7
+interface Container<T> {
+  get(i: i64): T;
+  count(): i64;
+}
+class Stack<T> implements Container<T> {
+  items: T[];
+  constructor(items: T[]) { this.items = items; }
+  get(i: i64): T { return this.items[i as usize].clone(); }
+  count(): i64 { return this.items.length as i64; }
+}
+interface Link<T> {
+  value(): T;
+  rest(): Option<Dyn<Link<T>>>;
+}
+function firstOf<T>(c: Ref<Dyn<Container<T>>>): T {
+  return c.get(0);
+}
+function main() {
+  const s = new Stack(["a", "b"]);
+  const d: Dyn<Container<string>> = new Stack(["x", "y"]);
+  console.log(s.get(1), s.count(), firstOf(d), d.count());
+  const n: Dyn<Container<i64>> = new Stack([7]);
+  console.log(firstOf(n));
+}
+// case: generic_interface_unsatisfied
+// error: class 'B' incorrectly implements 'Box<string>': types of method 'get' are incompatible
+interface Box<T> { get(): T }
+class B implements Box<string> {
+  get(): i64 { return 1; }
+}
+function main() {}
+// case: generic_interface_noargs
+// error: interface 'Box' expects 1 type argument, but got 0
+interface Box<T> { get(): T }
+function f(b: Box): i64 { return 1; }
+function main() {}
+// case: generic_interface_toomany
+// error: interface 'Box' expects 1 type argument, but got 2
+interface Box<T> { get(): T }
+function f(b: Box<i64, string>): i64 { return 1; }
+function main() {}
