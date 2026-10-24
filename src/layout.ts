@@ -186,6 +186,8 @@ export function conversions(b: Slots) {
     if (from === to) return v;
     // Raw pointers are addresses, whatever they point at or may write.
     if (typeof from !== "string" && from.kind === "pointer" && typeof to !== "string" && to.kind === "pointer") return v;
+    // Every regex is a pointer to its program.
+    if (typeof from !== "string" && from.kind === "regex" && typeof to !== "string" && to.kind === "regex") return v;
     // Stored callables taking and giving the same types share a layout and a vtable shape.
     if (typeof from !== "string" && from.kind === "dyn" && typeof to !== "string" && to.kind === "dyn") return v;
     // A string literal's type takes no space; as a string, it is its static block.

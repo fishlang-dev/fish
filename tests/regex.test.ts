@@ -86,3 +86,24 @@ test("regex test agrees with JavaScript", async () => {
   expect(wrong).toEqual([]);
   expect(run.stderr.toString()).not.toContain("fish: leaked");
 }, 60_000);
+
+test("regex exec agrees with JavaScript", async () => {
+  const cases = corpus(400);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-regex-"));
+  const file = join(dir, "exec.fsh");
+  const lines = cases.map((c, i) => {
+    const parts = parsePattern(c.p, c.f).captures.map((g, k) => (g.optional ? `, m${i}[${k + 1}] ?? "-"` : `, m${i}[${k + 1}]`)).join("");
+    return `  const m${i} = /${c.p}/${c.f}.exec(${JSON.stringify(c.s)});\n  if (m${i} === null) console.log("null"); else console.log(m${i}.index, m${i}[0]${parts});`;
+  });
+  writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
+  await buildAsync(file, join(dir, "exec"), false, "unwind", []);
+  const run = Bun.spawnSync([join(dir, "exec")], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const got = run.stdout.toString().trim().split("\n");
+  const wrong = cases.flatMap((c, i) => {
+    const m = new RegExp(c.p, c.f).exec(c.s);
+    const want = m === null ? "null" : [m.index, ...m.map((x) => x ?? "-")].join(" ");
+    return want === got[i] ? [] : [`/${c.p}/${c.f}.exec(${JSON.stringify(c.s)}) gave ${got[i]}, not ${want}`];
+  });
+  expect(wrong).toEqual([]);
+  expect(run.stderr.toString()).not.toContain("fish: leaked");
+}, 60_000);

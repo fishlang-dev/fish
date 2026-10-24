@@ -117,3 +117,77 @@ function main() {
 function main() {
   console.log(/1/.test(1));
 }
+// case: regex_exec
+// expect: 3 on 2024-10-24 and 2024-10-24 2024 10 24
+// expect: 2024 10 24
+// expect: 2024-10-24 2024
+// expect: true true
+// expect: true
+// expect: b - b
+// expect: 1 b
+function main() {
+  const date = /(?<year>\d{4})-(?<month>\d\d)(?:-(?<day>\d\d))?/;
+  const m = date.exec("on 2024-10-24 and");
+  if (m !== null) {
+    console.log(m.index, m.input, m[0], m[1], m[2], m[3] ?? "none");
+    console.log(m.groups.year, m.groups.month, m.groups.day ?? "none");
+    const [all, year] = m;
+    console.log(all, year);
+  }
+  const n = date.exec("2024-10");
+  if (n !== null) console.log(n.groups.day === null, n[3] === null);
+  console.log(date.exec("nothing") === null);
+  const alt = /(?<x>a)|(?<x>b)/.exec("b");
+  if (alt !== null) console.log(alt.groups.x ?? "none", alt[1] ?? "-", alt[2] ?? "-");
+  const s = "a😀b";
+  const u = /😀(.)/u.exec(s);
+  if (u !== null) console.log(u.index, u[1]);
+}
+// case: regex_as_parameter_field_and_local
+// expect: 42@3 X@1 a+/i b/
+// expect: true false
+// expect: true true
+// expect: e
+function firstNumber(re: RegExp, s: string): string {
+  const m = re.exec(s);
+  return m === null ? "none" : m[0] + "@" + m.index;
+}
+function describe(re: RegExp): string {
+  return re.source + "/" + re.flags;
+}
+class Rule {
+  pattern: RegExp;
+  constructor(pattern: RegExp) { this.pattern = pattern; }
+  check(s: string): boolean { return this.pattern.test(s); }
+}
+function main() {
+  console.log(firstNumber(/\d+/, "ab 42 c"), firstNumber(/x(y)?/i, "aXb"), describe(/a+/i), describe(/b/));
+  const rules = [new Rule(/^a/), new Rule(/z$/)];
+  for (const r of rules) console.log(r.check("abz"), r.check("bz"));
+  const kept: RegExp = /k(e)pt/;
+  const m = kept.exec("kept");
+  if (m !== null) console.log(m[1]);
+}
+// case: regex_exec_global
+// error: use 'matchAll' to go through every match, or drop the flag
+function main() {
+  console.log(/a/g.exec("a") === null);
+}
+// case: regex_exec_optional_capture
+// error: type 'null | string' is not assignable to type 'string'
+function main() {
+  const m = /a(b)?/.exec("a");
+  if (m !== null) {
+    const s: string = m[1];
+  }
+}
+// case: regex_source_unknown
+// error: 'source' is known from a regex's pattern, which isn't known for a 'RegExp' kept here
+class Holder {
+  re: RegExp;
+  constructor(re: RegExp) { this.re = re; }
+  show(): string { return this.re.source; }
+}
+function main() {
+  console.log(new Holder(/a/).show());
+}

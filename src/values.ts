@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -816,7 +816,8 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "regex") return regexCall(e, callee, receiver);
+    const rx = receiver === undefined ? undefined : asRegex(receiver);
+    if (callee.kind === "member" && rx) return regexCall(e, callee, rx);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
       throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
@@ -1286,7 +1287,7 @@ export function expressions(ctx: Context) {
     const held = isRefType(through) ? through.to : through;
     const object = typeof held !== "string" && held.kind === "shared" ? lower(held.of) : held;
     if (!isTuple(object)) return false;
-    const count = (object as ObjectType).fields.length;
+    const count = elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError(`a tuple's element is named by a number written in place, like '[0]'; '${show(object)}' has no element for a computed index`, e.index.start, e.index.end);
     const n = e.index.value;
     if (n >= BigInt(count)) throw new CompileError(`tuple type '${show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
@@ -1402,13 +1403,24 @@ export function expressions(ctx: Context) {
     if (!stringLike(s)) throw new CompileError(`${what} matches a string, not '${show(s)}'`, e.args[0]!.start, e.args[0]!.end);
     if (s !== "string") coerce(e.args[0]!, s, "string", "");
     loaded(callee.object, types.get(callee.object)!);
-    if (callee.name === "exec") throw new CompileError("'exec' is not supported yet", e.start, e.end);
     regexCalls.set(e, callee.name);
-    return { type: "boolean", what };
+    return { type: callee.name === "test" ? "boolean" : unionType([matchType(t), "null"]), what };
+  }
+
+  // The regex a value is: its own type, or, for a `RegExp` parameter in a generic body's
+  // definition, any regex.
+  function asRegex(t: Type): RegexType | undefined {
+    const held = lower(t);
+    if (typeof held === "string") return undefined;
+    if (held.kind === "regex") return held;
+    return held.kind === "param" && held.bound?.kind === "regex" ? held.bound : undefined;
   }
 
   // `re.source`, `re.flags` and the flag properties, known from its type.
-  function regexMember(e: Extract<Expr, { kind: "member" }>, t: RegexType): Type {
+  function regexMember(e: Extract<Expr, { kind: "member" }>, t: RegexType, generic: boolean): Type {
+    if (t.any && !generic && (e.name === "source" || e.name === "flags" || e.name in REGEX_FLAGS)) {
+      throw new CompileError(`'${e.name}' is known from a regex's pattern, which isn't known for a 'RegExp' kept here; read it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
+    }
     if (e.name === "source" || e.name === "flags") return "string";
     if (e.name in REGEX_FLAGS) return "boolean";
     if (e.name === "lastIndex") throw new CompileError("a Fish regex keeps no state, so it has no 'lastIndex'; use 'matchAll' to go through every match", e.start, e.end);
@@ -2473,9 +2485,10 @@ export function expressions(ctx: Context) {
         if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
         if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
         if (typeof object !== "string" && object.kind === "dyn") return dynField(e, object);
-        if (typeof object !== "string" && object.kind === "regex") {
+        const rx = asRegex(object);
+        if (rx) {
           if (object !== through) coercions.set(e.object, object);
-          return regexMember(e, object);
+          return regexMember(e, rx, lower(object) !== rx);
         }
         const load = () => object !== through && coercions.set(e.object, object);
         const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;

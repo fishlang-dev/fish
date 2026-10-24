@@ -12,7 +12,8 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 
 // Fields are sorted by name, which is also their order in memory.
 // A tuple is an object whose fields are its positions, `0`, `1` and on, marked `tuple`.
-export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true };
+// A regex match is a tuple of its captures with `index`, `input` and `groups` beside them.
+export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
@@ -83,7 +84,7 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 export type FunctionType = { kind: "function"; name: string; params: Type[]; returns: Type; fields: Field[] };
 
 // What a type parameter may be bounded by.
-export type Bound = ObjectType | InterfaceType | FunctionType;
+export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
 
 // The sized numbers. `isize` and `usize` are 64 bits on every target Fish supports.
 export type Integer = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize";
@@ -434,7 +435,11 @@ export type PointerType = { kind: "pointer"; to: Type; mutable: boolean; fields:
 
 // A regex: its pattern and flags, which fix what each capture may hold. Its value points at a
 // compiled program that never changes, so it copies freely and needs no drop.
-export type RegexType = { kind: "regex"; source: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[] };
+export type RegexType = { kind: "regex"; source: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
+
+// The \`RegExp\` annotation: any regex. A parameter of it is an implicit type parameter, so each
+// instance knows its regex; elsewhere it holds one whose pattern isn't known there.
+export const ANY_REGEX: RegexType = { kind: "regex", source: "", flags: "", captures: [], fields: [], any: true };
 
 const regexes = new Map<string, RegexType>();
 
@@ -806,6 +811,7 @@ export function lower(t: Type): Type {
     else if (t.kind === "array") found = arrayType(lower(t.element));
     else if (t.kind === "fixed") found = fixedType(lower(t.element), t.size);
     else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
+    else if (t.kind === "object" && t.match) found = t;
     else if (t.kind === "object" && t.tuple) found = tupleType(elementsOf(t).map(lower));
     else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
     lowered.set(t, found);
@@ -832,6 +838,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
   }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
+  if (t.kind === "object" && t.match) return t;
   if (t.kind === "object" && t.tuple) return tupleType(elementsOf(t).map((e) => replaced(e, swap)));
   return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
 }
@@ -868,7 +875,35 @@ export function tupleType(elements: Type[]): ObjectType {
 
 // A tuple's element types, in order.
 export function elementsOf(t: ObjectType): Type[] {
-  return t.fields.toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+  return t.fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+}
+
+// What `re.exec(s)` gives when it matches: the whole match and each capture, a capture that
+// may not take part being `string | null`, then where the match starts, the string matched, and,
+// when the pattern names groups, an object of them.
+export function matchType(t: RegexType): ObjectType {
+  const key = `match ${keys.get(t)}`;
+  let found = interned.get(key);
+  if (!found) {
+    const maybe = unionType(["string", "null"]);
+    const names = [...new Set(t.captures.flatMap((c) => (c.name === undefined ? [] : [c.name])))];
+    // A name shared by groups in different alternatives holds whichever took part.
+    const named = names.map((name) => {
+      const groups = t.captures.filter((c) => c.name === name);
+      return { name, type: groups.length === 1 && !groups[0]!.optional ? "string" as Type : maybe };
+    });
+    const fields: Field[] = [
+      { name: "0", type: "string" },
+      ...t.captures.map((c, i) => ({ name: String(i + 1), type: c.optional ? maybe : "string" as Type })),
+      { name: "index", type: "i64" },
+      { name: "input", type: "string" },
+      ...(named.length > 0 ? [{ name: "groups", type: objectType(named) as Type }] : []),
+    ];
+    found = { kind: "object", fields: objectType(fields).fields, tuple: true, match: true };
+    interned.set(key, found);
+    keys.set(found, key);
+  }
+  return found;
 }
 
 export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
@@ -963,6 +998,8 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof to !== "string" && to.kind === "ref") {
     return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
   }
+  // Any regex is a \`RegExp\`; all of them are the same pointer to a program.
+  if (to === ANY_REGEX) return typeof from !== "string" && (from.kind === "regex" || (from.kind === "param" && from.bound?.kind === "regex"));
   // A `MutPtr<T>` may be used as a `Ptr<T>`, as Rust's `*mut T` coerces to `*const T`.
   if (typeof to !== "string" && to.kind === "pointer") {
     return typeof from !== "string" && from.kind === "pointer" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
@@ -1049,6 +1086,7 @@ export function show(t: Type): string {
   if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
+  if (t.match) return "RegExpExecArray";
   if (t.tuple) return `[${elementsOf(t).map(show).join(", ")}]`;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));

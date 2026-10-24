@@ -3510,6 +3510,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (maths.has(e)) return mathCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (fixedPrints.has(e)) return toFixed(e);
+      if (regexCalls.get(e) === "exec") return regexExec(e);
       if (regexCalls.get(e) === "test") {
         const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
         const [found, yes] = [temp(), temp()];
@@ -5159,6 +5160,88 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A literal's string block: a count below zero, so it is never freed, its length, a pointer
   // to its bytes, no base, its UTF-16 length, and no breadcrumbs.
+  // `re.exec(s)`: the runtime writes each group's start and end, and the match is built from
+  // slices of s, with null for a group that took no part.
+  function regexExec(e: Extract<Expr, { kind: "call" }>): string {
+    const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
+    const regexT = lower(valueType(object)) as RegexType;
+    const option = types.get(e) as UnionType;
+    const match = option.members.find((m) => m !== "null") as ObjectType;
+    const re = value(object);
+    const s = value(e.args[0]!);
+    const groups = regexT.captures.length + 1;
+    const [out, found, yes] = [alloca(`[${groups * 2} x i64]`), temp(), temp()];
+    emit(`${found} = call i32 @fsh_rt_regex_match(ptr ${re}, ptr ${s}, ptr ${out})`);
+    emit(`${yes} = icmp ne i32 ${found}, 0`);
+    const [made, none, done] = [label(), label(), label()];
+    emit(`br i1 ${yes}, label %${made}, label %${none}`);
+    startBlock(made);
+    const at = (k: number) => {
+      const [p, v] = [temp(), temp()];
+      emit(`${p} = getelementptr i64, ptr ${out}, i64 ${k}`);
+      emit(`${v} = load i64, ptr ${p}`);
+      return v;
+    };
+    // A group's text, or null when it took no part; one of a name's groups that took part.
+    const capture = (indexes: number[], type: Type) => {
+      if (type === "string") {
+        const v = temp();
+        emit(`${v} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${at(indexes[0]! * 2)}, i64 ${at(indexes[0]! * 2 + 1)}, i32 2)`);
+        return v;
+      }
+      let result = convert("zeroinitializer", "null", type);
+      for (const i of indexes) {
+        const start = at(i * 2);
+        const [took, yes, next, from] = [temp(), label(), label(), block];
+        emit(`${took} = icmp sge i64 ${start}, 0`);
+        emit(`br i1 ${took}, label %${yes}, label %${next}`);
+        startBlock(yes);
+        const text = temp();
+        emit(`${text} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${start}, i64 ${at(i * 2 + 1)}, i32 2)`);
+        const some = convert(text, "string", type);
+        const filled = block;
+        emit(`br label %${next}`);
+        startBlock(next);
+        const merged = temp();
+        emit(`${merged} = phi ${llvm(type)} [ ${result}, %${from} ], [ ${some}, %${filled} ]`);
+        result = merged;
+      }
+      return result;
+    };
+    let built = "undef";
+    match.fields.forEach((f, i) => {
+      let v: string;
+      if (/^\d+$/.test(f.name)) v = capture([Number(f.name)], f.type);
+      else if (f.name === "index") v = at(0);
+      else if (f.name === "input") v = copied(s, "string");
+      else {
+        const named = f.type as ObjectType;
+        let inner = "undef";
+        named.fields.forEach((g, j) => {
+          const indexes = regexT.captures.flatMap((c, k) => (c.name === g.name ? [k + 1] : []));
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(named)} ${inner}, ${llvm(g.type)} ${capture(indexes, g.type)}, ${j}`);
+          inner = next;
+        });
+        v = inner;
+      }
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(match)} ${built}, ${llvm(f.type)} ${v}, ${i}`);
+      built = next;
+    });
+    const some = convert(built, match, option);
+    const filled = block;
+    emit(`br label %${done}`);
+    startBlock(none);
+    const nothing = convert("zeroinitializer", "null", option);
+    emit(`br label %${done}`);
+    startBlock(done);
+    const result = temp();
+    emit(`${result} = phi ${llvm(option)} [ ${some}, %${filled} ], [ ${nothing}, %${none} ]`);
+    if (!types.has(e)) pending.push({ v: result, type: option });
+    return result;
+  }
+
   // A regex is a pointer to its compiled program, one constant per pattern and flags.
   function regex(t: RegexType): string {
     const key = `${t.flags}/${t.source}`;
