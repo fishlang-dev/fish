@@ -1014,8 +1014,25 @@ export function check(written: Stmt[], library = false): Checked {
       let type = read(init) && !d.type ? value(init) : undefined;
       const inPlace = type !== undefined && !computed(init);
       let from: (at: Span) => Expr;
+      // An index that isn't a number written in place runs once, into a variable of its own, in
+      // the order the path reads them.
+      const hoisted: Stmt[] = [];
       if (inPlace) {
-        const copy = (e: Expr, at: Span): Expr => (e.kind === "member" || e.kind === "index" ? { ...e, object: copy(e.object, at), start: at.start, end: at.end } : { ...e, start: at.start, end: at.end });
+        const indexes = new Map<Expr, string>();
+        for (let e = init; e.kind === "member" || e.kind === "index"; e = e.object) {
+          if (e.kind !== "index" || e.index.kind === "int") continue;
+          const name = `index ${e.index.start}`;
+          indexes.set(e, name);
+          const at = { start: e.index.start, end: e.index.end };
+          hoisted.unshift({ kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: undefined, init: e.index, ...at }], ...at });
+        }
+        const copy = (e: Expr, at: Span): Expr => {
+          if (e.kind === "member") return { ...e, object: copy(e.object, at), start: at.start, end: at.end };
+          if (e.kind !== "index") return { ...e, start: at.start, end: at.end };
+          const name = indexes.get(e);
+          const index: Expr = name ? { kind: "ident", name, start: e.index.start, end: e.index.end } : { ...e.index };
+          return { ...e, object: copy(e.object, at), index, start: at.start, end: at.end };
+        };
         from = (at) => copy(init, at);
         Object.assign(s, { kind: "empty" });
       } else {
@@ -1094,8 +1111,8 @@ export function check(written: Stmt[], library = false): Checked {
         return { kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
       });
       // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
-      if (prologues.has(s)) for (const l of lets) prologues.add(l);
-      place.list.splice(place.at + 1, 0, ...lets);
+      if (prologues.has(s)) for (const l of [...hoisted, ...lets]) prologues.add(l);
+      place.list.splice(place.at + 1, 0, ...hoisted, ...lets);
       return undefined;
     }
 
