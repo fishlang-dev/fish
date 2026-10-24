@@ -1055,7 +1055,7 @@ export function expressions(ctx: Context) {
       Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
       return call(e);
     }
-    if (computed.has(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
+    if (readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError(`'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
     }
     const held = types.get(callee.object)!;
@@ -1490,6 +1490,17 @@ export function expressions(ctx: Context) {
     return channel(of, e);
   }
 
+  // Whether a place is read through a Dyn, or a runtime-computed property, anywhere along its
+  // path: such a read gives a copy, which a change would be lost in.
+  function readCopy(e: Expr): boolean {
+    for (let at = e; ; ) {
+      if (computed.has(at)) return true;
+      if (at.kind === "member" || at.kind === "index") at = at.object;
+      else if (at.kind === "nonNull") at = at.expr;
+      else return false;
+    }
+  }
+
   // A Map's and a Set's methods. Those changing it need it in a place that may change, or a
   // `Mut` borrow of it, which `set` and `add` give for chaining. What they give out are clones.
   function mapCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
@@ -1503,7 +1514,7 @@ export function expressions(ctx: Context) {
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
-      if (computed.has(callee.object)) throw new CompileError(`'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
+      if (readCopy(callee.object)) throw new CompileError(`'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
       const lent = isRefType(held) && held.mutable;
       if (!place(callee.object) && !lent) throw new CompileError(`'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
@@ -2944,6 +2955,8 @@ export function expressions(ctx: Context) {
     if (!place(target)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
     if (!setter || target.kind !== "member") {
       const read = value(target);
+      // Below a read through a Dyn, the place is part of a copy.
+      if (!computed.has(target) && readCopy(target)) throw new CompileError("this is part of a value read through a Dyn, which gives a copy, so writing it would change only the copy; change it through a method", target.start, target.end);
       if (computed.has(target)) {
         const holder = types.get((target as Extract<Expr, { kind: "member" }>).object);
         const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
