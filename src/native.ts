@@ -1149,6 +1149,135 @@ static char *fsh_format(double x, int single, char *out) {
   return out;
 }
 
+// The bytes of JavaScript white space or a line terminator starting at p, or 0: what parseInt,
+// parseFloat and Number skip.
+static int64_t fsh_js_space(const unsigned char *p, int64_t n) {
+  if (n >= 1 && (p[0] == ' ' || (p[0] >= '\t' && p[0] <= '\r'))) return 1;
+  if (n >= 2 && p[0] == 0xC2 && p[1] == 0xA0) return 2;
+  if (n < 3) return 0;
+  if (p[0] == 0xE1 && p[1] == 0x9A && p[2] == 0x80) return 3;
+  if (p[0] == 0xE2 && p[1] == 0x80 && (p[2] <= 0x8A || p[2] == 0xA8 || p[2] == 0xA9 || p[2] == 0xAF)) return 3;
+  if (p[0] == 0xE2 && p[1] == 0x81 && p[2] == 0x9F) return 3;
+  if (p[0] == 0xE3 && p[1] == 0x80 && p[2] == 0x80) return 3;
+  if (p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) return 3;
+  return 0;
+}
+
+static int64_t fsh_js_skip(const unsigned char *p, int64_t n) {
+  int64_t i = 0, w;
+  while (i < n && (w = fsh_js_space(p + i, n - i)) > 0) i += w;
+  return i;
+}
+
+static int fsh_digit(unsigned char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+  return 99;
+}
+
+// JavaScript's parseInt, its NaN as a false result: white space, a sign, '0x' when the radix is
+// 16 or not given (0), then the longest run of digits. A value past the i64 range is false too.
+int fsh_rt_parse_int(fsh_str *s, int64_t radix, int64_t *out) {
+  const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
+  int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
+  int negative = i < n && p[i] == '-';
+  if (i < n && (p[i] == '-' || p[i] == '+')) i++;
+  if (radix != 0 && (radix < 2 || radix > 36)) return 0;
+  if ((radix == 0 || radix == 16) && i + 1 < n && p[i] == '0' && (p[i + 1] == 'x' || p[i + 1] == 'X')) {
+    i += 2;
+    radix = 16;
+  }
+  if (radix == 0) radix = 10;
+  int64_t v = 0, start = i;
+  for (; i < n && fsh_digit(p[i]) < radix; i++) {
+    int64_t d = fsh_digit(p[i]);
+    if (__builtin_mul_overflow(v, radix, &v) || (negative ? __builtin_sub_overflow(v, d, &v) : __builtin_add_overflow(v, d, &v))) return 0;
+  }
+  *out = v;
+  return i > start;
+}
+
+// The length of the longest StrDecimalLiteral at p, without its sign: digits with an optional
+// fraction, or a fraction alone, then an optional exponent, or 'Infinity'; 0 when there is none.
+static int64_t fsh_js_decimal(const unsigned char *p, int64_t n) {
+  if (n >= 8 && memcmp(p, "Infinity", 8) == 0) return 8;
+  int64_t i = 0, digits = 0;
+  while (i < n && p[i] >= '0' && p[i] <= '9') i++, digits++;
+  if (i < n && p[i] == '.') {
+    i++;
+    while (i < n && p[i] >= '0' && p[i] <= '9') i++, digits++;
+  }
+  if (digits == 0) return 0;
+  if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+    int64_t j = i + 1;
+    if (j < n && (p[j] == '+' || p[j] == '-')) j++;
+    if (j < n && p[j] >= '0' && p[j] <= '9') {
+      while (j < n && p[j] >= '0' && p[j] <= '9') j++;
+      i = j;
+    }
+  }
+  return i;
+}
+
+// The double a decimal literal of 'length' bytes at p reads as, sign included.
+static double fsh_js_strtod(const unsigned char *p, int64_t length) {
+  int negative = length > 0 && p[0] == '-';
+  int64_t sign = length > 0 && (p[0] == '-' || p[0] == '+');
+  if (length - sign == 8 && memcmp(p + sign, "Infinity", 8) == 0) return negative ? -INFINITY : INFINITY;
+  char *text = fsh_rt_alloc(length + 1);
+  memcpy(text, p, length);
+  text[length] = 0;
+  double v = strtod(text, NULL);
+  fsh_rt_free(text);
+  return v;
+}
+
+// JavaScript's parseFloat, its NaN as a false result: white space, then the longest decimal
+// literal with an optional sign.
+int fsh_rt_parse_float(fsh_str *s, double *out) {
+  const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
+  int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
+  int64_t sign = i < n && (p[i] == '-' || p[i] == '+');
+  int64_t length = fsh_js_decimal(p + i + sign, n - i - sign);
+  if (length == 0) return 0;
+  *out = fsh_js_strtod(p + i, sign + length);
+  return 1;
+}
+
+// JavaScript's Number of a string, its NaN as a false result: the whole string less white space
+// at both ends is empty, giving 0, a '0x', '0o' or '0b' integer, or a decimal literal.
+int fsh_rt_parse_number(fsh_str *s, double *out) {
+  const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
+  int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
+  for (int64_t k = 1; n > i && k <= 3 && k <= n - i;) {
+    if (fsh_js_space(p + n - k, k) == k) {
+      n -= k;
+      k = 1;
+    } else k++;
+  }
+  if (i == n) {
+    *out = 0;
+    return 1;
+  }
+  if (n - i > 2 && p[i] == '0') {
+    int radix = p[i + 1] == 'x' || p[i + 1] == 'X' ? 16 : p[i + 1] == 'o' || p[i + 1] == 'O' ? 8 : p[i + 1] == 'b' || p[i + 1] == 'B' ? 2 : 0;
+    if (radix != 0) {
+      double v = 0;
+      for (int64_t k = i + 2; k < n; k++) {
+        if (fsh_digit(p[k]) >= radix) return 0;
+        v = v * radix + fsh_digit(p[k]);
+      }
+      *out = v;
+      return 1;
+    }
+  }
+  int64_t sign = p[i] == '-' || p[i] == '+';
+  if (fsh_js_decimal(p + i + sign, n - i - sign) != n - i - sign) return 0;
+  *out = fsh_js_strtod(p + i, n - i);
+  return 1;
+}
+
 char *fsh_rt_format_f64(double x, char *out) { return fsh_format(x, 0, out); }
 char *fsh_rt_format_f32(float x, char *out) { return fsh_format(x, 1, out); }
 

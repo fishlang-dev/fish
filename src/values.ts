@@ -155,6 +155,8 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
+export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
 // The `Math` calls and constants, which codegen lowers itself.
 export const maths = new WeakSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
@@ -749,6 +751,8 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
     if (callee.kind === "member" && isMath(callee.object)) return mathCall(e, callee.name);
+    const parser = parserOf(callee);
+    if (parser) return parse(e, parser);
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
       const made = callee.object;
@@ -1302,6 +1306,36 @@ export function expressions(ctx: Context) {
   // `Array.of(a, b)` is the array literal `[a, b]`; `Array.from(x, f?)` is the array of what x
   // holds, clones of an array's elements, a string's code points or a generator's values, or of
   // `0` to `n - 1` from `{ length: n }`, mapped by f when there is one.
+  // The global `parseInt`, `parseFloat`, `Number` and `Number.parse...` a call makes, unless a
+  // name of the program's hides it.
+  function parserOf(callee: Expr): "parseInt" | "parseFloat" | "Number" | undefined {
+    const global = (name: string) => !lookup(name) && !classes.has(name) && !byName.has(name);
+    if (callee.kind === "ident" && (callee.name === "parseInt" || callee.name === "parseFloat" || callee.name === "Number") && global(callee.name)) return callee.name;
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Number" && global("Number") && (callee.name === "parseInt" || callee.name === "parseFloat")) return callee.name;
+    return undefined;
+  }
+
+  // Parsing a number gives an Option where JavaScript would give NaN.
+  function parse(e: Call, name: "parseInt" | "parseFloat" | "Number"): { type: Type; what: string } {
+    const what = `'${name}'`;
+    const most = name === "parseInt" ? 2 : 1;
+    if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    if (e.args.length < 1 || e.args.length > most) throw new CompileError(name === "parseInt" ? "'parseInt' takes a string and an optional radix" : `${what} takes one string`, e.start, e.end);
+    const t = read(e.args[0]!);
+    if (!stringLike(t)) {
+      const hint = name === "Number" && isNumeric(t) ? "; to convert a number, write 'x as f64'" : "";
+      throw new CompileError(`${what} parses a string, not '${show(t)}'${hint}`, e.args[0]!.start, e.args[0]!.end);
+    }
+    if (t !== "string") coerce(e.args[0]!, t, "string", "");
+    const radix = e.args[1];
+    if (radix) {
+      const r = value(radix);
+      if (r !== "i64" && !adapt(radix, "i64")) throw new CompileError(`a radix is an 'i64', not '${show(r)}'`, radix.start, radix.end);
+    }
+    parses.set(e, name);
+    return { type: unionType([name === "parseInt" ? "i64" : "f64", "null"]), what };
+  }
+
   // The global `Math`, unless a name of the program's hides it.
   function isMath(e: Expr): boolean {
     return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math");

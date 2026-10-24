@@ -137,3 +137,117 @@ function main() {
 function main() {
   console.log(Math.pow(2));
 }
+// case: parse_like_javascript
+// expect: 0 42 66 NaN 146
+// expect: 1 -17 -23 -1 -56661
+// expect: 2 5 5 NaN 5
+// expect: 3 31 31 0 42819
+// expect: 4 31 31 0 42819
+// expect: 5 NaN NaN NaN NaN
+// expect: 6 NaN NaN NaN NaN
+// expect: 7 NaN 2748 NaN 13368
+// expect: 8 12 18 1 38
+// expect: 9 1 483 1 1803
+// expect: 10 0 0 0 0
+// expect: 11 92233720368547758 NaN NaN NaN
+// expect: 12 -92233720368547758 NaN NaN NaN
+// expect: 13 7 7 NaN 7
+// expect: 14 NaN NaN 0 33
+// expect: 15 -16 -16 0 -42804
+// expect: 16 8 8 0 8
+// expect: 5 NaN NaN NaN 0
+// expect: 0 3.14 3.14 3.14
+// expect: 1 -2500 NaN -2500
+// expect: 2 0.5 0.5 0.5
+// expect: 3 5 5 5
+// expect: 4 NaN NaN NaN
+// expect: 5 -0.0005 -0.0005 -0.0005
+// expect: 6 1 NaN 1
+// expect: 7 1 NaN 1
+// expect: 8 Infinity Infinity Infinity
+// expect: 9 -Infinity NaN -Infinity
+// expect: 10 Infinity Infinity Infinity
+// expect: 11 NaN NaN NaN
+// expect: 12 NaN NaN NaN
+// expect: 13 0 16 0
+// expect: 14 1 NaN 1
+// expect: 15 NaN 0 NaN
+// expect: 16 12 12 12
+// expect: 17 8 8 8
+// expect: 18 Infinity Infinity Infinity
+// expect: 19 0 0 0
+// expect: 20 0.1 0.1 0.1
+// expect: 21 1.2345678901234568e+29 1.2345678901234568e+29 1.2345678901234568e+29
+// expect: 22 5e-324 5e-324 5e-324
+// expect: 23 NaN 0 NaN
+// expect: 24 0 5 0
+// expect: 25 0 15 0
+// expect: 26 0 31 0
+// expect: 27 0 NaN 0
+// expect: 28 1 NaN 1
+// expect: 29 3 3 3
+// expect: 77 91
+function show(x: i64 | null): string {
+  return x === null ? "NaN" : "" + x;
+}
+function showF(x: f64 | null): string {
+  return x === null ? "NaN" : "" + x;
+}
+function main() {
+  const ints = ["42", "  -17px", "+5", "0x1F", "0X1f", "", "  ", "abc", "12.9", "1e3", "-0", "92233720368547758", "-92233720368547758", " \t\n 7", "0x", "-0x10", "08"];
+  for (const [i, s] of ints.entries()) console.log(i, show(parseInt(s)), show(parseInt(s, 16)), show(parseInt(s, 2)), show(Number.parseInt(s, 36)));
+  console.log(show(parseInt("12", 3)), show(parseInt("z", 37)), show(parseInt("1", 1)), show(parseInt("ff", 0)), show(parseInt("0x1f", 10)));
+  const floats = ["3.14", "  -2.5e3xyz", ".5", "5.", ".", "-.5e-3", "1e", "1e+", "+Infinity", "-Infinityx", "Infinity", "infinity", "NaN", "0x10", "1_000", "", "  12  ", "  8", "1e1000", "-0", "0.1", "123456789012345678901234567890", "4.9e-324", "  \n", "0b101", "0o17", "  0x1F  ", "+0x1", "1 2", "﻿3"];
+  for (const [i, s] of floats.entries()) console.log(i, showF(parseFloat(s)), showF(Number(s)), showF(Number.parseFloat(s)));
+  const r: Ref<string> = "77";
+  console.log(show(parseInt(r)), showF(Number("9" + 1)));
+}
+// case: parse_int_range
+// expect: 9223372036854775807 null
+// expect: null null
+// expect: -9223372036854775808 null
+// expect: null null
+// expect: 7 9223372036854775807
+// expect: 8000000000000000 null
+// expect: 43
+// expect: 5
+function main() {
+  const edges = ["9223372036854775807", "9223372036854775808", "-9223372036854775808", "-9223372036854775809", "7fffffffffffffff", "8000000000000000"];
+  for (const s of edges) {
+    const a = parseInt(s);
+    const b = parseInt(s, 16);
+    console.log(a === null ? "null" : "" + a, b === null ? "null" : "" + b);
+  }
+  const n = parseInt("42");
+  if (n !== null) console.log(n + 1);
+  const f = parseFloat("2.5") ?? 0.0;
+  console.log(f * 2);
+}
+// case: parse_shadowed
+// expect: 7
+function parseInt(s: string): i64 { return 7; }
+function main() {
+  console.log(parseInt("1"));
+}
+// case: parse_number_int
+// error: 'Number' parses a string, not 'i64'; to convert a number, write 'x as f64'
+function main() {
+  const n = 5;
+  console.log(Number(n));
+}
+// case: parse_bool
+// error: 'parseInt' parses a string, not 'boolean'
+function main() {
+  console.log(parseInt(true));
+}
+// case: parse_arity
+// error: 'parseFloat' takes one string
+function main() {
+  console.log(parseFloat("1", 2));
+}
+// case: parse_radix
+// error: a radix is an 'i64', not 'number'
+function main() {
+  const r = 2.5;
+  console.log(parseInt("1", r));
+}

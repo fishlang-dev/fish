@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, type DynTable } from "./values.ts";
+import { computed, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, type DynTable } from "./values.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
@@ -432,6 +432,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const zeros = op(`select i1 ${op(`fcmp oeq ${t} ${a}, ${b}`)}, ${t} ${op(`bitcast ${bits} ${joined} to ${t}`)}, ${t} ${pick}`);
       return op(`select i1 ${op(`fcmp uno ${t} ${a}, ${a}`)}, ${t} ${a}, ${t} ${zeros}`);
     });
+  }
+
+  // A number parsed by the runtime, or null where JavaScript would give NaN.
+  function parseCall(e: Extract<Expr, { kind: "call" }>, name: "parseInt" | "parseFloat" | "Number"): string {
+    const number = name === "parseInt" ? "i64" : "f64";
+    const s = operand(e.args[0]!, e.args.slice(1));
+    const radix = e.args[1] ? value(e.args[1]) : "0";
+    const [out, ok, read, found] = [alloca(llvm(number)), temp(), temp(), temp()];
+    const args = name === "parseInt" ? `ptr ${s}, i64 ${radix}, ptr ${out}` : `ptr ${s}, ptr ${out}`;
+    emit(`${ok} = call i32 @fsh_rt_parse_${name === "Number" ? "number" : name === "parseInt" ? "int" : "float"}(${args})`);
+    emit(`${read} = load ${llvm(number)}, ptr ${out}`);
+    emit(`${found} = icmp ne i32 ${ok}, 0`);
+    const type = types.get(e) ?? unionType([number, "null"]);
+    const result = temp();
+    emit(`${result} = select i1 ${found}, ${llvm(type)} ${convert(read, number, type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+    return result;
   }
 
   function emit(line: string) {
@@ -3463,6 +3479,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
+      if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (e.callee.kind === "ident" && e.callee.name === "fill length") {
         const n = value(e.args[0]!);
         if (!lengthChecks.has(e)) return n;
