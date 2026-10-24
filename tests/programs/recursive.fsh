@@ -213,3 +213,80 @@ function main() {
   console.log(weight({ v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] }));
   console.log(ev(Expr.Add(Expr.Num(5), Expr.Add(Expr.Num(6), Expr.Num(7)))));
 }
+// case: recursive_repairs
+// expect: 9 1 5
+// expect: 2 2 9
+// expect: a 2
+// expect: 1
+type Tree = { v: i64; kids: Tree[] };
+type Json = { kind: "num"; n: i64 } | { kind: "arr"; items: Json[] };
+type List<T> = { head: T; tail: List<T> | null };
+enum Seq<T> { Nil, Cons(T, Seq<T>) }
+enum E { Leaf(i64), Wrap(Node) }
+class Node {
+  e: E;
+  constructor(e: E) { this.e = e; }
+  depth(): i64 {
+    return match (this.e) {
+      case E.Leaf(v) => v,
+      case E.Wrap(m) => 1 + m.depth(),
+    };
+  }
+}
+function sum(ts: Ref<Tree[]>): i64 {
+  let s = 0;
+  for (const t of ts) s += t.v + sum(t.kids);
+  return s;
+}
+function first(t: Ref<Tree>): Ref<Tree> {
+  return t.kids[0];
+}
+function len<T>(l: Ref<List<T>>): i64 {
+  return match (l) {
+    case { tail: null } => 1,
+    case { tail } => 1 + len<T>(tail!),
+  };
+}
+function size<T>(l: Seq<T>): i64 {
+  return match (l) {
+    case Seq.Nil => 0,
+    case Seq.Cons(_, rest) => 1 + size<T>(rest.clone()),
+  };
+}
+function count(j: Ref<Json>): i64 {
+  return match (j) {
+    case { kind: "num" } => 1,
+    case { kind: "arr", items } => items.map((x) => count(x)).reduce((a, b) => a + b, 0),
+  };
+}
+function main() {
+  let t: Tree = { v: 1, kids: [{ v: 2, kids: [] }] };
+  t.kids[0] = { v: 9, kids: [] };
+  const kids: Tree[] = [{ v: 2, kids: [{ v: 3, kids: [] }] }];
+  const u: Tree = { v: 1, kids };
+  console.log(t.kids[0].v, u.kids.length, sum(u.kids));
+  const l: List<string> = { head: "a", tail: { head: "b", tail: null } };
+  const s: Seq<string> = Seq.Cons("a", Seq.Cons("b", Seq.Nil));
+  console.log(len<string>(l), size<string>(s), new Node(E.Wrap(new Node(E.Wrap(new Node(E.Leaf(7)))))).depth());
+  console.log(first(u).kids[0].v === 3 ? "a" : "b", count({ kind: "arr", items: [{ kind: "num", n: 1 }, { kind: "arr", items: [{ kind: "num", n: 2 }] }] }));
+  const j: Json = { kind: "arr", items: [{ kind: "num", n: 1 }, { kind: "arr", items: [] }] };
+  console.log(count(j));
+}
+// case: recursive_array_methods
+// expect: 10 20 1 20 1
+type Tree = { v: i64; kids: Tree[] };
+function double(t: Ref<Tree>): Tree {
+  return { v: t.v * 2, kids: t.kids.map((k) => double(k)) };
+}
+function sum(t: Ref<Tree>): i64 {
+  return t.v + t.kids.map((k) => sum(k)).reduce((a, b) => a + b, 0);
+}
+function main() {
+  const t: Tree = { v: 1, kids: [{ v: 2, kids: [{ v: 3, kids: [] }] }, { v: 4, kids: [] }] };
+  const d = double(t);
+  let m = new Map<string, Tree>();
+  m.set("a", d.clone());
+  const vs = [...m.values()];
+  const direct = m.values();
+  console.log(sum(t), sum(d), vs.length, sum(vs[0]), direct.length);
+}

@@ -5,7 +5,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { elementsOf, fits, holdsPattern, objectType, optionalField, recursiveType, show, tupleType, unionType, widenEnum, type ClassType, type Type } from "./typing.ts";
+import { elementsOf, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -135,16 +135,15 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   // pointer wherever it appears inside the classes it contains, as an alias that holds itself
   // does.
   function holdItself(c: ClassType) {
-    const back = recursiveType(show(c), c.generic?.args ?? []);
-    back.of = c;
-    const holders = new Set<ClassType>();
+    const back = blockFor(c, c.generic?.args ?? []);
+    const holders = new Set<ClassType | VariantType>();
     const reach = (t: Type) => {
       if (typeof t === "string") return;
-      if (t.kind === "class") {
+      if (t.kind === "class" || t.kind === "variant") {
         if (holders.has(t)) return;
         holders.add(t);
         t.fields.forEach((f) => reach(f.type));
-        if (t.base) reach(t.base);
+        if (t.kind === "class" && t.base) reach(t.base);
       } else if (t.kind === "union") t.members.forEach(reach);
       else if (t.kind === "object") t.fields.forEach((f) => reach(f.type));
     };

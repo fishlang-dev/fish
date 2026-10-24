@@ -471,10 +471,45 @@ export function recursiveType(name: string, args: Type[]): RecursiveType {
   return t;
 }
 
+// The recursive type standing for a class or an enum instance, made once for it, so the one
+// made for another instance is found from the instance.
+const heldBlocks = new WeakMap<Exclude<Type, string>, RecursiveType>();
+export function blockFor(t: ClassType | UnionType, args: Type[]): RecursiveType {
+  let back = heldBlocks.get(t);
+  if (!back) {
+    heldBlocks.set(t, back = recursiveType(show(t), args));
+    standsFor(back, t);
+  }
+  return back;
+}
+export function holdsBlock(t: UnionType, back: RecursiveType) {
+  heldBlocks.set(t, back);
+}
+
 // The same recursive type made with other type arguments, which only the checker can make.
 let instanceRecursive = (t: RecursiveType, _args: Type[]): RecursiveType => t;
 export function lowersRecursive(f: typeof instanceRecursive) {
   instanceRecursive = f;
+}
+
+// A recursive type for other type arguments: a class's or an enum's is found from its instance,
+// `of` made with them, which makes the instance without reading its fields; an alias's is
+// remade by the checker.
+function remade(t: RecursiveType, of: () => Type, args: Type[]): RecursiveType {
+  const kind = typeof t.of !== "string" ? t.of.kind : undefined;
+  if (kind === "class" || (kind === "union" && heldBlocks.get(t.of as UnionType) === t)) {
+    const made = of();
+    return typeof made !== "string" && (made.kind === "class" || made.kind === "union") ? blockFor(made, args) : t;
+  }
+  return instanceRecursive(t, args);
+}
+
+// Whether a value of `type` lent where a type parameter is wanted is a part of a value whose type
+// holds itself, the parameter standing for that type: each instance checks it again.
+export function partOfItself(type: Type, to: Type): boolean {
+  if (typeof to === "string" || to.kind !== "param" || to.concrete || to.bound === undefined || lower(type) !== lower(to.bound)) return false;
+  const bound = to.bound;
+  return holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
 }
 
 // The type a recursive type stands for, or the type itself.
@@ -697,6 +732,13 @@ export function arrayType(element: Type): ArrayType {
 
 const arrays = new Map<string, ArrayType>();
 
+// Sets the type a recursive type stands for. An array of either is then one type, whose
+// elements are the blocks, so `Tree[]` written anywhere is the array a `Tree` holds.
+export function standsFor(back: RecursiveType, of: Type) {
+  back.of = of;
+  arrays.set(`[${keyOf(of)}]`, arrayType(back));
+}
+
 export function mapType(key: Type, value: Type, set = false): MapType {
   const id = `${set ? "Set" : "Map"}<${keyOf(key)},${keyOf(value)}>`;
   let t = maps.get(id);
@@ -849,7 +891,7 @@ export function lower(t: Type): Type {
   if (t.kind === "shared") return sharedType(lower(t.of));
   if (t.kind === "block") return blockType(t.which, lower(t.of));
   if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
-  if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? instanceRecursive(t, t.args.map(lower)) : t;
+  if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? remade(t, () => lower(t.of), t.args.map(lower)) : t;
   let found = lowered.get(t);
   if (!found) {
     if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
@@ -894,7 +936,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   }
   if (typeof t !== "string" && t.kind === "recursive") {
     const args = t.args.map((a) => replaced(a, swap));
-    return args.some((a, i) => a !== t.args[i]) ? instanceRecursive(t, args) : t;
+    return args.some((a, i) => a !== t.args[i]) ? remade(t, () => replaced(t.of, swap), args) : t;
   }
   if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
   if (t.kind === "object" && t.match) return t;
@@ -1070,15 +1112,11 @@ export function fits(from: Type, to: Type): boolean {
   if (typeof to !== "string" && to.kind === "pointer") {
     return typeof from !== "string" && from.kind === "pointer" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
   }
-  if (typeof to !== "string" && to.kind === "union") {
-    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
-    return to.members.some((m) => fits(from, m));
-  }
-  // A union fits where every member it may hold does, as an enum fits an i64.
-  if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
   // A recursive type is the type it stands for. Its type holds it again, so a pair being
   // compared is taken to fit while its parts are.
-  if ((typeof from !== "string" && from.kind === "recursive") || (typeof to !== "string" && to.kind === "recursive")) {
+  // A union holding the recursive type itself takes it as it is.
+  const held = typeof to !== "string" && to.kind === "union" && to.members.includes(from);
+  if (!held && ((typeof from !== "string" && from.kind === "recursive") || (typeof to !== "string" && to.kind === "recursive"))) {
     const pair = `${keyOf(from)} ${keyOf(to)}`;
     if (assumed.has(pair)) return true;
     assumed.add(pair);
@@ -1088,6 +1126,12 @@ export function fits(from: Type, to: Type): boolean {
       assumed.delete(pair);
     }
   }
+  if (typeof to !== "string" && to.kind === "union") {
+    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
+    return to.members.some((m) => fits(from, m));
+  }
+  // A union fits where every member it may hold does, as an enum fits an i64.
+  if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
   if (typeof from !== "string" && from.kind === "pattern") return to === "string";
   if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
   // A closure fits a function type taking the same parameters, or the first of them, and

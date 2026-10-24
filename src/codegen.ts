@@ -2626,7 +2626,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // Puts `v` at the end of the array at `at`, growing it when it is full.
-  function appended(at: string, element: Type, v: string) {
+  function appended(at: string, given: Type, v: string) {
+    // An array of a type that holds itself holds each element in a block.
+    const element = arrayType(given).element;
+    if (element !== given) v = convert(v, given, element);
     const t = llvm(element);
     emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(element, "1")})`);
     const [lengthAt, dataAt, length, data, slot, more] = [temp(), temp(), temp(), temp(), temp(), temp()];
@@ -3412,7 +3415,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     // A value read out of a recursive type's block, when it is given up, leaves the block to be
     // freed.
-    if (to && unboxes(types.get(e)!, to)) {
+    if (to && !isRef(to) && unboxes(types.get(e)!, to)) {
       const type = types.get(e)!;
       const v = known.get(e) ?? evaluate(e);
       const out = convert(v, type, to);
@@ -4080,7 +4083,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
   // that declares the method.
   function thisPointer(target: Instance, object: Expr): string {
-    const held = unwraps(object) ? coercions.get(object)! : referent(types.get(object)!);
+    const held = unwraps(object) ? coercions.get(object)! : unfold(referent(types.get(object)!));
     return upcast(receiver(object, target.body.self?.owned), held as ClassType, target.body.owner!);
   }
 
@@ -4630,8 +4633,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // in a slot is a copy of its own.
   function receiver(object: Expr, owns = false): string {
     if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
-    // A reference already points where the receiver lives.
-    if (isRef(types.get(object)!)) return evaluate(object);
+    // A reference already points where the receiver lives, or at the block it lives in.
+    if (isRef(types.get(object)!)) return blockOf(evaluate(object), (types.get(object) as RefType).to);
     // In an optional chain, what the Option holds: in place when it is one member of it.
     if (unwraps(object)) {
       const option = types.get(object) as UnionType;
@@ -4686,7 +4689,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return boxed;
     }
     // A temporary taken out of a recursive type's block leaves the block to be freed.
-    if (consume && to && unboxes(type, to) && fresh(e) && !known.has(e)) {
+    if (consume && to && !isRef(to) && unboxes(type, to) && fresh(e) && !known.has(e)) {
       const out = convert(result, type, to);
       freeBlocks(result, type);
       return out;
@@ -5107,7 +5110,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       replace(pointer, type.to, result);
       return result;
     }
-    replace(address(target), type, result);
+    // An element or a field kept in a recursive type's block takes the value into a new block.
+    const place = placeType(target);
+    replace(address(target), place, place !== type && boxes(type, place) ? convert(result, type, place) : result);
     return result;
   }
 

@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, recursiveType, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -110,7 +110,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     let back = recursives.get(key);
     if (!back) {
       recursives.set(key, back = recursiveType(`${a.name}<${args.map(show).join(", ")}>`, args));
-      back.of = of;
+      standsFor(back, of);
       recursiveAliases.set(back, a);
     }
     return back;
@@ -171,7 +171,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       const type = unionType([...variants.values()], shown);
       for (const v of variants.values()) v.of = type;
       const back = enumBlocks.get(`${data.id} ${key}`);
-      if (back) back.of = type;
+      if (back && typeof type !== "string" && type.kind === "union") {
+        standsFor(back, type);
+        holdsBlock(type, back);
+      }
       const instance = { type, variants };
       data.instances.set(key, instance);
       return instance;
@@ -554,7 +557,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       throw new CompileError(`type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
     }
     if (back) {
-      back.of = type;
+      standsFor(back, type);
       recursiveAliases.set(back, a);
     }
     resolved.set(key, type);

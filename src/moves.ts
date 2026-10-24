@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { computed, dynCalls, isPrint, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { selfCalls } from "./check.ts";
-import { field, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -1006,7 +1006,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       return from === want || (isUnion(from) && from.members.includes(want));
     }
     if (key(e) === undefined || throughUnion(e) || narrowed(type)) return false;
-    return lower(type) === lower(to.to);
+    return lower(type) === lower(to.to) || partOfItself(type, to.to);
   }
 
   // Whether a field path passes through a union, or ends where a type parameter's concrete type

@@ -6,7 +6,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -2304,7 +2304,7 @@ export function expressions(ctx: Context) {
     if (object.kind === "ident") objects.add(object);
     const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
-    return typeof type !== "string" && type.kind === "ref" ? type.to : type;
+    return unfold(typeof type !== "string" && type.kind === "ref" ? type.to : type);
   }
 
   // Whether a field read or method call is a link of an optional chain: written `?.`, or after
@@ -2608,7 +2608,7 @@ export function expressions(ctx: Context) {
         }
         if (e.object.kind === "ident") objects.add(e.object);
         const through = linked(e) ? unwrapped(e.object, e.optional) : value(e.object);
-        const object = typeof through !== "string" && through.kind === "ref" ? through.to : through;
+        const object = unfold(typeof through !== "string" && through.kind === "ref" ? through.to : through);
         // A field read through a reference loads what it points to; a getter gets the pointer.
         if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
         if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
@@ -2769,7 +2769,10 @@ export function expressions(ctx: Context) {
           }
           coerce(x, types.get(x)!, element, `type '${show(types.get(x)!)}' is not assignable to type '${show(element)}', the type of the spread's elements`);
         });
-        return arrayType(element);
+        // An array of a type that holds itself holds each element in a block.
+        const made = arrayType(element);
+        if (made.element !== element) for (const x of elements) if (!spreads.has(x)) coerce(x, coercions.get(x) ?? types.get(x)!, made.element, "");
+        return made;
       }
       case "arrow":
         return closure(e, expecting.get(e), unsafeDepth > 0, owning.has(e));
@@ -3130,6 +3133,7 @@ export function expressions(ctx: Context) {
     // A recursive type's value meeting another type is the type it stands for, read out of
     // its block.
     if (typeof type !== "string" && type.kind === "recursive" && type !== to && !(typeof to !== "string" && to.kind === "union" && to.members.includes(type))) {
+      coercions.delete(e);
       coerce(e, type.of, to, message);
       if (!coercions.has(e)) coercions.set(e, type.of);
       return;
@@ -3230,7 +3234,10 @@ export function expressions(ctx: Context) {
       type = coercions.get(e) ?? types.get(e)!;
     }
     const exact = sameLowered(type, to.to);
-    if (!exact && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
+    // A type that holds itself may lend a part of a parameter's value as the parameter's type,
+    // which each instance checks against the type it is made for.
+    const part = partOfItself(type, to.to);
+    if (!exact && !part && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
     const unlocked = to.mutable ? unlocks(type, to.to) : undefined;
     if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(to.to)}', which could change it`, e.start, e.end);
     const through = to.mutable ? copied(e) : undefined;

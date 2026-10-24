@@ -33,6 +33,23 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
     }
     return undefined;
   }
+  // An array literal takes the shape of the array it meets, each element shaped as its element.
+  if (e.kind === "array" && typeof to !== "string" && to.kind === "array" && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
+    const steps: ((coercions: Map<Expr, Type>) => void)[] = [];
+    for (const x of e.elements as Expr[]) {
+      const have = types.get(x)!;
+      const shape = fits(have, to.element) ? undefined : literalShape(x, to.element, types);
+      if (!shape && !fits(have, to.element)) return undefined;
+      steps.push((coercions) => {
+        shape?.apply(coercions);
+        if (types.get(x) !== to.element) coercions.set(x, to.element);
+      });
+    }
+    return { type: to, apply: (coercions) => {
+      steps.forEach((step) => step(coercions));
+      types.set(e, to);
+    } };
+  }
   // A literal with spreads takes its fields' types from them, which no literal narrows.
   if (e.kind !== "object" || typeof to === "string" || to.kind !== "object" || e.props.some((p) => p.kind === "spread")) return undefined;
   const fields: Field[] = [];
