@@ -239,7 +239,11 @@ function run(site: Site, linked: Decl, macros: Map<string, Func>, checked: Check
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
   const declared = reached(code, macro).flatMap(quoteDeclarations);
-  const hygiene: Hygiene = { bound: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, fresh };
+  const members = new Set(loaded.modules.flatMap((m) => m.statements.flatMap((s) => {
+    const d = s.kind === "export" ? s.body : s;
+    return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
+  })));
+  const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
   const result = withHygiene(hygiene, () => comptimeCall(instance, [value], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];

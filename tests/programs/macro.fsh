@@ -370,3 +370,23 @@ macro function withLabel(input: AstStmt): Ast[] {
 }
 @keep @withLabel function one(): i64 { return 1; }
 function main() { console.log(one(), described()); }
+// case: macro_bare_variant
+// expect: 7 0
+enum Opt { Has(i64), Nothing }
+macro function m(input: AstStmt): Ast[] {
+  return [input, quote`function ${ident("get")}(o: Opt): i64 { return match (o) { case Nothing => 0, case Has(v) => v, }; }`];
+}
+@m function f() {}
+function main() { console.log(get(Opt.Has(7)), get(Opt.Nothing)); }
+// case: macro_cross_quote_scope
+// expect: 9
+const value: i64 = 3;
+macro function m(input: AstStmt): Ast[] {
+  return [input,
+    quote`function ${ident("sq")}(value: i64): i64 { return value * value; }`,
+    quote`function ${ident("show")}(): i64 { return sq(value); }`];
+}
+@m function f() {}
+function main() {
+  console.log(show());
+}

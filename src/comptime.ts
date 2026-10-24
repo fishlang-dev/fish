@@ -101,6 +101,9 @@ export function comptimeArgument(instance: Instance, arg: Expr): Value {
 // A comptime string array's binding: a literal type standing for exactly that array, so equal
 // arrays share an instance. It is never the interned literal of an ordinary string, which a
 // string parameter may be given with the same text.
+// The bindings each quote made while a macro runs, for a quote it is spliced into.
+const scopes = new WeakMap<object, Map<string, string>>();
+
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
 export function comptimeCall(instance: Instance, args: Value[], site: Span): Value {
@@ -453,7 +456,11 @@ function interpreter() {
         if (!types) return unsupported("this tagged template", e);
         const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
-        return built<Value>(q, types, e, astValues((i, into) => retag(holes[i]!.value, holes[i]!.type, into), holes.map((h) => h.value), e));
+        // A quote spliced in shares its bindings with this one.
+        const scope = new Map(holes.flatMap((h) => [...(scopes.get(untagged(h.value) as object) ?? [])]));
+        const made = built<Value>(q, types, e, astValues((i, into) => retag(holes[i]!.value, holes[i]!.type, into), holes.map((h) => h.value), e), scope);
+        if (made && typeof made === "object") scopes.set(untagged(made) as object, scope);
+        return made;
       }
       case "template": {
         let text = e.quasis[0] ?? "";

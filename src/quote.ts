@@ -187,12 +187,12 @@ export type Builder<V> = {
   none: V;
 };
 
-// While a macro runs: the private name each name its quotes bind or declare has, shared by
-// every quote the run builds, so a statement quoted on its own and spliced into another keeps
-// its bindings; the names each file declares or imports, which a quote written there means
-// wherever its expansion lands; and the spellings that pin them, `name-fsh<file>`, which the
-// linker gives the declaration the name means in that file.
-export type Hygiene = { bound: Map<string, string>; namesIn(file: number): Set<string>; pins: Set<string>; fresh(name: string): string };
+// While a macro runs: the private names of the top-level declarations its quotes make, known to
+// all of them; the names each file declares or imports, which a quote written there means
+// wherever its expansion lands; the spellings that pin them, `name-fsh<file>`, which the linker
+// gives the declaration the name means in that file; and the names of the program's enum
+// members, which a bare name in a quoted match means rather than binds.
+export type Hygiene = { declared: Map<string, string>; namesIn(file: number): Set<string>; pins: Set<string>; members: Set<string>; fresh(name: string): string };
 let hygiene: Hygiene | undefined;
 
 export function withHygiene<T>(h: Hygiene, run: () => T): T {
@@ -218,23 +218,24 @@ export function declaredBy(q: Quote): string[] {
 const DECLARATIONS = new Set(["function", "class", "typeAlias", "interface", "enum"]);
 // The nodes whose `name` is a name of the program's, bound or used: never a member's or a key's.
 const NAMED = new Set(["ident", "ref", "variant", "function", "class", "typeAlias", "interface", "enum", "infer", "mapped"]);
-// The bare names a match pattern means rather than binds.
+// The bare names a match pattern means rather than binds, besides the program's enum members.
 const VARIANTS = new Set(["None"]);
 
 // A quote's tree with its names made hygienic: each name it binds, a variable, a parameter, a
-// type parameter, a match binding, an `infer` or a declaration, private to the macro's run; and
-// a name the file the quote is written in declares or imports, pinned to what it means there.
-function hygienic(tree: unknown, h: Hygiene, file: number): unknown {
+// type parameter, a match binding, an `infer` or a declaration, private to it and to the quotes
+// spliced into it, whose bindings it gets in `bound`; and a name the file the quote is written in
+// declares or imports, pinned to what it means there.
+function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, string>): unknown {
   const copy = structuredClone(tree);
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
-    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !h.bound.has(name)) h.bound.set(name, h.fresh(name));
+    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
   };
   const pattern = (p: unknown, inMatch = false) => {
     if (!p || typeof p !== "object") return;
     const n = p as { kind?: string; name?: unknown; target?: unknown; props?: { value: unknown }[]; elements?: unknown[]; rest?: unknown; args?: unknown[]; patterns?: unknown[] };
-    // In a match a bare name binds, as the checker reads it, except `None`.
-    if (n.kind === "ident" && !(inMatch && typeof n.name === "string" && VARIANTS.has(n.name))) bind(n.name);
+    // In a match a bare name binds, as the checker reads it, unless an enum has a member of it.
+    if (n.kind === "ident" && !(inMatch && typeof n.name === "string" && (VARIANTS.has(n.name) || h.members.has(n.name)))) bind(n.name);
     if (n.kind === "default") pattern(n.target, inMatch);
     for (const x of n.props ?? []) pattern(x.value, inMatch);
     for (const x of [...(n.elements ?? []), ...(n.args ?? []), ...(n.patterns ?? [])]) pattern(x, inMatch);
@@ -257,7 +258,7 @@ function hygienic(tree: unknown, h: Hygiene, file: number): unknown {
   collect(copy);
   const renamed = (name: string): string | undefined => {
     const [head, ...rest] = name.split(".");
-    const to = h.bound.get(head!);
+    const to = bound.get(head!) ?? h.declared.get(head!);
     if (to) return [to, ...rest].join(".");
     if (!names.has(head!)) return undefined;
     const pinned = `${head}-fsh${file}`;
@@ -277,15 +278,16 @@ function hygienic(tree: unknown, h: Hygiene, file: number): unknown {
       for (const k of Object.keys(n)) delete n[k];
       Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
     }
-    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = h.bound.get(p.name) ?? p.name;
+    if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
     Object.values(n).forEach(rename);
   };
   rename(copy);
   return copy;
 }
 
-// Without `at`, every node keeps its own span, as a declaration a macro takes does.
-export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>): V {
+// Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`
+// gives the bindings of the quotes spliced in, and gets this quote's, with theirs.
+export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope = new Map<string, string>()): V {
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
     const t = unfolded(type);
@@ -312,7 +314,7 @@ export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | und
     }
     return b.record(t, fields);
   };
-  return make(at && hygiene ? hygienic(q.tree, hygiene, Math.floor(at.start / FILE_SPAN)) : q.tree, types[q.category]);
+  return make(at && hygiene ? hygienic(q.tree, hygiene, Math.floor(at.start / FILE_SPAN), scope) : q.tree, types[q.category]);
 }
 
 // An integer an Ast holds, as an `i64` until big integers.
