@@ -1177,3 +1177,51 @@ class Box<T> {
 function main() {
   console.log(new Box(1).map<i64, string>((x) => x));
 }
+// case: generic_arrows_and_nested_functions
+// expect: 1 s 2 a+b 5
+// expect: one 1
+// expect: 5
+const swap = <A, B>(p: [A, B]): [B, A] => [p[1], p[0]];
+function main() {
+  const id = <T>(x: T): T => x;
+  function pairUp<T>(a: T, b: T): T[] {
+    return [a, b];
+  }
+  const twice = <T,>(x: T, f: (y: T) => T): T => f(f(x));
+  console.log(id(1), id("s"), pairUp(1, 2).length, pairUp("a", "b").join("+"), twice(3, (y) => y + 1));
+  const s = swap([1, "one"]);
+  console.log(s[0], s[1]);
+  const inner = () => id(5);
+  console.log(inner());
+}
+// case: generic_arrow_capture
+// error: 'addK' is generic, so it is made anew for each call and can't use 'k' from the function around it; pass it as a parameter
+function main() {
+  const k = 3;
+  const addK = <T>(x: T): i64 => k;
+  console.log(addK(1));
+}
+// case: generic_arrow_value
+// error: 'id' is generic, a family of functions made one per call, so it can only be called here, not used as a value
+function main() {
+  const id = <T>(x: T): T => x;
+  const f = id;
+}
+// case: generic_arrow_passed
+// error: a generic arrow is a family of functions, one per call, so it can only be held by a const and called; passing or storing one needs one type for it, as in '(x: i64) => i64'
+function apply(f: (x: i64) => i64): i64 { return f(1); }
+function main() {
+  console.log(apply(<T>(x: T): T => x));
+}
+// case: generic_arrow_this
+// error: 'get' is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter
+class C {
+  n: i64 = 1;
+  m(): i64 {
+    const get = <T>(x: T): i64 => this.n;
+    return get(1);
+  }
+}
+function main() {
+  console.log(new C().m());
+}

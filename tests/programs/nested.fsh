@@ -98,8 +98,11 @@ function main() {}
 class P { n: i64 = 1; }
 function main() { let p = new P(); function take(): P { return p; } }
 // case: nested_generic
-// error: generic nested functions are not supported yet
-function main() { function g<T>(x: T): T { return x; } }
+// expect: 3 a
+function main() {
+  function g<T>(x: T): T { return x; }
+  console.log(g(3), g("a"));
+}
 // case: nested_self_call_argument
 // error: cannot mutably lend 'xs' while 'xs[...]' is lent to 'g' for this call
 // A self call lends what the function uses before its arguments run, so an argument can't

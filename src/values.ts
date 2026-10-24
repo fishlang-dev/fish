@@ -848,7 +848,9 @@ export function expressions(ctx: Context) {
     // A nested function's call of itself comes before any outer name it shares.
     const itself = callee.kind === "ident" ? ctx.selfCall(e) : undefined;
     if (itself) return itself;
-    if (callee.kind === "ident" && lookup(callee.name)) return closureCall(e, callee);
+    // A local generic function is called as the generic function it was lifted to.
+    const lifted = callee.kind === "ident" ? (lookup(callee.name)?.generic as Body | undefined) : undefined;
+    if (callee.kind === "ident" && !lifted && lookup(callee.name)) return closureCall(e, callee);
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
     if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
       const stored = field(receiver, callee.name);
@@ -972,7 +974,7 @@ export function expressions(ctx: Context) {
       joined(e.args[0]!, operand(e.args[0]!), "'String'");
       return { type: "string", what: "'String'" };
     }
-    const target = callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined;
+    const target = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
@@ -2511,6 +2513,7 @@ export function expressions(ctx: Context) {
         return "boolean";
       case "ident": {
         const local = lookup(e.name, e);
+        if (local?.generic) throw new CompileError(`'${e.name}' is generic, a family of functions made one per call, so it can only be called here, not used as a value`, e.start, e.end);
         if (!local && e.name === "undefined") return "null";
         // A top-level const: its value, computed while compiling. An aggregate is read where it
         // lives, through a reference, as a const can't change.

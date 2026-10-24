@@ -29,7 +29,8 @@ export type { Body } from "./classes.ts";
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
 
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number };
+// A local generic function's name stands for the function it was lifted to, `generic`.
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 export type Checked = { instances: Instance[] };
@@ -268,6 +269,16 @@ const loopParts = new WeakSet<Declarator>();
 // The arrows nested function declarations became, with their names; they lend what they capture
 // per call.
 export const nestedFunctions = new WeakMap<Expr, string>();
+// The generic functions written inside bodies, each lifted to a function of its own, by the
+// statement that declared it.
+const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
+let lifts = 0;
+
+// A generic arrow held by a const, as the function declaration it amounts to.
+function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
+  const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
+  return { kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, body, start: at.start, end: at.end } as Func;
+}
 // A nested function's calls of itself, which run with the calling closure's own captures.
 export const selfCalls = new WeakSet<Expr>();
 
@@ -331,6 +342,11 @@ export function check(written: Stmt[], library = false): Checked {
         if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
         if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError(`'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
         if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
+        // A generic arrow is a family of functions, so it is declared as a generic function is.
+        if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
+          funcs.push(arrowFunction(d.target.name, d.init, d));
+          continue;
+        }
         const giving: Stmt = { kind: "return", value: d.init, start: d.init.start, end: d.init.end };
         funcs.push(Object.assign({ ...made, name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
       }
@@ -1318,7 +1334,7 @@ export function check(written: Stmt[], library = false): Checked {
 
     // An arrow function: its own type, and its body checked here, where it is written.
     function closure(e: Arrow, expected?: FunctionType, unsafe = false, owning = false): ClosureType {
-      if (e.typeParams.length > 0) throw unsupported("generic arrow functions", e);
+      if (e.typeParams.some((p) => !isLifetime(p))) throw new CompileError("a generic arrow is a family of functions, one per call, so it can only be held by a const and called; passing or storing one needs one type for it, as in '(x: i64) => i64'", e.start, e.end);
       // An async arrow's future usually outlives the call making it, so it owns its captures.
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
@@ -1446,6 +1462,7 @@ export function check(written: Stmt[], library = false): Checked {
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           const d = s.declarations[0]!;
+          if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return lift(s, d.target.name, arrowFunction(d.target.name, d.init, d));
           if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
@@ -1488,6 +1505,7 @@ export function check(written: Stmt[], library = false): Checked {
         // A nested function is a closure under its name, lending what it uses per call.
         case "function": {
           if (!s.body) throw unsupported("nested functions without a body", s);
+          if (s.typeParams.some((p) => !isLifetime(p)) && !s.generator && !s.macro) return lift(s, s.name, s as Func);
           if (s.typeParams.length > 0) throw unsupported("generic nested functions", s);
           if (s.generator) throw unsupported("nested generator functions", s);
           if (s.macro) throw unsupported("nested macros", s);
@@ -1513,8 +1531,15 @@ export function check(written: Stmt[], library = false): Checked {
           return;
         case "debugger":
           throw unsupported("'debugger' statements", s);
-        case "empty":
+        case "empty": {
+          // A generic function lifted from here in an earlier check of this body.
+          const lifted = liftedFunctions.get(s);
+          if (lifted) {
+            declare(lifted.name, "void", false, false, s);
+            locals.get(s)!.generic = lifted.fn;
+          }
           return;
+        }
         case "for":
           // A name declared in the head is scoped to the loop.
           scopes.push(new Map());
@@ -1822,7 +1847,30 @@ export function check(written: Stmt[], library = false): Checked {
         if (local) return local;
       }
       const outside = outer?.lookup(name, at);
-      return outside && capture(outside, at);
+      // A local generic function holds nothing to capture.
+      return outside && (outside.generic ? outside : capture(outside, at));
+    }
+
+    // A generic function written in a body, or a generic arrow a const holds, is a generic
+    // function of its own, instantiated per call, so it can use nothing of the body around it.
+    function lift(s: Stmt, name: string, fn: Func): undefined {
+      const own = fn as Extract<Stmt, { kind: "function" }>;
+      if (JSON.stringify(fn.body).includes('"kind":"this"')) {
+        throw new CompileError(`'${name}' is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
+      }
+      for (const n of freeNames(own)) {
+        const local = n === name ? undefined : lookup(n);
+        if (local && !local.generic) throw new CompileError(`'${name}' is generic, so it is made anew for each call and can't use '${n}' from the function around it; pass it as a parameter`, fn.start, fn.end);
+      }
+      let lifted = liftedFunctions.get(s);
+      if (!lifted) {
+        lifted = { name, fn: { ...fn, name: `${f.name}.${name}#${lifts++}` } };
+        liftedFunctions.set(s, lifted);
+        byName.set(lifted.fn.name, lifted.fn);
+        funcs.push(lifted.fn);
+      }
+      Object.assign(s, { kind: "empty" });
+      return statement(s) as undefined;
     }
 
     // Whether `this` may be used: a constructor's can't until every field is assigned, nor can

@@ -107,7 +107,6 @@ const EXPRESSIONS: [string, string][] = [
   ["super", "'super' expressions"],
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
-  ["<T>(x: T) => x", "generic arrow functions"],
   ["class {}", "class expressions"],
   ["true[0]", "indexed access expressions"],
   ["f<i64>", "instantiation expressions"],
