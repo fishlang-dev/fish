@@ -16,7 +16,6 @@ export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...other
   typeName(s.name, s, aliases, ...others);
   aliases.set(s.name, s);
 }
-// The rest parameters given a meaning so far: a tag's, which the template's values fill.
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
 export function tagStrings(p: Param | undefined): boolean {
@@ -240,6 +239,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       if (t.typeParams.length > 0) throw unsupported("generic function types", t);
+      const rest = t.params.find((p) => p.rest);
+      if (rest) throw unsupported("rest parameters in function types", rest);
       const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
       if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
       return fn;
@@ -451,6 +452,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         add(m.name, m);
         const first = m.params[0];
         const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
+        const rest = m.params.find((p) => p.rest);
+        if (rest) throw unsupported("rest parameters in interface methods", rest);
         const params = (self ? m.params.slice(1) : m.params).map((p) => paramType(p));
         const method: Method = { name: m.name, params, returns: resolveType(m.returns), mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);

@@ -257,7 +257,11 @@ export function extend(c: ClassInfo, base: ClassInfo) {
     if (declared) defaulted.set(copy, declared);
     return copy;
   });
-  const args: Expr[] = params.map((p) => ({ kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end }));
+  // A rest parameter is passed on spread, to be packed into the base's again.
+  const args: Expr[] = params.map((p) => {
+    const name: Expr = { kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
+    return p.rest ? { kind: "spread", value: name, start: p.start, end: p.end } : name;
+  });
   const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;
   c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];

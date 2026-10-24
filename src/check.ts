@@ -822,7 +822,8 @@ export function check(written: Stmt[], library = false): Checked {
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
+      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
+      templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -899,7 +900,7 @@ export function check(written: Stmt[], library = false): Checked {
     });
 
     // A call leaves out only the last parameters, so none may be required after an optional one.
-    const late = f.params.find((p, i) => !p.optional && f.params.slice(0, i).some((q) => q.optional));
+    const late = f.params.find((p, i) => !p.optional && !p.rest && f.params.slice(0, i).some((q) => q.optional));
     if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
     // What the function may throw: any value's type.
     const errorType = f.throws && resolveType(f.throws);

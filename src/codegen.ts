@@ -2439,35 +2439,37 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return built(copy, length, length);
   }
 
-  // An array literal with spreads: each part runs in order, then the array is built from them,
-  // a spread array made for it giving up its elements and others giving clones.
+  // An array literal with spreads, built in order: each part goes in as it runs, a spread array
+  // made for it giving up its elements and others giving clones then and there, before a later
+  // part could change or move it. The array being built is owned by a scope of its own, so a
+  // panic part way drops it.
   function spreadArray(written: Expr[], type: ArrayType): string {
-    const parts = delivered((hand) => written.map((x) => {
-      if (x.kind !== "spread") return { v: hand(owned(x), type.element) };
-      const taken = fresh(x.value);
-      const from = types.get(x)!;
-      return { v: taken ? hand(owned(x.value), arrayType(from)) : value(x.value), spread: true, taken, from };
-    }));
     const out = alloca(ARRAY);
+    scopes.push([]);
+    own(out, type);
     emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
-    for (const part of parts) {
-      if (!part.spread) {
-        appended(out, type.element, part.v);
+    for (const x of written) {
+      if (x.kind !== "spread") {
+        appended(out, type.element, owned(x));
         continue;
       }
+      const taken = fresh(x.value);
+      const from = types.get(x)!;
+      const whole = taken ? owned(x.value) : value(x.value);
       const [data, length] = [temp(), temp()];
-      emit(`${data} = extractvalue ${ARRAY} ${part.v}, 0`);
-      emit(`${length} = extractvalue ${ARRAY} ${part.v}, 1`);
-      const from = part.from!;
+      emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
+      emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
       elements(from, data, length, (at) => {
         const v = temp();
         emit(`${v} = load ${llvm(from)}, ptr ${at}`);
-        appended(out, type.element, convert(part.taken ? v : copied(v, from), from, type.element));
+        appended(out, type.element, convert(taken ? v : copied(v, from), from, type.element));
       });
-      if (part.taken) emit(`call void @fsh_rt_free(ptr ${data})`);
+      if (taken) emit(`call void @fsh_rt_free(ptr ${data})`);
     }
     const v = temp();
     emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    scopes.pop();
     return v;
   }
 
@@ -3559,9 +3561,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A comptime parameter's argument was computed while compiling, and isn't passed.
     const passed = (i: number) => !target.body.params[i]?.comptime;
     const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
+    // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of target.body.params.slice(args.length)) {
       const type = target.locals.get(p)!.type;
-      values.push(`${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+      values.push(`${llvm(type)} ${p.rest ? "zeroinitializer" : convert("zeroinitializer", "null", type)}`);
     }
     return values;
   }

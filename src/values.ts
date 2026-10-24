@@ -51,6 +51,8 @@ export type Context = {
   // A data-carrying enum made with these type arguments.
   enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
+  // A generic class's constructor parameters as written.
+  templateParams(name: string): Param[] | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
   // What a call returns as the calling body sees it: in terms of the calling instance's own
@@ -705,6 +707,9 @@ export function expressions(ctx: Context) {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = classOf(self!.type.base!);
       types.set(callee, base.type);
+      if (base.constructor.params.at(-1)?.rest) packRest(e, e.args, base.constructor.params);
+      else refuseSpread(e.args);
+      expectFrom(base.constructor, e.args);
       const argTypes = e.args.map(value);
       const instance = instantiate(base.constructor, [], e.args, argTypes, e);
       args(e.args, argTypes, instance, e);
@@ -992,7 +997,7 @@ export function expressions(ctx: Context) {
       const least = params.filter((p) => !p.optional && !p.rest).length;
       if (given < least) throw new CompileError(`expected at least ${least} argument${least === 1 ? "" : "s"}, but got ${given}`, at.start, at.end);
     }
-    const required = params.filter((p) => !p.optional).length;
+    const required = params.filter((p) => !p.optional && !p.rest).length;
     if (given >= required && given <= params.length) return;
     const expected = required === params.length ? `${required}` : `${required}-${params.length}`;
     throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${given}`, at.start, at.end);
@@ -2486,7 +2491,8 @@ export function expressions(ctx: Context) {
           return blockType("AbortController");
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
-        if (named?.constructor.params.at(-1)?.rest && e.args) packRest(e, e.args, named.constructor.params);
+        const written = named?.constructor.params ?? (e.callee.kind === "ident" && !lookup(e.callee.name) ? ctx.templateParams(e.callee.name) : undefined);
+        if (written?.at(-1)?.rest && e.args) packRest(e, e.args, written);
         else refuseSpread(list);
         if (named) expectFrom(named.constructor, list);
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
@@ -2617,6 +2623,9 @@ export function expressions(ctx: Context) {
           if (stringLike(left) || stringLike(right)) return join(e.left, left, e.right, right);
         }
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
+      // A spread anywhere but in an array literal or a call filling a rest parameter.
+      case "spread":
+        throw new CompileError("'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
     }

@@ -1,4 +1,4 @@
 function main() {
   print(...[1])
 }
-// error: spread elements are not supported yet
+// error: '...' spreads into an array literal, or as an argument into a rest parameter
