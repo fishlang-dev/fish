@@ -117,3 +117,20 @@ function make(f: <T>() => T[]): i64 {
   return 0;
 }
 function main() {}
+// case: generic_value_meets_function_type
+// expect: [ 1, 2, 3 ] [ 'a' ]
+// expect: 7 5 5
+// expect: 5 3
+// expect: z
+function id<T>(x: T): T { return x; }
+function apply(f: (x: i64) => i64): i64 { return f(5); }
+function main() {
+  const xs = [1, 2, 3];
+  console.log(xs.map(id), ["a"].map(id));
+  const f: (x: i64) => i64 = id;
+  console.log(f(7), apply(<T>(x: T): T => x), apply(id));
+  const g = id;
+  console.log(apply(g), xs.filter(<T>(x: T): boolean => true).length);
+  const s: { h: (x: string) => string } = { h: id };
+  console.log(s.h("z"));
+}

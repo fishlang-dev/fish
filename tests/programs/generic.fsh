@@ -1215,7 +1215,7 @@ function main() {
   console.log(f(1), f("a"));
 }
 // case: generic_arrow_passed
-// error: argument of type 'a generic function' is not assignable to parameter of type '(x: i64) => i64'
+// expect: 1
 function apply(f: (x: i64) => i64): i64 { return f(1); }
 function main() {
   console.log(apply(<T>(x: T): T => x));

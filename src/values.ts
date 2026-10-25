@@ -442,6 +442,9 @@ export function expressions(ctx: Context) {
     if (t !== undefined) t = unfolded(t);
     // A literal lent to a reference is a temporary of the type it refers to.
     if ((e.kind === "object" || e.kind === "array") && isRefType(t)) t = unfolded(t.to);
+    // A generic function value meeting a function type that isn't generic is the one instance
+    // that type gives it: an arrow calling it, its parameters typed from there.
+    if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
@@ -1194,9 +1197,12 @@ export function expressions(ctx: Context) {
     // An arrow given to a generic body is checked once the other arguments decide its types.
     const argTypes: Type[] = [];
     e.args.forEach((a, i) => a.kind !== "arrow" && (argTypes[i] = value(a)));
+    const bounds = implicitOf(target);
     e.args.forEach((a, i) => {
       if (a.kind !== "arrow") return;
-      const want = ctx.callbackType(target, e.typeArgs, argTypes, i, e);
+      // A generic function type's parameter takes the arrow as the family it is.
+      const bound = bounds.get(i);
+      const want = bound?.kind === "function" && bound.generic ? undefined : ctx.callbackType(target, e.typeArgs, argTypes, i, e);
       if (want) expect(a, want);
       argTypes[i] = value(a);
     });
@@ -1350,6 +1356,25 @@ export function expressions(ctx: Context) {
     return { type: ctx.resolveWith(written.returns, bindings), what: name };
   }
 
+  // A generic function value, or a generic arrow, rewritten as an arrow calling it with its
+  // arguments: given a function type, its parameters take that type's, and the call inside
+  // infers the generic function's types from them.
+  function instanceArrow(e: Expr) {
+    if (e.kind === "arrow" && e.typeParams.some((p) => !isLifetime(p))) ctx.liftArrow(e);
+    if (e.kind !== "ident") return;
+    const local = lookup(e.name);
+    const held = local && lower(isRefType(local.type) ? local.type.to : local.type);
+    const name = (local?.generic as Body | undefined)?.name ?? (typeof held !== "string" && held?.kind === "closure" ? held.generic : undefined) ?? (!local && byName.get(e.name)?.typeParams?.some((p) => !isLifetime(p)) ? e.name : undefined);
+    const f = name === undefined ? undefined : byName.get(name);
+    if (!f) return;
+    const at = { start: e.start, end: e.end };
+    const names = f.params.map((_, i) => `${e.name}-arg${i}`);
+    const params: Param[] = names.map((n) => ({ ...at, pattern: { kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const call: Expr = { kind: "call", callee: { kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n) => ({ kind: "ident", name: n, ...at })), optional: false, ...at };
+    delete (e as { name?: string }).name;
+    Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
+  }
+
   // A generic function named as a value: its own type, each call of which instantiates it.
   function genericValue(f: Body, e: Expr): Type {
     if (f.foreign) throw unsupported("C functions used as values", e);
@@ -1384,7 +1409,8 @@ export function expressions(ctx: Context) {
   function functionValue(e: Extract<Expr, { kind: "ident" }>, f: Body) {
     const written = e.name;
     const name = `'${written}'`;
-    if (f.typeParams?.some((p) => !isLifetime(p))) throw new CompileError(`${name} is generic, a family of functions made one per call, so it can only be called here; using one instance as a value, as '${written}<T>', isn't supported yet`, e.start, e.end);
+    // A generic one given as a callback is the instance the callback's types make.
+    if (f.typeParams?.some((p) => !isLifetime(p))) return instanceArrow(e);
     if (f.foreign) throw unsupported("C functions used as values", e);
     if (f.throws) throw unsupported("functions that throw used as values", e);
     const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
