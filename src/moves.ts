@@ -488,7 +488,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const built = instance.envs?.get(e);
           const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias, changes: instance.changed?.has(alias) === true }))
             : built ? built.env.map((alias, i) => ({ alias, changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
-          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 512 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
               usable(c.at, String(c.alias.id));
@@ -602,7 +602,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const nested = instance.envs !== undefined && holdsNode(e.value, (n) => instance.envs!.has(n as Expr));
         const root = nested && (e.target.kind === "member" || e.target.kind === "index") ? rootOf(e.target) : undefined;
         const held = root && key(root);
-        const hold = -(e.target.start * 256 + 255) - 1;
+        const hold = -(e.target.start * 512 + 511) - 1;
         if (held !== undefined) lend(held, false, root!, undefined, `the assignment to '${text(e.target)}'`, e, root!.start, hold);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         if (held !== undefined) state?.loans.delete(hold);
@@ -778,7 +778,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function handOver(args: Expr[], name: string, call: Expr) {
     for (const a of args) {
       expr(a, (p) => `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`);
-      for (const [place, part, mutable] of lent(a)) lend(place, mutable, part, undefined, name, call);
+      lent(a).forEach(([place, part, mutable], i) => lend(place, mutable, part, undefined, name, call, part.start, partKey(part, i)));
     }
   }
 
@@ -906,6 +906,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
   }
 
+  // A loan's key for the `i`th place a value lends, apart from the others it lends at the same
+  // spot, as a closure's variables are when its environment is made from a call's or a name's.
+  // Keys below zero, never a source offset; a call's own captures take the lower half.
+  function partKey(part: Named, i: number): number {
+    return -(part.start * 512 + 256 + i) - 1;
+  }
+
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
   // A loan is keyed by where it starts, or by `key` for one no source offset may share.
   function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at = e.start, key = e.start) {
@@ -946,11 +953,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const to = coercions.get(e) ?? type;
     // A closure holds what it captures.
     if (e.kind === "arrow" || instance.envs?.has(e)) {
-      for (const [place, use, from, mutable, held] of captured(e)) {
+      captured(e).forEach(([place, use, from, mutable, held], i) => {
         // A copy of a mutable reference lends it again.
-        if (!held || reborrows(from!)) lend(place, mutable || held, use, holder);
+        if (!held || reborrows(from!)) lend(place, mutable || held, use, holder, undefined, undefined, use.start, partKey(use, i));
         if (from && holdsRef(from.type)) inheritFrom(holder, from);
-      }
+      });
       return;
     }
     if (!isRef(to)) {
@@ -976,7 +983,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
     // copied lends itself mutably, so only one of them is used at a time. A copy keeps its
     // source borrowed too, so it can't be told apart from the original while held.
-    for (const [lentPlace, part, mutable] of lent(e)) lend(lentPlace, mutable, part, holder);
+    lent(e).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
     inherit(holder, e);
     if (!inPlace(e, to)) temporary(holder, e);
   }
@@ -1276,7 +1283,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A closure made here: what it borrows must be free to lend, and what it moves in leaves.
   function made(e: Expr) {
-    for (const [place, use, from, mutable, held] of captured(e)) {
+    const parts = captured(e);
+    // A copy the closure holds of a variable that a nested function it calls changes wouldn't
+    // see the change, as JavaScript's closure would.
+    const stale = parts.find(([place, , from, , held]) => held && isCopy(from!.type) && parts.some(([q, , , m, h]) => q === place && m && !h));
+    if (stale) {
+      const [, use, from] = stale;
+      throw new CompileError(`this closure holds its own copy of '${from!.name}', which a nested function it calls changes, so it wouldn't see the change; pass '${from!.name}' as a parameter instead`, use.start, use.end);
+    }
+    for (const [place, use, from, mutable, held] of parts) {
       usable(use, place);
       if (!held || isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
       else {

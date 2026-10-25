@@ -284,6 +284,8 @@ const loopParts = new WeakSet<Declarator>();
 // The arrows nested function declarations became, with their names; they lend what they capture
 // per call.
 export const nestedFunctions = new WeakMap<Expr, string>();
+// The bindings nested function declarations make, and closures' captures of them.
+const nestedBindings = new WeakSet<Local>();
 // The generic functions written inside bodies, each lifted to a function of its own, by the
 // statement that declared it.
 const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
@@ -1778,7 +1780,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, body: s.body, ...at };
           nestedFunctions.set(arrow, s.name);
           Object.assign(s, { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
-          return statement(s);
+          const done = statement(s);
+          nestedBindings.add(locals.get(s)!);
+          return done;
         }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":
@@ -2120,9 +2124,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     // capture of it.
     function nestedLocal(l: Local): boolean {
       const type = lower(l.type);
-      if (typeof type === "string" || type.kind !== "closure" || l.param || l.mutable) return false;
-      const body = closureBodies.get(type)?.body;
-      return body?.closure?.self === l.name && !body.async;
+      if (!nestedBindings.has(l) || typeof type === "string" || type.kind !== "closure") return false;
+      return closureBodies.get(type)?.body.async !== true;
     }
 
     function peek(name: string): Local | undefined {
@@ -2275,6 +2278,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
         alias = { name: from.name, type: from.type, mutable: false, param: false, id: nextId++ };
         depths.set(alias, 0);
         captures!.set(alias, from);
+        if (nestedBindings.has(from)) nestedBindings.add(alias);
       }
       if (at && !instance.captureUses!.has(alias)) instance.captureUses!.set(alias, at);
       return alias;

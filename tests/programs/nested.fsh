@@ -295,3 +295,32 @@ function main() {
   ys[1] = seven();
   console.log(ys);
 }
+// case: nested_value_two_captures
+// error: cannot use 'xs[0]' while 'g' borrows 'xs' mutably and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; let k = 0; function reset(): void { xs = [new P(5)]; k++; } const g = reset; const r: Ref<P> = xs[0]; g(); console.log(r.n); }
+// case: nested_arrow_two_captures
+// error: cannot use 'xs[0]' while 'a' borrows 'xs' mutably and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; let k = 0; function reset(): void { xs = [new P(5)]; k++; } const a = (): void => { reset(); }; const r: Ref<P> = xs[0]; a(); console.log(r.n); }
+// case: nested_owning_two_functions
+// error: cannot use 'n' while 'm' borrows 'n' mutably and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; let n = 0; function inc(): void { n++; } function reset(): void { xs = [new P(n)]; } const m = move (): void => { inc(); reset(); inc(); }; m(); console.log(n, xs[0].n); m(); }
+// case: nested_owning_stale_copy
+// error: this closure holds its own copy of 'n', which a nested function it calls changes, so it wouldn't see the change; pass 'n' as a parameter instead
+async function main() { let n = 0; function inc(): void { n++; } const g = async () => { inc(); return n; }; const v = await g(); console.log(v, n); }
+// case: nested_name_rebound
+// expect: 0
+// expect: 1
+function keep<T>(x: T): void { const inc = x; const y = inc; }
+function main() {
+  let n = 0;
+  function inc(): void { n++; }
+  keep(inc);
+  console.log(n);
+  const g = inc;
+  const a = (): void => { const inc = g; inc(); };
+  a();
+  console.log(n);
+}
