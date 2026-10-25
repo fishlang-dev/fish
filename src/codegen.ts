@@ -5725,12 +5725,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   function entry(): string[] {
     if (main.future) return driver(main.future);
-    if (!main.throws) return [`define i32 @main() ${unwinds} {`, '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    // The runtime keeps the program's arguments for `process.argv`.
+    if (!main.throws) return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "  call void @fsh_rt_args(i32 %argc, ptr %argv)", '  call void @"fsh.main"()', "  ret i32 0", "}"];
     current = main;
     ({ types, locals, calls, setters, coercions, jumps } = main);
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
     const type = resultType(main);
     const [result, failed, bad, ok, error] = [temp(), temp(), label(), label(), temp()];
+    emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
     emit(`${result} = call ${type} @"fsh.main"()`);
     emit(`${failed} = extractvalue ${type} ${result}, 0`);
     emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
@@ -5743,7 +5745,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     write(2, ["Error:", [error, main.throws]], builder, convert);
     dispose(error, main.throws);
     emit("ret i32 1");
-    return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+    return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
   }
 
   // An async `main`, run by the runtime as its first task; an error it gives is reported as a
@@ -5756,6 +5758,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const type = pollType(future);
     const [frame, out, outcome, result, failed, ok, bad] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
     allocas.push(`  ${frame} = alloca ${llvm(future)}`, `  store ${llvm(future)} zeroinitializer, ptr ${frame}`, `  ${out} = alloca ${type}`);
+    emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
     emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(type)}, ptr ${out})`);
     emit(`${failed} = icmp eq i32 ${outcome}, 2`);
     emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
@@ -5771,7 +5774,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       dispose(error, future.throws);
       emit("ret i32 1");
     } else emit("unreachable");
-    return [`define i32 @main() ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+    return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
   }
 
   // The size of an LLVM type in bytes, as a constant.

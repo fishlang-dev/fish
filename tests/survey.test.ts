@@ -48,7 +48,7 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
-    classForms: 1, process: 1, fetch: 1, timers: 1, stderr: 1,
+    classForms: 1, fetch: 1, timers: 1, stderr: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
@@ -60,6 +60,8 @@ test("forms that look alike are told apart", () => {
   expect(counts("import os from \"node:os\";\nimport { hostname } from \"os\";\nimport { cpus } from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("export { hostname } from \"node:os\";\nexport * from \"os\";\n")).toEqual({});
   expect(counts("export * as system from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
+  expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
+  expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.pid;\n}\n")).toEqual({ process: 3, R3: 1 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});

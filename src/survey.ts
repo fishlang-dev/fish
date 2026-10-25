@@ -74,7 +74,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
-  { id: "process", action: "unsupported", title: "process (process environment)", feature: "Process environment" },
+  { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
   { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
@@ -184,7 +184,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
-  ["process", PLANNED("Process environment")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
+  ["process", STD("process, for argv, env and exit")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
   // console.log prints as util.inspect does, but no plan gives util itself, as inspect or format.
 ]);
@@ -337,6 +337,9 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 // than the start of a long chain.
 // Generic arrows a const holds, which Fish declares as generic functions, and the members of
 // interfaces, whose generic methods Fish doesn't have.
+// `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
+const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
+
 const heldArrows = new WeakSet<object>();
 const statementDestructures = new WeakSet<object>();
 const interfaceMembers = new WeakSet<object>();
@@ -356,11 +359,15 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       break;
     case "member":
       if (n.name === "prototype") push("R2");
-      if (named(n.object, "process")) push("process");
+      if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (isPrivate(n.name)) push("classForms");
       break;
     case "unary":
       if (n.op === "delete") push("R3");
+      if (n.op === "delete" && envEntry(n.operand)) push("process");
+      break;
+    case "assign":
+      if (envEntry(n.target)) push("process");
       break;
     case "binary":
       if (n.op === "instanceof") push("G5");

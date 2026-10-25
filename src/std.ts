@@ -689,6 +689,38 @@ export function availableParallelism(): i64 {
   return unsafe { fsh_rt_os_parallelism() };
 }
 `,
+  process: String.raw`
+declare function fsh_rt_argc(): i64;
+declare function fsh_rt_arg(i: i64): Ptr<u8>;
+declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
+declare function fsh_rt_exit(code: i64): void;
+
+export function argv(): string[] {
+  let all: string[] = [];
+  const n = unsafe { fsh_rt_argc() };
+  for (let i: i64 = 0; i < n; i++) all.push(unsafe { fromCString(fsh_rt_arg(i)) });
+  return all;
+}
+
+export function env(name: string): string | null {
+  const value = unsafe { fsh_rt_getenv(cString(name)) };
+  if (unsafe { value.isNull() }) return null;
+  return unsafe { fromCString(value) };
+}
+
+export function exit(code: i64 = 0): never {
+  unsafe { fsh_rt_exit(code) };
+  // The C call never returns.
+  while (true) {}
+}
+`,
+};
+
+// Members of a std module read as values, each through a function of its: `argv` as
+// `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
+// `process.env[name]` calling it with the key.
+export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
+  process: { argv: "value", env: "table" },
 };
 
 // The std module a specifier names, if any: `node:os` and `os` both name `os`.

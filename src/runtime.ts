@@ -175,6 +175,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_insp_push(ptr, ptr)",
   "declare ptr @fsh_rt_insp_variant(ptr)",
   "declare ptr @fsh_rt_insp_done(ptr)",
+  "declare void @fsh_rt_args(i32, ptr)",
   "",
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
   '@.false = private unnamed_addr constant [6 x i8] c"false\\00"',

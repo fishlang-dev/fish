@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
 import { parse, shiftSpans, type Span, type Specifier, type Stmt } from "./parser.ts";
-import { STD_MODULES, stdModule } from "./std.ts";
+import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
@@ -310,25 +310,64 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
     if (own.some((d) => spaces.has(d))) hidden = new Set([...hidden, ...own]);
     const object = n.object as { kind?: string; name?: string } | undefined;
-    const space = n.kind === "member" && object?.kind === "ident" && !hidden.has(object.name!) ? spaces.get(object.name!) : undefined;
-    if (space) {
-      const name = n.name as string;
-      const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
-      if (!exports.includes(name)) {
-        if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
-      } else {
-        const alias = `${object!.name}:${name}`;
-        if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
-        bound.add(alias);
-        for (const key of Object.keys(n)) if (key !== "start" && key !== "end") delete n[key];
-        Object.assign(n, { kind: "ident", name: alias });
+    // `process.env.HOME` and `process.env[name]`: a table member's key, read through its function.
+    const table = (x: unknown) => {
+      const m = x as { kind?: string; object?: { kind?: string; name?: string }; name?: string } | undefined;
+      const on = m?.kind === "member" && m.object?.kind === "ident" && !hidden.has(m.object.name!) ? spaces.get(m.object.name!) : undefined;
+      return on && valuesOf(on.from)[m!.name!] === "table" ? { space: on, owner: m!.object!.name!, name: m!.name! } : undefined;
+    };
+    if (n.kind === "assign" && (n.target as { kind?: string }).kind !== undefined && table((n.target as { object?: unknown }).object)) {
+      const t = table((n.target as { object?: unknown }).object)!;
+      throw new CompileError(`setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
+    }
+    const keyed = (n.kind === "member" || n.kind === "index") && !n.optional ? table(n.object) : undefined;
+    if (keyed) {
+      const alias = `${keyed.owner}:${keyed.name}`;
+      if (!bound.has(alias)) bind(alias, keyed.space.from, keyed.name, n as unknown as Span);
+      bound.add(alias);
+      const key = n.kind === "member" ? { kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
+      walk(key, hidden);
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
+      Object.assign(n, { kind: "call", callee: { kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
+      return;
+    }
+    // A call's callee is the function itself; a value member elsewhere reads through its function.
+    if (n.kind === "call") {
+      const callee = n.callee as Record<string, unknown>;
+      const owner = callee.object as { kind?: string; name?: string } | undefined;
+      if (callee.kind === "member" && owner?.kind === "ident" && spaces.has(owner.name!) && !hidden.has(owner.name!)) {
+        rewrite(callee, spaces.get(owner.name!)!, owner.name!, false);
+        (n.args as unknown[]).forEach((x) => walk(x, hidden));
         return;
       }
     }
+    const space = n.kind === "member" && object?.kind === "ident" && !hidden.has(object.name!) ? spaces.get(object.name!) : undefined;
+    if (space && rewrite(n, space, object!.name!, true)) return;
     Object.values(n).forEach((x) => walk(x, hidden));
+  };
+  // `os.hostname` into the name imported from the module, called when it is a value member.
+  const rewrite = (n: Record<string, unknown>, space: { from: Module; explicit: boolean }, owner: string, read: boolean): boolean => {
+    const name = n.name as string;
+    const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
+    if (!exports.includes(name)) {
+      if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
+      return false;
+    }
+    const kind = valuesOf(space.from)[name];
+    if (read && kind === "table") throw new CompileError(`'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as number, n.end as number);
+    const alias = `${owner}:${name}`;
+    if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
+    bound.add(alias);
+    for (const key of Object.keys(n)) if (key !== "start" && key !== "end") delete n[key];
+    const ident = { kind: "ident", name: alias, start: n.start, end: n.end };
+    Object.assign(n, read && kind === "value" ? { kind: "call", callee: ident, typeArgs: [], args: [], optional: false } : ident);
+    return true;
   };
   walk(body, new Set());
 }
+
+// What a std module's members are read as, by name.
+const valuesOf = (m: Module) => STD_VALUES[m.path.replace(/^std:/, "")] ?? {};
 
 // The names a binding pattern binds.
 function bindings(pattern: unknown): string[] {

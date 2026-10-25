@@ -31,6 +31,7 @@ export const NATIVE = String.raw`
 #include <time.h>
 #include <errno.h>
 #include <pwd.h>
+#include <limits.h>
 #include <sys/random.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -39,6 +40,7 @@ export const NATIVE = String.raw`
 #include <arpa/inet.h>
 #ifdef __APPLE__
 #include <sys/event.h>
+#include <mach-o/dyld.h>
 #else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -1956,6 +1958,52 @@ int64_t fsh_rt_os_parallelism(void) {
 #endif
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   return n > 0 ? n : 1;
+}
+
+// The program's arguments, kept from main for process.argv, which Node gives as the runtime's
+// path, the script's, then the arguments; a Fish program is both, so its path comes twice.
+static int32_t fsh_argc = 0;
+static char **fsh_argv = NULL;
+static char fsh_exe[PATH_MAX];
+
+void fsh_rt_args(int32_t argc, char **argv) {
+  fsh_argc = argc;
+  fsh_argv = argv;
+  char found[PATH_MAX];
+  int ok = 0;
+#ifdef __APPLE__
+  uint32_t size = sizeof found;
+  ok = _NSGetExecutablePath(found, &size) == 0;
+#else
+  ssize_t n = readlink("/proc/self/exe", found, sizeof found - 1);
+  if (n > 0) {
+    found[n] = 0;
+    ok = 1;
+  }
+#endif
+  if (!ok || !realpath(found, fsh_exe)) {
+    if (!argc || !realpath(argv[0], fsh_exe)) snprintf(fsh_exe, sizeof fsh_exe, "%s", argc ? argv[0] : "");
+  }
+}
+
+int64_t fsh_rt_argc(void) {
+  return fsh_argc + 1;
+}
+
+const char *fsh_rt_arg(int64_t i) {
+  return i < 2 ? fsh_exe : fsh_argv[i - 1];
+}
+
+const char *fsh_rt_getenv(const char *name) {
+  return getenv(name);
+}
+
+// process.exit: output flushed and the process ended at once, as Node ends it, so what is still
+// alive isn't reported as leaked.
+void fsh_rt_exit(int64_t code) {
+  fflush(NULL);
+  fsh_abandoned = 1;
+  exit((int)code);
 }
 
 // A value to print as Node's util.inspect prints it: a tree codegen builds, laid out here by
