@@ -124,9 +124,9 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
   const name = e.right.kind === "ident" ? e.right.name : undefined;
   const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
   const instances = c || !name ? [] : members.filter((m): m is ClassType => typeof m !== "string" && m.kind === "class" && m.generic?.name === name);
-  if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it; write which, as in 'instanceof ${show(instances[0]!)}'`, e.right.start, e.right.end);
+  if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c ?? instances[0];
-  if (!tested) throw new CompileError("the right side of 'instanceof' must be a class", e.right.start, e.right.end);
+  if (!tested) throw new CompileError("the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
   types.set(e.right, tested);
   return "boolean";
 }

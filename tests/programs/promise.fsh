@@ -600,3 +600,13 @@ async function main() {
     else console.log("boom", e.message);
   }
 }
+// case: promise_instanceof_two_instances
+// error: 'Box' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart
+class Box<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+}
+function main() {
+  const x: Box<i64> | Box<string> = new Box<i64>(1);
+  if (x instanceof Box) console.log("box");
+}
