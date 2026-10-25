@@ -45,7 +45,7 @@ function main(): void {
   console.log(sorted);
 }
 // case: function_value_lent_element
-// error: 'map' lends its callback each element as a 'Ref<{ x: i64; y: i64 }>', and 'norm' takes its own '{ x: i64; y: i64 }'; write '(x) => norm(x.clone())'
+// error: 'map' lends its callback a 'Ref<{ x: i64; y: i64 }>', and 'norm' takes its own '{ x: i64; y: i64 }'; write '(p) => norm(p.clone())'
 type Point = { x: i64; y: i64 };
 function norm(p: Point): i64 { return p.x * p.x + p.y * p.y; }
 function main(): void { const pts: Point[] = [{ x: 1, y: 2 }]; console.log(pts.map(norm)); }
@@ -74,3 +74,26 @@ function main(): void { const f = abs; }
 // A local of the same name is that local.
 function seven(): i64 { return 0; }
 function main(): void { const seven = (): i64 => 7; const f = seven; console.log(f()); }
+// case: function_value_takes_function
+// error: functions taking functions used as values are not supported yet
+function apply(f: (x: i64) => i64, v: i64): i64 { return f(v); }
+function main() { const a = apply; }
+// case: function_value_declared_types
+// expect: 8
+// Its parameters are typed where it is declared, whatever the names mean where it is used.
+type T = i64;
+function double(x: T): T { return x * 2; }
+function g<T>(v: T): i64 { const f = double; return f(4); }
+function main() { console.log(g("a")); }
+// case: function_value_sort_suggestion
+// error: write '(a, b) => cmp(a.clone(), b.clone())'
+type Point = { x: i64; y: i64 };
+function cmp(a: Point, b: Point): i64 { return a.x - b.x; }
+function main() { let ps: Point[] = [{ x: 2, y: 0 }, { x: 1, y: 0 }]; ps.sort(cmp); }
+// case: function_value_local_by_name
+// error: a local function passed by name isn't supported yet; write an arrow calling it, as in '(x) => helper(x)'
+function main() { function helper(x: i64): i64 { return x + 1; } console.log([1, 2].map(helper)); }
+// case: function_value_type_shown
+// error: type '(s: string) => i64' is not assignable to type '(x: i64) => i64'
+function take(s: string): i64 { return 0; }
+function main() { const f: (x: i64) => i64 = take; }

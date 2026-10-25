@@ -176,8 +176,11 @@ export const fixedFills = new WeakSet<Expr>();
 // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
 // gathered into one array.
 export const stringBuilds = new WeakMap<Expr, "units" | "points">();
-// The parameters of the closures declared functions named as values became, by function name.
-const namedParams = new WeakMap<Param, string>();
+// The parameters of the closures declared functions named as values became: the function as
+// written, its parameters' names, and which of them take values a caller would have to clone.
+const namedParams = new WeakMap<Param, { fn: string; names: string[]; clones: boolean[] }>();
+// Their types, resolved where the function is declared.
+export const presetParams = new WeakMap<Param, Type>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -1200,29 +1203,43 @@ export function expressions(ctx: Context) {
     throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${given}`, at.start, at.end);
   }
 
-  // A callback given as a declared function's name becomes the closure calling it.
+  // A callback given as a declared function's name becomes the closure calling it. A local
+  // function given by name isn't converted yet.
   function namedFunction(callback: Expr) {
-    const declared = callback.kind === "ident" && !lookup(callback.name) ? byName.get(callback.name) : undefined;
-    if (declared && !declared.comptime) functionValue(callback as Extract<Expr, { kind: "ident" }>, declared);
+    if (callback.kind !== "ident") return;
+    const local = lookup(callback.name);
+    const held = local && lower(local.type);
+    if (held && typeof held !== "string" && (held.kind === "closure" || held.kind === "function" || isCallable(held) || (held.kind === "param" && held.bound?.kind === "function"))) {
+      throw new CompileError(`a local function passed by name isn't supported yet; write an arrow calling it, as in '(x) => ${callback.name}(x)'`, callback.start, callback.end);
+    }
+    const declared = local ? undefined : byName.get(callback.name);
+    if (declared && !declared.comptime) functionValue(callback, declared);
   }
 
   // `double` named where a value is wanted becomes `(x) => double(x)`, its parameters and their
   // types its declaration's, capturing nothing, so it passes, stores and boxes as any closure.
   function functionValue(e: Extract<Expr, { kind: "ident" }>, f: Body) {
-    const name = `'${f.name}'`;
-    if (f.typeParams?.some((p) => !isLifetime(p))) throw new CompileError(`${name} is generic, a family of functions made one per call, so it can only be called here; using one instance as a value, as '${f.name}<T>', isn't supported yet`, e.start, e.end);
+    const written = e.name;
+    const name = `'${written}'`;
+    if (f.typeParams?.some((p) => !isLifetime(p))) throw new CompileError(`${name} is generic, a family of functions made one per call, so it can only be called here; using one instance as a value, as '${written}<T>', isn't supported yet`, e.start, e.end);
     if (f.foreign) throw unsupported("C functions used as values", e);
     if (f.throws) throw unsupported("functions that throw used as values", e);
     const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
     if (odd) throw unsupported(odd.comptime ? "functions with comptime parameters used as values" : odd.rest ? "functions with rest parameters used as values" : "functions with defaulted parameters used as values", e);
+    // Typed where it is declared, so a type name means what it means there.
+    const types = paramTypes(instanceOf(f));
+    if (types.some((t) => typeof t !== "string" && (t.kind === "function" || t.kind === "closure" || t.kind === "dyn"))) throw unsupported("functions taking functions used as values", e);
     const at = { start: e.start, end: e.end };
-    const params: Param[] = f.params.map((p, i) => ({ ...at, pattern: { kind: "ident", name: `${f.name}-arg${i}`, ...at }, type: p.type, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
-    for (const p of params) namedParams.set(p, f.name);
-    const args: Expr[] = params.map((p) => {
-      const arg: Expr = { kind: "ident", name: (p.pattern as Extract<Pattern, { kind: "ident" }>).name, ...at };
-      return arg;
+    // A parameter keeps its name unless it would hide the function, or has none of its own.
+    const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== written && p.pattern.name !== f.name ? p.pattern.name : `${written}-arg${i}`));
+    const clones = types.map((t) => !isCopy(t));
+    const params: Param[] = f.params.map((p, i) => ({ ...at, pattern: { kind: "ident", name: names[i]!, ...at }, type: undefined, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    params.forEach((p, i) => {
+      presetParams.set(p, types[i]!);
+      namedParams.set(p, { fn: written, names, clones });
     });
-    const call: Expr = { kind: "call", callee: { kind: "ident", name: f.name, ...at }, typeArgs: [], args, optional: false, ...at };
+    const args: Expr[] = names.map((n) => ({ kind: "ident", name: n, ...at }));
+    const call: Expr = { kind: "call", callee: { kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
   }
@@ -1962,9 +1979,11 @@ export function expressions(ctx: Context) {
     if (sameLowered(given, written) || (converted && !isRefType(given) && fits(given, written))) return;
     if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     // A declared function given by name takes its own value, which a lent element isn't.
-    const fn = p && namedParams.get(p);
-    if (fn && isRefType(given) && sameLowered(given.to, written)) {
-      throw new CompileError(`'${name}' lends its callback each element as ${article(show(given))}, and '${fn}' takes its own '${show(written)}'; write '(x) => ${fn}(x.clone())', or have '${fn}' take a '${show(given)}'`, at.start, at.end);
+    const named = p && namedParams.get(p);
+    if (named && isRefType(given) && sameLowered(given.to, written)) {
+      const { fn, names, clones } = named;
+      const arrow = `(${names.join(", ")}) => ${fn}(${names.map((n, i) => (clones[i] ? `${n}.clone()` : n)).join(", ")})`;
+      throw new CompileError(`'${name}' lends its callback ${article(show(given))}, and '${fn}' takes its own '${show(written)}'; write '${arrow}', or have '${fn}' take a '${show(given)}'`, at.start, at.end);
     }
     throw new CompileError(`'${name}' passes its callback ${article(show(given))} here, not ${article(show(written))}`, at.start, at.end);
   }

@@ -22,7 +22,7 @@ import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsonCalls, printed, expressions, restStarts, substituted, stringLike } from "./values.ts";
+import { jsonCalls, printed, expressions, presetParams, restStarts, substituted, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -1683,7 +1683,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       if (p.comptime) throw unsupported("comptime parameters on closures", p);
       if (p.rest) throw unsupported("rest parameters on arrow functions", p);
       const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && paramName(p) !== "this";
-      const type = !p.type && given && plain ? given : paramType(p);
+      // A declared function's parameter, named as a value, is typed where the function is declared.
+      const type = presetParams.get(p) ?? (!p.type && given && plain ? given : paramType(p));
       const to = isRef(type) ? type.to : type;
       if (typeof to !== "string" && to.kind === "interface") throw unsupported("closure parameters of interface types", p);
       return type;
