@@ -2772,13 +2772,23 @@ export function expressions(ctx: Context) {
       return helper("timeout clear", [e.args[0] ?? { kind: "null", ...at }]);
     }
     if (e.args.length === 0) throw new CompileError(`'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
-    if (e.args.length > 2) throw new CompileError(`passing arguments on to a timer's function isn't supported yet; call it from an arrow, as in '${name}(() => f(x), ms)'`, e.args[2]!.start, e.args.at(-1)!.end);
+    if (e.args.length > 4) throw new CompileError(`'${name}' passes at most two arguments on to its function so far; pass the rest through an arrow, as in '${name}(() => f(a, b, c), ms)'`, e.args[4]!.start, e.args.at(-1)!.end);
+    // What it passes on is captured when the timer is set, so each is a name or a literal, which
+    // capturing then and reading later can't tell apart.
+    const passed = e.args.slice(2);
+    const plain = (x: Expr): boolean => ["ident", "int", "float", "bigint", "string", "bool", "null"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && plain(x.operand));
+    const odd = passed.find((x) => !plain(x));
+    if (odd) throw new CompileError(`'${name}' passes on a name or a literal; give this value a name first, as in 'const v = ...; ${name}(f, ms, v)'`, odd.start, odd.end);
     // The callback runs inside an async arrow the timer keeps, which owns what it captures. It is
     // named or written in place, so making that arrow evaluates nothing early or late.
     const callback = e.args[0]!;
     if (callback.kind !== "arrow" && callback.kind !== "ident") throw new CompileError(`'${name}' takes a function written here or named, as in '${name}(() => tick(), ms)'; give this one a name first`, callback.start, callback.end);
+    // An arrow's unwritten parameters take the types of what is passed, as TypeScript infers.
+    if (callback.kind === "arrow") callback.params.forEach((p, i) => {
+      if (!p.type && passed[i]) p.type = presetNode(widenLet(value(passed[i]!)), p);
+    });
     const span = { start: callback.start, end: callback.end };
-    const run: Expr = { kind: "call", callee: callback, args: [], typeArgs: [], optional: false, ...span };
+    const run: Expr = { kind: "call", callee: callback, args: passed, typeArgs: [], optional: false, ...span };
     const body: Expr = timerAsync(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
     const wrapper: Expr = { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
     timerWrappers.add(wrapper);

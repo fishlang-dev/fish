@@ -90,3 +90,45 @@ async function main(): Promise<void> {
     console.log("stop");
   }, 25);
 }
+// case: timeout_arguments_and_async
+// expect: named 1
+// expect: arrow lit
+// expect: untyped 3 -4
+// expect: async start
+// expect: async end
+// expect: after async
+// expect: slow start
+// expect: slow end
+// Passed values reach the function; an async one is awaited before the next timer runs.
+function show(label: string, n: i64): void { console.log(label, n); }
+async function slow(label: string): Promise<void> {
+  console.log(label, "start");
+  await sleep(30);
+  console.log(label, "end");
+}
+async function main(): Promise<void> {
+  const name = "named";
+  setTimeout(show, 5, name, 1);
+  setTimeout((x: string) => { console.log("arrow", x); }, 10, "lit");
+  setTimeout((a, b) => { console.log("untyped", a, b); }, 12, 3, -4);
+  setTimeout(async () => {
+    console.log("async start");
+    await sleep(20);
+    console.log("async end");
+  }, 15);
+  setTimeout(() => { console.log("after async"); }, 20);
+  setTimeout(slow, 50, "slow");
+}
+// case: timeout_too_many_arguments
+// error: 'setTimeout' passes at most two arguments on to its function so far
+function f(a: i64, b: i64, c: i64): void {}
+async function main(): Promise<void> { setTimeout(f, 1, 1, 2, 3); }
+// case: timeout_argument_expression
+// error: 'setTimeout' passes on a name or a literal; give this value a name first
+function f(a: i64): void {}
+function g(): i64 { return 1; }
+async function main(): Promise<void> { setTimeout(f, 1, g()); }
+// case: timeout_argument_type
+// error: argument of type '"s"' is not assignable to parameter of type 'i64'
+function f(a: i64): void {}
+async function main(): Promise<void> { setTimeout(f, 1, "s"); }
