@@ -2625,7 +2625,7 @@ export function expressions(ctx: Context) {
     if (list.elements.length === 0) throw new CompileError(`${name} needs a Promise to wait for${kind === "race" ? "; an empty race never settles" : ""}`, list.start, list.end);
     const futures = list.elements.map((x) => {
       if (x === undefined || x.kind === "spread") throw new CompileError(`${name} takes each Promise written in the list`, (x ?? list).start, (x ?? list).end);
-      if (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise" && !lookup("Promise")) {
+      if (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise" && (x.callee.name === "all" || x.callee.name === "race") && !lookup("Promise") && !classes.has("Promise")) {
         throw new CompileError(`'Promise.${(x.callee as { name: string }).name}' can't be in another Promise's list; give it an async function of its own, as in 'async function both() { return await Promise.all([...]); }', and put its call in the list`, x.start, x.end);
       }
       let t = value(x);

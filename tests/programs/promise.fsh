@@ -419,3 +419,34 @@ async function f(): Promise<i64> { return 1; }
 async function main() {
   const [a, b] = await Promise.all([Promise.all([f()]), f()]);
 }
+// case: promise_race_stale_wait
+// expect: race got 1
+// expect: other got 2 true
+async function late(ch: Ref<Channel<i64>>): Promise<i64> {
+  await sleep(10);
+  const v = await ch.receive();
+  return v!;
+}
+async function other(ch: Channel<i64>): Promise<i64> {
+  const v = await ch.receive();
+  return v!;
+}
+async function feeder(ch: Channel<i64>): Promise<i64> {
+  await sleep(30);
+  await ch.send(1);
+  await sleep(50);
+  await ch.send(2);
+  return 0;
+}
+async function main() {
+  const ch = new Channel<i64>(1);
+  const f = spawn(feeder(ch.clone()));
+  // ch.receive() waits from the start; late's receive joins at 10 ms, behind it.
+  const r = await Promise.race([late(ch), ch.receive()]);
+  console.log("race got", r);
+  const t = spawn(other(ch.clone()));
+  const start = Date.now();
+  const got = await t;
+  console.log("other got", got, Date.now() - start < 1000);
+  await f;
+}

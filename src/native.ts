@@ -3590,9 +3590,13 @@ typedef struct { int64_t count; fsh_semaphore *semaphore; } fsh_permit;
 int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **out, void *tag) {
   pthread_mutex_lock(&s->lock);
   int32_t taken = s->permits > 0;
+  // One taking a slot while still in line, woken for another of its task's futures, leaves the
+  // line, so a later wake goes to a waiter still there.
+  fsh_task *mine = taken ? fsh_unwait(&s->waiting, task, tag) : NULL;
   if (taken) s->permits--;
   else fsh_wait_on(&s->waiting, task, tag);
   pthread_mutex_unlock(&s->lock);
+  if (mine) fsh_task_release(mine);
   if (!taken) return 0;
   fsh_rt_block_retain(&s->count);
   fsh_permit *p = fsh_rt_alloc(sizeof(fsh_permit));
@@ -3679,8 +3683,11 @@ int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task, void *t
   memcpy(c->ring + (c->head + c->length) % c->capacity * c->size, value, c->size);
   memset(value, 0, c->size);
   c->length++;
+  // A send done while still in line leaves it, as an acquire does.
+  fsh_task *mine = fsh_unwait(&c->senders, task, tag);
   fsh_task *next = fsh_next_waiter(&c->receivers);
   pthread_mutex_unlock(&c->lock);
+  if (mine) fsh_task_release(mine);
   fsh_wake_waiter(next);
   return 1;
 }
@@ -3699,8 +3706,11 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task, void *
   memcpy(out, c->ring + c->head * c->size, c->size);
   c->head = (c->head + 1) % c->capacity;
   c->length--;
+  // A receive done while still in line leaves it, as an acquire does.
+  fsh_task *mine = fsh_unwait(&c->receivers, task, tag);
   fsh_task *next = fsh_next_waiter(&c->senders);
   pthread_mutex_unlock(&c->lock);
+  if (mine) fsh_task_release(mine);
   fsh_wake_waiter(next);
   return 1;
 }
