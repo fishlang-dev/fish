@@ -232,3 +232,9 @@ test("a moved Promise's note offers no clone", () => {
   }
   expect(thrown).toMatchObject({ note: { message: "'r.promise' moved here: 'p' owns it now" } });
 });
+
+// A library has no main to start the runtime, so a timer outside an async function is refused.
+test("a timer in a library's sync function is refused", () => {
+  const src = "export function later(): void {\n  setTimeout(() => { console.log(\"x\"); }, 1);\n}";
+  expect(() => check(parse(src), true)).toThrow("'setTimeout' can only be used inside an 'async' function here, where the runtime is running");
+});

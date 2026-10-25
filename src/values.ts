@@ -134,6 +134,8 @@ export type Context = {
   errorOf(instance: Instance): Type | undefined;
   // What the body's function declares it throws.
   throwsDeclared(): Type | undefined;
+  // Whether the body is a sync `main` run as an async one, as a program setting timers does.
+  syncMain: boolean;
   // Whether a binding stands for a variable a closure captures, and whether this is a closure;
   // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
@@ -217,6 +219,8 @@ const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
 // running their callbacks.
 const timerSets = new WeakSet<Expr>();
 export const timerWrappers = new WeakSet<Expr>();
+// The name each rewritten timer call was written with, for messages about it.
+export const timerNames = new WeakMap<Expr, string>();
 // The timer globals, Node's and the browser's.
 const TIMER_CALLS = new Set(["setTimeout", "setInterval", "clearTimeout", "clearInterval"]);
 // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
@@ -2772,6 +2776,8 @@ export function expressions(ctx: Context) {
       return helper("timeout clear", [e.args[0] ?? { kind: "null", ...at }]);
     }
     if (e.args.length === 0) throw new CompileError(`'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
+    if (!ctx.runtime && !ctx.async) throw new CompileError(`'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
+    timerNames.set(e, name);
     if (e.args.length > 4) throw new CompileError(`'${name}' passes at most two arguments on to its function so far; pass the rest through an arrow, as in '${name}(() => f(a, b, c), ms)'`, e.args[4]!.start, e.args.at(-1)!.end);
     // What it passes on is captured when the timer is set, so each is a name or a literal, which
     // capturing then and reading later can't tell apart.
@@ -2788,9 +2794,13 @@ export function expressions(ctx: Context) {
       if (!p.type && passed[i]) p.type = presetNode(widenLet(value(passed[i]!)), p);
     });
     const span = { start: callback.start, end: callback.end };
-    const run: Expr = { kind: "call", callee: callback, args: passed, typeArgs: [], optional: false, ...span };
-    const body: Expr = timerAsync(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
-    const wrapper: Expr = { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
+    // Each run passes its own copy of a value that doesn't copy, as each of node's runs passes it.
+    const given = passed.map((x): Expr => (x.kind === "ident" && !isCopy(value(x)) ? { kind: "call", callee: { kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
+    const run: Expr = { kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
+    const body: Expr = givesPromise(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
+    // An async arrow taking nothing is what the timer keeps, so its captures are made once.
+    const wrapper: Expr = callback.kind === "arrow" && callback.async && passed.length === 0 ? callback
+      : { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
     timerWrappers.add(wrapper);
     const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
     const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
@@ -2798,17 +2808,22 @@ export function expressions(ctx: Context) {
     timerSets.add(e);
   }
 
-  // Whether a timer's callback is async: an async arrow, or a function or value giving a Promise.
-  function timerAsync(callback: Expr): boolean {
-    if (callback.kind === "arrow") return callback.async;
+  // Whether a timer's callback gives a Promise to await: an async arrow or one whose body calls a
+  // function that does, or a function or value that does.
+  function givesPromise(callback: Expr): boolean {
+    if (callback.kind === "arrow") return callback.async || (!Array.isArray(callback.body) && callback.body.kind === "call" && givesPromise(callback.body.callee));
     if (callback.kind !== "ident") return false;
     const local = lookup(callback.name);
-    if (!local) return byName.get(callback.name)?.async === true;
+    if (!local) {
+      const f = byName.get(callback.name);
+      return f?.async === true || (f?.returnType?.kind === "ref" && f.returnType.name === "Promise");
+    }
     const held = lower(local.type);
     const fn = typeof held !== "string" && (held.kind === "closure" || held.kind === "function") ? held : isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
     const returns = fn?.returns;
     return typeof returns !== "string" && returns !== undefined && (returns.kind === "future" || promiseMet(returns) !== undefined);
   }
+
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
   // closures settling it; reject's error is what the function declares it throws, or `Error`.
@@ -2927,7 +2942,7 @@ export function expressions(ctx: Context) {
   // and gives its value, or raises its error as a call would. It moves into the await.
   function awaited(e: Extract<Expr, { kind: "unary" }>): Type {
     if (ctx.locked) throw new CompileError("'update' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the update, then await", e.start, e.end);
-    if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
+    if (!ctx.async || ctx.syncMain) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     awaitedNow.add(e.operand);
     let t = value(e.operand);

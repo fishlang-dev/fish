@@ -2,7 +2,7 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes, restStarts, stringBuilds } from "./values.ts";
+import { equalities, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -673,7 +673,7 @@ function interpreter() {
       }
       return unsupported(`calling '${callee.name}' here`, e);
     }
-    return refuse(`'${callee.kind === "ident" ? callee.name : "this call"}'`, e);
+    return refuse(`'${timerNames.get(e) ?? (callee.kind === "ident" ? callee.name : "this call")}'`, e);
   }
 
   function stringMethod(name: string, s: string, args: Value[], at: Span): Value {

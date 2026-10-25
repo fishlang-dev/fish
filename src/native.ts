@@ -3494,10 +3494,10 @@ static void *fsh_timing(void *arg) {
 // The callbacks setTimeout and setInterval set, earliest first and ties in the order set, which
 // the prelude's one timer task runs in turn. Each holds its callable's block and vtable.
 // ponytail: a sorted array, inserted into in O(n); a heap if programs keep many timers
-typedef struct { int64_t deadline, seq, id, every; void *block; void **vtable; } fsh_timeout;
+typedef struct { int64_t deadline, id, every; void *block; void **vtable; } fsh_timeout;
 static pthread_mutex_t fsh_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_timeout *fsh_timeouts = NULL;
-static int64_t fsh_timeout_count = 0, fsh_timeout_capacity = 0, fsh_timeout_ids = 0, fsh_timeout_seq = 0;
+static int64_t fsh_timeout_count = 0, fsh_timeout_capacity = 0, fsh_timeout_ids = 0;
 // The timer task's wait for the next timer, and the deadline it has a wake set for.
 static fsh_task *fsh_timeouts_waiter = NULL;
 static int64_t fsh_timeouts_armed = INT64_MAX;
@@ -3541,10 +3541,13 @@ int32_t fsh_rt_timeouts_claim(void) {
   return __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
+// Registered under the tasks' lock, where its end is announced, and announced itself, for a
+// main that returned between the claim and now.
 void fsh_rt_timeouts_task(fsh_task *task) {
-  pthread_mutex_lock(&fsh_timeouts_lock);
+  pthread_mutex_lock(&fsh_alive_lock);
   fsh_timeouts_task = task;
-  pthread_mutex_unlock(&fsh_timeouts_lock);
+  pthread_cond_broadcast(&fsh_finished);
+  pthread_mutex_unlock(&fsh_alive_lock);
 }
 
 // Sets a timer for a callable, its delay at least 1 ms as Node's is, giving its id.
@@ -3552,7 +3555,7 @@ int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repea
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
   int64_t id = ++fsh_timeout_ids;
-  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, ++fsh_timeout_seq, id, repeat ? ms : 0, block, vtable });
+  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable });
   fsh_task *waiter = fsh_timeouts_changed();
   pthread_mutex_unlock(&fsh_timeouts_lock);
   fsh_timeouts_wake(waiter);
@@ -3590,7 +3593,6 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     if (t.every) {
       out[0] = ((void *(*)(void *))t.vtable[1])(t.block);
       t.deadline = now + t.every * 1000000;
-      t.seq = ++fsh_timeout_seq;
       fsh_timeout_insert(t);
     }
     result = 1;
@@ -4861,20 +4863,18 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
-  // Pending timers keep the program alive, as Node's do: the timer task runs them, then ends.
-  fsh_timeouts_main_returned();
-  pthread_mutex_lock(&fsh_alive_lock);
-  while (!fsh_panicked) {
-    pthread_mutex_lock(&fsh_timeouts_lock);
-    fsh_task *timers = fsh_timeouts_task;
-    pthread_mutex_unlock(&fsh_timeouts_lock);
-    if (!timers || __atomic_load_n(&timers->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
-    pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
-  }
-  pthread_mutex_unlock(&fsh_alive_lock);
-  if (fsh_timeouts_task && !fsh_panicked) {
-    fsh_task_release(fsh_timeouts_task);
-    free(fsh_timeouts);
+  // Pending timers keep the program alive, as Node's do: the timer task runs them, then ends. A
+  // main that failed ends the program with its error, its timers dropped with the other tasks;
+  // a timer task claimed but not yet registered is waited for.
+  if (fsh_main_task->outcome != 2) {
+    fsh_timeouts_main_returned();
+    pthread_mutex_lock(&fsh_alive_lock);
+    while (!fsh_panicked) {
+      int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
+      if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
+      pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
+    }
+    pthread_mutex_unlock(&fsh_alive_lock);
   }
   pthread_mutex_lock(&fsh_park);
   __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
@@ -4919,6 +4919,17 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     t->joiner = NULL;
     fsh_task_release(t);
   }
+  // Timers left, set after the timer task ended or left by a failed main, are dropped.
+  while (fsh_timeout_count > 0) {
+    fsh_timeout t = fsh_timeout_take(0);
+    ((void (*)(void *))t.vtable[0])(t.block);
+  }
+  free(fsh_timeouts);
+  fsh_timeouts = NULL;
+  fsh_timeout_capacity = 0;
+  if (fsh_timeouts_waiter) fsh_task_release(fsh_timeouts_waiter);
+  if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
+  fsh_timeouts_waiter = fsh_timeouts_task = NULL;
   for (int64_t i = 0; i < fsh_workers; i++) free(fsh_queues[i].ring);
   free(fsh_injected.ring);
   free(fsh_queues);

@@ -151,3 +151,52 @@ function main(): void {
 function main() {
   setTimeout(() => { console.log("done"); }, 1);
 }
+// case: timeout_async_arrow_captures
+// expect: 2
+async function main(): Promise<void> {
+  const xs = [1, 2];
+  setTimeout(async () => { await sleep(1); console.log(xs.length); }, 1);
+}
+// case: timeout_generic_passed
+// expect: 5
+// expect: true
+function later<T>(x: T): void {
+  setTimeout((v) => { console.log(v); }, 1, x);
+}
+async function main(): Promise<void> {
+  later(5);
+  later(true);
+}
+// case: timeout_gives_promise
+// expect: arrow start
+// expect: arrow end
+// expect: fn start
+// expect: fn end
+// A callback giving a Promise without being async is awaited too.
+async function slow(label: string): Promise<void> { console.log(label, "start"); await sleep(5); console.log(label, "end"); }
+function viaPromise(): Promise<void> { return slow("fn"); }
+async function main(): Promise<void> {
+  setTimeout(() => slow("arrow"), 1);
+  setTimeout(viaPromise, 20);
+}
+// case: interval_passed_copies
+// expect: 3
+// expect: 3
+// expect: stop
+// Each run is passed its own copy of a value that doesn't copy.
+function show(xs: i64[]): void { console.log(xs.length); }
+async function main(): Promise<void> {
+  const arr = [1, 2, 3];
+  const id = setInterval(show, 10, arr);
+  setTimeout(() => { clearInterval(id); console.log("stop"); }, 25);
+}
+// case: timers_sync_main_await
+// error: 'await' can only be used inside an 'async' function
+function main(): void {
+  setTimeout(() => { console.log("t"); }, 1);
+  await sleep(5);
+}
+// case: timers_comptime
+// error: 'setTimeout' can't run while compiling
+const t = setTimeout(() => { console.log("top"); }, 1);
+async function main(): Promise<void> { console.log("main"); }
