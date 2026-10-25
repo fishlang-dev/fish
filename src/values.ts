@@ -204,7 +204,10 @@ export const syncFileCalls = new WeakMap<Expr, string>();
 export const printCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
-// `Promise.all` and `Promise.race` calls, each its own combined future.
+// The ways several Promises are awaited at once.
+type Combiner = "all" | "race" | "allSettled" | "any";
+const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
+// `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
 export const combinedCalls = new WeakSet<Expr>();
 // The operands of an `await`, while they are checked.
 const awaitedNow = new WeakSet<Expr>();
@@ -884,8 +887,8 @@ export function expressions(ctx: Context) {
       unformattable(e.args);
       return { type: "void", what: "printing" };
     }
-    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && (callee.name === "all" || callee.name === "race") && !lookup("Promise") && !classes.has("Promise")) {
-      return combined(e, callee.name);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && !lookup("Promise") && !classes.has("Promise")) {
+      return combined(e, callee.name as Combiner);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalTimeout(e, callee);
@@ -2608,7 +2611,7 @@ export function expressions(ctx: Context) {
 
   // `Promise.all([...])` and `Promise.race([...])`: one future awaiting those in the list at once,
   // in this task. It is awaited where it is made, so the futures' borrows end with the await.
-  function combined(e: Call, kind: "all" | "race"): { type: Type; what: string } {
+  function combined(e: Call, kind: Combiner): { type: Type; what: string } {
     const name = `'Promise.${kind}'`;
     if (e.optional) throw new CompileError(`${name} is always there, so it is called without '?.'`, e.start, e.end);
     if (!awaitedNow.has(e)) throw new CompileError(`${name} is awaited where it is called, as in 'await Promise.${kind}([a(), b()])'`, e.start, e.end);
@@ -2620,12 +2623,14 @@ export function expressions(ctx: Context) {
       const element = typeof t !== "string" && t.kind === "array" ? t.element : undefined;
       if (typeof element === "string" || element?.kind !== "dyn" || promiseElement(element.of) === undefined) throw new CompileError(`${name} takes an array of Promises, as in 'Promise.${kind}([a(), b()])' or a 'Promise<T>[]', not '${show(t)}'`, list.start, list.end);
       combinedCalls.add(e);
-      return { type: combinedFuture({ kind, futures: [], array: t as ArrayType, at: e }), what: name };
+      // Boxed futures throw nothing, so an `any` over them fails only when the array is empty,
+      // with no errors, typed as null.
+      return { type: combinedFuture({ kind, futures: [], array: t as ArrayType, aggregate: kind === "any" ? aggregateOf("null", e) : undefined, at: e }), what: name };
     }
     if (list.elements.length === 0) throw new CompileError(`${name} needs a Promise to wait for${kind === "race" ? "; an empty race never settles" : ""}`, list.start, list.end);
     const futures = list.elements.map((x) => {
       if (x === undefined || x.kind === "spread") throw new CompileError(`${name} takes each Promise written in the list`, (x ?? list).start, (x ?? list).end);
-      if (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise" && (x.callee.name === "all" || x.callee.name === "race") && !lookup("Promise") && !classes.has("Promise")) {
+      if (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise" && COMBINERS.includes(x.callee.name) && !lookup("Promise") && !classes.has("Promise")) {
         throw new CompileError(`'Promise.${(x.callee as { name: string }).name}' can't be in another Promise's list; give it an async function of its own, as in 'async function both() { return await Promise.all([...]); }', and put its call in the list`, x.start, x.end);
       }
       let t = value(x);
@@ -2634,9 +2639,17 @@ export function expressions(ctx: Context) {
       if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`${name} takes Promises, like an async function's call, not '${show(t)}'`, x.start, x.end);
       return t;
     });
-    const type = combinedFuture({ kind, futures, at: e });
+    // An `any` fails only when every future can, with all their errors.
+    const thrown = futures.map((f) => (f.kind === "dyn" ? undefined : f.throws));
+    const aggregate = kind === "any" && thrown.every((x) => x !== undefined) ? aggregateOf(unionType(thrown as Type[]), e) : undefined;
+    const type = combinedFuture({ kind, futures, aggregate, at: e });
     combinedCalls.add(e);
     return { type, what: name };
+  }
+
+  // The prelude's `AggregateError<E>` for errors of type `E`.
+  function aggregateOf(errors: Type, at: Span): ClassType {
+    return construct("AggregateError", [], [arrayType(errors)], at)!.type as ClassType;
   }
 
   // What keeps a value from moving to another thread: a reference, which borrows from the

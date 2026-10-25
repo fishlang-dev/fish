@@ -398,30 +398,55 @@ export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void",
 // state, then for each future the future, its value, and how far it got: 0 not yet polled, 1
 // waiting, 2 done. A future giving nothing gives null here.
 // Over an array of `Promise<T>` values, `array` is its type, and the frame holds the array, the
-// values and a flag per future instead.
-export type Combined = { kind: "all" | "race"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; at: { start: number; end: number } };
+// values and a flag per future instead. `aggregate` is the AggregateError an `any` throws when
+// every future fails.
+export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: number; end: number } };
 export const combinedOf = new WeakMap<FutureType, Combined>();
 
+// What a future in a combined one gives, null for nothing, and what it throws.
+function givenBy(f: FutureType | HandleType | DynType): Type {
+  const gives = f.kind === "dyn" ? promiseElement(f.of)! : f.gives;
+  return gives === "void" ? "null" : gives;
+}
+const thrownBy = (f: FutureType | HandleType | DynType): Type | undefined => (f.kind === "dyn" ? undefined : f.throws);
+
+// An `allSettled` outcome, as JavaScript gives it: fulfilled with the value, or, for a future that
+// can throw, rejected with what it threw.
+export function settledType(gives: Type, thrown: Type | undefined): Type {
+  const { fulfilled, rejected } = settledParts(gives, thrown);
+  return rejected ? unionType([fulfilled, rejected]) : fulfilled;
+}
+
+export function settledParts(gives: Type, thrown: Type | undefined): { fulfilled: ObjectType; rejected?: ObjectType } {
+  const fulfilled = objectType([{ name: "status", type: literalType("fulfilled") }, { name: "value", type: gives }]);
+  return { fulfilled, rejected: thrown ? objectType([{ name: "status", type: literalType("rejected") }, { name: "reason", type: thrown }]) : undefined };
+}
+
 export function combinedFuture(combined: Combined): FutureType {
-  if (combined.array) {
-    const given = promiseElement((combined.array.element as DynType).of)!;
-    const gives: Type = given === "void" ? "null" : given;
-    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "futures", type: combined.array }, { name: "values", type: arrayType(gives) }, { name: "flags", type: arrayType("u8") }];
-    const t: FutureType = { kind: "future", name: `Promise.${combined.kind}`, gives: combined.kind === "all" ? arrayType(gives) : gives, fields: [], params: [], frame, concrete: true };
+  const { kind } = combined;
+  const make = (gives: Type, throws: Type | undefined, frame: Field[]) => {
+    const params = combined.futures.flatMap((f) => (f.kind === "future" ? f.params : []));
+    const t: FutureType = { kind: "future", name: `Promise.${kind}`, gives, throws, fields: [], params, frame, concrete: true };
     keys.set(t, `future ${declared++}`);
     combinedOf.set(t, combined);
     return t;
+  };
+  if (combined.array) {
+    const given = givenBy(combined.array.element as DynType);
+    const kept = kind === "allSettled" ? settledType(given, undefined) : given;
+    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "futures", type: combined.array }, { name: "values", type: arrayType(kept) }, { name: "flags", type: arrayType("u8") }];
+    return make(kind === "all" || kind === "allSettled" ? arrayType(kept) : given, kind === "any" ? combined.aggregate : undefined, frame);
   }
-  const gives = (f: FutureType | HandleType | DynType) => (f.kind === "dyn" ? promiseElement(f.of)! : f.gives);
-  const values = combined.futures.map((f) => (gives(f) === "void" ? "null" : gives(f)));
-  const thrown = combined.futures.flatMap((f) => (f.kind !== "dyn" && f.throws ? [f.throws] : []));
+  // Each future's slot keeps its value, its outcome for `allSettled`, or its error for `any`.
+  const kept = combined.futures.map((f) => (kind === "allSettled" ? settledType(givenBy(f), thrownBy(f)) : kind === "any" ? (thrownBy(f) ?? "null") : givenBy(f)));
   const frame: Field[] = [{ name: "state", type: "i32" }];
-  combined.futures.forEach((f, i) => frame.push({ name: `future${i}`, type: f }, { name: `value${i}`, type: values[i]! }, { name: `done${i}`, type: "i32" }));
-  const params = combined.futures.flatMap((f) => (f.kind === "future" ? f.params : []));
-  const t: FutureType = { kind: "future", name: `Promise.${combined.kind}`, gives: combined.kind === "all" ? tupleType(values) : unionType(values), throws: thrown.length > 0 ? unionType(thrown) : undefined, fields: [], params, frame, concrete: true };
-  keys.set(t, `future ${declared++}`);
-  combinedOf.set(t, combined);
-  return t;
+  combined.futures.forEach((f, i) => frame.push({ name: `future${i}`, type: f }, { name: `value${i}`, type: kept[i]! }, { name: `done${i}`, type: "i32" }));
+  const thrown = combined.futures.flatMap((f) => (thrownBy(f) ? [thrownBy(f)!] : []));
+  if (kind === "all") return make(tupleType(kept), thrown.length > 0 ? unionType(thrown) : undefined, frame);
+  if (kind === "allSettled") return make(tupleType(kept), undefined, frame);
+  const gives = unionType(combined.futures.map(givenBy));
+  if (kind === "race") return make(gives, thrown.length > 0 ? unionType(thrown) : undefined, frame);
+  return make(gives, combined.aggregate, frame);
 }
 
 // `yieldNow()`'s future, which is pending once, then done.

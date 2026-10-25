@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./p
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -6151,6 +6151,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const gives = f.kind === "dyn" ? promiseElement(f.of)! : f.gives;
       return gives === "void" ? "null" : gives;
     };
+    // What each future's slot keeps: its value, its outcome, or for `any` its error.
+    const kept = (i: number) => t.frame[2 + 3 * i]!.type;
     const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
     const finished = (at: string, f: Type) => {
       const old = temp();
@@ -6164,6 +6166,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     futures.forEach((f, i) => {
       const [futureAt, valueAt, doneAt] = [field(1 + 3 * i), field(2 + 3 * i), field(3 + 3 * i)];
       const [d, over, skip, go] = [temp(), temp(), label(), label()];
+      const thrown = f.kind === "dyn" ? undefined : f.throws;
+      const outcome = settledParts(valueOf(f), thrown);
+      const keep = (v: string, from: Type) => emit(`store ${llvm(kept(i))} ${convert(v, from, kept(i))}, ptr ${valueAt}`);
       emit(`${d} = load i32, ptr ${doneAt}`);
       emit(`${over} = icmp eq i32 ${d}, 2`);
       emit(`br i1 ${over}, label %${skip}, label %${go}`);
@@ -6178,20 +6183,28 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const v = step.value() ?? "zeroinitializer";
       finished(futureAt, f);
       emit(`store i32 2, ptr ${doneAt}`);
-      if (kind === "race") {
+      if (kind === "race" || kind === "any") {
         cancelOthers(i);
         finishWith(1, convert(v, valueOf(f), t.gives));
       } else {
-        emit(`store ${llvm(valueOf(f))} ${v}, ptr ${valueAt}`);
+        if (kind === "allSettled") keep(objectOf(outcome.fulfilled, { value: v }), outcome.fulfilled);
+        else keep(v, valueOf(f));
         emit(`br label %${skip}`);
       }
       startBlock(step.failed);
-      if (f.kind !== "dyn" && f.throws) {
+      if (thrown) {
         const error = step.error();
         finished(futureAt, f);
         emit(`store i32 2, ptr ${doneAt}`);
-        cancelOthers(i);
-        finishWith(2, undefined, convert(error, f.throws, t.throws!));
+        if (kind === "all" || kind === "race") {
+          cancelOthers(i);
+          finishWith(2, undefined, convert(error, thrown, t.throws!));
+        } else {
+          // An outcome, or for `any` an error kept for its AggregateError.
+          if (kind === "allSettled") keep(objectOf(outcome.rejected!, { reason: error }), outcome.rejected!);
+          else keep(error, thrown);
+          emit(`br label %${skip}`);
+        }
       } else emit("unreachable");
       startBlock(skip);
     });
@@ -6210,17 +6223,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       startBlock(waiting);
       finishWith(0);
       startBlock(ready);
-      // The values move out of the frame into the tuple.
-      const tuple = t.gives as ObjectType;
-      let made = "zeroinitializer";
-      futures.forEach((f, i) => {
-        const [valueAt, v, next] = [field(2 + 3 * i), temp(), temp()];
-        emit(`${v} = load ${llvm(valueOf(f))}, ptr ${valueAt}`);
-        emit(`store ${llvm(valueOf(f))} zeroinitializer, ptr ${valueAt}`);
-        emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(valueOf(f))} ${v}, ${fieldPath(tuple, String(i)).join(", ")}`);
-        made = next;
+      // What the slots keep moves out of the frame: into the tuple, or, for an `any` every one of
+      // whose futures failed, into its AggregateError.
+      const moved = futures.map((_, i) => {
+        const [valueAt, v] = [field(2 + 3 * i), temp()];
+        emit(`${v} = load ${llvm(kept(i))}, ptr ${valueAt}`);
+        emit(`store ${llvm(kept(i))} zeroinitializer, ptr ${valueAt}`);
+        return v;
       });
-      finishWith(1, made);
+      if (kind === "any") {
+        if (!t.throws) emit("unreachable");
+        else finishWith(2, undefined, aggregated(t.throws as ClassType, moved.map((v, i) => [v, kept(i)] as const)));
+      } else {
+        const tuple = t.gives as ObjectType;
+        let made = "zeroinitializer";
+        moved.forEach((v, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(kept(i))} ${v}, ${fieldPath(tuple, String(i)).join(", ")}`);
+          made = next;
+        });
+        finishWith(1, made);
+      }
     }
     out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block, pending, scopes } = saved);
@@ -6229,12 +6252,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
   // a flag per future, every one zero.
-  function combineArray(t: FutureType, name: string, kind: "all" | "race", array: ArrayType, at: Expr): string {
+  function combineArray(t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Expr): string {
     const saved = { allocas, body, temps, labels, block, pending, scopes };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
     const dyn = array.element as DynType;
     const given = promiseElement(dyn.of)!;
-    const element = llvm(given === "void" ? "null" : given);
+    const value = given === "void" ? "null" : given;
+    // What the values array keeps: each value, or for `allSettled` its outcome.
+    const keptType = (t.frame[2]!.type as ArrayType).element;
+    const element = llvm(keptType);
     const field = (i: number) => {
       const p = temp();
       emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
@@ -6269,7 +6295,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [valuesData, flagsData] = [temp(), temp()];
     emit(`${valuesData} = load ptr, ptr ${part(valuesAt, 0)}`);
     emit(`${flagsData} = load ptr, ptr ${part(flagsAt, 0)}`);
-    const finishWith = (tag: number, v?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v)}`);
+    const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
     // Each index below `n`, in a loop of its own.
     const each = (body: (i: string, next: string) => void) => {
       const index = alloca("i64");
@@ -6330,20 +6356,30 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store ${DYN} zeroinitializer, ptr ${slot}`);
       dispose(old, dyn);
       emit(`store i8 2, ptr ${flagAt}`);
-      if (kind === "race") {
+      if (kind === "race" || kind === "any") {
         cancelOthers(i);
         finishWith(1, v);
       } else {
         const p = temp();
+        const outcome = settledParts(value, undefined).fulfilled;
         emit(`${p} = getelementptr ${element}, ptr ${valuesData}, i64 ${i}`);
-        emit(`store ${element} ${v}, ptr ${p}`);
+        emit(`store ${element} ${kind === "allSettled" ? objectOf(outcome, { value: v }) : v}, ptr ${p}`);
         emit(`br label %${next}`);
       }
       startBlock(step.failed);
       emit("unreachable");
     });
+    // A boxed future can't fail, so an `any` fails only over an empty array, as JavaScript rejects.
     if (kind === "race") finishWith(0);
-    else {
+    else if (kind === "any") {
+      const [empty, none, waiting] = [temp(), label(), label()];
+      emit(`${empty} = icmp eq i64 ${n}, 0`);
+      emit(`br i1 ${empty}, label %${none}, label %${waiting}`);
+      startBlock(none);
+      finishWith(2, undefined, aggregateOf(t.throws as ClassType, "null", "0"));
+      startBlock(waiting);
+      finishWith(0);
+    } else {
       const count = alloca("i64");
       emit(`store i64 0, ptr ${count}`);
       each((i, next) => {
@@ -6374,6 +6410,42 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
     ({ allocas, body, temps, labels, block, pending, scopes } = saved);
     return name;
+  }
+
+  // An object of `type` with the given fields, the rest, as a literal's, empty.
+  function objectOf(type: ObjectType, given: Record<string, string>): string {
+    let made = "zeroinitializer";
+    for (const [name, v] of Object.entries(given)) {
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(field(type, name)!.type)} ${v}, ${fieldPath(type, name).join(", ")}`);
+      made = next;
+    }
+    return made;
+  }
+
+  // An `any`'s AggregateError: JavaScript's message, and each error in the list's order.
+  function aggregated(type: ClassType, errors: (readonly [string, Type])[]): string {
+    const list = field(type, "errors")!.type as ArrayType;
+    const element = llvm(list.element);
+    const [bytes, data] = [temp(), temp()];
+    emit(`${bytes} = mul i64 ${errors.length}, ${sizeOf(element)}`);
+    emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes})`);
+    errors.forEach(([v, from], i) => {
+      const at = temp();
+      emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+      emit(`store ${element} ${convert(v, from, list.element)}, ptr ${at}`);
+    });
+    return aggregateOf(type, data, String(errors.length));
+  }
+
+  function aggregateOf(type: ClassType, data: string, n: string): string {
+    const [a, b, c, made, done] = [temp(), temp(), temp(), temp(), temp()];
+    emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
+    emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${n}, 1`);
+    emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${n}, 2`);
+    emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${ARRAY} ${c}, ${fieldPath(type, "errors").join(", ")}`);
+    emit(`${done} = insertvalue ${llvm(type)} ${made}, ptr ${text("All promises were rejected")}, ${fieldPath(type, "message").join(", ")}`);
+    return done;
   }
 
   // `then` where a combined future's flag at `doneAt` says its future is waiting.

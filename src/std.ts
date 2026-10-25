@@ -51,6 +51,11 @@ class IoError {
   constructor(message: string) { this.message = message; }
 }
 class JsonError { message: string; constructor(message: string) { this.message = message; } }
+class AggregateError<E> {
+  message: string = "All promises were rejected";
+  errors: E[];
+  constructor(errors: E[]) { this.errors = errors; }
+}
 class ParseArgsError {
   message: string;
   code: string;

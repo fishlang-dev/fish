@@ -485,3 +485,96 @@ async function main() {
   const sum = await d;
   console.log("sum", sum, Date.now() - start < 1000);
 }
+// case: promise_all_settled_and_any
+// expect: fulfilled 1 fulfilled
+// expect: b x
+// expect: { status: 'fulfilled', value: 1 }
+// expect: any 7
+// expect: All promises were rejected 2 a b
+// expect: 2 3 fulfilled
+// expect: empty All promises were rejected 0
+class Boom {
+  message: string;
+  constructor(m: string) { this.message = m; }
+}
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function fail(ms: i64, m: string): Promise<i64> throws Boom {
+  await sleep(ms);
+  throw new Boom(m);
+}
+async function tick(): Promise<void> {
+  await sleep(5);
+}
+async function main() {
+  const [a, b, c] = await Promise.allSettled([after(20, 1), fail(10, "x"), tick()]);
+  console.log(a.status, a.value, c.status);
+  if (b.status === "rejected") console.log("b", b.reason.message);
+  console.log(a);
+  const first = await Promise.any([fail(5, "early"), after(30, 7), after(60, 8)]);
+  console.log("any", first);
+  try {
+    const none = await Promise.any([fail(5, "a"), fail(15, "b")]);
+    console.log(none);
+  } catch (e) {
+    console.log(e.message, e.errors.length, e.errors[0].message, e.errors[1].message);
+  }
+  let ps: Promise<i64>[] = [];
+  ps.push(after(10, 3));
+  ps.push(after(5, 4));
+  const outcomes = await Promise.allSettled(ps);
+  console.log(outcomes.length, outcomes[0].value, outcomes[1].status);
+  const empty: Promise<i64>[] = [];
+  try {
+    const one = await Promise.any(empty);
+    console.log(one);
+  } catch (e) {
+    console.log("empty", e.message, e.errors.length);
+  }
+}
+// case: promise_any_cancels_the_rest
+// expect: listener got 3
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function listener(ch: Channel<i64>): Promise<i64> {
+  const v = await ch.receive();
+  return v!;
+}
+async function main() {
+  const ch = new Channel<i64>(1);
+  const r = await Promise.any([ch.receive(), after(20, 1)]);
+  const t = spawn(listener(ch.clone()));
+  await sleep(20);
+  await ch.send(3);
+  const got = await t;
+  console.log("listener got", got);
+}
+// case: promise_any_never_fails
+// expect: 2
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function main() {
+  const r = await Promise.any([after(30, 1), after(5, 2)]);
+  console.log(r);
+}
+// case: promise_settled_status_narrows
+// error: this comparison appears to be unintentional
+async function after(ms: i64): Promise<i64> {
+  await sleep(ms);
+  return ms;
+}
+async function main() {
+  const [a] = await Promise.allSettled([after(5)]);
+  if (a.status === "rejected") console.log("never");
+}
+// case: promise_any_empty_list
+// error: 'Promise.any' needs a Promise to wait for
+async function main() {
+  const r = await Promise.any([]);
+}
