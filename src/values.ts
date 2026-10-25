@@ -75,6 +75,12 @@ export type Context = {
   paramTypes(instance: Instance): Type[];
   // The binding a name refers to; `at`, the use, is where a closure first captures it.
   lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
+  // The binding a name refers to, without capturing it, and this body's binding for a variable
+  // of a body around it, captured if need be.
+  peek(name: string): Local | undefined;
+  reach(l: Local, at?: Expr | ObjectProp): Local;
+  // Records the bindings a call of a nested function builds its environment from.
+  envOf(e: Call, env: Local[]): void;
   // Notes a closure's use of `this`, which it captures.
   noteThis(e: Expr): void;
   self: Body["self"];
@@ -916,6 +922,8 @@ export function expressions(ctx: Context) {
     // A nested function's call of itself comes before any outer name it shares.
     const itself = callee.kind === "ident" ? ctx.selfCall(e) : undefined;
     if (itself) return itself;
+    const nested = callee.kind === "ident" ? nestedFunction(callee.name) : undefined;
+    if (nested) return nestedCall(e, callee as Extract<Expr, { kind: "ident" }>, nested);
     // A local generic function is called as the generic function it was lifted to.
     const lifted = callee.kind === "ident" ? (lookup(callee.name)?.generic as Body | undefined) : undefined;
     if (callee.kind === "ident" && !lifted && lookup(callee.name)) return closureCall(e, callee);
@@ -1183,6 +1191,29 @@ export function expressions(ctx: Context) {
   }
 
   // A call of a closure held by a variable runs the closure's body.
+  // The nested function a name calls, unless it is async, whose future holds what it uses.
+  function nestedFunction(name: string): Local | undefined {
+    const local = ctx.peek(name);
+    const type = local && lower(local.type);
+    if (!local || typeof type === "string" || type?.kind !== "closure") return undefined;
+    const body = closureBody(type as ClosureType).body;
+    return body.closure?.self === name && !body.async ? local : undefined;
+  }
+
+  // `name(...)` on a nested function builds its environment for the call from this body's
+  // bindings for what it captures, so a closure calling it captures those, not the function,
+  // and changes what the function changes.
+  function nestedCall(e: Call, callee: Extract<Expr, { kind: "ident" }>, local: Local): { type: Type; what: string } {
+    const called = closureBody(lower(local.type) as ClosureType);
+    const env = [...called.captures!.entries()].map(([alias, from]) => {
+      const mine = ctx.reach(from as Local, callee);
+      if (called.changed?.has(alias)) changesLocal(mine, "", "change", callee, false);
+      return mine;
+    });
+    ctx.envOf(e, env);
+    return closureCall(e, callee, local.type);
+  }
+
   function closureCall(e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
     const held = known ?? value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";

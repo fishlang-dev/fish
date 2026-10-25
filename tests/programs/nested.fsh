@@ -45,8 +45,28 @@ function main() {
   console.log(k);
 }
 // case: nested_borrow_between_calls
-// error: cannot use 'n' while 'inc' borrows 'n' mutably and is used later
-function main() { let n = 0; function inc() { n++; } inc(); console.log(n); inc(); }
+// expect: 1
+// expect: 5
+// expect: 15
+// A nested function called by name lends what it uses for each call, so its variables are
+// usable between calls, through another nested function, an arrow and a function nested in one.
+function main() {
+  let n = 0;
+  function inc(): void { n++; }
+  function twice(): void { inc(); inc(); }
+  inc();
+  console.log(n);
+  inc();
+  twice();
+  const show = (): void => { inc(); console.log(n); };
+  show();
+  function deep(k: i64): void {
+    function inner(): void { n += k; }
+    inner();
+  }
+  deep(10);
+  console.log(n);
+}
 // case: nested_self_call_borrow
 // error: cannot mutably lend 'xs' while 'r' borrows 'xs[...]' and is used later
 class P { n: i64; constructor(n: i64) { this.n = n; } }
@@ -78,10 +98,10 @@ function main() {
   }
 }
 // case: nested_moved_capture
-// error: cannot move 'xs' while 'add' borrows 'xs' mutably and is used later
+// error: 'xs' was moved, so it can't be used here
 function main() { let xs = [1]; function add() { xs.push(2); } const r = xs; add(); }
 // case: nested_loop_conflict
-// error: while 'add' borrows 'xs' mutably
+// error: cannot mutably lend 'xs' while a 'for...of' loop is reading 'xs'
 function main() { let xs = [1]; function add() { xs.push(2); } for (const x of xs) { add(); } }
 // case: nested_value_conflict
 // error: cannot use 'n' while 'g' borrows 'n' mutably and is used later

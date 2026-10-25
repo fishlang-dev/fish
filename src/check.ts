@@ -90,6 +90,9 @@ export type Instance = {
   // The captures it changes, which it captures mutably, and those it moves out of itself.
   changed?: Set<Local>;
   moved?: Set<Local>;
+  // Each call of a nested function by name, and this body's bindings for what that function
+  // captures, in its environment's order, from which the call builds it.
+  envs?: Map<Expr, Local[]>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -105,6 +108,10 @@ export type Instance = {
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
 type Outer = {
   lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
+  // The binding a name refers to, without capturing it.
+  peek(name: string): Local | undefined;
+  // This body's binding for a variable of a body around it, capturing it if need be.
+  reach(l: Local, at?: Expr | ObjectProp): Local;
   narrowed(l: Local): Type | undefined;
   thisReady(e: Expr): boolean;
   noteThis(e: Expr): void;
@@ -970,7 +977,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
-      templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup,
+      templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
+      envOf: (e, env) => void (instance.envs ??= new Map()).set(e, env),
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -1589,7 +1597,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner);
-      withSight(inSight, () => checkInstance(inner, { lookup, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
+      withSight(inSight, () => checkInstance(inner, { lookup, peek, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       // A nested function runs whenever it is called, so it can't take over what it uses.
@@ -2086,6 +2094,20 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       const outside = outer?.lookup(name, at);
       // A local generic function holds nothing to capture.
       return outside && (outside.generic ? outside : capture(outside, at));
+    }
+
+    function peek(name: string): Local | undefined {
+      for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
+        const local = scopes[i]!.get(name);
+        if (local) return local;
+      }
+      return outer?.peek(name);
+    }
+
+    // By the binding itself, not its name, which a body in between may have taken for another.
+    function reach(l: Local, at?: Expr | ObjectProp): Local {
+      if (captures?.has(l) || scopes.some((scope) => [...scope.values()].includes(l))) return l;
+      return capture(outer!.reach(l, at), at);
     }
 
     // A generic function written in a body, or a generic arrow a const holds, is a generic

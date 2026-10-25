@@ -490,12 +490,19 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
-          // A nested function calling itself uses what it captured again: lent shared while its
-          // arguments run, so they may read it, then mutably for the call where it changes it, so
-          // nothing borrowed from those may be live across it. Keys below zero, one per capture,
-          // so no argument's loan can replace these.
-          const captures = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias], i) => ({ alias, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named })) : [];
-          for (const c of captures) lend(String(c.alias.id), false, c.at, undefined, name, e, c.at.start, c.key);
+          // A nested function called by name, itself included, uses what it captures for the
+          // call: lent shared while its arguments run, so they may read it, then mutably for the
+          // call where it changes it, so nothing borrowed from those may be live across it. Keys
+          // below zero, one per capture, so no argument's loan can replace these.
+          const env = instance.envs?.get(e);
+          const callee = env && calls.get(e);
+          const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias, changes: instance.changed?.has(alias) === true }))
+            : env ? env.map((alias, i) => ({ alias, changes: callee!.changed?.has([...callee!.captures!.keys()][i]!) === true })) : [];
+          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          for (const c of captures) {
+            usable(c.at, String(c.alias.id));
+            lend(String(c.alias.id), false, c.at, undefined, name, e, c.at.start, c.key);
+          }
           // A closure is read to call it, or taken over when it can run only once.
           const run = e.callee.kind === "ident" ? lower(types.get(e.callee) ?? "void") : undefined;
           if (e.callee.kind === "ident" && locals.has(e.callee)) {
@@ -532,7 +539,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           for (const c of captures) {
-            if (!instance.changed?.has(c.alias) || !state) continue;
+            if (!c.changes || !state) continue;
             state.loans.delete(c.key);
             lend(String(c.alias.id), true, c.at, undefined, name, e, e.end - 1, c.key);
           }

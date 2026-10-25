@@ -5062,7 +5062,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
+    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!) : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
@@ -5303,6 +5303,34 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares.
     return convert(result, field(object, e.name)!.type, types.get(e)!);
+  }
+
+  // A nested function's environment built for one call, in a slot of its own.
+  function envFor(target: Instance, env: Local[]): string {
+    const at = alloca(llvm(target.closure!));
+    emit(`store ${llvm(target.closure!)} ${environment(target, env)}, ptr ${at}`);
+    return at;
+  }
+
+  // A closure's environment, from the bindings standing here for what it captures, in order:
+  // where each lives, or a copy, or the value moved in.
+  function environment(inner: Instance, froms: (Local | "this")[]): string {
+    let result = "undef";
+    froms.forEach((from, i) => {
+      const type = inner.closure!.fields[i]!.type;
+      let part = from === "this" ? "%this" : slot(from);
+      // A closure holding a variable's value holds a copy, or moves it in, emptying it.
+      if (!isRef(type)) {
+        part = temp();
+        emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
+        if (isCopy(type)) part = copied(part, type);
+        else emit(`store ${llvm(type)} zeroinitializer, ptr ${slot(from as Local)}`);
+      }
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ${llvm(type)} ${part}, ${i}`);
+      result = next;
+    });
+    return froms.length === 0 ? "zeroinitializer" : result;
   }
 
   // A tuple's fixed elements in order, with where each is in its fields, and its rest array's.
@@ -6227,22 +6255,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
         const inner = calls.get(e)!;
-        let result = "undef";
-        [...inner.captures!.values()].forEach((from, i) => {
-          const type = inner.closure!.fields[i]!.type;
-          let part = from === "this" ? "%this" : slot(from);
-          // A closure holding a variable's value holds a copy, or moves it in, emptying it.
-          if (!isRef(type)) {
-            part = temp();
-            emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
-            if (isCopy(type)) part = copied(part, type);
-            else emit(`store ${llvm(type)} zeroinitializer, ptr ${slot(from as Local)}`);
-          }
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ${llvm(type)} ${part}, ${i}`);
-          result = next;
-        });
-        return inner.captures!.size === 0 ? "zeroinitializer" : result;
+        return environment(inner, [...inner.captures!.values()]);
       }
       case "object": {
         const type = types.get(e) as ObjectType;
