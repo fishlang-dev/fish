@@ -433,8 +433,10 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     }
     // Each value a comptime parameter is given makes an instance of its own.
     f.params.forEach((p, i) => p.comptime && own.set(comptimeName(p), comptimeArgument(args[i]!)));
-    // A type argument holding a pattern keeps it, so the instance's parameters still ask for it.
-    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, holdsPattern(t) ? t : lower(t)]));
+    // A type argument holding a pattern keeps it, so the instance's parameters still ask for it;
+    // one holding no type parameter keeps how its fields were spelled, which printing and JSON
+    // read.
+    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, holdsPattern(t) || concrete(t) ? t : lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) sites.set(at, own);
     else sites.delete(at);

@@ -32,3 +32,22 @@ function main() {
   const f = (x: i64) => x;
   console.log(f);
 }
+// case: print_spelling_everywhere
+// expect: { b: null }
+// expect: { b: null } C { y: 1 }
+// expect: {"b":null} {"b":null} [{"b":null}] {"b":null}
+type P = { a: i64 | undefined; b: i64 | null; c?: string };
+@derive(Json)
+class C {
+  x: string | undefined = undefined;
+  y: i64 = 1;
+  constructor() {}
+}
+function show<T>(v: Ref<T>): string { return JSON.stringify(v); }
+function shown<T>(v: Ref<T>) { console.log(v); }
+function main() {
+  const p: P = { a: undefined, b: null };
+  shown(p);
+  console.log(p, new C());
+  console.log(JSON.stringify(p), show(p), show([p.clone()]), Response.json(p).body);
+}

@@ -121,7 +121,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const at = { start: m.start, end: m.end };
     const type: TypeNode | undefined = m.optional && m.type ? { kind: "union", types: [m.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
     const init: Expr | undefined = m.optional ? (m.init ?? { kind: "null", ...at }) : m.init;
-    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }) });
+    const written = m.optional ? m.type : m.type && withoutUndefined(m.type);
+    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(written && { written }) });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
@@ -129,7 +130,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     // An optional parameter property is an Option, as the parameter is.
     const at = { start: p.start, end: p.end };
     const type: TypeNode | undefined = p.optional && p.type ? { kind: "union", types: [p.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
-    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }) });
+    const written = p.optional ? p.type : p.type && withoutUndefined(p.type);
+    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(written && { written }) });
   });
 
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
@@ -365,3 +367,11 @@ const MEMBER_FORMS: Record<Exclude<ClassMember["kind"], "field" | "constructor" 
   index: "index signatures",
   staticBlock: "static blocks",
 };
+
+// A type written `T | undefined` without its `undefined`, or nothing when it has none.
+export function withoutUndefined(t: TypeNode): TypeNode | undefined {
+  if (t.kind !== "union") return undefined;
+  const rest = t.types.filter((u) => !(u.kind === "ref" && u.name === "undefined" && u.args.length === 0));
+  if (rest.length === t.types.length || rest.length === 0) return undefined;
+  return rest.length === 1 ? rest[0]! : { ...t, types: rest };
+}

@@ -4141,5 +4141,3 @@ const MAP_ARGUMENTS: Record<string, number> = { set: 2, add: 1, get: 1, has: 1, 
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
-// Whether a type is a data-carrying enum, or one of its variants.
-const holdsVariant = (t: Type): boolean => typeof t !== "string" && (t.kind === "variant" || (t.kind === "union" && t.members.some(holdsVariant)));

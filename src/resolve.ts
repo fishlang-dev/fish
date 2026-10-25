@@ -7,7 +7,7 @@ import { ANY_REGEX, recursiveType, holdsBlock, standsFor, lowersRecursive, type 
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
-import { mutates, owns } from "./classes.ts";
+import { mutates, owns, withoutUndefined } from "./classes.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
 
@@ -739,8 +739,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
-    // An object may leave out an optional property, which is then empty.
-    const f = m.optional ? optionalField(m.name, unionMember(m.type)) : { name: m.name, type: resolveType(m.type) };
+    // An object may leave out an optional property, which is then empty; one spelled
+    // `T | undefined` is optional too, so printing and JSON leave it out while empty.
+    const absent = m.optional ? m.type : withoutUndefined(m.type);
+    const f = absent ? optionalField(m.name, unionMember(absent)) : { name: m.name, type: resolveType(m.type) };
     return { ...f, type: storable(f.type, m), ...(m.readonly && { readonly: true }) };
   }
 }
