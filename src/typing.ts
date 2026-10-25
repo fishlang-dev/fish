@@ -89,7 +89,9 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
-export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[] };
+// A generic one, `<T>(x: T) => T`, is a family: `generic` holds its type parameters' names and
+// the node it was written as, each call resolving it for that call's types.
+export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: { names: string[]; node: unknown } };
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;

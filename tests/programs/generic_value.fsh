@@ -71,3 +71,49 @@ function make() {
 function main() {
   console.log(make()(1));
 }
+// case: generic_value_type_parameters
+// expect: 1 a true 1 a true
+// expect: 4
+// expect: hi ann
+// expect: 1 a true
+type Id = <T>(x: T) => T;
+function id<T>(x: T): T { return x; }
+function both(f: <T>(x: T) => T): string {
+  return `${f(1)} ${f("a")} ${f(true)}`;
+}
+function twice(f: Id, n: i64): i64 {
+  return f(f(n));
+}
+interface Named { name: string }
+function greet(f: <T extends Named>(x: T) => string): string {
+  return f({ name: "ann" });
+}
+function main() {
+  console.log(both(id), both(<T>(x: T): T => x));
+  console.log(twice(id, 4));
+  console.log(greet(<T extends Named>(x: T): string => "hi " + x.name));
+  const o = { f: id };
+  console.log(both(o.f));
+}
+// case: generic_value_type_not_generic
+// error: it takes a generic function, one that works for every type, as '<T>(x: T) => T'
+function both(f: <T>(x: T) => T): i64 {
+  return f(1);
+}
+function main() {
+  console.log(both((x: i64): i64 => x));
+}
+// case: generic_value_type_constraint
+// error: type 'i64' does not satisfy the constraint 'Named' of 'T'
+interface Named { name: string }
+function greet(f: <T extends Named>(x: T) => string): string {
+  return f(5);
+}
+function main() {}
+// case: generic_value_type_uninferred
+// error: can't infer a type for 'T' in this call of 'f'
+function make(f: <T>() => T[]): i64 {
+  const xs = f();
+  return 0;
+}
+function main() {}

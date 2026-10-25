@@ -579,6 +579,12 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     // A recursive type's value stands for the type it stands for.
     type = unfold(type);
     const message = `argument of type '${show(type)}' is not assignable to parameter of type '${show(bound)}'`;
+    // A generic function type takes a generic function value, whose calls each instantiate it.
+    if (bound.kind === "function" && bound.generic) {
+      const held = typeof type !== "string" && type.kind === "param" && type.concrete ? lower(type) : type;
+      if (typeof held !== "string" && held.kind === "closure" && held.generic) return type;
+      throw new CompileError(`${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
+    }
     if (bound.kind === "function") {
       if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
       return type;

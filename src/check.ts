@@ -1044,6 +1044,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       depthOf: (l) => depths.get(l)!,
       closure,
       liftArrow,
+      resolveWith: (t, scope) => withScope(scope, () => resolveType(t)),
       closureBody: (t) => closureBodies.get(t)!,
       resolveType,
       implicitOf,

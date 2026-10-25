@@ -160,6 +160,8 @@ export type Context = {
   closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean, owning?: boolean): ClosureType;
   // Makes a generic arrow written as a value a generic function of its own, the arrow its name.
   liftArrow(e: Extract<Expr, { kind: "arrow" }>): void;
+  // A type node resolved with type parameters bound, as a generic function type's for a call.
+  resolveWith(t: TypeNode, scope: Map<string, Type>): Type;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
@@ -988,8 +990,9 @@ export function expressions(ctx: Context) {
     if (itself) return itself;
     const nested = callee.kind === "ident" ? nestedFunction(callee.name) : undefined;
     if (nested) return nestedCall(e, callee as Extract<Expr, { kind: "ident" }>, nested);
-    // A local generic function is called as the generic function it was lifted to.
-    const lifted = callee.kind === "ident" ? (lookup(callee.name)?.generic as Body | undefined) : undefined;
+    // A local generic function is called as the generic function it was lifted to, and a generic
+    // function value read from a name or a field as the function it names.
+    const lifted = (callee.kind === "ident" ? (lookup(callee.name)?.generic as Body | undefined) : undefined) ?? genericTarget(callee, receiver);
     if (callee.kind === "ident" && !lifted && lookup(callee.name)) return closureCall(e, callee);
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
     if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
@@ -997,8 +1000,6 @@ export function expressions(ctx: Context) {
       const method = receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name);
       const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
       if (held && !method && isCallable(held)) return callableCall(e, callee, held as DynType);
-      // A field holding a generic function value calls that function.
-      if (held && !method && typeof held !== "string" && held.kind === "closure" && held.generic) return closureCall(e, callee, held);
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
       const given = value(callee);
@@ -1319,10 +1320,58 @@ export function expressions(ctx: Context) {
     if (declared && !declared.comptime) functionValue(callback, declared);
   }
 
+  // A call through a generic function type, in a body checked before it knows the function: its
+  // type parameters are inferred from the arguments, or written, and its signature resolved
+  // with them.
+  function familyCall(e: Call, type: FunctionType, name: string): { type: Type; what: string } {
+    const { names, node } = type.generic!;
+    const written = node as Extract<TypeNode, { kind: "function" }>;
+    if (e.args.length !== written.params.length) throw new CompileError(`expected ${written.params.length} argument${written.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    const argTypes = e.args.map((a) => value(a));
+    const bindings = new Map<string, Type>();
+    if (e.typeArgs.length > 0) {
+      if (e.typeArgs.length !== names.length) throw new CompileError(`expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
+      names.forEach((n, i) => bindings.set(n, resolveType(e.typeArgs[i]!)));
+    } else written.params.forEach((p, i) => p.type && infer(p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
+    for (const [i, n] of names.entries()) {
+      const bound = bindings.get(n);
+      if (!bound) throw new CompileError(`can't infer a type for '${n}' in this call of ${name}; pass it, as in '${(e.callee as { name?: string }).name ?? "f"}<i64>(...)'`, e.start, e.end);
+      const constraint = written.typeParams[i]!.constraint;
+      if (constraint) {
+        const limit = ctx.resolveWith(constraint, bindings);
+        const reason = typeof limit !== "string" && limit.kind === "interface" ? unsatisfied(bound, limit, members, e) : fits(bound, limit) ? undefined : `'${show(bound)}' is not a '${show(limit)}'`;
+        if (reason) throw new CompileError(`type '${show(bound)}' does not satisfy the constraint '${show(limit)}' of '${n}' in ${name}: ${reason}`, e.start, e.end);
+      }
+    }
+    e.args.forEach((a, i) => {
+      const want = ctx.resolveWith(written.params[i]!.type!, bindings);
+      coerce(a, argTypes[i]!, want, `argument of type '${show(argTypes[i]!)}' is not assignable to parameter of type '${show(want)}'`);
+    });
+    return { type: ctx.resolveWith(written.returns, bindings), what: name };
+  }
+
   // A generic function named as a value: its own type, each call of which instantiates it.
   function genericValue(f: Body, e: Expr): Type {
     if (f.foreign) throw unsupported("C functions used as values", e);
     return genericFunctionType(f.name, "a generic function");
+  }
+
+  // The generic function a generic function value names, when the callee is a local or a field
+  // holding one; read for nothing else, it is called directly, in this instance.
+  function genericTarget(callee: Expr, receiver: Type | undefined): Body | undefined {
+    let held: Type | undefined;
+    if (callee.kind === "ident") {
+      const local = lookup(callee.name);
+      if (!local) return undefined;
+      held = local.type;
+      locals.set(callee, local);
+    } else if (callee.kind === "member" && pure(callee) && typeof receiver !== "string" && (receiver?.kind === "class" || receiver?.kind === "object")) {
+      if (receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name)) return undefined;
+      held = field(receiver, callee.name)?.type;
+    }
+    if (held === undefined) return undefined;
+    const t = lower(isRefType(held) ? held.to : held);
+    return typeof t !== "string" && t.kind === "closure" && t.generic ? byName.get(t.generic) : undefined;
   }
 
   // A name, or fields read from one, which reading has no effect of its own.
@@ -1391,13 +1440,8 @@ export function expressions(ctx: Context) {
     const held = known ?? value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";
     const through = lower(isRefType(held) ? held.to : held);
-    // A generic function value's call is a call of the function it names, instantiated for this
-    // call; read from a name or a field, nothing is lost by not reading it.
-    if (typeof through !== "string" && through.kind === "closure" && through.generic) {
-      if (!pure(callee)) throw unsupported("calls of a generic function value that isn't a name or a field", callee);
-      e.callee = { kind: "ident", name: through.generic, start: callee.start, end: callee.end };
-      return call(e);
-    }
+    // A generic function value reached here isn't a name or a field, which `callee` calls.
+    if (typeof through !== "string" && through.kind === "closure" && through.generic) throw unsupported("calls of a generic function value that isn't a name or a field", callee);
     if (isCallable(through)) return callableCall(e, callee, through as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
     // closure it was given.
@@ -1405,6 +1449,7 @@ export function expressions(ctx: Context) {
     if (typeof type === "string" || (type.kind !== "closure" && type.kind !== "function")) {
       throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
     }
+    if (type.kind === "function" && type.generic) return familyCall(e, type, name);
     if (e.typeArgs.length > 0) throw new CompileError(`${name} takes no type arguments`, e.start, e.end);
     const written = type.kind === "closure" ? closureBody(type).body.params : undefined;
     if (written) arity(e.args.length, written, e);

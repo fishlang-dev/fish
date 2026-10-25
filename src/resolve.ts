@@ -270,9 +270,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
-      if (t.typeParams.length > 0) throw unsupported("generic function types", t);
       const rest = t.params.find((p) => p.rest);
       if (rest) throw unsupported("rest parameters in function types", rest);
+      // A generic one is shown and compared with its own parameters standing for themselves.
+      if (t.typeParams.length > 0) {
+        const scope = placeholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n)));
+        const fn = withScope(scope, () => functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns)));
+        fn.name = `<${t.typeParams.map((p) => p.name).join(", ")}>${fn.name}`;
+        fn.generic = { names: t.typeParams.map((p) => p.name), node: t };
+        return fn;
+      }
       const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
       if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
       return fn;
