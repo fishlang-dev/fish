@@ -51,6 +51,17 @@ class IoError {
   constructor(message: string) { this.message = message; }
 }
 class JsonError { message: string; constructor(message: string) { this.message = message; } }
+interface ErrorLike { name: string; message: string; }
+type ErrorOptions = { cause?: Dyn<ErrorLike> };
+class Error {
+  name: string = "Error";
+  message: string;
+  cause: Dyn<ErrorLike> | null = null;
+  constructor(message?: string, options?: ErrorOptions) {
+    this.message = message ?? "";
+    this.cause = options?.cause ?? null;
+  }
+}
 class AggregateError<E> {
   message: string = "All promises were rejected";
   errors: E[];

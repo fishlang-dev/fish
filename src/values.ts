@@ -450,6 +450,9 @@ export function expressions(ctx: Context) {
     // callable.
     const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
     if (callables.length === 1) t = callables[0]!;
+    // A value written where a Dyn is wanted, as an object literal's field, is boxed into it there.
+    const box = t === undefined ? undefined : boxedIn(t);
+    if (e.kind !== "arrow" && box) wanted.set(e, box);
     // An arrow written where a callable is stored captures by move: the callable owns it all.
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
       expecting.set(e, callableOf.get(t.of)!);
@@ -1282,10 +1285,13 @@ export function expressions(ctx: Context) {
     list.forEach((a, i) => {
       const t = bounds.get(i);
       if (t?.kind === "function") expect(a, t);
-      // An arrow in an object literal given for an object-typed parameter takes its field's type.
+      // An arrow in an object literal given for an object-typed parameter takes its field's type,
+      // and a value for a Dyn field is boxed into it.
       if (t?.kind === "object" && a.kind === "object") {
         for (const p of a.props) {
-          const want = p.kind === "property" && p.value.kind === "arrow" ? field(t, p.key as string)?.type : undefined;
+          const declared = p.kind === "property" ? field(t, p.key as string)?.type : undefined;
+          const boxes = declared !== undefined && boxedIn(declared) !== undefined;
+          const want = p.kind === "property" && (p.value.kind === "arrow" || boxes) ? declared : undefined;
           if (want && p.kind === "property") expect(p.value, want);
         }
       }
@@ -1376,6 +1382,18 @@ export function expressions(ctx: Context) {
     const call: Expr = { kind: "call", callee: { kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n) => ({ kind: "ident", name: n, ...at })), optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
+  }
+
+  // The Dyn of an interface a value meeting `t` is boxed into: `t` itself, or the one in an
+  // Option, as an optional field's.
+  function boxedIn(t: Type): DynType | undefined {
+    const dyn = (u: Type) => typeof u !== "string" && u.kind === "dyn" && !callableOf.has(u.of) && promiseElement(u.of) === undefined;
+    if (dyn(t)) return t as DynType;
+    if (typeof t !== "string" && t.kind === "union" && t.members.length === 2 && t.members.includes("null")) {
+      const other = t.members.find((m) => m !== "null")!;
+      return dyn(other) ? (other as DynType) : undefined;
+    }
+    return undefined;
   }
 
   // A generic function named as a value: its own type, each call of which instantiates it.
@@ -4185,6 +4203,12 @@ export function expressions(ctx: Context) {
     const field = propertyField(p);
     // A generic function value is held as it is, captures nothing, and is called by name.
     if (typeof field.type !== "string" && field.type.kind === "closure" && field.type.generic) return field;
+    // A value for a field the object's type holds a Dyn in is boxed into it.
+    const boxed = p.kind === "property" ? wanted.get(p.value) : undefined;
+    if (p.kind === "property" && typeof boxed !== "string" && boxed?.kind === "dyn" && lower(field.type) !== lower(boxed)) {
+      coerce(p.value, field.type, boxed, `type '${show(field.type)}' is not assignable to type '${show(boxed)}'`);
+      return { ...field, type: boxed };
+    }
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
     if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {
