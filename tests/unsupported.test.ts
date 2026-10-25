@@ -220,3 +220,15 @@ for (const decl of ["export const x = 1", "export default 1", "export * from 'm'
     }));
   });
 }
+
+// A moved Promise can't be cloned, so the note on a later use offers no clone.
+test("a moved Promise's note offers no clone", () => {
+  const src = "async function main(): Promise<void> throws Error {\n  const r = Promise.withResolvers<i64>();\n  const p = r.promise;\n  const s = r;\n}";
+  let thrown: unknown;
+  try {
+    check(parse(src));
+  } catch (e) {
+    thrown = e;
+  }
+  expect(thrown).toMatchObject({ note: { message: "'r.promise' moved here: 'p' owns it now" } });
+});
