@@ -280,7 +280,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const own = placeholders(t.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n)));
         const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns)));
         fn.name = `<${t.typeParams.map((p) => p.name).join(", ")}>${fn.name}`;
-        fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around };
+        fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
         return fn;
       }
       const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
@@ -525,7 +525,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const returns = m.returns;
         const [params, result] = withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => paramType(p)), resolveType(returns)] as const);
         const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
-        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, params: self ? m.params.slice(1) : m.params }, scope: around };
+        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);
       } else {

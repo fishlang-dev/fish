@@ -471,7 +471,13 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const members: Members = {
     classOf: (t) => classOf(t),
     returnOf: (b, at) => returnOf(definition(b), at),
-    paramTypesOf: (b) => declaredParams(b),
+    // A generic method's, with its own type parameters standing for themselves.
+    paramTypesOf: (b) => ((b.typeParams ?? []).some((p) => !isLifetime(p)) ? paramTypes(definition(b), scopeOf(definition(b))) : declaredParams(b)),
+    bodyNamed: (name) => byName.get(name),
+    typeParamsOf: (b) => {
+      const scope = scopeOf(definition(b));
+      return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
+    },
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
@@ -1594,7 +1600,6 @@ export function check(written: Stmt[], library = false, macros = false): Checked
 
     // An arrow function: its own type, and its body checked here, where it is written.
     function closure(e: Arrow, expected?: FunctionType, unsafe = false, owning = false): ClosureType {
-      if (e.typeParams.some((p) => !isLifetime(p))) throw new CompileError("a generic arrow is a family of functions, one per call, so it can only be held by a const and called; passing or storing one needs one type for it, as in '(x: i64) => i64'", e.start, e.end);
       // An async arrow's future usually outlives the call making it, so it owns its captures.
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
@@ -2036,7 +2041,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
-          if (family && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(family)}': it takes a generic function, one that works for every type`, (s.value ?? s).start, (s.value ?? s).end);
+          const passedOn = typeof type !== "string" && type.kind === "param" && type.bound?.kind === "function" && type.bound.generic !== undefined;
+          if (family && !passedOn && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(family)}': it takes a generic function, one that works for every type`, (s.value ?? s).start, (s.value ?? s).end);
           const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
           if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;

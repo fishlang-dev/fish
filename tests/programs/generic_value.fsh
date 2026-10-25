@@ -169,7 +169,7 @@ function main() {
   console.log(d.map((x: i64): i64 => x));
 }
 // case: generic_value_interface_method_not_generic
-// error: method 'map' must be generic with 1 type parameter and 1 parameter, as 'Mapper' declares it
+// error: method 'map' must be generic with 1 type parameter, as 'Mapper' declares it
 interface Mapper {
   map<U>(f: (x: i64) => U): U;
 }
@@ -220,4 +220,116 @@ function main() {
 // error: 'w' needs its value where it is declared, since a generic function type describes the generic function it holds
 function main() {
   let w: <T>(x: T) => T;
+}
+// case: generic_value_interface_borrow_mode
+// error: types of method 'put' are incompatible
+interface P {
+  put<U>(x: Ref<U[]>): i64;
+}
+class K {
+  put<U>(x: Mut<U[]>): i64 { x.pop(); return 1; }
+}
+function use(p: P): i64 { const xs = ["a", "b"]; const n = p.put(xs); console.log(xs); return n; }
+function main() { console.log(use(new K())); }
+// case: generic_value_interface_return_type
+// error: types of method 'map' are incompatible
+interface Mapper {
+  map<U>(f: (x: i64) => U): U;
+}
+class Box {
+  v: i64 = 1;
+  map<U>(f: (x: i64) => U): string { f(this.v); return "str"; }
+}
+function use(m: Mapper): void {
+  const n = m.map((x: i64): i64 => x);
+  console.log(n);
+}
+function main() {
+  use(new Box());
+}
+// case: generic_value_interface_bound
+// error: its type parameters' bounds differ
+interface Named { name: string }
+interface Greeter {
+  greet<U>(x: U): string;
+}
+class G {
+  greet<U extends Named>(x: U): string { return "hi " + x.name; }
+}
+function use<M extends Greeter>(m: M): string {
+  return m.greet(5);
+}
+function main() {
+  console.log(use(new G()));
+}
+// case: generic_value_family_wrong_return
+// error: it returns 'string', where '<T>(x: T) => T' returns 'T'
+function k<T>(x: T): string { return "k"; }
+function both(f: <T>(x: T) => T): string {
+  return `${f(1) + 1}`;
+}
+function main() {
+  console.log(both(k));
+}
+// case: generic_value_family_wrong_arity
+// error: it takes 2 parameters, where '<T>(x: T) => T' takes 1
+function two<T>(x: T, y: T): T { return y; }
+function both(f: <T>(x: T) => T): i64 {
+  return f(1);
+}
+function main() {
+  console.log(both(two));
+}
+// case: generic_value_family_throws
+// error: it can throw, which '<T>(x: T) => T' doesn't say
+class Bad { message: string = "bad"; }
+function boom<T>(x: T): T throws Bad { throw new Bad(); }
+function both(f: <T>(x: T) => T): i64 {
+  return f(1);
+}
+function main() {
+  console.log(both(boom));
+  console.log("after");
+}
+// case: generic_value_family_passed_on
+// expect: 1
+function id<T>(x: T): T { return x; }
+function inner(f: <T>(x: T) => T): string { return `${f(1)}`; }
+function outer(f: <T>(x: T) => T): string { return inner(f); }
+function main() { console.log(outer(id)); }
+// case: generic_value_through_getter
+// error: calls of a generic function value read through a getter are not supported yet
+function id<T>(x: T): T { return x; }
+class C {
+  get g() { console.log("getter ran"); return { f: id }; }
+}
+function main() {
+  const c = new C();
+  console.log(c.g.f(1));
+}
+// case: generic_value_family_returned
+// expect: 1 q
+function id<T>(x: T): T { return x; }
+function pass(f: <T>(x: T) => T): <T>(x: T) => T { return f; }
+function main() { const g = pass(id); console.log(g(1), g("q")); }
+// case: generic_value_this_field
+// expect: 1 a
+function id<T>(x: T): T { return x; }
+class C {
+  o = { f: id };
+  run(): string { return `${this.o.f(1)} ${this.o.f("a")}`; }
+}
+function main() { console.log(new C().run()); }
+// case: generic_value_family_copies
+// expect: in 2
+function id<T>(x: T): T { return x; }
+async function both(f: <T>(x: T) => T): Promise<string> {
+  const h = spawn(async () => f("in"));
+  await sleep(1);
+  const a = await h;
+  return `${a} ${f(2)}`;
+}
+async function main() {
+  const v = await both(id);
+  console.log(v);
 }

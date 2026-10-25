@@ -1368,7 +1368,10 @@ export function expressions(ctx: Context) {
     const f = name === undefined ? undefined : byName.get(name);
     if (!f) return;
     const at = { start: e.start, end: e.end };
-    const names = f.params.map((_, i) => `${e.name}-arg${i}`);
+    const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
+    if (odd) throw unsupported(odd.comptime ? "generic functions with comptime parameters used as values" : odd.rest ? "generic functions with rest parameters used as values" : "generic functions with defaulted parameters used as values", e);
+    // Its parameters keep the names it declares, unless one would hide it.
+    const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== name ? p.pattern.name : `arg${i}`));
     const params: Param[] = names.map((n) => ({ ...at, pattern: { kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
     const call: Expr = { kind: "call", callee: { kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n) => ({ kind: "ident", name: n, ...at })), optional: false, ...at };
     delete (e as { name?: string }).name;
@@ -1393,15 +1396,27 @@ export function expressions(ctx: Context) {
     } else if (callee.kind === "member" && pure(callee) && typeof receiver !== "string" && (receiver?.kind === "class" || receiver?.kind === "object")) {
       if (receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name)) return undefined;
       held = field(receiver, callee.name)?.type;
+      // A getter on the way runs code the direct call would skip.
+      const t = held && lower(isRefType(held) ? held.to : held);
+      if (typeof t !== "string" && t?.kind === "closure" && t.generic && throughGetter(callee)) throw unsupported("calls of a generic function value read through a getter", callee);
     }
     if (held === undefined) return undefined;
     const t = lower(isRefType(held) ? held.to : held);
     return typeof t !== "string" && t.kind === "closure" && t.generic ? byName.get(t.generic) : undefined;
   }
 
-  // A name, or fields read from one, which reading has no effect of its own.
+  // A name or `this`, or fields read from one, which reading has no effect of its own unless a
+  // getter is on the way.
   function pure(e: Expr): boolean {
-    return e.kind === "ident" || (e.kind === "member" && !e.optional && pure(e.object));
+    return e.kind === "ident" || e.kind === "this" || (e.kind === "member" && !e.optional && pure(e.object));
+  }
+
+  function throughGetter(e: Expr): boolean {
+    if (e.kind !== "member") return false;
+    const object = types.get(e.object);
+    const held = object && lower(isRefType(object) ? object.to : object);
+    const getter = typeof held !== "string" && held?.kind === "class" && inherited(classOf(held), "getters", e.name) !== undefined;
+    return getter || throughGetter(e.object);
   }
 
   // `double` named where a value is wanted becomes `(x) => double(x)`, its parameters and their

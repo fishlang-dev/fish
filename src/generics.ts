@@ -2,7 +2,7 @@ import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
-import { unsatisfied, type Members } from "./interfaces.ts";
+import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
 import { unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
@@ -582,7 +582,17 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     // A generic function type takes a generic function value, whose calls each instantiate it.
     if (bound.kind === "function" && bound.generic) {
       const held = typeof type !== "string" && type.kind === "param" && type.concrete ? lower(type) : type;
-      if (typeof held !== "string" && held.kind === "closure" && held.generic) return type;
+      // A parameter of the same generic function type is passed on as it is, the type known by
+      // its signature as written.
+      // ponytail: compared as shown, which misses differing bounds; compare structurally if that matters
+      const family = typeof held !== "string" && held.kind === "param" ? held.bound : held;
+      if (typeof family !== "string" && family?.kind === "function" && family.generic && family.name === bound.name) return type;
+      if (typeof held !== "string" && held.kind === "closure" && held.generic) {
+        const f = members.bodyNamed(held.generic);
+        const reason = f && familyMismatch(f, bound, members, arg);
+        if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
+        return type;
+      }
       throw new CompileError(`${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
     }
     if (bound.kind === "function") {

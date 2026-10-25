@@ -93,8 +93,9 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 // interface, it describes values without being one, so it never reaches codegen.
 // A generic one, `<T>(x: T) => T`, is a family: `generic` holds its type parameters' names and
 // the node it was written as, each call resolving it for that call's types.
-// The type parameters around it, `scope`, are those it was written among.
-export type Family = { names: string[]; node: unknown; scope: Map<string, Type> };
+// The type parameters around it, `scope`, are those it was written among; `own` are its type
+// parameters' placeholders, in order, for comparing it with another.
+export type Family = { names: string[]; node: unknown; scope: Map<string, Type>; own: Type[] };
 export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: Family };
 
 // What a type parameter may be bounded by.
@@ -1004,6 +1005,8 @@ export function isCopy(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer" || t.kind === "regex") return true;
   // A closure copies when what it captures does, and it changes nothing through it.
   if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
+  // A parameter of a generic function type holds a generic function value, which captures nothing.
+  if (t.kind === "param" && t.bound?.kind === "function" && t.bound.generic) return true;
   // A fixed array copies when its elements do, as Rust's `[T; N]` does.
   if (t.kind === "fixed") return isCopy(t.element) && !holdsMut(t.element);
   // A tuple copies when everything in it does, as a union does.
@@ -1161,7 +1164,14 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   if (typeof t !== "string" && t.kind === "function") {
     const params = t.params.map((p) => replaced(p, swap));
     const returns = replaced(t.returns, swap);
-    return params.some((p, i) => p !== t.params[i]) || returns !== t.returns ? functionType(t.names, params, returns) : t;
+    if (!params.some((p, i) => p !== t.params[i]) && returns === t.returns) return t;
+    const made = functionType(t.names, params, returns);
+    // A generic one stays generic, the types around it it was written among replaced too.
+    if (t.generic) {
+      made.name = `<${t.generic.names.join(", ")}>${made.name}`;
+      made.generic = { ...t.generic, scope: new Map([...t.generic.scope].map(([n, x]) => [n, replaced(x, swap)])) };
+    }
+    return made;
   }
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
