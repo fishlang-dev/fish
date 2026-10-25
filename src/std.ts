@@ -698,8 +698,9 @@ function size(s: string): i64 {
   return s.length as i64;
 }
 
+// Past the end there is no unit, as a working directory the system couldn't give is empty.
 function at(s: string, i: i64): i64 {
-  return s.charCodeAt(i as usize) as i64;
+  return i >= 0 && i < size(s) ? s.charCodeAt(i as usize) as i64 : -1;
 }
 
 function lastSlashOf(s: string): i64 {

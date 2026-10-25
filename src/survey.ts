@@ -279,6 +279,15 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     if (top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) note("G7", top.start);
     if (top.kind === "let" && top.keyword === "let" && !(isNode(s) && s.kind === "declare")) note("A4", top.start);
   }
+  // A std module imported whole, by its local name, with what it exports: a member it doesn't
+  // have still waits, though the import is portable.
+  const wholes = new Map<string, { module: string; has: Set<string> }>();
+  for (const s of program) {
+    if (!isNode(s) || s.kind !== "import" || typeof s.module !== "string") continue;
+    const name = stdModule(s.module);
+    const whole = (s.namespace ?? s.default) as string | undefined;
+    if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name) });
+  }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter.
@@ -298,6 +307,8 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
       for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
+      const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
+      if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as number, whole.module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -461,9 +472,14 @@ function moduleRule(n: Node, specifier: unknown): string | undefined {
 function stdHas(n: Node, specifier: string): boolean {
   const name = stdModule(specifier);
   if (!name || (n.kind !== "import" && n.kind !== "exportNamed" && n.kind !== "exportAll") || (n.kind === "exportAll" && n.alias !== undefined)) return false;
-  const has = new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind === "export" && s.body.kind === "function" ? [s.body.name] : [])));
+  const has = stdExports(name);
   const names = (n.kind === "exportNamed" ? n.specifiers : n.named) as { name: string }[] | undefined;
   return (names ?? []).every((sp) => has.has(sp.name));
+}
+
+// What a std module exports: its functions and its consts.
+function stdExports(name: string): Set<string> {
+  return new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
 }
 
 // The built-in an import names: its subpath when that has its own equivalent, else its module.
