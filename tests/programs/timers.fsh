@@ -132,3 +132,22 @@ async function main(): Promise<void> { setTimeout(f, 1, g()); }
 // error: argument of type '"s"' is not assignable to parameter of type 'i64'
 function f(a: i64): void {}
 async function main(): Promise<void> { setTimeout(f, 1, "s"); }
+// case: timers_sync_main
+// expect: main returns
+// expect: tick
+// expect: tick
+// expect: later
+// A program setting timers runs on the async runtime, so a sync main's timers fire after it returns.
+function main(): void {
+  const id = setInterval(() => { console.log("tick"); }, 20);
+  setTimeout(() => {
+    clearInterval(id);
+    console.log("later");
+  }, 50);
+  console.log("main returns");
+}
+// case: timers_sync_main_no_type
+// expect: done
+function main() {
+  setTimeout(() => { console.log("done"); }, 1);
+}

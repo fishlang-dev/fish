@@ -301,6 +301,21 @@ const destructuredParts = new WeakMap<Stmt, Expr>();
 export const unusedDefaults = new WeakSet<Expr>();
 
 // Whether a piece of syntax holds a node `found` picks out.
+// A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
+// an async one, its timers firing once it returns.
+function timersRunAsync(written: Stmt[]) {
+  const top = written.map((s) => (s.kind === "function" ? s : (s as { declaration?: Stmt }).declaration)).filter((s): s is Func => s?.kind === "function");
+  const main = top.find((f) => f.name === "main");
+  if (!main || main.async) return;
+  const declared = new Set(top.map((f) => f.name));
+  const timers = holdsNode(written, (n) => n.kind === "call" && (n as { callee?: { kind?: string; name?: string } }).callee?.kind === "ident" && TIMER_GLOBALS.has((n as { callee: { name: string } }).callee.name) && !declared.has((n as { callee: { name: string } }).callee.name));
+  if (!timers) return;
+  main.async = true;
+  const returns = main.returnType;
+  if (returns?.kind === "ref" && returns.name === "void") main.returnType = { kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end };
+}
+const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
+
 export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
@@ -367,6 +382,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     return false;
   });
   lowerDefaults(written);
+  if (!library) timersRunAsync(written);
   const program = [...stdFor(written), ...written];
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();
