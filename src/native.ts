@@ -15,6 +15,10 @@ import { CASEMAP } from "./casemap.ts";
 // back as the same value, in plain notation for exponents from -7 to 20 and in exponent
 // notation otherwise. An f32 takes the fewest digits that read back as the same f32.
 export const NATIVE = String.raw`
+#ifdef __linux__
+// For sched_getaffinity's CPU sets.
+#define _GNU_SOURCE
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +30,7 @@ export const NATIVE = String.raw`
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <pwd.h>
 #include <sys/random.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -1893,6 +1898,63 @@ int32_t fsh_rt_json_end(fsh_json_in *r) {
   char *message = fsh_rt_alloc(96);
   snprintf(message, 96, "Unexpected non-whitespace character after JSON at position %lld", (long long)r->at);
   return fsh_json_error(r, message);
+}
+
+// Node's os module, over libc. Each string is written to a buffer of the calling thread's,
+// which the Fish side copies at once.
+static __thread char fsh_os_text[4096];
+
+const char *fsh_rt_os_hostname(void) {
+  if (gethostname(fsh_os_text, sizeof fsh_os_text) != 0) fsh_os_text[0] = 0;
+  fsh_os_text[sizeof fsh_os_text - 1] = 0;
+  return fsh_os_text;
+}
+
+// TMPDIR, TMP or TEMP, else /tmp, without a trailing slash, as Node gives it.
+const char *fsh_rt_os_tmpdir(void) {
+  const char *names[] = {"TMPDIR", "TMP", "TEMP"};
+  const char *dir = NULL;
+  for (int i = 0; i < 3 && (!dir || !*dir); i++) dir = getenv(names[i]);
+  if (!dir || !*dir) dir = "/tmp";
+  snprintf(fsh_os_text, sizeof fsh_os_text, "%s", dir);
+  size_t n = strlen(fsh_os_text);
+  if (n > 1 && fsh_os_text[n - 1] == '/') fsh_os_text[n - 1] = 0;
+  return fsh_os_text;
+}
+
+// HOME, else the user's entry in the password database.
+const char *fsh_rt_os_homedir(void) {
+  const char *home = getenv("HOME");
+  if (home && *home) {
+    snprintf(fsh_os_text, sizeof fsh_os_text, "%s", home);
+    return fsh_os_text;
+  }
+  struct passwd entry, *found = NULL;
+  char buffer[4096];
+  fsh_os_text[0] = 0;
+  if (getpwuid_r(getuid(), &entry, buffer, sizeof buffer, &found) == 0 && found) snprintf(fsh_os_text, sizeof fsh_os_text, "%s", found->pw_dir);
+  return fsh_os_text;
+}
+
+const char *fsh_rt_os_platform(void) {
+#ifdef __APPLE__
+  return "darwin";
+#else
+  return "linux";
+#endif
+}
+
+// The CPUs this process may run on, at least one.
+int64_t fsh_rt_os_parallelism(void) {
+#ifdef __linux__
+  cpu_set_t set;
+  if (sched_getaffinity(0, sizeof set, &set) == 0) {
+    int n = CPU_COUNT(&set);
+    if (n > 0) return n;
+  }
+#endif
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? n : 1;
 }
 ` + CASEMAP + String.raw`
 // A code point found in a sorted table of pairs, by its first column.

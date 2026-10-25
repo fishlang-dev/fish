@@ -659,6 +659,44 @@ type Json = JsonValue;
 // The name untyped `JSON.parse` reads into.
 export const JSON_VALUE_NAME = "json value";
 
+// The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
+// as a global, each Fish source loaded like a file of the program.
+export const STD_MODULES: Record<string, string> = {
+  os: String.raw`
+declare function fsh_rt_os_hostname(): Ptr<u8>;
+declare function fsh_rt_os_tmpdir(): Ptr<u8>;
+declare function fsh_rt_os_homedir(): Ptr<u8>;
+declare function fsh_rt_os_platform(): Ptr<u8>;
+declare function fsh_rt_os_parallelism(): i64;
+
+export function hostname(): string {
+  return unsafe { fromCString(fsh_rt_os_hostname()) };
+}
+
+export function tmpdir(): string {
+  return unsafe { fromCString(fsh_rt_os_tmpdir()) };
+}
+
+export function homedir(): string {
+  return unsafe { fromCString(fsh_rt_os_homedir()) };
+}
+
+export function platform(): string {
+  return unsafe { fromCString(fsh_rt_os_platform()) };
+}
+
+export function availableParallelism(): i64 {
+  return unsafe { fsh_rt_os_parallelism() };
+}
+`,
+};
+
+// The std module a specifier names, if any: `node:os` and `os` both name `os`.
+export function stdModule(specifier: string): string | undefined {
+  const name = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
+  return Object.hasOwn(STD_MODULES, name) ? name : undefined;
+}
+
 export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + JSON_NAME + AST + AST_HELPERS;
 export const STD_FILE = "<fish std>";
 

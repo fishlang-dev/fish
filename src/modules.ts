@@ -2,6 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
 import { parse, shiftSpans, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { STD_MODULES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
@@ -11,7 +12,9 @@ import { unsupported } from "./unsupported.ts";
 export const FILE_SPAN = 2 ** 24;
 
 // `targets` is the file each import and re-export names.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module> };
+// `globals`: the std modules a file names as globals, as `os` in `os.hostname()`, without
+// importing them.
+export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module> };
 export type Loaded = { modules: Module[]; sources: Source[] };
 
 // The files of the program last loaded, for naming where a declaration is.
@@ -27,8 +30,9 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
+  const std = (name: string) => visit(`std:${name}`, STD_MODULES[name]!, `node:${name}`);
   const visit = (path: string, text: string, file: string): Module => {
-    const key = realpathSync(path);
+    const key = path.startsWith("std:") ? path : realpathSync(path);
     const known = byPath.get(key);
     if (known) return known;
     const base = modules.length * FILE_SPAN;
@@ -43,15 +47,21 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
       throw e;
     }
     if (base > 0) shiftSpans(statements, base);
-    const module: Module = { path: key, file, base, src: text, statements, targets: new Map() };
+    const module: Module = { path: key, file, base, src: text, statements, targets: new Map(), globals: new Map() };
     modules.push(module);
     byPath.set(key, module);
     for (const s of statements) {
       const specifier = specifierOf(s);
       if (specifier === undefined) continue;
+      const named = stdModule(specifier);
+      if (named) {
+        module.targets.set(s, std(named));
+        continue;
+      }
       const target = resolveSpecifier(path, specifier, s);
       module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
     }
+    for (const name of globalsIn(statements)) module.globals.set(name, std(name));
     return module;
   };
   try {
@@ -62,6 +72,26 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
   return { modules, sources };
+}
+
+// The std modules a file uses as globals: a member of a std module's name, as `os.hostname`,
+// where the file neither declares nor imports that name.
+function globalsIn(statements: Stmt[]): string[] {
+  const bound = new Set(statements.flatMap((s) => {
+    if (s.kind === "import") return [s.default, s.namespace, ...(s.named ?? []).map((sp) => sp.alias ?? sp.name)].filter((n): n is string => n !== undefined);
+    return namesOf(s.kind === "export" ? s.body : s);
+  }));
+  const found = new Set<string>();
+  const walk = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v !== "object" || v === null) return;
+    const n = v as Record<string, unknown>;
+    const object = n.object as { kind?: string; name?: string } | undefined;
+    if (n.kind === "member" && object?.kind === "ident" && Object.hasOwn(STD_MODULES, object.name!) && !bound.has(object.name!)) found.add(object.name!);
+    Object.values(n).forEach(walk);
+  };
+  walk(statements);
+  return [...found];
 }
 
 // The file a statement imports from, or re-exports from.
@@ -204,13 +234,17 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
   };
   // A library gives C its entry file's exported functions, under their own names.
   const listed: Specifier[] = [];
+  const spaces = new Map<string, { from: Module; explicit: boolean }>();
   const cOnly = (at: Span) => new CompileError("a library's C functions are its entry file's exported functions, each under its own name; write 'export function' on the function itself", at.start, at.end);
   for (const s of module.statements) {
     const from = module.targets.get(s);
     if (entry && library && (s.kind === "exportAll" || s.kind === "exportDefault" || (s.kind === "exportNamed" && from))) throw cOnly(s);
     if (s.kind === "import") {
-      if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
-      if (s.default !== undefined) bind(s.default, from!, "default", s);
+      // A std module imported whole is reached through its name, as `os.hostname()`.
+      const whole = s.namespace ?? s.default;
+      if (whole !== undefined && stdModule(s.module)) spaces.set(whole, { from: from!, explicit: true });
+      else if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
+      else if (s.default !== undefined) bind(s.default, from!, "default", s);
       for (const sp of s.named ?? []) bind(sp.alias ?? sp.name, from!, sp.name, sp);
     } else if (s.kind === "importEquals") {
       throw new CompileError(`'import ${s.name} = ...' isn't supported yet; import what you use with 'import { a, b } from "./file"'`, s.start, s.end);
@@ -243,8 +277,56 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     l.body[at] = { kind: "export", body: l.body[at]!, start: l.body[at]!.start, end: l.body[at]!.end };
     l.own.get(sp.name)!.fixed = true;
   }
+  for (const [name, from] of module.globals) if (!l.own.has(name) && !l.imports.has(name) && !spaces.has(name)) spaces.set(name, { from, explicit: false });
+  if (spaces.size > 0) throughSpaces(l.body, spaces, bind);
   renameIn(l.body, (name) => void l.used.add(name));
   return l;
+}
+
+// Turns each `os.hostname` on a std module bound whole into a name imported from it, written
+// so no program can write it. A global's member the module doesn't have is left alone, since a
+// local of that name may be meant; an import's is refused. Where a function's parameter, a
+// block's declaration or a catch clause takes the name, it means that instead.
+function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void) {
+  const bound = new Set<string>();
+  const walk = (v: unknown, hidden: Set<string>) => {
+    if (Array.isArray(v)) {
+      const declared = v.flatMap((s) => (s && typeof s === "object" && (s as Stmt).kind === "let" ? (s as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : []));
+      const inner = declared.some((d) => spaces.has(d)) ? new Set([...hidden, ...declared]) : hidden;
+      return v.forEach((x) => walk(x, inner));
+    }
+    if (typeof v !== "object" || v === null) return;
+    const n = v as Record<string, unknown>;
+    const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...(n.kind === "try" && n.param ? bindings(n.param) : []), ...(n.kind === "forOf" || n.kind === "forIn" ? bindings((n.left as { declarations?: { target: unknown }[] })?.declarations?.[0]?.target) : [])];
+    if (own.some((d) => spaces.has(d))) hidden = new Set([...hidden, ...own]);
+    const object = n.object as { kind?: string; name?: string } | undefined;
+    const space = n.kind === "member" && object?.kind === "ident" && !hidden.has(object.name!) ? spaces.get(object.name!) : undefined;
+    if (space) {
+      const name = n.name as string;
+      const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
+      if (!exports.includes(name)) {
+        if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
+      } else {
+        const alias = `${object!.name}:${name}`;
+        if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
+        bound.add(alias);
+        for (const key of Object.keys(n)) if (key !== "start" && key !== "end") delete n[key];
+        Object.assign(n, { kind: "ident", name: alias });
+        return;
+      }
+    }
+    Object.values(n).forEach((x) => walk(x, hidden));
+  };
+  walk(body, new Set());
+}
+
+// The names a binding pattern binds.
+function bindings(pattern: unknown): string[] {
+  if (Array.isArray(pattern)) return pattern.flatMap(bindings);
+  if (typeof pattern !== "object" || pattern === null) return [];
+  const p = pattern as Record<string, unknown>;
+  if (p.kind === "ident") return [p.name as string];
+  return Object.entries(p).flatMap(([k, x]) => (k === "default" || k === "key" ? [] : bindings(x)));
 }
 
 // The top-level names a declaration introduces.
