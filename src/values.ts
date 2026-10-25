@@ -2799,7 +2799,8 @@ export function expressions(ctx: Context) {
     const run: Expr = { kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
     const body: Expr = givesPromise(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
     // An async arrow taking nothing is what the timer keeps, so its captures are made once.
-    const wrapper: Expr = callback.kind === "arrow" && callback.async && passed.length === 0 ? callback
+    const own = callback.kind === "arrow" && callback.async && callback.params.length === 0 && Array.isArray(callback.body);
+    const wrapper: Expr = own ? callback
       : { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
     timerWrappers.add(wrapper);
     const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
@@ -2811,7 +2812,13 @@ export function expressions(ctx: Context) {
   // Whether a timer's callback gives a Promise to await: an async arrow or one whose body calls a
   // function that does, or a function or value that does.
   function givesPromise(callback: Expr): boolean {
-    if (callback.kind === "arrow") return callback.async || (!Array.isArray(callback.body) && callback.body.kind === "call" && givesPromise(callback.body.callee));
+    if (callback.kind === "arrow") {
+      if (callback.async) return true;
+      // A block body gives what its last statement returns.
+      const last = Array.isArray(callback.body) ? callback.body.at(-1) : undefined;
+      const given = Array.isArray(callback.body) ? (last?.kind === "return" ? last.value : undefined) : callback.body;
+      return given?.kind === "call" && givesPromise(given.callee);
+    }
     if (callback.kind !== "ident") return false;
     const local = lookup(callback.name);
     if (!local) {
@@ -2823,7 +2830,6 @@ export function expressions(ctx: Context) {
     const returns = fn?.returns;
     return typeof returns !== "string" && returns !== undefined && (returns.kind === "future" || promiseMet(returns) !== undefined);
   }
-
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
   // closures settling it; reject's error is what the function declares it throws, or `Error`.

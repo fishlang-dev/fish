@@ -200,3 +200,18 @@ function main(): void {
 // error: 'setTimeout' can't run while compiling
 const t = setTimeout(() => { console.log("top"); }, 1);
 async function main(): Promise<void> { console.log("main"); }
+// case: timeout_async_arrow_forms
+// expect: x 4
+// expect: ok
+async function main(): Promise<void> {
+  setTimeout(async (x: i64 = 4) => { console.log("x", x); }, 1);
+  setTimeout(async () => 5, 5);
+  setTimeout(() => { console.log("ok"); }, 10);
+}
+// case: timeout_block_gives_promise
+// expect: block start
+// expect: block end
+async function slow(label: string): Promise<void> { console.log(label, "start"); await sleep(5); console.log(label, "end"); }
+async function main(): Promise<void> {
+  setTimeout(() => { return slow("block"); }, 1);
+}

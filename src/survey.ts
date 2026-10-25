@@ -75,7 +75,7 @@ const RULES: Rule[] = [
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
-  { id: "timerForms", action: "unsupported", title: "setImmediate, unref, hasRef and refresh on a timer, and more than two arguments passed on to a timer's function" },
+  { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
@@ -504,7 +504,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (named(callee, "fetch")) push("fetch");
   if (named(callee, "setImmediate") || named(callee, "clearImmediate")) push("timerForms");
   if ((named(callee, "setTimeout") || named(callee, "setInterval")) && (n.args as unknown[]).length > 4) push("timerForms");
-  if (isNode(callee) && callee.kind === "member" && ["unref", "hasRef", "refresh"].includes(callee.name as string)) push("timerForms");
+  if (isNode(callee) && callee.kind === "member" && callee.name === "unref") push("timerForms");
   if (isNode(callee) && callee.kind === "member" && named(callee.object, "console") && !["log", "error", "warn"].includes(callee.name as string)) push("console");
   // Fish's parse takes no reviver, and its stringify one value.
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");

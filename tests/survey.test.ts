@@ -56,6 +56,7 @@ test("each rule counts what the sample shows", () => {
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {
   expect(counts("function main() {\n  setTimeout(f, 1);\n  const t = setInterval(f, 2, a, b);\n  clearTimeout(t);\n}\n")).toEqual({});
   expect(counts("function main() {\n  setImmediate(f);\n  setTimeout(f, 1).unref();\n  setTimeout(f, 1, a, b, c);\n}\n")).toEqual({ timerForms: 3 });
+  expect(counts("function main() {\n  auth.refresh();\n  page.hasRef();\n}\n")).toEqual({});
 });
 
 test("forms that look alike are told apart", () => {
