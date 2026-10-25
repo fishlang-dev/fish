@@ -689,6 +689,263 @@ export function availableParallelism(): i64 {
   return unsafe { fsh_rt_os_parallelism() };
 }
 `,
+  // A port of Node's path.posix for the functions Fish has, so each gives what Node gives.
+  path: String.raw`
+declare function fsh_rt_cwd(): Ptr<u8>;
+
+// A string's length and the UTF-16 unit at an index, as Node's code reads them, in i64.
+function size(s: string): i64 {
+  return s.length as i64;
+}
+
+function at(s: string, i: i64): i64 {
+  return s.charCodeAt(i as usize) as i64;
+}
+
+function lastSlashOf(s: string): i64 {
+  for (let i = size(s) - 1; i >= 0; i--) if (at(s, i) === 47) return i;
+  return -1;
+}
+
+export const sep = "/";
+export const delimiter = ":";
+
+// Node's normalizeString: a path's segments with "." dropped and ".." taken back, above the root
+// too when it is relative.
+function normalizeString(path: string, allowAboveRoot: boolean): string {
+  let res = "";
+  let lastSegmentLength: i64 = 0;
+  let lastSlash: i64 = -1;
+  let dots: i64 = 0;
+  let code: i64 = 0;
+  for (let i: i64 = 0; i <= size(path); ++i) {
+    if (i < size(path)) code = at(path, i);
+    else if (code === 47) break;
+    else code = 47;
+    if (code === 47) {
+      if (lastSlash === i - 1 || dots === 1) {
+      } else if (dots === 2) {
+        if (size(res) < 2 || lastSegmentLength !== 2 || at(res, size(res) - 1) !== 46 || at(res, size(res) - 2) !== 46) {
+          if (size(res) > 2) {
+            const lastSlashIndex = size(res) - lastSegmentLength - 1;
+            if (lastSlashIndex === -1) {
+              res = "";
+              lastSegmentLength = 0;
+            } else {
+              res = res.slice(0, lastSlashIndex);
+              lastSegmentLength = size(res) - 1 - lastSlashOf(res);
+            }
+            lastSlash = i;
+            dots = 0;
+            continue;
+          } else if (size(res) !== 0) {
+            res = "";
+            lastSegmentLength = 0;
+            lastSlash = i;
+            dots = 0;
+            continue;
+          }
+        }
+        if (allowAboveRoot) {
+          res = size(res) > 0 ? res + "/.." : "..";
+          lastSegmentLength = 2;
+        }
+      } else {
+        if (size(res) > 0) res = res + "/" + path.slice(lastSlash + 1, i);
+        else res = path.slice(lastSlash + 1, i);
+        lastSegmentLength = i - lastSlash - 1;
+      }
+      lastSlash = i;
+      dots = 0;
+    } else if (code === 46 && dots !== -1) {
+      ++dots;
+    } else {
+      dots = -1;
+    }
+  }
+  return res;
+}
+
+function cwd(): string {
+  return unsafe { fromCString(fsh_rt_cwd()) };
+}
+
+export function resolve(...args: string[]): string {
+  if (args.length === 0 || (args.length === 1 && (args[0] === "" || args[0] === "."))) {
+    const here = cwd();
+    if (at(here, 0) === 47) return here;
+  }
+  let resolvedPath = "";
+  let resolvedAbsolute = false;
+  for (let i: i64 = (args.length as i64) - 1; i >= 0 && !resolvedAbsolute; i--) {
+    const path = args[i as usize];
+    if (size(path) === 0) continue;
+    resolvedPath = path + "/" + resolvedPath;
+    resolvedAbsolute = at(path, 0) === 47;
+  }
+  if (!resolvedAbsolute) {
+    const here = cwd();
+    resolvedPath = here + "/" + resolvedPath;
+    resolvedAbsolute = at(here, 0) === 47;
+  }
+  resolvedPath = normalizeString(resolvedPath, !resolvedAbsolute);
+  if (resolvedAbsolute) return "/" + resolvedPath;
+  return resolvedPath.length > 0 ? resolvedPath : ".";
+}
+
+export function normalize(path: string): string {
+  if (size(path) === 0) return ".";
+  const isAbsolute = at(path, 0) === 47;
+  const trailingSeparator = at(path, size(path) - 1) === 47;
+  let out = normalizeString(path, !isAbsolute);
+  if (size(out) === 0) {
+    if (isAbsolute) return "/";
+    return trailingSeparator ? "./" : ".";
+  }
+  if (trailingSeparator) out = out + "/";
+  return isAbsolute ? "/" + out : out;
+}
+
+export function join(...args: string[]): string {
+  let parts: string[] = [];
+  for (const arg of args) if (size(arg) > 0) parts.push(arg);
+  if (parts.length === 0) return ".";
+  return normalize(parts.join("/"));
+}
+
+export function relative(from: string, to: string): string {
+  if (from === to) return "";
+  const a = resolve(from);
+  const b = resolve(to);
+  if (a === b) return "";
+  const fromStart: i64 = 1;
+  const fromEnd = size(a);
+  const fromLen = fromEnd - fromStart;
+  const toStart: i64 = 1;
+  const toLen = size(b) - toStart;
+  const length = fromLen < toLen ? fromLen : toLen;
+  let lastCommonSep: i64 = -1;
+  let i: i64 = 0;
+  for (; i < length; i++) {
+    const fromCode = at(a, fromStart + i);
+    if (fromCode !== at(b, toStart + i)) break;
+    else if (fromCode === 47) lastCommonSep = i;
+  }
+  if (i === length) {
+    if (toLen > length) {
+      if (at(b, toStart + i) === 47) return b.slice(toStart + i + 1);
+      if (i === 0) return b.slice(toStart + i);
+    } else if (fromLen > length) {
+      if (at(a, fromStart + i) === 47) lastCommonSep = i;
+      else if (i === 0) lastCommonSep = 0;
+    }
+  }
+  let out = "";
+  for (i = fromStart + lastCommonSep + 1; i <= fromEnd; ++i) {
+    if (i === fromEnd || at(a, i) === 47) out = out + (size(out) === 0 ? ".." : "/..");
+  }
+  return out + b.slice(toStart + lastCommonSep);
+}
+
+export function dirname(path: string): string {
+  if (size(path) === 0) return ".";
+  const hasRoot = at(path, 0) === 47;
+  let end: i64 = -1;
+  let matchedSlash = true;
+  for (let i: i64 = size(path) - 1; i >= 1; --i) {
+    if (at(path, i) === 47) {
+      if (!matchedSlash) {
+        end = i;
+        break;
+      }
+    } else {
+      matchedSlash = false;
+    }
+  }
+  if (end === -1) return hasRoot ? "/" : ".";
+  if (hasRoot && end === 1) return "//";
+  return path.slice(0, end);
+}
+
+export function basename(path: string, suffix?: string): string {
+  let start: i64 = 0;
+  let end: i64 = -1;
+  let matchedSlash = true;
+  if (suffix !== null && size(suffix) > 0 && size(suffix) <= size(path)) {
+    if (suffix === path) return "";
+    let extIdx: i64 = size(suffix) - 1;
+    let firstNonSlashEnd: i64 = -1;
+    for (let i: i64 = size(path) - 1; i >= 0; --i) {
+      const code = at(path, i);
+      if (code === 47) {
+        if (!matchedSlash) {
+          start = i + 1;
+          break;
+        }
+      } else {
+        if (firstNonSlashEnd === -1) {
+          matchedSlash = false;
+          firstNonSlashEnd = i + 1;
+        }
+        if (extIdx >= 0) {
+          if (code === at(suffix, extIdx)) {
+            if (--extIdx === -1) end = i;
+          } else {
+            extIdx = -1;
+            end = firstNonSlashEnd;
+          }
+        }
+      }
+    }
+    if (start === end) end = firstNonSlashEnd;
+    else if (end === -1) end = size(path);
+    return path.slice(start, end);
+  }
+  for (let i: i64 = size(path) - 1; i >= 0; --i) {
+    if (at(path, i) === 47) {
+      if (!matchedSlash) {
+        start = i + 1;
+        break;
+      }
+    } else if (end === -1) {
+      matchedSlash = false;
+      end = i + 1;
+    }
+  }
+  if (end === -1) return "";
+  return path.slice(start, end);
+}
+
+export function extname(path: string): string {
+  let startDot: i64 = -1;
+  let startPart: i64 = 0;
+  let end: i64 = -1;
+  let matchedSlash = true;
+  let preDotState: i64 = 0;
+  for (let i: i64 = size(path) - 1; i >= 0; --i) {
+    const code = at(path, i);
+    if (code === 47) {
+      if (!matchedSlash) {
+        startPart = i + 1;
+        break;
+      }
+      continue;
+    }
+    if (end === -1) {
+      matchedSlash = false;
+      end = i + 1;
+    }
+    if (code === 46) {
+      if (startDot === -1) startDot = i;
+      else if (preDotState !== 1) preDotState = 1;
+    } else if (startDot !== -1) {
+      preDotState = -1;
+    }
+  }
+  if (startDot === -1 || end === -1 || preDotState === 0 || (preDotState === 1 && startDot === end - 1 && startDot === startPart + 1)) return "";
+  return path.slice(startDot, end);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
@@ -725,7 +982,9 @@ export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
 
 // The std module a specifier names, if any: `node:os` and `os` both name `os`.
 export function stdModule(specifier: string): string | undefined {
-  const name = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
+  const bare = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
+  // "path/posix" is "path", which is POSIX's here.
+  const name = bare === "path/posix" ? "path" : bare;
   return Object.hasOwn(STD_MODULES, name) ? name : undefined;
 }
 

@@ -1994,6 +1994,12 @@ const char *fsh_rt_arg(int64_t i) {
   return i < 2 ? fsh_exe : fsh_argv[i - 1];
 }
 
+// The working directory, in the calling thread's buffer, as path.resolve starts from it.
+const char *fsh_rt_cwd(void) {
+  if (!getcwd(fsh_os_text, sizeof fsh_os_text)) fsh_os_text[0] = 0;
+  return fsh_os_text;
+}
+
 const char *fsh_rt_getenv(const char *name) {
   return getenv(name);
 }
