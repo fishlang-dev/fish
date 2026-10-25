@@ -125,3 +125,93 @@ async function main() { await Promise.resolve<void>(1); }
 // error: a stored 'Promise<i64>' can't throw yet
 function f(): Promise<i64> { return Promise.reject(new Error("x")); }
 function main() {}
+// case: promise_new_generic
+// expect: 5 s
+async function wrap<T>(v: T): Promise<T> {
+  return await new Promise<T>((resolve) => { resolve(v); });
+}
+async function main(): Promise<void> {
+  const a = await wrap(5);
+  const b = await wrap("s");
+  console.log(a, b);
+}
+// case: promise_reject_generic
+// expect: str
+// expect: 7
+async function fail<T>(v: T): Promise<i64> throws T {
+  return await Promise.reject(v);
+}
+async function main(): Promise<void> {
+  try { await fail("str"); } catch (e) { console.log(e); }
+  try { await fail(7); } catch (e) { console.log(e); }
+}
+// case: promise_new_generic_reject
+// expect: nf
+// expect: plain
+class NotFound { message = "nf"; }
+async function failWith<E>(err: E): Promise<i64> throws E {
+  const n = await new Promise<i64>((resolve, reject: (e: E) => void) => { reject(err); });
+  return n;
+}
+async function main(): Promise<void> {
+  try { const x = await failWith(new NotFound()); } catch (e) { console.log(e.message); }
+  try { const y = await failWith("plain"); } catch (e) { console.log(e); }
+}
+// case: promise_new_option
+// expect: null
+async function main(): Promise<void> {
+  const a = await new Promise<string | null>((resolve) => { resolve(null); });
+  console.log(a);
+}
+// case: promise_new_parameter
+// expect: 5 6
+async function use(p: Promise<i64>): Promise<i64> { const v = await p; return v + 1; }
+async function main(): Promise<void> {
+  const a = await use(new Promise((resolve) => { resolve(4); }));
+  const b = await use(Promise.resolve(5));
+  console.log(a, b);
+}
+// case: promise_new_declared_reject
+// expect: nf
+class NotFound { message = "nf"; }
+function ex(resolve: (value: i64) => void, reject: (reason: NotFound) => void): void { reject(new NotFound()); }
+async function main(): Promise<void> {
+  try { const v = await new Promise<i64>(ex); console.log(v); } catch (e) { console.log(e.message); }
+}
+// case: promise_new_executor_parameter
+// expect: 11
+function make(ex: (resolve: (v: i64) => void) => void): Promise<i64> { return new Promise<i64>(ex); }
+async function main(): Promise<void> {
+  const a = await make((resolve) => { resolve(11); });
+  console.log(a);
+}
+// case: promise_resolve_met
+// expect: null 1
+function maybe(): Promise<string | null> { return Promise.resolve(null); }
+function num(): Promise<f64> { return Promise.resolve(1); }
+async function main(): Promise<void> {
+  const a = await maybe();
+  const b = await num();
+  console.log(a, b);
+}
+// case: promise_new_awaited_as
+// expect: 2
+async function main(): Promise<void> {
+  const x: i64 = await new Promise((resolve) => { resolve(2); });
+  console.log(x);
+}
+// case: promise_new_async_executor
+// error: an executor runs at once, so it can't be async
+async function main() { const x = await new Promise<i64>(async (resolve) => { resolve(1); }); }
+// case: promise_resolve_nested
+// error: 'Promise.resolve' of a Promise would hold one Promise inside another
+async function main() { const x = await Promise.resolve(Promise.resolve(3)); }
+// case: promise_resolve_missing_value
+// error: 'Promise.resolve' takes the value it gives, a 'i64'
+async function main() { const x = await Promise.resolve<i64>(); }
+// case: generic_callback_given_callbacks
+// expect: got 5
+// expect: got s
+function run<T>(executor: (resolve: (value: T) => void) => void): void { executor((value) => { console.log("got", value); }); }
+function wrap<T>(v: T): void { run<T>((resolve) => { resolve(v); }); }
+function main() { wrap(5); wrap("s"); }

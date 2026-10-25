@@ -294,7 +294,9 @@ export function callableType(fn: FunctionType): DynType {
 // Whether two stored callables take and give the same types, so either holds the other's value.
 export function sameCallable(a: Type, b: Type): boolean {
   const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
-  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
+  // A type parameter bound to a literal, as `wrap("s")` binds it, stands for its base type here.
+  const same = (a: Type, b: Type) => lower(a) === lower(b) || widenLet(lower(a)) === widenLet(lower(b));
+  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => same(p, g.params[i]!)) && same(f.returns, g.returns);
 }
 
 // A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside
@@ -1377,6 +1379,8 @@ export function fits(from: Type, to: Type): boolean {
   }
   // In an instance, a type parameter and the concrete type it stands for are one value.
   if (from === to || sameLowered(from, to) || from === "never" || sameCallable(from, to)) return true;
+  // So does a value of a type parameter fit as what it stands for, a literal as its base type.
+  if (typeof from !== "string" && from.kind === "param" && from.concrete !== undefined && fits(from.concrete, to)) return true;
   // A future fits the `Promise<T>` describing it, as an async function's result.
   if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
   // A reference reads the value where it lives, so it fits only a reference to the same type;

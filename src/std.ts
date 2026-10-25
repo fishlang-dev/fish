@@ -107,16 +107,17 @@ async function __promiseAwaitVoid<E>(cell: Channel<{ ok: true } | { ok: false; r
   }
 }
 // One whose executor takes no reject can't fail, so it may be stored as a Promise<T>.
-function __promiseCellResolve<T>(executor: (resolve: (value: T) => void) => void): Channel<T> {
-  const cell = new Channel<T>(1);
+// The value is wrapped, as a Channel can't carry an Option.
+function __promiseCellResolve<T>(executor: (resolve: (value: T) => void) => void): Channel<{ value: T }> {
+  const cell = new Channel<{ value: T }>(1);
   const resolved = cell.clone();
-  executor((value) => { resolved.settle(value); });
+  executor((value) => { resolved.settle({ value }); });
   return cell;
 }
-async function __promiseAwaitResolve<T>(cell: Channel<T>): Promise<T> {
+async function __promiseAwaitResolve<T>(cell: Channel<{ value: T }>): Promise<T> {
   while (true) {
     const got = await cell.receive();
-    if (got !== null) return got;
+    if (got !== null) return got.value;
   }
 }
 function __promiseCellResolveVoid(executor: (resolve: () => void) => void): Channel<boolean> {

@@ -3798,8 +3798,6 @@ void fsh_rt_channel_leave(fsh_channel *c, fsh_task *task, void *tag) {
   fsh_wake_waiter(sender);
 }
 
-// Closes a channel: what it holds can still be received, and every task waiting is woken to
-// see it closed.
 // A promise's resolve or reject: moves the value in and closes the channel, waking its receiver,
 // unless an earlier settle closed it; 0 then, leaving the value for the caller to drop.
 int32_t fsh_rt_channel_settle(fsh_channel *c, void *value) {
@@ -3819,6 +3817,8 @@ int32_t fsh_rt_channel_settle(fsh_channel *c, void *value) {
   return 1;
 }
 
+// Closes a channel: what it holds can still be received, and every task waiting is woken to
+// see it closed.
 void fsh_rt_channel_close(fsh_channel *c) {
   pthread_mutex_lock(&c->lock);
   c->closed = 1;

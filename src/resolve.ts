@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -29,10 +29,12 @@ export function paramName(p: Param): string {
   return p.pattern.name;
 }
 
-// The classes every program's prelude declares.
 // Type nodes the checker makes for a type it already knows, as a rewritten call's type arguments.
+// Made while checking a generic body's definition, they name its placeholders, which each
+// instance swaps for what it binds them to.
 export const presetTypes = new WeakMap<TypeNode, Type>();
 
+// The classes every program's prelude declares.
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
 
 export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
@@ -269,7 +271,15 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
 
   function resolveType(t: TypeNode): Type {
     const preset = presetTypes.get(t);
-    if (preset !== undefined) return preset;
+    if (preset !== undefined) {
+      const swap = new Map<Type, Type>();
+      holdsPart(preset, (u) => {
+        const bound = typeof u !== "string" && u.kind === "param" ? scope.get(u.name) : undefined;
+        if (bound !== undefined && bound !== u) swap.set(u, bound);
+        return false;
+      }, true);
+      return swap.size > 0 ? replaced(preset, swap) : preset;
+    }
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
     if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);

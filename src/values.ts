@@ -332,6 +332,8 @@ export function expressions(ctx: Context) {
   const expecting = new Map<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
   const wanted = new Map<Expr, Type>();
+  // The T a `new Promise` or `Promise.resolve` is awaited where a T is wanted for.
+  const awaitedAs = new Map<Expr, Type>();
   // Arrows checked to own what they capture, being stored.
   const owning = new WeakSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
@@ -448,9 +450,11 @@ export function expressions(ctx: Context) {
     // that type gives it: an arrow calling it, its parameters typed from there.
     if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
-    // A `new Promise` or `Promise.reject` meeting a `Promise<T>` takes its T from there.
-    const promises = e.kind === "new" || (e.kind === "call" && e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Promise");
-    if (promises && typeof t !== "string" && (t?.kind === "dyn" || t?.kind === "interface") && promiseElement(t.kind === "dyn" ? t.of : t) !== undefined) wanted.set(e, t);
+    // A `new Promise`, `Promise.resolve` or `Promise.reject` meeting a `Promise<T>`, or awaited
+    // where a T is wanted, takes its T from there.
+    const makesPromise = (x: Expr) => (x.kind === "new" && x.callee.kind === "ident" && x.callee.name === "Promise") || (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise");
+    if (t !== undefined && makesPromise(e) && promiseMet(t) !== undefined) wanted.set(e, t);
+    if (t !== undefined && e.kind === "unary" && e.op === "await" && makesPromise(e.operand)) awaitedAs.set(e.operand, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
     const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
@@ -1294,6 +1298,8 @@ export function expressions(ctx: Context) {
     list.forEach((a, i) => {
       const t = bounds.get(i);
       if (t?.kind === "function") expect(a, t);
+      // A `new Promise` given for a `Promise<T>` parameter takes its T from there.
+      if (t?.kind === "interface" && promiseElement(t) !== undefined) expect(a, t);
       // An arrow in an object literal given for an object-typed parameter takes its field's type,
       // and a value for a Dyn field is boxed into it.
       if (t?.kind === "object" && a.kind === "object") {
@@ -2665,56 +2671,73 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 1) throw new CompileError("'Promise' takes one type argument, what it gives", e.start, e.end);
     const executor = list[0]!;
     const expected = wanted.get(e);
-    // A stored `Promise<T>`, or one a parameter takes, gives its T and can't throw.
-    const stored = typeof expected !== "string" && (expected?.kind === "dyn" || expected?.kind === "interface") ? promiseElement(expected.kind === "dyn" ? expected.of : expected) : undefined;
-    const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : stored;
+    // A stored `Promise<T>`, or one a parameter takes, gives its T and can't throw; one awaited
+    // where a T is wanted gives that T and may.
+    const stored = expected === undefined ? undefined : promiseMet(expected);
+    const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : stored ?? awaitedAs.get(e);
     if (gives === undefined) throw new CompileError(`can't tell what this Promise gives; write it, ${example}, since Fish has no 'unknown'`, e.start, e.end);
-    const declared = executor.kind === "arrow" ? executor.params : executor.kind === "ident" && !lookup(executor.name) ? byName.get(executor.name)?.params : undefined;
-    const held = declared === undefined ? lower(value(executor)) : undefined;
+    const declared = executor.kind === "arrow" ? executor : executor.kind === "ident" && !lookup(executor.name) ? byName.get(executor.name) : undefined;
+    const raw = declared === undefined ? lower(value(executor)) : undefined;
+    const held = typeof raw !== "string" && raw?.kind === "param" && raw.bound?.kind === "function" ? raw.bound : raw;
     const fn = typeof held !== "string" && (held?.kind === "closure" || held?.kind === "function") ? held : held !== undefined && isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
     if (declared === undefined && fn === undefined) throw new CompileError(`'new Promise' takes an executor, a function given 'resolve' and 'reject', ${example}; not '${show(held!)}'`, executor.start, executor.end);
-    const takes = declared?.length ?? fn!.params.length;
+    const async = declared?.async === true || (fn !== undefined && typeof fn.returns !== "string" && (fn.returns.kind === "future" || promiseElement(fn.returns.kind === "dyn" ? fn.returns.of : fn.returns) !== undefined));
+    if (async) throw new CompileError("an executor runs at once, so it can't be async; call an async function that awaits and then calls 'resolve' instead", executor.start, executor.end);
+    const takes = declared?.params.length ?? fn!.params.length;
     const rejects = takes >= 2;
     if (rejects && stored !== undefined) throw new CompileError(`a Promise stored as a '${show(expected!)}' can't throw yet, so its executor can't take 'reject'; await it where it is made, or resolve it with a value saying it failed`, executor.start, executor.end);
-    const annotated = executor.kind === "arrow" ? executor.params[1]?.type : undefined;
-    const reason = annotated ? resolveType(annotated) : undefined;
-    if (reason !== undefined && (typeof reason === "string" || reason.kind !== "function" || reason.params.length !== 1)) throw new CompileError(`'reject' takes the error it fails with, as in 'reject: (reason: Error) => void', not '${show(reason)}'`, annotated!.start, annotated!.end);
-    const error = reason !== undefined ? (reason as FunctionType).params[0]! : ctx.throwsDeclared() ?? classes.get("Error")!.type;
-    const node = (t: Type): TypeNode => {
-      const made: TypeNode = { kind: "ref", name: show(t), args: [], start: e.start, end: e.end };
-      presetTypes.set(made, t);
-      return made;
-    };
+    // Reject's own type, written on the executor's parameter or in its signature.
+    const annotated = declared?.params[1]?.type;
+    const reason = annotated ? resolveType(annotated) : fn?.params[1];
+    const signature = reason === undefined || typeof reason === "string" ? undefined : reason.kind === "function" ? reason : isCallable(reason) ? callableOf.get((reason as DynType).of) : undefined;
+    if (reason !== undefined && signature?.params.length !== 1) throw new CompileError(`'reject' takes the error it fails with, as in 'reject: (reason: Error) => void', not '${show(reason)}'`, (annotated ?? executor).start, (annotated ?? executor).end);
+    const error = signature?.params[0] ?? ctx.throwsDeclared() ?? classes.get("Error")!.type;
     const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
-    const typeArgs = [...(gives === "void" ? [] : [node(gives)]), ...(rejects ? [node(error)] : [])];
+    const typeArgs = [...(gives === "void" ? [] : [presetNode(gives, e)]), ...(rejects ? [presetNode(error, e)] : [])];
     const at = { start: e.start, end: e.end };
     const cell: Expr = { kind: "call", callee: { kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
     Object.assign(e, { kind: "call", callee: { kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
   }
 
+  // The T of a `Promise<T>` a value meets, stored or taken by a parameter.
+  function promiseMet(t: Type): Type | undefined {
+    const held = typeof t !== "string" && t.kind === "param" ? t.bound : t;
+    if (typeof held === "string" || held === undefined) return undefined;
+    return held.kind === "dyn" ? promiseElement(held.of) : held.kind === "interface" ? promiseElement(held) : undefined;
+  }
+
+  // A type argument for a rewritten call, standing for a type already known.
+  function presetNode(t: Type, at: Span): TypeNode {
+    const made: TypeNode = { kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
+    presetTypes.set(made, t);
+    return made;
+  }
+
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
-  // giving v or throwing e. A rejected one gives the T it is written with or meets, or nothing.
+  // giving v or throwing e. Each gives the T it is written with or meets; a rejected one with
+  // neither gives nothing.
   function promiseSettled(e: Call, name: "resolve" | "reject") {
     const at = { start: e.start, end: e.end };
     if (e.args.length > 1 || e.args[0]?.kind === "spread") throw new CompileError(`'Promise.${name}' takes ${name === "resolve" ? "the value it gives" : "the error it throws"}`, e.start, e.end);
     if (e.typeArgs.length > 1) throw new CompileError(`'Promise.${name}' takes one type argument, what it gives`, e.start, e.end);
+    const expected = wanted.get(e);
+    const met = (expected === undefined ? undefined : promiseMet(expected)) ?? awaitedAs.get(e);
+    const written = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : undefined;
     if (name === "resolve") {
-      const nothing = e.args.length === 0 || (e.typeArgs[0] && resolveType(e.typeArgs[0]) === "void");
-      if (nothing && e.args.length > 0) throw new CompileError("a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
-      Object.assign(e, { callee: { kind: "ident", name: nothing ? "promise resolve void" : "promise resolve", ...at }, typeArgs: nothing ? [] : e.typeArgs });
+      const gives = written ?? (e.args.length === 0 ? "void" : met);
+      if (gives === "void" && e.args.length > 0) throw new CompileError("a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
+      if (gives !== "void" && e.args.length === 0) throw new CompileError(`'Promise.resolve' takes the value it gives, a '${show(gives!)}'`, e.start, e.end);
+      const given = e.args.length > 0 ? value(e.args[0]!) : undefined;
+      if (typeof given !== "string" && (given?.kind === "future" || given?.kind === "handle" || (given?.kind === "dyn" && promiseElement(given.of) !== undefined))) {
+        throw new CompileError("'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
+      }
+      Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
       return;
     }
     if (e.args.length === 0) throw new CompileError("'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
-    const expected = wanted.get(e);
-    const met = typeof expected !== "string" && (expected?.kind === "dyn" || expected?.kind === "interface") ? promiseElement(expected.kind === "dyn" ? expected.of : expected) : undefined;
-    const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : met ?? "void";
-    const node = (t: Type): TypeNode => {
-      const made: TypeNode = { kind: "ref", name: show(t), args: [], ...at };
-      presetTypes.set(made, t);
-      return made;
-    };
+    const gives = written ?? met ?? "void";
     const reason = value(e.args[0]!);
-    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [node(gives)]), node(widenLet(reason))] });
+    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
   }
 
   // The std `AbortError` class, which aborted work throws.
