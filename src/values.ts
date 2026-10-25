@@ -3759,13 +3759,36 @@ export function expressions(ctx: Context) {
   }
 
   // Whether a value may be a place's, which taking it copies: a place, or any branch of `!`,
-  // `?:`, `??` or a `match` giving one. A match arm's block is taken to.
+  // `?:`, `??` or a `match` giving one, a match arm's block through its `return`s. A place here
+  // is what codegen copies rather than takes over: any field read but a getter's, a shared
+  // value's copy or one the runtime computes, through unions and optional chains too.
   function copiesPlace(e: Expr): boolean {
+    // A reference, whatever gives it, is read where its value lives; an assignment gives its
+    // target's value.
+    const given = types.get(e);
+    if ((given !== undefined && isRefType(given)) || e.kind === "assign") return true;
     if (e.kind === "nonNull") return copiesPlace(e.expr);
     if (e.kind === "conditional") return copiesPlace(e.then) || copiesPlace(e.else);
     if (e.kind === "binary" && e.op === "??") return copiesPlace(e.left) || copiesPlace(e.right);
-    if (e.kind === "match") return e.arms.some((a) => a.body.kind === "block" || copiesPlace(a.body as Expr));
-    return place(e);
+    if (e.kind === "match") return e.arms.some((a) => (a.body.kind === "block" ? armReturns(a.body).some(copiesPlace) : copiesPlace(a.body)));
+    if (e.kind === "member") return !calls.has(e) && !ctx.copiesOut.has(e) && !computed.has(e);
+    if (e.kind === "index") return element(e);
+    return e.kind === "ident" || e.kind === "this";
+  }
+
+  // The values a match arm's block gives, through its own `return`s, not those of functions in it.
+  function armReturns(block: Stmt): Expr[] {
+    const found: Expr[] = [];
+    const walk = (n: unknown) => {
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) return n.forEach(walk);
+      const s = n as Stmt | Expr;
+      if (s.kind === "arrow" || s.kind === "function") return;
+      if (s.kind === "return" && s.value) found.push(s.value);
+      Object.values(n).forEach(walk);
+    };
+    walk(block);
+    return found;
   }
 
   function property(p: ObjectProp): Field {

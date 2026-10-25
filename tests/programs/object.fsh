@@ -380,3 +380,30 @@ function main() {
   const q = { ...c.view, n: 2 };
   console.log(q.c.get(), q.n);
 }
+// case: object_spread_union_field
+// error: can't clone a 'Cell', which is changed in place wherever it is shared
+type C = { c: Cell<i64>; n: i64 };
+type A = { kind: "a"; o: C };
+type B = { kind: "b"; o: C };
+function main() { let u: A | B = { kind: "a", o: { c: new Cell<i64>(1), n: 1 } }; let q = { ...u.o, n: 2 }; }
+// case: object_spread_optional_chain
+// error: can't clone a 'Cell', which is changed in place wherever it is shared
+type C = { c: Cell<i64>; n: i64 };
+type W = { inner: C };
+function main() { let m: W | null = { inner: { c: new Cell<i64>(1), n: 1 } }; let q = { ...m?.inner!, n: 2 }; }
+// case: object_spread_match_arm_temporary
+// expect: 1 2
+// A match arm's block giving a value it makes is taken over, not copied.
+type C = { c: Cell<i64>; n: i64 };
+function main() { let b = 1; let q = { ...match (b) { case 1 => { return { c: new Cell<i64>(1), n: 1 }; }, case _ => ({ c: new Cell<i64>(2), n: 0 }) }, n: 2 }; console.log(q.c.get(), q.n); }
+// case: object_spread_reference_result
+// error: can't clone a JoinHandle, or a value holding one
+// A reference a call gives is read where its value lives, so spreading it copies.
+async function work(s: string): Promise<string> { return s + "!"; }
+type O = { h: JoinHandle<string>; n: i64 };
+function first(xs: Ref<O[]>): Ref<O> { return xs[0]; }
+async function main() { let xs: O[] = [{ h: spawn(work("a")), n: 1 }]; const q = { ...first(xs), n: 2 }; const v = await q.h; }
+// case: object_spread_assignment
+// error: can't clone a 'Cell', which is changed in place wherever it is shared
+type C = { c: Cell<i64>; n: i64 };
+function main() { let p: C = { c: new Cell<i64>(1), n: 1 }; const o: C = { c: new Cell<i64>(2), n: 1 }; const q = { ...(p = o), n: 2 }; }
