@@ -43,3 +43,17 @@ import process from "node:process";
 function main() {
   console.log(process.pid);
 }
+// case: process_named_values
+// expect: true true true
+import { argv, env } from "node:process";
+function count(argv: string[]): usize { return argv.length; }
+function main() {
+  const all = argv;
+  console.log(all.length === argv.length, env.FISH_NOT_SET_ANYWHERE === null, count(["x"]) === 1);
+}
+// case: process_named_table_whole
+// error: 'env' is read by key, as in 'env.HOME' or 'env[name]'
+import { env } from "node:process";
+function main() {
+  const e = env;
+}

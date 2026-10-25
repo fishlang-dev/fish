@@ -278,7 +278,12 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     l.own.get(sp.name)!.fixed = true;
   }
   for (const [name, from] of module.globals) if (!l.own.has(name) && !l.imports.has(name) && !spaces.has(name)) spaces.set(name, { from, explicit: false });
-  if (spaces.size > 0) throughSpaces(l.body, spaces, bind);
+  // A std module's value members imported by name, as `import { argv } from "node:process"`.
+  const valued = new Map([...l.imports].flatMap(([alias, { from, name }]): [string, "value" | "table"][] => {
+    const kind = valuesOf(from)[name];
+    return kind ? [[alias, kind]] : [];
+  }));
+  if (spaces.size > 0 || valued.size > 0) throughSpaces(l.body, spaces, bind, valued);
   renameIn(l.body, (name) => void l.used.add(name));
   return l;
 }
@@ -287,12 +292,13 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
 // so no program can write it. A global's member the module doesn't have is left alone, since a
 // local of that name may be meant; an import's is refused. Where a function's parameter, a
 // block's declaration or a catch clause takes the name, it means that instead.
-function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void) {
+function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void, valued: Map<string, "value" | "table"> = new Map()) {
   const bound = new Set<string>();
+  const named = (d: string) => spaces.has(d) || valued.has(d);
   const walk = (v: unknown, hidden: Set<string>) => {
     if (Array.isArray(v)) {
       const declared = v.flatMap((s) => (s && typeof s === "object" && (s as Stmt).kind === "let" ? (s as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : []));
-      const inner = declared.some((d) => spaces.has(d)) ? new Set([...hidden, ...declared]) : hidden;
+      const inner = declared.some(named) ? new Set([...hidden, ...declared]) : hidden;
       return v.forEach((x) => walk(x, inner));
     }
     if (typeof v !== "object" || v === null) return;
@@ -301,14 +307,14 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     if (n.kind === "try" && n.param) {
       const caught = bindings(n.param);
       walk(n.block, hidden);
-      walk(n.handler, caught.some((d) => spaces.has(d)) ? new Set([...hidden, ...caught]) : hidden);
+      walk(n.handler, caught.some(named) ? new Set([...hidden, ...caught]) : hidden);
       if (n.finalizer) walk(n.finalizer, hidden);
       return;
     }
     const head = n.kind === "forOf" || n.kind === "forIn" ? n.left : n.kind === "for" ? n.init : undefined;
     const declared = head && (head as { kind?: string }).kind === "let" ? (head as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : [];
     const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
-    if (own.some((d) => spaces.has(d))) hidden = new Set([...hidden, ...own]);
+    if (own.some(named)) hidden = new Set([...hidden, ...own]);
     const object = n.object as { kind?: string; name?: string } | undefined;
     // `process.env.HOME` and `process.env[name]`: a table member's key, read through its function.
     const table = (x: unknown) => {
@@ -319,6 +325,24 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     if (n.kind === "assign" && (n.target as { kind?: string }).kind !== undefined && table((n.target as { object?: unknown }).object)) {
       const t = table((n.target as { object?: unknown }).object)!;
       throw new CompileError(`setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
+    }
+    // `env.HOME` and `env[k]` on a table imported by name call it with the key.
+    const imported = n.object as { kind?: string; name?: string; start?: number; end?: number } | undefined;
+    if ((n.kind === "member" || n.kind === "index") && !n.optional && imported?.kind === "ident" && valued.get(imported.name!) === "table" && !hidden.has(imported.name!)) {
+      const key = n.kind === "member" ? { kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
+      walk(key, hidden);
+      const callee = { kind: "ident", name: imported.name, start: imported.start, end: imported.end };
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
+      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [key], optional: false });
+      return;
+    }
+    // `argv` imported by name reads as a value, calling it, except where it is called.
+    if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
+      if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
+      const callee = { kind: "ident", name: n.name, start: n.start, end: n.end };
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
+      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
+      return;
     }
     const keyed = (n.kind === "member" || n.kind === "index") && !n.optional ? table(n.object) : undefined;
     if (keyed) {
@@ -334,6 +358,10 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     // A call's callee is the function itself; a value member elsewhere reads through its function.
     if (n.kind === "call") {
       const callee = n.callee as Record<string, unknown>;
+      if (callee.kind === "ident" && valued.has(callee.name as string)) {
+        (n.args as unknown[]).forEach((x) => walk(x, hidden));
+        return;
+      }
       const owner = callee.object as { kind?: string; name?: string } | undefined;
       if (callee.kind === "member" && owner?.kind === "ident" && spaces.has(owner.name!) && !hidden.has(owner.name!)) {
         rewrite(callee, spaces.get(owner.name!)!, owner.name!, false);

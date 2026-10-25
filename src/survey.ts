@@ -339,6 +339,8 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
 // interfaces, whose generic methods Fish doesn't have.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
+// The `process.env` nodes read by key, which Fish takes; any other use of it, it doesn't.
+const envKeys = new WeakSet<object>();
 
 const heldArrows = new WeakSet<object>();
 const statementDestructures = new WeakSet<object>();
@@ -360,6 +362,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     case "member":
       if (n.name === "prototype") push("R2");
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
+      if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
+      if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       if (isPrivate(n.name)) push("classForms");
       break;
     case "unary":
@@ -369,12 +373,16 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     case "assign":
       if (envEntry(n.target)) push("process");
       break;
+    case "update":
+      if (envEntry(n.operand)) push("process");
+      break;
     case "binary":
       if (n.op === "instanceof") push("G5");
       if (n.op === "==" || n.op === "!=") push("A3");
       break;
     case "index":
       if (isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template")) push("G6");
+      if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       break;
     case "ref":
       if (n.name === "any") push("G1");
