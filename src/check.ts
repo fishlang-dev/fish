@@ -1428,7 +1428,17 @@ export function check(written: Stmt[], library = false, macros = false): Checked
         const later = pattern.elements.length - elements.length;
         if (pattern.rest && (many === undefined || later < 0 || (later > 0 && !isCopy(many)))) throw unsupported(many === undefined ? "rest elements in tuple patterns" : later < 0 ? "rest patterns that don't start where a tuple's rest elements do" : "rest patterns after names taken from rest elements whose type doesn't copy", pattern.rest);
         pattern.elements.forEach((p, i) => {
-          if (p) part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), start: p.start, end: p.end }, optional: false, start: p.start, end: p.end }, elements[i] ?? many!);
+          if (!p) return;
+          const at = { start: p.start, end: p.end };
+          // With a default, an element past the fixed ones may be missing, so it is read as
+          // `.at(i)` on the rest, which an array pattern's default reads too.
+          if (i >= elements.length && p.kind === "default") {
+            const array: Expr = { kind: "member", object: from(p), name: "...", optional: false, ...at };
+            restStarts.set(array, elements.length);
+            const read: Expr = { kind: "call", callee: { kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
+            return part(p, read, unionType([many!, "null"]));
+          }
+          part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), ...at }, optional: false, ...at }, elements[i] ?? many!);
         });
         if (pattern.rest) {
           const at = { start: pattern.rest.start, end: pattern.rest.end };

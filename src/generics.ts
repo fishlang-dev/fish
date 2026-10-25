@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { unfold, tiedBy, elementsOf, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -143,9 +143,14 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
-  if (node.kind === "tuple" && isTuple(arg) && (arg as ObjectType).fields.length === node.elements.length) {
+  // An optional element matches what it holds when there, and a rest element the tuple's array.
+  const fixed = node.kind === "tuple" ? node.elements.filter((n) => !n.rest) : [];
+  if (node.kind === "tuple" && isTuple(arg) && elementsOf(arg as ObjectType).length === fixed.length && (fixed.length < node.elements.length) === ((arg as ObjectType).rest !== undefined)) {
     const elements = elementsOf(arg as ObjectType);
-    node.elements.forEach((n, i) => infer(n.type, elements[i]!, names, bindings, at));
+    // An optional element left out says nothing about its type.
+    fixed.forEach((n, i) => (n.optional && elements[i] === "null") || infer(n.type, n.optional ? withoutNull(elements[i]!) : elements[i]!, names, bindings, at));
+    const rest = node.elements.find((n) => n.rest);
+    if (rest) infer(rest.type, arrayType((arg as ObjectType).rest!), names, bindings, at);
     return;
   }
   // `T[]` and `Array<T>` against an array match its element type.

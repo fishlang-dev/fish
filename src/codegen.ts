@@ -2749,15 +2749,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (isTuple(object)) {
       const [order, rest] = tupleOrder(object);
       const length = object.required === undefined ? undefined : tupleLength(v, object);
-      const fixed = order;
       const many = () => {
         const x = temp();
         emit(`${x} = extractvalue ${llvm(t)} ${v}, ${rest!.i}`);
         return x;
       };
-      if (rest && fixed.length === 0) return jsonElements(w, many(), rest.f.type as ArrayType, (as[rest.i]!.type as ArrayType).element);
+      if (rest && order.length === 0) return jsonElements(w, many(), rest.f.type as ArrayType, (as[rest.i]!.type as ArrayType).element);
       jsonRaw(w, "[");
-      fixed.forEach(({ i }, n) => {
+      order.forEach(({ i }, n) => {
         present(length, n, () => {
           if (n > 0) jsonRaw(w, ",");
           const x = temp();
@@ -2991,10 +2990,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (t.kind === "object" && isTuple(object)) {
       const [order, rest] = tupleOrder(object);
       const length = object.required === undefined ? undefined : tupleLength(v, object);
-      const fixed = order;
       const node = temp();
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? fixed.length})`);
-      fixed.forEach(({ i }, n) => {
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
+      order.forEach(({ i }, n) => {
         present(length, n, () => {
           const x = temp();
           emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);

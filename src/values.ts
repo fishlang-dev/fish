@@ -225,8 +225,6 @@ const tupleLiterals = new WeakSet<Expr>();
 
 const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
-// Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
-// through a Dyn: values, not places.
 // A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
 export const restStarts = new WeakMap<Expr, number>();
 
@@ -237,6 +235,8 @@ export function restText(e: Expr, text: (e: Expr) => string): string | undefined
   return undefined;
 }
 
+// Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
+// through a Dyn: values, not places.
 export const computed = new WeakSet<Expr>();
 
 // For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
@@ -263,6 +263,8 @@ export function expressions(ctx: Context) {
   // a generic function takes a tuple, which are a tuple of their own elements' types.
   const tuples = new Map<Expr, ObjectType>();
   const shaped = new WeakSet<Expr>();
+  // Those passed where the tuple has optional or rest elements take its shape, by its type node.
+  const shapedBy = new WeakMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
   const fixedLiterals = new Map<Expr, FixedType>();
   // Objects of index expressions already checked, which their next read takes as checked.
   const once = new WeakSet<Expr>();
@@ -1158,7 +1160,12 @@ export function expressions(ctx: Context) {
       }
       // A parameter of a function that isn't generic has its type before the call.
       if (a.kind !== "arrow" && known) expect(a, known[i]!);
-      if (!known && (a.kind === "array" || tupleLiterals.has(a)) && target.params[i]?.type?.kind === "tuple") shaped.add(a);
+      // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
+      const node = target.params[i]?.type;
+      if (!known && (a.kind === "array" || tupleLiterals.has(a)) && node?.kind === "tuple") {
+        shaped.add(a);
+        if (node.elements.some((n) => n.optional || n.rest)) shapedBy.set(a, node);
+      }
     });
   }
 
@@ -1486,6 +1493,23 @@ export function expressions(ctx: Context) {
       tupleLiterals.add(e);
     }
     return tuple;
+  }
+
+  // The tuple a literal of these parts' types is where a generic function takes one: its parts in
+  // order, or in the shape its parameter writes, an optional element left out being empty and the
+  // parts past the fixed ones its rest.
+  function shapedTuple(e: Expr, parts: Type[]): ObjectType {
+    const node = shapedBy.get(e);
+    if (!node) return tupleType(parts);
+    // Checked once already, the literal's last part is its rest's array.
+    const again = e.kind === "object" && node.elements.some((n) => n.rest);
+    const given = again ? parts.slice(0, -1) : parts;
+    const fixed = node.elements.filter((n) => !n.rest);
+    const required = fixed.findIndex((n) => n.optional);
+    const elements = fixed.map((n, i): Type => (i >= given.length ? "null" : n.optional ? unionType([given[i]!, "null"]) : given[i]!));
+    if (!node.elements.some((n) => n.rest)) return given.length > fixed.length ? tupleType(given) : tupleType(elements, required < 0 ? undefined : required);
+    const rest = again ? (parts.at(-1) as ArrayType).element : unionType(given.slice(fixed.length));
+    return tupleType(elements, undefined, rest);
   }
 
   // `t[0]` on a tuple reads its field `0`: the index is a number written in place naming one of
@@ -2160,7 +2184,7 @@ export function expressions(ctx: Context) {
         return made;
       }
       const element = isArray(t) ? lower(t.element) : undefined;
-      const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 ? elementsOf(element as ObjectType) : undefined;
+      const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 && (element as ObjectType).rest === undefined && (element as ObjectType).required === undefined ? elementsOf(element as ObjectType) : undefined;
       if (element === undefined || (!set && !pair)) throw new CompileError(`'new ${name}' takes ${shape}, not '${show(t)}'`, from.start, from.end);
       const result = collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
       const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
@@ -2886,7 +2910,7 @@ export function expressions(ctx: Context) {
       case "object": {
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
-        if ((shaped.has(e) || pairs.has(e)) && tupleLiterals.has(e)) return tupleLiteral(e, tupleType(tupleParts(e).map((x) => widenLet(value(x!)))));
+        if ((shaped.has(e) || pairs.has(e)) && tupleLiterals.has(e)) return tupleLiteral(e, shapedTuple(e, tupleParts(e).map((x) => widenLet(value(x!)))));
         if (e.props.some((p) => p.kind === "spread")) return objectSpread(e);
         return objectType(fields(e.props.map(property), e.props));
       }
@@ -2930,7 +2954,7 @@ export function expressions(ctx: Context) {
           return inline;
         }
         if (shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
-          return tupleLiteral(e, tupleType((e.elements as Expr[]).map((x) => widenLet(value(x)))));
+          return tupleLiteral(e, shapedTuple(e, (e.elements as Expr[]).map((x) => widenLet(value(x)))));
         }
         const elements = e.elements as Expr[];
         // A spread gives an array's elements: those of an array itself, or of what a string, a
@@ -3858,7 +3882,9 @@ export function expressions(ctx: Context) {
       else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
-      path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${root.name}`) : "[...]"}${path}`;
+      // A rest tuple's element is named by its place in the tuple, its array left unsaid.
+      if (root.kind === "index" && root.index.kind === "int" && restStarts.has(root.object)) path = `[${BigInt(restStarts.get(root.object)!) + root.index.value}]${path}`;
+      else if (!(root.kind === "member" && restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${root.name}`) : "[...]"}${path}`;
       root = root.object;
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {

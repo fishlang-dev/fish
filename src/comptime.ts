@@ -2,9 +2,9 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes } from "./values.ts";
+import { equalities, quotes, restStarts } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, elementsOf, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -615,8 +615,20 @@ function interpreter() {
     if (getter) return call(getter, [], object as Record, e);
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
+    if (object && typeof object === "object" && object.kind === "record" && isTuple(object.type) && e.name === "length") return tupleLength(object);
     if (object && typeof object === "object" && object.kind === "record") return object.fields.get(e.name);
     return unsupported(`reading '${e.name}' here`, e);
+  }
+
+  // A tuple's length, as at run time: its required elements, up to the last optional one there,
+  // then its rest.
+  function tupleLength(t: Record): bigint {
+    const type = t.type as ObjectType;
+    const count = elementsOf(type).length;
+    let length = type.required ?? count;
+    for (let i = length; i < count; i++) if (unwrap(t.fields.get(String(i))!) !== null) length = i + 1;
+    const rest = t.fields.get("...");
+    return BigInt(length + (rest && typeof rest === "object" && rest.kind === "array" ? rest.items.length : 0));
   }
 
   function callExpr(f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
@@ -807,8 +819,10 @@ function interpreter() {
       const held = unwrap(object ?? expr(f, target.object));
       const i = unwrap(expr(f, target.index)) as bigint;
       const length = typeof held === "string" ? held.length : held && typeof held === "object" && held.kind === "array" ? held.items.length : unsupported("indexing this", target);
+      // A rest tuple's array is named as the tuple, its fixed elements counted in.
+      const before = BigInt(restStarts.get(target.object) ?? 0);
       const inside = () => {
-        if (i < 0n || i >= BigInt(length)) panic(`index out of bounds: the len is ${length} but the index is ${i}`, target);
+        if (i < 0n || i >= BigInt(length)) panic(`index out of bounds: the len is ${BigInt(length) + before} but the index is ${i + before}`, target);
       };
       // The bounds are checked where the place is taken, as a borrow of an element checks them.
       inside();

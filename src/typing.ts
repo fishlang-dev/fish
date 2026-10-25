@@ -17,7 +17,7 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 // A regex match is a tuple of its captures with `index`, `input` and `groups` beside them.
 // A tuple with optional elements has `required`, the count before them; each optional one holds
 // `T | null`. A tuple ending in `...T[]` has `rest`, T, and holds those elements as an array in
-// its field `...`, after its fixed ones.
+// its field `...`.
 export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: number; rest?: Type };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
@@ -1321,7 +1321,9 @@ export function fits(from: Type, to: Type): boolean {
   // A tuple fits only a tuple of its length, element by element.
   if (isTuple(from) || isTuple(to)) {
     const [a, b] = [from as ObjectType, to as ObjectType];
-    return isTuple(from) && isTuple(to) && a.fields.length === b.fields.length && b.fields.every((f) => fits(field(a, f.name)!.type, f.type));
+    // A tuple fits one of its shape, giving at least the elements that one requires.
+    const shaped = isTuple(from) && isTuple(to) && a.fields.length === b.fields.length && (a.rest === undefined) === (b.rest === undefined);
+    return shaped && (a.required ?? a.fields.length) >= (b.required ?? b.fields.length) && b.fields.every((f) => fits(field(a, f.name)!.type, f.type));
   }
   // An interface is satisfied by members, which only the checker can look up.
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;

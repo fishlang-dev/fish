@@ -244,7 +244,7 @@ function main() { const t: [i64, string?] = [1, "a", "b"]; }
 // error: type '[i64, string?]' is not assignable to type '[i64, string]'
 function main() { const t: [i64, string?] = [1]; const u: [i64, string] = t; }
 // case: tuple_optional_moved
-// error: 't.length' can't be used here because 't' was moved
+// error: 't' was moved, so it can't be used here
 class C { constructor(public n: i64) {} }
 function main() { const t: [i64, C?] = [1, new C(2)]; const u = t; console.log(u.length, t.length); }
 // case: tuple_past
@@ -354,3 +354,74 @@ function main() { const t: [i64, ...C[]] = [1, new C(1), new C(2)]; const [a, b,
 // error: 't[1]' can't be moved out of its array; use 't[1].clone()' to take a copy, or 'pop()' to take the last element out
 class C { constructor(public n: i64) {} }
 function main() { const t: [i64, ...C[]] = [1, new C(1)]; const [a, b] = t; }
+// case: tuple_rest_fits
+// error: argument of type '[i64, i64]' is not assignable to parameter of type '[i64, ...i64[]]'
+function f(t: [i64, ...i64[]]): void {}
+function main() { const p: [i64, i64] = [1, 2]; f(p); }
+// case: tuple_optional_fits_required
+// error: type '[i64, i64?]' is not assignable to type '[i64, i64 | null]'
+function main() { const a: [i64, i64?] = [1]; const b: [i64, i64 | null] = a; }
+// case: tuple_shapes_comptime
+// expect: true true 2 2
+// expect: 1 1 3 3
+function two(): boolean { const t: [i64, i64] = [1, 2]; return t.length === 2; }
+function sum(): i64 { const t: [i64, i64] = [1, 2]; let n = 0; for (let i: usize = 0; i < t.length; i++) n++; return n; }
+function short(): usize { const t: [i64, string?] = [1]; return t.length; }
+function rest(): usize { const t: [string, ...i64[]] = ["a", 1, 2]; return t.length; }
+const A = comptime two();
+const B = comptime sum();
+const S = comptime short();
+const R = comptime rest();
+function main() { console.log(two(), A, sum(), B); console.log(short(), S, rest(), R); }
+// case: tuple_rest_comptime_past
+// error: this comptime code panicked: index out of bounds: the len is 1 but the index is 1
+function past(): i64 { const t: [string, ...i64[]] = ["c"]; return t[1]; }
+const P = comptime past();
+function main() { console.log(P); }
+// case: tuple_shapes_generic
+// expect: 1 3 2
+// expect: [ 4 ] 1
+// expect: [ 5, 6 ] 2
+// expect: [ 4, 5 ]
+// expect: [ 'a', 1, 2 ] 3
+function first<T>(t: [T, ...T[]]): T { return t[0]; }
+function len<T>(t: [string, ...T[]]): usize { return t.length; }
+function opt<T>(t: [T, T?]): void { console.log(t, t.length); }
+function all<T>(t: [T, ...T[]]): void { console.log(t); }
+function tail<T>(t: [string, ...T[]]): void { console.log(t, t.length); }
+function main() {
+  const p: [i64, ...i64[]] = [1, 2];
+  const q: [string, ...boolean[]] = ["b", true];
+  const r: [string, ...i64[]] = ["a", 1, 2];
+  console.log(first(p), len(r), len(q));
+  opt<i64>([4]);
+  opt([5, 6]);
+  all<i64>([4, 5]);
+  tail(["a", 1, 2]);
+}
+// case: tuple_rest_map
+// error: 'new Map' takes an array of key and value pairs, as in 'new Map([["a", 1]])', not '[string, ...i64[]][]'
+function main() { const xs: [string, ...i64[]][] = [["a", 1]]; const m = new Map(xs); }
+// case: tuple_rest_default
+// expect: a 5
+// expect: 1 9
+class C { constructor(public n: i64) {} }
+function main() {
+  const t: [string, ...i64[]] = ["a"];
+  const [a, b = 5] = t;
+  console.log(a, b);
+  const u: [i64, ...C[]] = [1];
+  const [x, y = new C(9)] = u;
+  console.log(x, y.n);
+}
+// case: tuple_length_after_part_moved
+// error: 't' can't be used as a whole here because 't[1]' was moved out of it
+class C { constructor(public n: i64) {} }
+function main() { const t: [i64, C?] = [1, new C(2)]; const [a, b] = t; console.log(t.length, b); }
+// case: tuple_rest_assign_const
+// error: cannot assign to 't[1]' because 't' is a constant
+function main() { const t: [i64, ...i64[]] = [1, 2]; t[1] = 5; }
+// case: tuple_rest_moved_out
+// error: 't' can't be used as a whole here because 't[1...]' was moved out of it
+class C { constructor(public n: i64) {} }
+function main() { const t: [i64, ...C[]] = [1, new C(1)]; const [a, ...r] = t; console.log(a, r, t); }

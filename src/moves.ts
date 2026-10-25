@@ -6,7 +6,7 @@ import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { computed, restText, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { selfCalls } from "./check.ts";
-import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -439,7 +439,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       case "member":
         if (!types.has(e.object)) return;
-        if (key(e) !== undefined) return use(e, consume);
+        if (key(e) !== undefined) {
+          // A tuple's length looks at its optional elements and its rest, so none may have moved.
+          const held = types.get(e.object)!;
+          const tuple = lower(typeof held !== "string" && held.kind === "ref" ? held.to : held) as ObjectType;
+          if (e.name === "length" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) usable(e.object as Named, key(e.object)!);
+          return use(e, consume);
+        }
         return expr(e.object);
       case "arrow":
         for (const [place, use, from, mutable, held] of captured(e)) {
@@ -1343,9 +1349,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A place's path as written, from the variable's name.
   function pathOf(place: string): string {
-    const [id, ...fields] = place.split(".");
+    // The rest field's name is dots too, so it is split out before the path is.
+    const [id, ...fields] = place.replaceAll("....", ".\0").split(".").map((f) => (f === "\0" ? "..." : f));
     const local = [...locals.values()].find((l) => String(l.id) === id);
-    return [local?.name ?? id, ...fields].join(".").replaceAll(".[]", "[...]").replace(/\.(\d+)(?=\.|$)/g, "[$1]");
+    // A rest tuple's array is its elements from where its fixed ones end, as `t[1...]`.
+    const held = local && lower(local.type);
+    const start = held && typeof held !== "string" && held.kind === "object" && held.rest !== undefined ? held.fields.length - 1 : undefined;
+    const named = fields.map((f, i) => (f === "..." ? (i === 0 && start !== undefined ? `[${start}...]` : "[...]") : f === "[]" ? "[...]" : f));
+    return [local?.name ?? id, ...named].join(".").replaceAll(".[", "[").replace(/\.(\d+)(?=\.|\[|$)/g, "[$1]");
   }
 }
 
