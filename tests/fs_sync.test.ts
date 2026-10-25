@@ -83,3 +83,17 @@ test("statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync giv
     symlinkSync("d/f.txt", join(dir, "ln"));
   });
 });
+
+test("a failing realpathSync names the part node's walk stops at", () => {
+  compare("realpath", `import { realpathSync } from "node:fs";`, `
+  console.log(realpathSync(""), realpathSync("lnd/.."));
+  for (const p of ["dangling", "dangling/x", "lnd/missing", "lnd/../missing", "real/../nope", "loop1", "loop1/x"]) {
+    try { realpathSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  }`, (dir) => {
+    mkdirSync(join(dir, "real", "deep"), { recursive: true });
+    symlinkSync("nowhere", join(dir, "dangling"));
+    symlinkSync("real/deep", join(dir, "lnd"));
+    symlinkSync("loop2", join(dir, "loop1"));
+    symlinkSync("loop1", join(dir, "loop2"));
+  });
+});

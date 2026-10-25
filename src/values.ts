@@ -1034,8 +1034,8 @@ export function expressions(ctx: Context) {
       fileCalls.add(e);
       return { type: leafFuture(reading ? "readFile" : "writeFile", "void", ioError()), what: `'${callee.name}'` };
     }
-    // `fileReadSync(path)`, `fileWriteSync(path, bytes)` and `pathExists(path)`: node:fs's calls,
-    // run on the calling thread.
+    // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
+    // thread.
     const sync = callee.kind === "ident" && fileAt(e.start).startsWith("node:") ? SYNC_FILE_CALLS[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
@@ -4415,7 +4415,6 @@ const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind 
 // What a string's length, index and methods work on: text, or a union of string literals.
 export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
 
-// Each string method: its parameters, what it returns, and how many arguments it needs.
 // The blocking file calls std's node:fs is written over: their parameters, what each gives, and
 // whether it throws an IoError.
 const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
@@ -4430,6 +4429,7 @@ const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
   pathRemove: [["string", "boolean", "boolean"], "void", true],
 };
 
+// Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   charCodeAt: [["usize"], "u16", 1],
   at: [["i64"], unionType(["string", "null"]), 1],

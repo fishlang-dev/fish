@@ -3987,31 +3987,76 @@ int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
   return 1;
 }
 
-// realpathSync: the resolved path. A failure names, as Node's does, the absolute path up to the
-// first part that can't be found, with lstat as its call.
+// realpathSync: the resolved path. As Node's walk does, the path is first made absolute and
+// normalised, so ".." takes back the part before it whether that is a link or not, and an empty
+// path is the working directory. A failure names the part the walk stops at, followed a part at a
+// time: a missing part fails its lstat, and a link that can't be followed its stat, each named
+// with the links before it resolved.
 int32_t fsh_rt_fs_realpath(fsh_str *path, fsh_str **out, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "lstat", "");
-  char resolved[PATH_MAX];
-  if (realpath(c, resolved)) {
+  char cwd[PATH_MAX];
+  if (c[0] != '/' && !getcwd(cwd, sizeof cwd)) {
+    int failure = errno;
     fsh_rt_free(c);
+    return fsh_fs_failed(error, failure, "uv_cwd", NULL);
+  }
+  size_t size = (c[0] == '/' ? 0 : strlen(cwd)) + strlen(c) + 2;
+  char *whole = fsh_rt_alloc(size);
+  snprintf(whole, size, "%s/%s", c[0] == '/' ? "" : cwd, c);
+  fsh_rt_free(c);
+  char *parts = fsh_rt_alloc(size + 1);
+  size_t n = 0;
+  char *rest = NULL;
+  for (char *part = strtok_r(whole, "/", &rest); part; part = strtok_r(NULL, "/", &rest)) {
+    if (strcmp(part, ".") == 0) continue;
+    if (strcmp(part, "..") == 0) {
+      while (n > 0 && parts[n - 1] != '/') n--;
+      if (n > 0) n--;
+      continue;
+    }
+    parts[n++] = '/';
+    size_t k = strlen(part);
+    memcpy(parts + n, part, k);
+    n += k;
+  }
+  if (n == 0) parts[n++] = '/';
+  parts[n] = 0;
+  fsh_rt_free(whole);
+  char *resolved = realpath(parts, NULL);
+  if (resolved) {
+    fsh_rt_free(parts);
     *out = fsh_rt_str_from_cstring(resolved);
+    free(resolved);
     return 1;
   }
   int failure = errno;
-  char whole[PATH_MAX * 2];
-  if (c[0] == '/') snprintf(whole, sizeof whole, "%s", c);
-  else snprintf(whole, sizeof whole, "%s/%s", fsh_rt_cwd(), c);
-  fsh_rt_free(c);
+  char *done = fsh_rt_alloc(size + PATH_MAX + 2);
+  done[0] = 0;
+  const char *call = "lstat";
   struct stat st;
-  for (char *slash = strchr(whole + 1, '/');; slash = strchr(slash + 1, '/')) {
-    if (slash) *slash = 0;
-    int missing = lstat(whole, &st) != 0;
-    if (missing) failure = errno;
-    if (missing || !slash) break;
-    *slash = '/';
+  rest = NULL;
+  for (char *part = strtok_r(parts, "/", &rest); part; part = strtok_r(NULL, "/", &rest)) {
+    size_t k = strlen(done);
+    snprintf(done + k, size + PATH_MAX + 2 - k, "/%s", part);
+    if (lstat(done, &st) != 0) {
+      failure = errno;
+      break;
+    }
+    if (!S_ISLNK(st.st_mode)) continue;
+    char *real = stat(done, &st) == 0 ? realpath(done, NULL) : NULL;
+    if (!real) {
+      failure = errno;
+      call = "stat";
+      break;
+    }
+    snprintf(done, size + PATH_MAX + 2, "%s", strcmp(real, "/") == 0 ? "" : real);
+    free(real);
   }
-  return fsh_fs_failed(error, failure, "lstat", whole);
+  int32_t result = fsh_fs_failed(error, failure, call, done[0] ? done : "/");
+  fsh_rt_free(done);
+  fsh_rt_free(parts);
+  return result;
 }
 
 // mkdtempSync: a new directory named by the prefix and six random characters, as Node makes it.
