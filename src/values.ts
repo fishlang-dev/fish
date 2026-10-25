@@ -7,7 +7,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -161,6 +161,9 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The values printed as Node's util.inspect prints them, whose types as written say how their
+// fields were spelled.
+export const printed = new WeakSet<Expr>();
 // The `JSON.stringify` and `JSON.parse` calls, by which each is.
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
@@ -786,11 +789,11 @@ export function expressions(ctx: Context) {
       for (const a of e.args) {
         const type = a.kind === "string" ? "void" : read(a);
         if (printable(type)) continue;
-        throw new CompileError(typeof type !== "string" && type.kind === "param" ? `a value of type '${type.name}' can't be printed`
-          : isArray(type) ? "printing an array is not supported yet; print its elements"
-          : typeof type !== "string" && type.kind === "map" ? `printing a '${type.set ? "Set" : "Map"}' is not supported yet; print its ${type.set ? "members" : "entries"}`
-          : holdsVariant(type) ? "printing an enum that holds data is not supported yet"
-          : "printing an object is not supported yet; print its fields", a.start, a.end);
+        printed.add(a);
+        // Anything else prints as Node's util.inspect prints it.
+        const part = uninspectable(type);
+        if (!part) continue;
+        throw new CompileError(typeof part !== "string" && (part.kind === "function" || part.kind === "closure" || part.kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
       }
       return { type: "void", what: "printing" };
     }

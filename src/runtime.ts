@@ -207,7 +207,14 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
   emit(`call void @fsh_rt_print_end(i32 ${stream})`);
 
   function piece(v: string, type: Type) {
-    if (typeof type !== "string" && type.kind === "literal") {
+    // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
+    const plain = (t: Type): boolean => typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || (t.kind === "union" && t.members.every(plain));
+    if (!plain(type) && b.inspect) {
+      flush();
+      const text = b.inspect(v, type);
+      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${text})`);
+      emit(`call void @fsh_rt_str_release(ptr ${text})`);
+    } else if (typeof type !== "string" && type.kind === "literal") {
       literal(String(type.value));
     } else if (type === "string") {
       // Written by the runtime, since its bytes may hold anything printf would read as format.

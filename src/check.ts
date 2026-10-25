@@ -22,7 +22,7 @@ import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsonCalls, expressions, substituted, stringLike } from "./values.ts";
+import { jsonCalls, printed, expressions, substituted, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -709,11 +709,13 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
     views.set(instance, instance.returns);
-    // `JSON.stringify` writes a field by how it was spelled, which lowering forgets.
+    // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     for (const e of instance.types.keys()) {
-      if (e.kind !== "call" || jsonCalls.get(e) !== "stringify") continue;
-      const x = e.args[0]!;
-      (instance.spelled ??= new Map()).set(x, instance.coercions.get(x) ?? instance.types.get(x)!);
+      const stringified = e.kind === "call" && jsonCalls.get(e) === "stringify" ? e.args[0] : undefined;
+      for (const x of [...(stringified ? [stringified] : []), ...(printed.has(e) ? [e] : [])]) {
+        const type = instance.coercions.get(x) ?? instance.types.get(x);
+        if (type) (instance.spelled ??= new Map()).set(x, type);
+      }
     }
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
     // A pipe's topic written in as a field read would run a getter once for each `%`.

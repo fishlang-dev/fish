@@ -70,9 +70,9 @@ enum E {
 }
 
 function main() {
-  console.log(E.B);
+  console.log(E.B, E.A(1));
 }
-// error: printing an enum that holds data is not supported yet
+// expect: B A(1)
 // case: enum_data_recursive
 enum List {
   Cons(i64, List),

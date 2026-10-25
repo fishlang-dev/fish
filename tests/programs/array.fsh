@@ -864,10 +864,10 @@ function main() {
 // expect: 2 2
 // expect: zed 2
 // case: array_print
+// expect: [ 1, 2 ]
 function main() {
   console.log([1, 2]);
 }
-// error: printing an array is not supported yet; print its elements
 // case: array_push_receiver_lent
 function growG(g: Mut<i64[][]>): i64 {
   for (let k = 0; k < 9; k++) g.push([k]);

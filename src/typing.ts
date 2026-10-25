@@ -550,6 +550,43 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
   }
 }
 
+// The part of a type that `console.log` can't print as Node's util.inspect would, or undefined:
+// every value but functions, handles and other runtime objects prints, a type parameter in each
+// instance once it is concrete.
+export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined {
+  if (typeof t === "string") return t === "void" ? t : undefined;
+  if (seen.has(t)) return undefined;
+  seen.add(t);
+  const part = (u: Type) => uninspectable(u, seen);
+  const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
+  switch (t.kind) {
+    case "literal":
+    case "pattern":
+      return undefined;
+    case "ref":
+      return part(t.to);
+    case "recursive":
+      return part(t.of);
+    case "param":
+      return t.concrete ? part(t.concrete) : undefined;
+    case "union":
+      return first(t.members);
+    case "array":
+    case "fixed":
+      return part(t.element);
+    case "map":
+      return first(t.set ? [t.key] : [t.key, t.value]);
+    case "object":
+      return t.match ? t : first(t.fields.map((f) => f.type));
+    case "class":
+      return first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]);
+    case "variant":
+      return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
+    default:
+      return t;
+  }
+}
+
 // The part of a type that keeps `JSON.stringify` and `JSON.parse` from taking its values, or
 // undefined when every part is Json: booleans, numbers, strings and literals, and objects,
 // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that

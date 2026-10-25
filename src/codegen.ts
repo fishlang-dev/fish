@@ -131,6 +131,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const comparers = new Map<Type, string>();
   const jsonWriters = new Map<Type, string>();
   const jsonReaders = new Map<Type, string>();
+  const inspectors = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
@@ -141,7 +142,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // default order.
   const orders = new Map<string, string>();
   let comparators = 0;
-  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type) };
+  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type), inspect: (v: string, type: Type) => inspected(v, type) };
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
@@ -2757,7 +2758,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
-  function jsonFields(c: ClassType): { name: string; type: Type; path: number[] }[] {
+  function jsonFields(c: ClassType): { name: string; type: Type; path: number[]; omit?: boolean }[] {
     return c.base ? [...jsonFields(c.base).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
   }
 
@@ -2840,6 +2841,237 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`br label %${head}`);
     startBlock(done);
     jsonRaw(w, "]");
+  }
+
+  // The string `console.log` prints for a value: its tree, laid out by the runtime.
+  function inspected(v: string, type: Type): string {
+    const tree = inspectTree(v, type);
+    const text = temp();
+    emit(`${text} = call ptr @fsh_rt_insp_done(ptr ${tree})`);
+    return text;
+  }
+
+  // A value's tree for the runtime's layout, through the function made for its type when it
+  // has parts. The type as written is kept beside the lowered one, for how fields were spelled.
+  function inspectTree(v: string, type: Type): string {
+    const t = lower(type);
+    if (typeof t === "string" || t.kind === "literal") return inspectScalar(v, t);
+    const written = asWritten(type);
+    let name = inspectors.get(written);
+    if (!name) {
+      name = `@"fsh.insp.${inspectors.size}"`;
+      inspectors.set(written, name);
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      emit(`ret ptr ${inspectParts("%v", t, written)}`);
+      out.push(`define internal ptr ${name}(${llvm(t)} %v) {`, "entry:", ...allocas, ...body, "}", "");
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    }
+    const node = temp();
+    emit(`${node} = call ptr ${name}(${llvm(t)} ${v})`);
+    return node;
+  }
+
+  function inspectScalar(v: string, t: Type): string {
+    const node = temp();
+    if (typeof t !== "string" && t.kind === "literal") {
+      if (typeof t.value === "string") {
+        emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${text(t.value)})`);
+      } else if (typeof t.value === "bigint") emit(`${node} = call ptr @fsh_rt_insp_i64(i64 ${t.value})`);
+      else emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${cString(String(t.value))})`);
+      return node;
+    }
+    if (t === "null" || t === "never" || t === "void") emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${cString("null")})`);
+    else if (t === "string") emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${v})`);
+    else if (t === "boolean") {
+      const word = temp();
+      emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
+      emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${word})`);
+    } else if (isFloat(t)) {
+      let wide = v;
+      if (t === "f32") {
+        wide = temp();
+        emit(`${wide} = fpext float ${v} to double`);
+      }
+      emit(`${node} = call ptr @fsh_rt_insp_f64(double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
+    } else {
+      const { bits, signed } = INTEGERS[t as Integer];
+      let wide = v;
+      if (bits < 64) {
+        wide = temp();
+        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      }
+      emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i64" : "u64"}(i64 ${wide})`);
+    }
+    return node;
+  }
+
+  // The tree of a value with parts: elements, members, entries, a member's values, an object's
+  // fields by name or an instance's as declared, a base's first. An empty field spelled `x?: T`
+  // is left out, as Node leaves out a field that isn't there.
+  function inspectParts(v: string, t: Exclude<Type, string>, written: Type): string {
+    if (t.kind === "ref" || t.kind === "recursive") {
+      const to = t.kind === "ref" ? t.to : t.of;
+      const held = temp();
+      emit(`${held} = load ${llvm(lower(to))}, ptr ${v}`);
+      return inspectTree(held, writtenPart(written, t, (x) => (x.kind === "ref" ? x.to : undefined)) ?? to);
+    }
+    if (t.kind === "array" || t.kind === "fixed") return inspectElements(v, t, writtenPart(written, t, (x) => (x as ArrayType).element) ?? t.element);
+    if (t.kind === "map") return inspectEntries(v, t, writtenPart(written, t, (x) => (x as MapType).value) ?? t.value);
+    if (t.kind === "union") {
+      const spelled = writtenPart(written, t, (x) => x) as UnionType | undefined;
+      const members = spelled?.members.length === t.members.length ? spelled.members : t.members;
+      const result = alloca("ptr");
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
+      const done = label();
+      const cases = t.members.map(() => label());
+      emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      t.members.forEach((m, i) => {
+        startBlock(cases[i]!);
+        const member = lower(m);
+        let x = "zeroinitializer";
+        if (!(typeof member !== "string" && member.kind === "literal") && member !== "null") {
+          const slot = alloca(llvm(t));
+          emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
+          const at = temp();
+          x = temp();
+          emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
+          emit(`${x} = load ${llvm(member)}, ptr ${at}`);
+        }
+        emit(`store ptr ${inspectTree(x, members[i]!)}, ptr ${result}`);
+        emit(`br label %${done}`);
+      });
+      startBlock(done);
+      const node = temp();
+      emit(`${node} = load ptr, ptr ${result}`);
+      return node;
+    }
+    if (t.kind === "variant") {
+      const node = temp();
+      emit(`${node} = call ptr @fsh_rt_insp_variant(ptr ${cString(t.member)})`);
+      t.fields.forEach((f, i) => {
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+        emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, f.type)})`);
+      });
+      return node;
+    }
+    const object = t as ObjectType;
+    const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
+    const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
+    if (t.kind === "object" && isTuple(object)) {
+      const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      const node = temp();
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${order.length})`);
+      for (const { i } of order) {
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+        emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, as[i]!.type)})`);
+      }
+      return node;
+    }
+    const fields = t.kind === "class" ? jsonFields(t) : object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional === "added" }));
+    const name = t.kind === "class" ? t.name.replace(/[@<].*$/, "") : "";
+    const node = temp();
+    emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(name)})`);
+    for (const f of fields) {
+      const x = temp();
+      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const after = label();
+      if (f.omit) {
+        const present = holds(x, lower(f.type) as UnionType, (lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const write = label();
+        emit(`br i1 ${present}, label %${write}, label %${after}`);
+        startBlock(write);
+      }
+      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(f.name)}, ptr ${inspectTree(x, f.type)})`);
+      emit(`br label %${after}`);
+      startBlock(after);
+    }
+    return node;
+  }
+
+  // An array's first 100 elements, and how many it has.
+  function inspectElements(v: string, t: ArrayType | FixedType, written: Type): string {
+    const element = llvm(lower(t.element));
+    const [length, data] = [temp(), temp()];
+    if (t.kind === "array") {
+      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+    } else {
+      const slot = alloca(llvm(t));
+      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
+      emit(`${length} = add i64 0, ${t.size}`);
+      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+    }
+    const node = temp();
+    emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
+    const [cap, kept] = [temp(), temp()];
+    emit(`${cap} = icmp slt i64 ${length}, 100`);
+    emit(`${kept} = select i1 ${cap}, i64 ${length}, i64 100`);
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, loop, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${kept}`);
+    emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    startBlock(loop);
+    const [at, x, next] = [temp(), temp(), temp()];
+    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    emit(`${x} = load ${element}, ptr ${at}`);
+    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, written)})`);
+    emit(`${next} = add i64 ${i}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+    return node;
+  }
+
+  // A Map's or Set's live entries in order, its first 100, and how many it has.
+  function inspectEntries(map: string, t: MapType, written: Type): string {
+    const entry = entryType(t);
+    const [size, node] = [temp(), temp()];
+    emit(`${size} = call i64 @fsh_rt_map_size(ptr ${map})`);
+    emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${t.set ? 5 : 4}, i64 ${size})`);
+    const counter = alloca("i64");
+    emit(`store i64 0, ptr ${counter}`);
+    const [test, live, loop, next, end] = [label(), label(), label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    const [i, used, more] = [temp(), temp(), temp()];
+    emit(`${i} = load i64, ptr ${counter}`);
+    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    emit(`br i1 ${more}, label %${live}, label %${end}`);
+    startBlock(live);
+    const [at, state, alive] = [temp(), temp(), temp()];
+    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${state} = load i64, ptr ${at}`);
+    emit(`${alive} = icmp eq i64 ${state}, 1`);
+    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    startBlock(loop);
+    const [keyAt, key] = [temp(), temp()];
+    emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    emit(`${key} = load ${llvm(lower(t.key))}, ptr ${keyAt}`);
+    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(key, t.key)})`);
+    if (!t.set) {
+      const [valueAt, x] = [temp(), temp()];
+      emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      emit(`${x} = load ${llvm(lower(t.value))}, ptr ${valueAt}`);
+      emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, written)})`);
+    }
+    emit(`br label %${next}`);
+    startBlock(next);
+    const step = temp();
+    emit(`${step} = add i64 ${i}, 1`);
+    emit(`store i64 ${step}, ptr ${counter}`);
+    emit(`br label %${test}`);
+    startBlock(end);
+    return node;
   }
 
   // `JSON.parse<T>(s)`: s read as a T. A failure, or text left after the value, throws a
@@ -4537,7 +4769,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) {
-        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), valueType, convert);
+        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert);
         return undefined;
       }
       // `Shape.Circle(1.5)`: a variant built from its payload, each value handed to it. Used as a

@@ -218,7 +218,7 @@ function main() { let xs = ["a", "b"]; const s = new Set(xs); console.log(xs.len
 // error: 'new Map()' needs its key and value types, as in 'new Map<string, i64>()'
 function main() { const m = new Map(); }
 // case: map_print
-// error: printing a 'Map' is not supported yet; print its entries
+// expect: Map(0) {}
 function main() { const m = new Map<string, i64>(); console.log(m); }
 // case: map_ref_set
 // error: cannot add to 'm' because 'm' is a shared reference ('Ref'), which only reads

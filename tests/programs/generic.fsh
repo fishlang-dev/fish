@@ -1041,12 +1041,16 @@ function main() {
 }
 // expect: 7
 // case: generic_print
+// expect: 1
+// expect: { x: [ 'a' ] }
 function show<T>(x: T) {
   print(x)
 }
 
-function main() {}
-// error: a value of type 'T' can't be printed
+function main() {
+  show(1);
+  show({ x: ["a"] });
+}
 // case: generic_string_clone
 class Box<T> {
   v: T;

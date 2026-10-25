@@ -69,7 +69,8 @@ function size(t: Type): [number, number] {
 // What converting needs besides emitting: a slot in the function's entry block.
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
 // `deep` compares two values of one type holding objects, arrays or instances, part by part.
-export type Slots = Builder & { alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string };
+// `inspect` gives the string `console.log` prints for a value laid out as Node lays one out.
+export type Slots = Builder & { alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
 
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(t.kind);

@@ -86,10 +86,10 @@ function main() {
 }
 // error: property 'x' does not exist on type 'i64'
 // case: object_print
+// expect: { x: 1 }
 function main() {
   print({ x: 1 })
 }
-// error: printing an object is not supported yet; print its fields
 // case: object_string_widens
 type K = "a" | "b";
 type O = { k: K; n: i64 };
