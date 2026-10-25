@@ -879,6 +879,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes, instance.patterns, instance.copiesOut]) table.clear();
     instance.returns = "void";
     delete instance.throws;
+    delete instance.envs;
+    delete instance.made;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
@@ -1752,6 +1754,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
           if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
+          // A nested function's declaration, met as this `const` again when a body is checked anew.
+          if (nestedFunctions.has(d.init)) nestedBindings.add(locals.get(s)!);
           return;
         }
         case "if": {
@@ -1783,9 +1787,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           // The body is the arrow's now; left here too, walks over the statement would find it twice,
           // as an async function's frame did, taking the function's loops and awaits for its own.
           for (const key of ["body", "params", "returnType", "typeParams"] as const) delete (s as Partial<Func>)[key];
-          const done = statement(s);
-          nestedBindings.add(locals.get(s)!);
-          return done;
+          return statement(s);
         }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":

@@ -341,3 +341,15 @@ function g<T extends HasM>(t: T): u8 {
 function main() {
   console.log(g({ m: 1, n: 300 }));
 }
+// case: object_spread_handle
+// error: can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself
+async function work(s: string): Promise<string> { return s + "!"; }
+async function main() { let o = { h: spawn(work("a")), n: 1 }; let q = { ...o, n: 2 }; const v = await q.h; }
+// case: object_spread_cell
+// error: can't clone a 'Cell', which is changed in place wherever it is shared; make a new one from what it holds
+function main() { const o = { c: new Cell<i64>(1), n: 1 }; const p = { ...o, n: 2 }; }
+// case: object_spread_overridden_handle
+// expect: a! 2
+// A field the literal gives itself isn't copied from the spread.
+async function work(s: string): Promise<string> { return s + "!"; }
+async function main() { const o = { h: spawn(work("x")), n: 1 }; const q = { ...{ n: 0 }, h: spawn(work("a")), n: 2 }; const v = await q.h; const w = await o.h; console.log(v, q.n); }

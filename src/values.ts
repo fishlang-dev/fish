@@ -3722,6 +3722,9 @@ export function expressions(ctx: Context) {
   function objectSpread(e: Extract<Expr, { kind: "object" }>): Type {
     const merged = new Map<string, Field>();
     const written = new Set<string>();
+    // The spread a field comes from, when that spread copies a place rather than taking over a
+    // value made for it.
+    const copied = new Map<string, ObjectProp>();
     for (const p of e.props) {
       if (p.kind !== "spread") {
         const f = property(p);
@@ -3729,6 +3732,7 @@ export function expressions(ctx: Context) {
         written.add(f.name);
         merged.delete(f.name);
         merged.set(f.name, f);
+        copied.delete(f.name);
         continue;
       }
       const t = value(p.value);
@@ -3740,11 +3744,16 @@ export function expressions(ctx: Context) {
       }
       if (holdsRef(held)) throw unsupported("spreads of values holding references", p);
       const parts = held.kind === "class" ? allFields(held).filter((f) => (f.access ?? "public") === "public") : held.fields;
+      const place = ["ident", "member", "index", "this"].includes(p.value.kind);
       for (const f of parts) {
         merged.delete(f.name);
         merged.set(f.name, { name: f.name, type: f.type });
+        if (place) copied.set(f.name, p);
+        else copied.delete(f.name);
       }
     }
+    // A spread of a place copies the fields it gives, which must be ones a clone may copy.
+    for (const [name, p] of copied) clonable(merged.get(name)!.type, p);
     return objectType([...merged.values()]);
   }
 

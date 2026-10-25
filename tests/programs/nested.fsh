@@ -343,3 +343,17 @@ async function main() {
   console.log(got);
   for (const x of gen()) console.log(x);
 }
+// case: nested_checked_again
+// expect: 6
+// A body checked again, once an integer's type is known, rebuilds its nested functions' captures.
+function f(): void {
+  let total = 0;
+  const xs = [1, 2, 3];
+  function add(n: i64): void { total += n; }
+  for (let i = 0; i < xs.length; i++) add(xs[i]);
+  console.log(total);
+}
+function main() { f(); }
+// case: nested_checked_again_reference
+// error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
+function main() { let xs = ["a" + 1, "b" + 2]; let i = 0; { const r: Ref<string> = xs[i]; function show(): void { console.log(r); } xs.push("c"); show(); } }
