@@ -58,7 +58,7 @@ const RULES: Rule[] = [
   { id: "destructuringAssignment", action: "guided", title: "a destructuring assignment used as a value or as a for update: write it as a statement of its own" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "guided", title: "a let with neither a type nor a value: write its type, as in 'let x: string', since Fish doesn't work it out from later assignments" },
-  { id: "tuples", action: "unsupported", title: "optional and rest elements in tuple types", feature: "Optional and rest tuple elements" },
+  { id: "tuples", action: "unsupported", title: "a rest element before the end of a tuple type, or one beside optional elements" },
   { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
@@ -438,7 +438,11 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   if (n.kind === "destructure" && !statementDestructures.has(n)) push("destructuringAssignment");
   const simple: Record<string, string> = { tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
   if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
-  if (n.kind === "tuple" && (n.elements as Node[]).some((e) => e.optional || e.rest)) push("tuples");
+  if (n.kind === "tuple") {
+    const elements = n.elements as Node[];
+    const rest = elements.findIndex((e) => e.rest);
+    if (rest >= 0 && (rest < elements.length - 1 || elements.some((e) => e.optional))) push("tuples");
+  }
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0 && !heldArrows.has(n)) push("genericMethods");
   if (n.kind === "function" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && Array.isArray(n.params) && "returns" in n) push("genericMethods");

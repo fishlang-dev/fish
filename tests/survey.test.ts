@@ -215,13 +215,13 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
 const big = "const xs = setTimeout(f, 1);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "const t: [number, number?] = [1, 2];\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
+  projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "abstract class A {}\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
       ["setTimeout and setInterval", 1, 10, 78.5],
       ["for...in", 1, 1, 85.7],
-      ["Optional and rest tuple elements", 1, 2, 100],
+      ["Abstract classes and #private fields", 1, 2, 100],
     ]);
     expect(r.curve.steps[1]!).toMatchObject({ rules: ["forIn"], files: 2, lines: 3 });
     expect(r.repos.map((x) => x.files)).toEqual([3, 1]);
@@ -257,10 +257,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "for (const k in o) {}\nconst t: [number, number?] = [1, 2];\n", "plan.md": "## Plan\n\n- [ ] 7. **setTimeout and setInterval** - timers\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **setTimeout and setInterval** - timers\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "setTimeout and setInterval": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Optional and rest tuple elements": null,
+      "setTimeout and setInterval": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
@@ -476,5 +476,15 @@ test("the report lists each Node built-in with its files and what replaces it", 
   project({ "a.ts": "import x from \"./x\";\n" }, (dir) => {
     expect(survey(dir)).not.toHaveProperty("builtins");
     expect(formatReport(survey(dir))).not.toContain("Node built-ins");
+  });
+});
+
+test("optional and trailing rest tuple elements are portable; a leading rest, or one beside optional elements, waits", () => {
+  project({
+    "a.ts": "const t: [number, string?] = [1];\nconst u: [string, ...number[]] = [\"a\", 1];\n",
+    "b.ts": "const v: [...number[], string] = [\"a\"];\n",
+    "c.ts": "const w: [number, string?, ...number[]] = [1];\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map((f) => f.findings.map(([id]) => id))).toEqual([[], ["tuples"], ["tuples"]]);
   });
 });
