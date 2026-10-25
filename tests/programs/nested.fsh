@@ -98,7 +98,7 @@ function main() {
   }
 }
 // case: nested_moved_capture
-// error: 'xs' was moved, so it can't be used here
+// error: 'add' uses 'xs', and 'xs' was moved, so it can't be used here
 function main() { let xs = [1]; function add() { xs.push(2); } const r = xs; add(); }
 // case: nested_loop_conflict
 // error: cannot mutably lend 'xs' while a 'for...of' loop is reading 'xs'
@@ -247,4 +247,51 @@ function main() {
   function show(): void { console.log(r); }
   show();
   xs = [2];
+}
+// case: nested_async_moves_capture
+// error: cannot move 'xs' while 'r' borrows 'xs[...]' and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function sink(f: () => Promise<usize>): void {}
+async function main() { const xs = [new P(7)]; const r: Ref<P> = xs[0]; async function g() { return xs.length; } sink(g); console.log(r.n); }
+// case: nested_async_calls_nested
+// expect: 3
+// expect: 3
+// expect: 1 1
+// An async nested function holds the nested functions it calls as made where it is.
+async function main() {
+  const xs = [1, 2, 3];
+  function len(): usize { return xs.length; }
+  async function g() { return len(); }
+  console.log(xs.length);
+  const got = await g();
+  console.log(got);
+  let n = 0;
+  function inc(): void { n++; }
+  async function h() { inc(); return 1; }
+  const v = await h();
+  console.log(n, v);
+}
+// case: nested_async_holds_borrow
+// error: cannot change 'n' while
+async function main() { let n = 0; function inc(): void { n++; } async function h() { inc(); return 1; } const f = h(); n = 5; await f; }
+// case: nested_name_as_parameter
+// expect: 0
+// expect: 1
+function keep<T>(inc: T): void { const y = inc; }
+function pass<T>(inc: T): T { const x = inc; return x; }
+function main() { let n = 0; function inc(): void { n++; } keep(inc); console.log(n); const g = pass(inc); g(); console.log(n); }
+// case: nested_assignment_target_held
+// error: cannot mutably lend 'ys' while 'ys' is lent to the assignment to 'ys[0]'
+function main() { let ys = ["a"]; function b(): string { ys = ["yy"]; return "?"; } ys[0] = b(); }
+// case: nested_assignment_in_place
+// expect: [ 3, 2 ]
+// expect: [ 1, 7 ]
+function main() {
+  let xs = [1, 2, 3];
+  xs[0] = xs.pop()!;
+  console.log(xs);
+  let ys = [1, 2];
+  function seven(): i64 { return 7; }
+  ys[1] = seven();
+  console.log(ys);
 }

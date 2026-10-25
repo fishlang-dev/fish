@@ -94,6 +94,9 @@ export type Instance = {
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
   envs?: Map<Expr, { of: Instance; env: Local[] }>;
+  // Each closure owning what it captures that holds nested functions as made where it is, and
+  // this body's bindings for what each of those uses, which the closure borrows.
+  made?: Map<Expr, { of: Instance; env: Local[] }[]>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -980,6 +983,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
+      nestedLocal,
+      owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,
@@ -1601,6 +1606,20 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       withSight(inSight, () => checkInstance(inner, { lookup, peek, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
+      // A closure owning what it captures holds a nested function it uses as made here, so it
+      // borrows what that function uses, as this body has it.
+      if (e.async || inner.body.closure!.move) {
+        for (const [, from] of inner.captures) {
+          if (from === "this" || !nestedLocal(from)) continue;
+          const of = closureBodies.get(lower(from.type) as ClosureType)!;
+          const env = [...of.captures!].map(([alias, x]) => {
+            const mine = reach(x as Local, e);
+            if (of.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
+            return mine;
+          });
+          (instance.made ??= new Map()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
+        }
+      }
       // A nested function runs whenever it is called, so it can't take over what it uses.
       const nested = nestedFunctions.get(e);
       if (nested !== undefined) {
@@ -2095,6 +2114,15 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       const outside = outer?.lookup(name, at);
       // A local generic function holds nothing to capture.
       return outside && (outside.generic ? outside : capture(outside, at));
+    }
+
+    // Whether a binding is the one a sync nested function's declaration makes, or a closure's
+    // capture of it.
+    function nestedLocal(l: Local): boolean {
+      const type = lower(l.type);
+      if (typeof type === "string" || type.kind !== "closure" || l.param || l.mutable) return false;
+      const body = closureBodies.get(type)?.body;
+      return body?.closure?.self === l.name && !body.async;
     }
 
     function peek(name: string): Local | undefined {

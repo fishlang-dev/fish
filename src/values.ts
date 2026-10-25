@@ -81,6 +81,10 @@ export type Context = {
   reach(l: Local, at?: Expr | ObjectProp): Local;
   // Records the bindings a call of a nested function builds its environment from.
   envOf(e: Expr, of: Instance, env: Local[]): void;
+  // Whether a binding is the one a sync nested function's declaration makes.
+  nestedLocal(l: Local): boolean;
+  // Whether this is a closure owning what it captures: async, or `move`.
+  owning: boolean;
   // Notes a closure's use of `this`, which it captures.
   noteThis(e: Expr): void;
   self: Body["self"];
@@ -1190,14 +1194,12 @@ export function expressions(ctx: Context) {
     throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${given}`, at.start, at.end);
   }
 
-  // A call of a closure held by a variable runs the closure's body.
-  // The nested function a name calls, unless it is async, whose future holds what it uses.
+  // The nested function a name calls, unless it is async, whose future holds what it uses. A
+  // closure owning what it captures, async or `move`, takes the function as made where it is.
   function nestedFunction(name: string): Local | undefined {
+    if (ctx.owning) return undefined;
     const local = ctx.peek(name);
-    const type = local && lower(local.type);
-    if (!local || typeof type === "string" || type?.kind !== "closure") return undefined;
-    const body = closureBody(type as ClosureType).body;
-    return body.closure?.self === name && !body.async ? local : undefined;
+    return local && ctx.nestedLocal(local) ? local : undefined;
   }
 
   // `name(...)` on a nested function builds its environment for the call from this body's
@@ -1213,12 +1215,14 @@ export function expressions(ctx: Context) {
   function nestedEnv(e: Expr, local: Local, at: Extract<Expr, { kind: "ident" }>) {
     const called = closureBody(lower(local.type) as ClosureType);
     ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, from]) => {
-      const mine = ctx.reach(from as Local, at);
+      // A closure captures it here, where the variable is named only through the function.
+      const mine = ctx.reach(from as Local, { kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
       if (called.changed?.has(alias)) changesLocal(mine, "", "change", at, false);
       return mine;
     }));
   }
 
+  // A call of a closure held by a variable runs the closure's body.
   function closureCall(e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
     const held = known ?? value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";

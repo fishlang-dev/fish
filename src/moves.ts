@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { computed, restText, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
-import { nestedFunctions, selfCalls } from "./check.ts";
+import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -490,7 +490,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             : built ? built.env.map((alias, i) => ({ alias, changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
           const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
-            usable(c.at, String(c.alias.id));
+            try {
+              usable(c.at, String(c.alias.id));
+            } catch (err) {
+              // The variable isn't written at the call, so the message says the function uses it.
+              if (err instanceof CompileError && !selfCalls.has(e)) throw new CompileError(`${name} uses '${c.alias.name}', and ${err.message}`, err.start, err.end, err.note);
+              throw err;
+            }
             lend(String(c.alias.id), false, c.at, undefined, name, e, c.at.start, c.key);
           }
           // A closure is read to call it, or taken over when it can run only once.
@@ -591,7 +597,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (e.op !== "=") expr(e.target);
         // A target's indexes run before the value, as in JavaScript.
         else for (const index of indexes(e.target)) expr(index);
+        // A place inside a variable is found before the value runs, so a nested function the
+        // value calls can't replace the variable from under it.
+        const nested = instance.envs !== undefined && holdsNode(e.value, (n) => instance.envs!.has(n as Expr));
+        const root = nested && (e.target.kind === "member" || e.target.kind === "index") ? rootOf(e.target) : undefined;
+        const held = root && key(root);
+        const hold = -(e.target.start * 256 + 255) - 1;
+        if (held !== undefined) lend(held, false, root!, undefined, `the assignment to '${text(e.target)}'`, e, root!.start, hold);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
+        if (held !== undefined) state?.loans.delete(hold);
         // The target changes once the value is ready, after the value's reads.
         assign(e.target, e.end);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
@@ -1260,8 +1274,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
   }
 
-  // The places a closure captures, where it first uses each, the variable, if not `this`,
-  // whether it changes it, and whether it holds it rather than borrowing it.
   // A closure made here: what it borrows must be free to lend, and what it moves in leaves.
   function made(e: Expr) {
     for (const [place, use, from, mutable, held] of captured(e)) {
@@ -1276,6 +1288,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
   }
 
+  // The places a closure captures, where it first uses each, the variable, if not `this`,
+  // whether it changes it, and whether it holds it rather than borrowing it.
   function captured(e: Expr): [string, Named, Local | undefined, boolean, boolean][] {
     // A nested function's declaration makes nothing; each use as a value makes its closure, from
     // this body's bindings for what it uses.
@@ -1284,15 +1298,21 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const aliases = [...built.of.captures!.keys()];
       return built.env.map((l, i) => [String(l.id), { kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, built.of.changed!.has(aliases[i]!), false]);
     }
-    if (e.kind !== "arrow" || nestedFunctions.has(e)) return [];
+    if (e.kind !== "arrow" || (nestedFunctions.has(e) && !e.async)) return [];
     const inner = calls.get(e)!;
-    return [...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
+    // A closure owning what it captures holds the nested functions it uses as made here, so it
+    // borrows what they use.
+    const through = (instance.made?.get(e) ?? []).flatMap(({ of, env }) => {
+      const aliases = [...of.captures!.keys()];
+      return env.map((l, i): [string, Named, Local | undefined, boolean, boolean] => [String(l.id), { kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, of.changed!.has(aliases[i]!), false]);
+    });
+    return [...[...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;
       const mutable = inner.changed!.has(alias);
       const held = !isRef(inner.closure!.fields[i]!.type);
       if (!use) return [];
       return [from === "this" ? ["this", use, undefined, mutable, false] : [String(from.id), use, from, mutable, held]];
-    });
+    }), ...through];
   }
 
   function rootOf(e: Named): Named {
@@ -1387,7 +1407,7 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls, envs }: Instance): Map<Local, number> {
+function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made }: Instance): Map<Local, number> {
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
   const lentTo = (a: Expr) => {
@@ -1515,6 +1535,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs }: Insta
       // A closure uses what it captures where it is made; whatever holds it holds that after.
       case "arrow":
         for (const from of calls.get(e)!.captures!.values()) if (from !== "this") used(from, call ?? e.end);
+        for (const { env } of made?.get(e) ?? []) for (const l of env) used(l, call ?? e.end);
         return;
       case "throw":
         return expr(e.value);
