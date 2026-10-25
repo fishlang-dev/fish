@@ -2204,6 +2204,10 @@ typedef struct fsh_insp {
   int64_t count, room;
   // An ARRAY's, Map's or Set's size, of which the first 100 are kept.
   int64_t size;
+  // An Error's OBJECT, its text the bracketed header Node prints in place of its stack, and
+  // what it is past the depth, its class's name bracketed.
+  int32_t error;
+  char *cut;
 } fsh_insp;
 
 static fsh_insp *fsh_insp_new(int32_t kind, const char *text, int64_t length) {
@@ -2250,6 +2254,7 @@ static void fsh_insp_free(fsh_insp *v) {
   fsh_rt_free(v->items);
   fsh_rt_free(v->keys);
   fsh_rt_free(v->text);
+  fsh_rt_free(v->cut);
   fsh_rt_free(v);
 }
 
@@ -2351,6 +2356,44 @@ static void fsh_sb_spaces(fsh_sb *b, int64_t n) {
 static char *fsh_sb_done(fsh_sb *b) {
   if (!b->p) fsh_sb_put(b, "", 0);
   return b->p;
+}
+
+// An Error as Node prints one with no stack lines: its name and message, the class's name when
+// it differs and the error's name ends in Error, as Node's improveStack writes them, bracketed.
+fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
+  fsh_sb b = {0};
+  fsh_sb_str(&b, "[");
+  int64_t n = name->length;
+  int differs = cls[0] && ((int64_t)strlen(cls) != n || memcmp(cls, name->bytes, n) != 0);
+  int named = n >= 5 && memcmp(name->bytes + n - 5, "Error", 5) == 0;
+  if (differs && named) {
+    fsh_sb_str(&b, cls);
+    // A class whose name holds the error's takes its place; any other is written before it.
+    char *own = fsh_rt_alloc(n + 1);
+    memcpy(own, name->bytes, n);
+    own[n] = 0;
+    if (!strstr(cls, own)) {
+      fsh_sb_str(&b, " [");
+      fsh_sb_put(&b, name->bytes, n);
+      fsh_sb_str(&b, "]");
+    }
+    fsh_rt_free(own);
+  } else fsh_sb_put(&b, name->bytes, n);
+  if (message->length > 0) {
+    fsh_sb_str(&b, ": ");
+    fsh_sb_put(&b, message->bytes, message->length);
+  }
+  fsh_sb_str(&b, "]");
+  fsh_insp *v = fsh_insp_new(FSH_INSP_OBJECT, b.p, b.n);
+  fsh_rt_free(b.p);
+  v->error = 1;
+  fsh_sb cut = {0};
+  fsh_sb_str(&cut, "[");
+  if (cls[0]) fsh_sb_str(&cut, cls);
+  else fsh_sb_put(&cut, name->bytes, n);
+  fsh_sb_str(&cut, "]");
+  v->cut = fsh_sb_done(&cut);
+  return v;
 }
 
 // A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which Node's layout
@@ -2648,7 +2691,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     }
     return fsh_sb_done(&b);
   }
-  char open[64], cut[64];
+  // Sized to the text, a class's name or an Error's header, which may be long.
+  char open[v->length + 40], cut[v->length + 40];
   const char *close = v->kind == FSH_INSP_ARRAY ? "]" : "}";
   int64_t size = v->kind == FSH_INSP_OBJECT ? v->count : v->size;
   if (v->kind == FSH_INSP_ARRAY) {
@@ -2662,6 +2706,9 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     strcpy(cut, v->kind == FSH_INSP_MAP ? "[Map]" : "[Set]");
   }
   int hidden = c->hidden && v->kind == FSH_INSP_ARRAY;
+  // An Error with nothing to show beside its header is its header; past the depth, its class.
+  if (v->error && recurse > 2) return fsh_insp_copy(v->cut);
+  if (v->error && size == 0) return fsh_insp_copy(v->text);
   if (size == 0 && !hidden) {
     fsh_sb b = {0};
     fsh_sb_str(&b, open);
@@ -2698,7 +2745,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     }
     fsh_sb b = {0};
     const char *key = v->keys[i];
-    if (fsh_insp_identifier(key)) fsh_sb_str(&b, key);
+    // An Error's '[cause]' and '[errors]' are written as Node writes keys it shows itself.
+    if (fsh_insp_identifier(key) || (v->error && key[0] == '[')) fsh_sb_str(&b, key);
     else fsh_insp_quote(&b, key, strlen(key));
     fsh_sb_str(&b, ": ");
     fsh_sb_str(&b, x);
