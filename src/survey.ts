@@ -77,7 +77,7 @@ const RULES: Rule[] = [
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
   { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
-  { id: "json", action: "unsupported", title: "JSON.parse with no 'as T' to give its type, and JSON.stringify's replacer and indent arguments", feature: "Dynamic Json values" },
+  { id: "json", action: "unsupported", title: "JSON.parse with no 'as T' to give its type or with a reviver, and JSON.stringify's replacer and indent arguments", feature: "Dynamic Json values" },
   { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
 ];
@@ -466,7 +466,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (["setTimeout", "setInterval", "clearTimeout", "clearInterval"].some((name) => named(callee, name))) push("timers");
   if (memberOf(callee, "console", ["error", "warn"]) || memberOf(callee, "Date", ["now"]) || memberOf(callee, "performance", ["now"])) push("stderr");
   // A parse with no type to read into wants the dynamic Json value; stringify takes one value.
-  if (memberOf(callee, "JSON", ["parse"]) && !typedParses.has(n)) push("json");
+  if (memberOf(callee, "JSON", ["parse"]) && (!typedParses.has(n) || (n.args as unknown[]).length > 1)) push("json");
   if (memberOf(callee, "JSON", ["stringify"]) && (n.args as unknown[]).length > 1) push("json");
   if (memberOf(callee, "Promise", ["all", "race", "allSettled", "any"])) push("promiseAll");
   if (!isNode(callee) || callee.kind !== "member") return;

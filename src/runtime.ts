@@ -150,6 +150,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_json_forget(ptr)",
   "declare i32 @fsh_rt_json_expected(ptr, ptr)",
   "declare i32 @fsh_rt_json_missing(ptr, ptr)",
+  "declare i32 @fsh_rt_json_unlike(ptr, ptr)",
+  "declare void @fsh_rt_json_settle(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_json_peek(ptr)",
   "declare i32 @fsh_rt_json_null(ptr)",
   "declare i32 @fsh_rt_json_bool(ptr, ptr)",

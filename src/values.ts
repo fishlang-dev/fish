@@ -435,6 +435,8 @@ export function expressions(ctx: Context) {
     if (e.kind === "tagged" && !isQuote(e)) untag(e);
     if (e.kind === "call") {
       const { type } = call(e);
+      // A parse read only to check the text still makes its value, which is then dropped.
+      if (jsonCalls.get(e) === "parse") types.set(e, type);
       if (typeof type !== "string" && type.kind === "future" && leafOf.has(type)) {
         throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", e.start, e.end);
       }
@@ -1594,7 +1596,6 @@ export function expressions(ctx: Context) {
     throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
-  // The global `Math`, unless a name of the program's hides it.
   // `JSON.stringify` and `JSON.parse`, unless a name of the program's hides `JSON`.
   function jsonOf(callee: Expr): "stringify" | "parse" | undefined {
     if (callee.kind !== "member" || callee.object.kind !== "ident" || callee.object.name !== "JSON") return undefined;
@@ -1653,6 +1654,7 @@ export function expressions(ctx: Context) {
     return classOf(t).node.derives?.includes("Json") ?? false;
   }
 
+  // The global `Math`, unless a name of the program's hides it.
   function isMath(e: Expr): boolean {
     return e.kind === "ident" && e.name === "Math" && !lookup("Math") && !classes.has("Math") && !byName.has("Math") && !byName.has("const Math") && !enums.has("Math");
   }

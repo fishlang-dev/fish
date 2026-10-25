@@ -377,3 +377,69 @@ async function main(): Promise<void> throws IoError {
   const c = await ask(port, "POST /users HTTP/1.1\r\nHost: h\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{\"nom\":1}");
   console.log(line(c));
 }
+// case: json_parse_enum_in_union
+// expect: {"Circle":2} "Dot" null
+// expect: error: expected one of Circle, Dot at $
+// expect: {"Circle":2} {"s":{"Circle":3}}
+@derive(Json)
+enum Shape { Circle(f64), Dot }
+type H = { s?: Shape };
+function one(s: string): string {
+  try {
+    const a = JSON.parse<Shape | null>(s);
+    return JSON.stringify(a);
+  } catch (e) {
+    return "error: " + e.message;
+  }
+}
+function main() {
+  console.log(one("{\"Circle\":2}"), one("\"Dot\""), one("null"));
+  console.log(one("{}"));
+  try {
+    const a = JSON.parse<Shape | string>("{\"Circle\":2}");
+    const h = JSON.parse<H>("{\"s\":{\"Circle\":3}}");
+    console.log(JSON.stringify(a), JSON.stringify(h));
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// case: json_parse_statement
+// expect: fine
+// expect: Unexpected token x in JSON at position 0
+function check(s: string): string {
+  try {
+    JSON.parse<string[]>(s);
+    return "fine";
+  } catch (e) {
+    return e.message;
+  }
+}
+function main() {
+  console.log(check("[\"a\", \"b\"]"));
+  console.log(check("x"));
+}
+// case: json_parse_union_messages
+// expect: expected null | u8 at $.age
+// expect: 300 doesn't fit u8 at $.age
+// expect: expected i64 | string at $.n
+// expect: expected N at $
+type U = { age?: u8; n: i64 | string };
+enum N { One = 1, Two = 2 }
+function t(s: string): string {
+  try {
+    JSON.parse<U>(s);
+    return "ok";
+  } catch (e) {
+    return e.message;
+  }
+}
+function main() {
+  console.log(t("{\"age\":\"x\",\"n\":1}"));
+  console.log(t("{\"age\":300,\"n\":1}"));
+  console.log(t("{\"n\":true}"));
+  try {
+    JSON.parse<N>("3");
+  } catch (e) {
+    console.log(e.message);
+  }
+}

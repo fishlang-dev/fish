@@ -2928,6 +2928,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (c.kind === "array") return readElements(r, c);
     if (c.kind === "map") return readEntries(r, c);
     if (c.kind === "union") return c.members.every((m) => typeof m !== "string" && m.kind === "variant") ? readVariant(r, c) : readMember(r, c);
+    if (c.kind === "variant") return readVariant(r, c);
     if (c.kind === "object" && isTuple(c)) return readTuple(r, c);
     const fields = c.kind === "class" ? jsonFields(c) : (c as ObjectType).fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] }));
     return readObject(r, c, fields);
@@ -2951,7 +2952,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     jsonGuard(same, "i1", () => {
       emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
       const ignored = temp();
-      emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(what)})`);
+      emit(`${ignored} = call i32 @fsh_rt_json_unlike(ptr ${r}, ptr ${cString(what)})`);
     });
     return "zeroinitializer";
   }
@@ -3156,13 +3157,30 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A union's value: each member tried in turn from the same place, the first that reads
-  // winning; when none does, the error kept is from the one that read furthest.
+  // winning; when none does, the error kept is from the one that read furthest. An enum's
+  // members are read together, tagged as the enum is.
   function readMember(r: string, t: UnionType): string {
     const mark = alloca("[3 x i64]");
     const result = alloca(llvm(t));
     const done = label();
     emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    const groups = new Map<string, VariantType[]>();
+    const parts: (Type | VariantType[])[] = [];
     for (const m of t.members) {
+      if (typeof m === "string" || m.kind !== "variant") {
+        parts.push(m);
+        continue;
+      }
+      let group = groups.get(m.enum);
+      if (!group) {
+        group = [];
+        groups.set(m.enum, group);
+        parts.push(group);
+      }
+      group.push(m);
+    }
+    for (const part of parts) {
+      const m = Array.isArray(part) ? unionType(part) : part;
       const [ok, v] = jsonRead(r, m);
       const [won, lost] = [label(), label()];
       emit(`br i1 ${ok}, label %${won}, label %${lost}`);
@@ -3173,6 +3191,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       startBlock(lost);
       emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
     }
+    emit(`call void @fsh_rt_json_settle(ptr ${r}, ptr ${mark}, ptr ${cString(show(t))})`);
     emit("ret i1 false");
     startBlock(done);
     const v = temp();
@@ -3182,8 +3201,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A data enum's member, tagged as serde writes it: a bare name, or an object of one key, the
   // name, holding its value or an array of its values.
-  function readVariant(r: string, t: UnionType): string {
-    const variants = t.members as VariantType[];
+  function readVariant(r: string, t: UnionType | VariantType): string {
+    const variants = t.kind === "union" ? (t.members as VariantType[]) : [t];
     const result = alloca(llvm(t));
     const [named, keyed, done] = [label(), label(), label()];
     const names = variants.map((v) => v.member).join(", ");

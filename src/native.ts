@@ -1463,6 +1463,7 @@ typedef struct fsh_json_in {
   int64_t path_length, path_room;
   char *error;
   int64_t error_at;
+  int32_t weak;
 } fsh_json_in;
 
 // ponytail: a fixed nesting limit keeps hostile input from overflowing the stack; make it an
@@ -1481,6 +1482,7 @@ fsh_json_in *fsh_rt_json_in(fsh_str *s) {
   r->path_length = 1;
   r->error = NULL;
   r->error_at = -1;
+  r->weak = 0;
   return r;
 }
 
@@ -1546,14 +1548,20 @@ void fsh_rt_json_forget(fsh_json_in *r) {
   r->error_at = -1;
 }
 
-// Keeps an error made at the reading position, unless one from further on is kept.
-static int32_t fsh_json_error(fsh_json_in *r, char *message) {
-  if (!r->error || r->at > r->error_at) {
+// Keeps an error made at the reading position, unless one from further on is kept. A weak
+// error, a value of another kind than wanted, gives way to another at the same place.
+static int32_t fsh_json_kept(fsh_json_in *r, char *message, int32_t weak) {
+  if (!r->error || r->at > r->error_at || (r->at == r->error_at && r->weak && !weak)) {
     fsh_rt_free(r->error);
     r->error = message;
     r->error_at = r->at;
+    r->weak = weak;
   } else fsh_rt_free(message);
   return 0;
+}
+
+static int32_t fsh_json_error(fsh_json_in *r, char *message) {
+  return fsh_json_kept(r, message, 0);
 }
 
 // Text that isn't JSON, in JavaScript's words.
@@ -1569,12 +1577,21 @@ static int32_t fsh_json_syntax(fsh_json_in *r) {
   return fsh_json_error(r, message);
 }
 
-// A value of the wrong kind or shape, with where it sits.
-int32_t fsh_rt_json_expected(fsh_json_in *r, const char *what) {
+static int32_t fsh_json_expected(fsh_json_in *r, const char *what, int32_t weak) {
   int64_t size = strlen(what) + r->path_length + 16;
   char *message = fsh_rt_alloc(size);
   snprintf(message, size, "expected %s at %.*s", what, (int)r->path_length, r->path);
-  return fsh_json_error(r, message);
+  return fsh_json_kept(r, message, weak);
+}
+
+// A value of the wrong shape, with where it sits.
+int32_t fsh_rt_json_expected(fsh_json_in *r, const char *what) {
+  return fsh_json_expected(r, what, 0);
+}
+
+// A value of another kind, or another literal, than the one wanted.
+int32_t fsh_rt_json_unlike(fsh_json_in *r, const char *what) {
+  return fsh_json_expected(r, what, 1);
 }
 
 int32_t fsh_rt_json_missing(fsh_json_in *r, const char *name) {
@@ -1604,7 +1621,18 @@ static int fsh_json_word(fsh_json_in *r, const char *word, int64_t n) {
 static int32_t fsh_json_wrong(fsh_json_in *r, const char *what) {
   int32_t c = fsh_rt_json_peek(r);
   int starts = c == '{' || c == '[' || c == '"' || c == '-' || (c >= '0' && c <= '9') || c == 't' || c == 'f' || c == 'n';
-  return starts ? fsh_rt_json_expected(r, what) : fsh_json_syntax(r);
+  return starts ? fsh_rt_json_unlike(r, what) : fsh_json_syntax(r);
+}
+
+// After every member of a union failed: when none got past the value's start, one error
+// naming the union says more than the last member's.
+void fsh_rt_json_settle(fsh_json_in *r, int64_t *mark, const char *what) {
+  fsh_rt_json_restore(r, mark);
+  fsh_rt_json_peek(r);
+  if (!r->error || !r->weak || r->error_at != r->at) return;
+  fsh_rt_free(r->error);
+  r->error = NULL;
+  fsh_json_expected(r, what, 1);
 }
 
 int32_t fsh_rt_json_null(fsh_json_in *r) {

@@ -56,6 +56,7 @@ test("each rule counts what the sample shows", () => {
 test("forms that look alike are told apart", () => {
   expect(counts("const a = JSON.parse(s) as User;\nconst b = JSON.stringify(a);\n")).toEqual({ A8: 1 });
   expect(counts("const a = JSON.parse(s);\nconst b = JSON.stringify(a, null, 2);\n")).toEqual({ json: 2 });
+  expect(counts("const a = JSON.parse(s, revive) as User;\n")).toEqual({ A8: 1, json: 1 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});
