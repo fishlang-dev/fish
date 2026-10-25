@@ -6171,6 +6171,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store i32 1, ptr ${doneAt}`);
       const step = pollStep(f, futureAt, at as Expr);
       startBlock(step.waiting);
+      // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
+      if (f === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
       emit(`br label %${skip}`);
       startBlock(step.ready);
       const v = step.value() ?? "zeroinitializer";
@@ -6231,8 +6233,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const saved = { allocas, body, temps, labels, block, pending, scopes };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
     const dyn = array.element as DynType;
-    const gives = promiseElement(dyn.of)!;
-    const element = llvm(gives);
+    const given = promiseElement(dyn.of)!;
+    const element = llvm(given === "void" ? "null" : given);
     const field = (i: number) => {
       const p = temp();
       emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
@@ -6410,9 +6412,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return [p, v] as const;
     };
     const leaf = leafOf.get(t);
-    if (t === SLEEP || leaf?.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, i64 ${load(1, "i64")[1]})`);
-    else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
-    else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    if (t === SLEEP || leaf?.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
+    else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
+    else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
     else if (leaf && ["connect", "accept", "read", "write"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     if (leaf?.signal) {
       const [flag] = load(frame.length - 1, "i32");
@@ -6539,9 +6541,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${yes} = icmp ne i32 ${aborted}, 0`);
         emit(`br i1 ${yes}, label %${cancel}, label %${go}`);
         startBlock(cancel);
-        if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx)`);
-        if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx)`);
-        if (leaf.method === "sleep") emit("call void @fsh_rt_sleep_leave(ptr %cx)");
+        if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
+        if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
+        if (leaf.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
         if (socket) emit(`call void @fsh_rt_socket_leave(ptr ${handle}, ptr %cx)`);
         emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
         emit(`br label %${failed}`);
@@ -6597,18 +6599,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {
         const [permit, made] = [alloca("ptr"), temp()];
-        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit})`);
+        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit}, ptr ${at})`);
         emit(`${made} = load ptr, ptr ${permit}`);
         given = made;
       } else if (leaf.method === "send") {
         const [moving, closed] = [temp(), temp()];
         emit(`${moving} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
-        emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx)`);
+        emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx, ptr ${at})`);
         emit(`${closed} = icmp eq i32 ${outcome}, 3`);
         panicIf(closed, "send on a closed channel", e);
       } else {
         const buffer = alloca(llvm(leaf.of));
-        emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx)`);
+        emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx, ptr ${at})`);
         // What it gives is an Option: the value, or empty once the channel is closed and drained.
         const [got, read, option] = [temp(), temp(), temp()];
         emit(`${got} = icmp eq i32 ${outcome}, 1`);

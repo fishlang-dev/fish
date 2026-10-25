@@ -308,3 +308,114 @@ async function main() {
   const xs = [1, 2];
   const r = await Promise.all(xs);
 }
+// case: promise_all_yield_alone
+// expect: done true
+async function main() {
+  const [x] = await Promise.all([yieldNow()]);
+  console.log("done", x === null);
+}
+// case: promise_void_array
+// expect: tick 10
+// expect: tick 20
+// expect: all done 2
+// expect: tick 5
+// expect: race done
+async function tick(ms: i64): Promise<void> {
+  await sleep(ms);
+  console.log("tick", ms);
+}
+async function main() {
+  let ps: Promise<void>[] = [];
+  ps.push(tick(20));
+  ps.push(tick(10));
+  const all = await Promise.all(ps);
+  console.log("all done", all.length);
+  let qs: Promise<void>[] = [];
+  qs.push(tick(30));
+  qs.push(tick(5));
+  await Promise.race(qs);
+  console.log("race done");
+}
+// case: promise_wait_same_channel
+// expect: 9 1 true
+async function sender(ch: Channel<i64>): Promise<i64> {
+  await sleep(100);
+  await ch.send(1);
+  return 0;
+}
+async function timed(ch: Ref<Channel<i64>>): Promise<i64> {
+  const r = await Promise.race([ch.receive(), sleep(20)]);
+  return 9;
+}
+async function main() {
+  const ch = new Channel<i64>(1);
+  const t = spawn(sender(ch.clone()));
+  const start = Date.now();
+  const [a, b] = await Promise.all([ch.receive(), timed(ch)]);
+  console.log(b, a!, Date.now() - start < 1000);
+  await t;
+}
+// case: promise_wait_same_semaphore
+// expect: 9 true
+async function holder(g: shared<{ gate: Semaphore }>): Promise<i64> {
+  const p = await g.gate.acquire();
+  await sleep(100);
+  return 0;
+}
+async function timed(g: Ref<shared<{ gate: Semaphore }>>): Promise<i64> {
+  const r = await Promise.race([g.gate.acquire(), sleep(20)]);
+  return 9;
+}
+async function main() {
+  const g = shared({ gate: new Semaphore(1) });
+  const t = spawn(holder(g.clone()));
+  await sleep(10);
+  const start = Date.now();
+  const [p, a] = await Promise.all([g.gate.acquire(), timed(g)]);
+  console.log(a, Date.now() - start < 1000);
+  await t;
+}
+// case: promise_wait_same_signal
+// expect: aborted true
+async function main() {
+  const c = new AbortController();
+  const s = c.signal;
+  const t = spawn(abortLater(c));
+  const start = Date.now();
+  try {
+    const [a, b] = await Promise.all([sleep(10, s), sleep(3000, s)]);
+    console.log("no abort");
+  } catch (e) {
+    console.log("aborted", Date.now() - start < 1000);
+  }
+  await t;
+}
+async function abortLater(c: AbortController): Promise<i64> {
+  await sleep(100);
+  c.abort();
+  return 0;
+}
+// case: promise_aborted_sleep_keeps_sibling
+// expect: f aborted
+// expect: done 1 true
+async function f(s: AbortSignal): Promise<i64> {
+  try {
+    await sleep(10, s);
+  } catch (e) {
+    console.log("f aborted");
+  }
+  return 1;
+}
+async function main() {
+  const c = new AbortController();
+  c.abort();
+  const start = Date.now();
+  const [a, b] = await Promise.all([sleep(100), f(c.signal)]);
+  console.log("done", b, Date.now() - start < 1000);
+}
+// case: promise_all_nested
+// error: 'Promise.all' can't be in another Promise's list; give it an async function of its own
+async function f(): Promise<i64> { return 1; }
+async function main() {
+  const [a, b] = await Promise.all([Promise.all([f()]), f()]);
+}

@@ -404,7 +404,8 @@ export const combinedOf = new WeakMap<FutureType, Combined>();
 
 export function combinedFuture(combined: Combined): FutureType {
   if (combined.array) {
-    const gives = promiseElement((combined.array.element as DynType).of)!;
+    const given = promiseElement((combined.array.element as DynType).of)!;
+    const gives: Type = given === "void" ? "null" : given;
     const frame: Field[] = [{ name: "state", type: "i32" }, { name: "futures", type: combined.array }, { name: "values", type: arrayType(gives) }, { name: "flags", type: arrayType("u8") }];
     const t: FutureType = { kind: "future", name: `Promise.${combined.kind}`, gives: combined.kind === "all" ? arrayType(gives) : gives, fields: [], params: [], frame, concrete: true };
     keys.set(t, `future ${declared++}`);

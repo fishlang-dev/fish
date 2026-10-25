@@ -3297,7 +3297,8 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {
 // Timers: a heap of deadlines, earliest first, and a thread that wakes each task when its
 // deadline passes. Each entry holds a reference to its task.
 // A timer wakes a sleeping task, or with a signal, aborts it for 'AbortSignal.timeout'.
-typedef struct { int64_t deadline; fsh_task *task; struct fsh_signal *signal; } fsh_timer;
+// A sleep's timer is tagged with the sleep's frame, so cancelling one leaves its task's others.
+typedef struct { int64_t deadline; fsh_task *task; struct fsh_signal *signal; void *tag; } fsh_timer;
 void fsh_rt_signal_abort(struct fsh_signal *s);
 void fsh_rt_signal_release(struct fsh_signal *s);
 static pthread_mutex_t fsh_timer_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -3319,14 +3320,14 @@ static void fsh_timer_swap(int64_t a, int64_t b) {
   fsh_timers[b] = t;
 }
 
-static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *signal) {
+static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *signal, void *tag) {
   pthread_mutex_lock(&fsh_timer_lock);
   if (fsh_timer_count == fsh_timer_capacity) {
     fsh_timer_capacity = fsh_timer_capacity ? fsh_timer_capacity * 2 : 64;
     fsh_timers = realloc(fsh_timers, fsh_timer_capacity * sizeof(fsh_timer));
   }
   int64_t at = fsh_timer_count++;
-  fsh_timers[at] = (fsh_timer){ deadline, task, signal };
+  fsh_timers[at] = (fsh_timer){ deadline, task, signal, tag };
   while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
@@ -3366,25 +3367,13 @@ static void fsh_timer_remove(int64_t at) {
   }
 }
 
-// An aborted sleep takes its timer off the heap, so it neither waits out its deadline holding the
-// task nor wakes it later.
+// An aborted or cancelled sleep takes its timer off the heap, so it neither waits out its deadline
+// holding the task nor wakes it later; one never polled has none.
 // ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
-void fsh_rt_sleep_leave(fsh_task *task) {
+void fsh_rt_sleep_cancel(fsh_task *task, void *frame) {
   pthread_mutex_lock(&fsh_timer_lock);
   int64_t at = 0;
-  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal)) at++;
-  if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
-  fsh_timer_remove(at);
-  pthread_mutex_unlock(&fsh_timer_lock);
-  fsh_task_release(task);
-}
-
-// A sleep cancelled where it waits takes one of its timers off the heap: one for its task at its
-// deadline, which another sleep of the task waiting as long would wake it for just the same.
-void fsh_rt_sleep_cancel(fsh_task *task, int64_t deadline) {
-  pthread_mutex_lock(&fsh_timer_lock);
-  int64_t at = 0;
-  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal || fsh_timers[at].deadline != deadline)) at++;
+  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].tag != frame)) at++;
   if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
   fsh_timer_remove(at);
   pthread_mutex_unlock(&fsh_timer_lock);
@@ -3431,17 +3420,17 @@ static void *fsh_timing(void *arg) {
 }
 
 // Polls a sleep, whose frame holds its state and first the delay in milliseconds, then its
-// deadline: done once the deadline has passed, and until then a timer wakes the task.
+// deadline: done once the deadline has passed, and until then its one timer, added at its first
+// poll and never firing early, wakes the task; a poll before then from another wake waits on.
 int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   int32_t *state = (int32_t *)frame;
   int64_t *deadline = frame + 1;
-  if (*state == 0) {
-    *state = 1;
-    int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
-    *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
-  } else if (fsh_now() >= *deadline) return 1;
+  if (*state != 0) return fsh_now() >= *deadline;
+  *state = 1;
+  int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
+  *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
-  fsh_timer_add(*deadline, task, NULL);
+  fsh_timer_add(*deadline, task, NULL, frame);
   return 0;
 }
 
@@ -3506,33 +3495,37 @@ int32_t fsh_rt_shared_release(int64_t *block) {
   return block && __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
-// Tasks waiting on a semaphore or a channel, oldest first, each holding a count on its task.
-typedef struct { fsh_task **tasks; int64_t count, capacity; } fsh_waiters;
+// Waits on a semaphore, a channel or a signal, oldest first, each holding a count on its task. A
+// task waits once for each of its futures waiting, which the tag tells apart: the future's frame,
+// or for a signal its waiting flag.
+typedef struct { fsh_task *task; void *tag; } fsh_waiter;
+typedef struct { fsh_waiter *tasks; int64_t count, capacity; } fsh_waiters;
 
-// A task already waiting stays where it is: a wake it didn't wait for, from a timer or an abort,
-// polls it again, and a second place in line would swallow a wake meant for the next task.
-static void fsh_wait_on(fsh_waiters *w, fsh_task *t) {
+// A future already waiting stays where it is: a wake it didn't wait for, from a timer, an abort
+// or another future of its task, polls it again, and a second place in line would swallow a wake
+// meant for the next.
+static void fsh_wait_on(fsh_waiters *w, fsh_task *t, void *tag) {
   for (int64_t i = 0; i < w->count; i++) {
-    if (w->tasks[i] == t) return;
+    if (w->tasks[i].task == t && w->tasks[i].tag == tag) return;
   }
   if (w->count == w->capacity) {
     int64_t capacity = w->capacity ? w->capacity * 2 : 4;
-    fsh_task **tasks = fsh_rt_alloc(capacity * sizeof(fsh_task *));
-    if (w->count) memcpy(tasks, w->tasks, w->count * sizeof(fsh_task *));
+    fsh_waiter *tasks = fsh_rt_alloc(capacity * sizeof(fsh_waiter));
+    if (w->count) memcpy(tasks, w->tasks, w->count * sizeof(fsh_waiter));
     fsh_rt_free(w->tasks);
     w->tasks = tasks;
     w->capacity = capacity;
   }
   __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
-  w->tasks[w->count++] = t;
+  w->tasks[w->count++] = (fsh_waiter){ t, tag };
 }
 
-// The oldest waiter, taken off the list, for the caller to wake once its lock is released.
+// The oldest waiter's task, taken off the list, for the caller to wake once its lock is released.
 // ponytail: O(n) removal from the front, a ring if waiter lists grow long
 static fsh_task *fsh_next_waiter(fsh_waiters *w) {
   if (w->count == 0) return NULL;
-  fsh_task *t = w->tasks[0];
-  memmove(w->tasks, w->tasks + 1, --w->count * sizeof(fsh_task *));
+  fsh_task *t = w->tasks[0].task;
+  memmove(w->tasks, w->tasks + 1, --w->count * sizeof(fsh_waiter));
   return t;
 }
 
@@ -3542,19 +3535,19 @@ static void fsh_wake_waiter(fsh_task *t) {
   fsh_task_release(t);
 }
 
-// Takes a task off a list it waits on, for the caller to release once its lock is released;
-// NULL when it isn't there, as when a wake already took it off.
-static fsh_task *fsh_unwait(fsh_waiters *w, fsh_task *t) {
+// Takes a future's wait off a list, for the caller to release its task once its lock is
+// released; NULL when it isn't there, as when a wake already took it off.
+static fsh_task *fsh_unwait(fsh_waiters *w, fsh_task *t, void *tag) {
   for (int64_t i = 0; i < w->count; i++) {
-    if (w->tasks[i] != t) continue;
-    memmove(w->tasks + i, w->tasks + i + 1, (--w->count - i) * sizeof(fsh_task *));
+    if (w->tasks[i].task != t || w->tasks[i].tag != tag) continue;
+    memmove(w->tasks + i, w->tasks + i + 1, (--w->count - i) * sizeof(fsh_waiter));
     return t;
   }
   return NULL;
 }
 
 static void fsh_waiters_free(fsh_waiters *w) {
-  for (int64_t i = 0; i < w->count; i++) fsh_task_release(w->tasks[i]);
+  for (int64_t i = 0; i < w->count; i++) fsh_task_release(w->tasks[i].task);
   fsh_rt_free(w->tasks);
 }
 
@@ -3594,11 +3587,11 @@ int64_t fsh_rt_semaphore_available(fsh_semaphore *s) {
 typedef struct { int64_t count; fsh_semaphore *semaphore; } fsh_permit;
 
 // Polls 'acquire()': takes a slot, giving a new Permit through out, or waits.
-int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **out) {
+int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **out, void *tag) {
   pthread_mutex_lock(&s->lock);
   int32_t taken = s->permits > 0;
   if (taken) s->permits--;
-  else fsh_wait_on(&s->waiting, task);
+  else fsh_wait_on(&s->waiting, task, tag);
   pthread_mutex_unlock(&s->lock);
   if (!taken) return 0;
   fsh_rt_block_retain(&s->count);
@@ -3611,9 +3604,9 @@ int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **
 
 // An aborted 'acquire' leaves the waiters. One a release already woke passes that wake on, so
 // the slot it would have taken isn't left with nobody coming for it.
-void fsh_rt_semaphore_leave(fsh_semaphore *s, fsh_task *task) {
+void fsh_rt_semaphore_leave(fsh_semaphore *s, fsh_task *task, void *tag) {
   pthread_mutex_lock(&s->lock);
-  fsh_task *mine = fsh_unwait(&s->waiting, task);
+  fsh_task *mine = fsh_unwait(&s->waiting, task, tag);
   fsh_task *next = !mine && s->permits > 0 ? fsh_next_waiter(&s->waiting) : NULL;
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
@@ -3672,14 +3665,14 @@ void fsh_rt_channel_release(fsh_channel *c) {
 
 // Polls 'send(v)': moves the value in, leaving its slot empty, and wakes a receiver; or waits
 // while the ring is full. 3 when the channel is closed, for the caller's panic.
-int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task) {
+int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task, void *tag) {
   pthread_mutex_lock(&c->lock);
   if (c->closed) {
     pthread_mutex_unlock(&c->lock);
     return 3;
   }
   if (c->length == c->capacity) {
-    fsh_wait_on(&c->senders, task);
+    fsh_wait_on(&c->senders, task, tag);
     pthread_mutex_unlock(&c->lock);
     return 0;
   }
@@ -3694,12 +3687,12 @@ int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task) {
 
 // Polls 'receive()': moves the oldest value out and wakes a sender, gives 2 with nothing once
 // the channel is closed and empty, or waits.
-int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task) {
+int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task, void *tag) {
   pthread_mutex_lock(&c->lock);
   if (c->length == 0) {
     int32_t closed = c->closed;
     if (closed) memset(out, 0, c->size);
-    else fsh_wait_on(&c->receivers, task);
+    else fsh_wait_on(&c->receivers, task, tag);
     pthread_mutex_unlock(&c->lock);
     return closed ? 2 : 0;
   }
@@ -3713,10 +3706,10 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task) {
 }
 
 // An aborted 'send' or 'receive' leaves the waiters, passing on a wake it already took.
-void fsh_rt_channel_leave(fsh_channel *c, fsh_task *task) {
+void fsh_rt_channel_leave(fsh_channel *c, fsh_task *task, void *tag) {
   pthread_mutex_lock(&c->lock);
-  fsh_task *mine = fsh_unwait(&c->receivers, task);
-  if (!mine) mine = fsh_unwait(&c->senders, task);
+  fsh_task *mine = fsh_unwait(&c->receivers, task, tag);
+  if (!mine) mine = fsh_unwait(&c->senders, task, tag);
   fsh_task *receiver = !mine && c->length > 0 ? fsh_next_waiter(&c->receivers) : NULL;
   fsh_task *sender = !mine && c->length < c->capacity ? fsh_next_waiter(&c->senders) : NULL;
   pthread_mutex_unlock(&c->lock);
@@ -3733,8 +3726,8 @@ void fsh_rt_channel_close(fsh_channel *c) {
   fsh_waiters senders = c->senders, receivers = c->receivers;
   c->senders = c->receivers = (fsh_waiters){ NULL, 0, 0 };
   pthread_mutex_unlock(&c->lock);
-  for (int64_t i = 0; i < senders.count; i++) fsh_wake_waiter(senders.tasks[i]);
-  for (int64_t i = 0; i < receivers.count; i++) fsh_wake_waiter(receivers.tasks[i]);
+  for (int64_t i = 0; i < senders.count; i++) fsh_wake_waiter(senders.tasks[i].task);
+  for (int64_t i = 0; i < receivers.count; i++) fsh_wake_waiter(receivers.tasks[i].task);
   fsh_rt_free(senders.tasks);
   fsh_rt_free(receivers.tasks);
 }
@@ -3769,7 +3762,7 @@ int32_t fsh_rt_signal_enter(fsh_signal *s, int32_t *waiting, fsh_task *task) {
   pthread_mutex_lock(&s->lock);
   int32_t aborted = s->aborted;
   if (!aborted && !*waiting) {
-    fsh_wait_on(&s->waiting, task);
+    fsh_wait_on(&s->waiting, task, waiting);
     *waiting = 1;
   }
   pthread_mutex_unlock(&s->lock);
@@ -3781,7 +3774,7 @@ void fsh_rt_signal_leave(fsh_signal *s, int32_t *waiting, fsh_task *task) {
   if (!*waiting) return;
   *waiting = 0;
   pthread_mutex_lock(&s->lock);
-  fsh_task *mine = fsh_unwait(&s->waiting, task);
+  fsh_task *mine = fsh_unwait(&s->waiting, task, waiting);
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
 }
@@ -3793,7 +3786,7 @@ fsh_signal *fsh_rt_signal_timeout(int64_t ms) {
   s->count = 2;
   int64_t now = fsh_now();
   ms = ms > 0 ? ms : 0;
-  fsh_timer_add(ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000, NULL, s);
+  fsh_timer_add(ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000, NULL, s, NULL);
   return s;
 }
 
@@ -3804,7 +3797,7 @@ void fsh_rt_signal_abort(fsh_signal *s) {
   fsh_waiters waiting = s->waiting;
   s->waiting = (fsh_waiters){ NULL, 0, 0 };
   pthread_mutex_unlock(&s->lock);
-  for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i]);
+  for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i].task);
   fsh_rt_free(waiting.tasks);
 }
 
