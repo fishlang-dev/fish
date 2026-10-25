@@ -448,8 +448,9 @@ export function expressions(ctx: Context) {
     // that type gives it: an arrow calling it, its parameters typed from there.
     if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
-    // A `new Promise` meeting a `Promise<T>` takes its T from there.
-    if (e.kind === "new" && typeof t !== "string" && (t?.kind === "dyn" || t?.kind === "interface") && promiseElement(t.kind === "dyn" ? t.of : t) !== undefined) wanted.set(e, t);
+    // A `new Promise` or `Promise.reject` meeting a `Promise<T>` takes its T from there.
+    const promises = e.kind === "new" || (e.kind === "call" && e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Promise");
+    if (promises && typeof t !== "string" && (t?.kind === "dyn" || t?.kind === "interface") && promiseElement(t.kind === "dyn" ? t.of : t) !== undefined) wanted.set(e, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
     const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
@@ -903,6 +904,10 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && !lookup("Promise") && !classes.has("Promise")) {
       return combined(e, callee.name as Combiner);
+    }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && (callee.name === "resolve" || callee.name === "reject") && !lookup("Promise") && !classes.has("Promise")) {
+      promiseSettled(e, callee.name);
+      return call(e);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalTimeout(e, callee);
@@ -2685,6 +2690,31 @@ export function expressions(ctx: Context) {
     const at = { start: e.start, end: e.end };
     const cell: Expr = { kind: "call", callee: { kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
     Object.assign(e, { kind: "call", callee: { kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
+  }
+
+  // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
+  // giving v or throwing e. A rejected one gives the T it is written with or meets, or nothing.
+  function promiseSettled(e: Call, name: "resolve" | "reject") {
+    const at = { start: e.start, end: e.end };
+    if (e.args.length > 1 || e.args[0]?.kind === "spread") throw new CompileError(`'Promise.${name}' takes ${name === "resolve" ? "the value it gives" : "the error it throws"}`, e.start, e.end);
+    if (e.typeArgs.length > 1) throw new CompileError(`'Promise.${name}' takes one type argument, what it gives`, e.start, e.end);
+    if (name === "resolve") {
+      const nothing = e.args.length === 0 || (e.typeArgs[0] && resolveType(e.typeArgs[0]) === "void");
+      if (nothing && e.args.length > 0) throw new CompileError("a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
+      Object.assign(e, { callee: { kind: "ident", name: nothing ? "promise resolve void" : "promise resolve", ...at }, typeArgs: nothing ? [] : e.typeArgs });
+      return;
+    }
+    if (e.args.length === 0) throw new CompileError("'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
+    const expected = wanted.get(e);
+    const met = typeof expected !== "string" && (expected?.kind === "dyn" || expected?.kind === "interface") ? promiseElement(expected.kind === "dyn" ? expected.of : expected) : undefined;
+    const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : met ?? "void";
+    const node = (t: Type): TypeNode => {
+      const made: TypeNode = { kind: "ref", name: show(t), args: [], ...at };
+      presetTypes.set(made, t);
+      return made;
+    };
+    const reason = value(e.args[0]!);
+    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [node(gives)]), node(widenLet(reason))] });
   }
 
   // The std `AbortError` class, which aborted work throws.

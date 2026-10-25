@@ -85,3 +85,43 @@ async function main() { const x = await new Promise<i64>((res, rej: string) => {
 // case: promise_new_resolve_type
 // error: argument of type '"s"' is not assignable to parameter of type 'i64'
 async function main() { const x = await new Promise<i64>((res) => { res("s"); }); }
+// case: promise_resolve_reject
+// expect: 5 str
+// expect: rejected
+// expect: typed
+// expect: 1 two
+// expect: 3
+// expect: no
+async function main(): Promise<void> throws Error {
+  const a = await Promise.resolve(5);
+  const s = await Promise.resolve<string>("str");
+  await Promise.resolve();
+  console.log(a, s);
+  try {
+    await Promise.reject(new Error("rejected"));
+  } catch (e) {
+    console.log(e.message);
+  }
+  try {
+    const n = await Promise.reject<i64>(new Error("typed"));
+    console.log(n);
+  } catch (e) {
+    console.log(e.message);
+  }
+  const all = await Promise.all([Promise.resolve(1), Promise.resolve("two")]);
+  console.log(all[0], all[1]);
+  const settled = await Promise.allSettled([Promise.resolve(3), Promise.reject<i64>(new Error("no"))]);
+  const [x, y] = settled;
+  if (x.status === "fulfilled") console.log(x.value);
+  if (y.status === "rejected") console.log(y.reason.message);
+}
+// case: promise_reject_nothing
+// error: 'Promise.reject' takes the error it throws
+async function main() { await Promise.reject(); }
+// case: promise_resolve_void_value
+// error: a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it
+async function main() { await Promise.resolve<void>(1); }
+// case: promise_reject_stored
+// error: a stored 'Promise<i64>' can't throw yet
+function f(): Promise<i64> { return Promise.reject(new Error("x")); }
+function main() {}

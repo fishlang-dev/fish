@@ -131,6 +131,11 @@ async function __promiseAwaitResolveVoid(cell: Channel<boolean>): Promise<void> 
     if (got !== null) return;
   }
 }
+// Promise.resolve(v) and Promise.reject(e).
+async function __promiseResolve<T>(value: T): Promise<T> { return value; }
+async function __promiseResolveVoid(): Promise<void> {}
+async function __promiseReject<T, E>(reason: E): Promise<T> throws E { throw reason; }
+async function __promiseRejectVoid<E>(reason: E): Promise<void> throws E { throw reason; }
 class ParseArgsError {
   message: string;
   code: string;
