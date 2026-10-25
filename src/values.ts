@@ -191,6 +191,27 @@ export const syncFileCalls = new WeakMap<Expr, string>();
 export const printCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
+
+// What a literal format does with the arguments after it, as the runtime's routine reads it:
+// the specifier each one it takes is given to, and where those left, appended, start.
+export function formatPlan(format: string, count: number): { specs: string[]; rest: number } {
+  const specs: string[] = [];
+  let taken = 0;
+  let last = 0;
+  for (let i = 0; i < format.length - 1; i++) {
+    if (format[i] !== "%") continue;
+    const next = format[++i]!;
+    if (next === "%") {
+      last = i + 1;
+      continue;
+    }
+    if (taken + 1 === count || !"sdifoOcj".includes(next)) continue;
+    specs.push(next);
+    taken++;
+    last = i + 1;
+  }
+  return { specs, rest: last === 0 ? 0 : taken + 1 };
+}
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
@@ -835,6 +856,7 @@ export function expressions(ctx: Context) {
       if (e.optional || (callee.kind === "member" && callee.optional)) throw new CompileError(`'${printer}' is always there, so it is called without '?.'`, e.start, e.end);
       printCalls.add(e);
       shown(e.args);
+      unformattable(e.args);
       return { type: "void", what: "printing" };
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
@@ -1095,6 +1117,7 @@ export function expressions(ctx: Context) {
       if (e.optional) throw new CompileError("'format' is always there, so it is called without '?.'", e.start, e.end);
       refuseSpread(e.args);
       shown(e.args);
+      unformattable(e.args);
       formatCalls.add(e);
       return { type: "string", what: "'format'" };
     }
@@ -3553,6 +3576,13 @@ export function expressions(ctx: Context) {
       if (!part) continue;
       throw new CompileError(typeof part !== "string" && (part.kind === "function" || part.kind === "closure" || part.kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
     }
+  }
+
+  // `%j`, JSON, in a literal format, where it would take an argument.
+  function unformattable(args: Expr[]) {
+    const [first] = args;
+    if (first?.kind !== "string" || args.length < 2 || !formatPlan(first.value, args.length).specs.includes("j")) return;
+    throw new CompileError("'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead", first.start, first.end);
   }
 
   function joined(e: Expr, type: Type, into: string) {

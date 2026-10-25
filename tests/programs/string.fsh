@@ -792,11 +792,13 @@ function main() {
 // case: string_print_format
 function main() {
   const s: string = "50% %d %s";
+  console.log("as text:", s, "100%");
   console.log(s, "100%");
   const z: string = "a\0b";
   console.log(z === "a\0b", z === "a");
 }
-// expect: 50% %d %s 100%
+// expect: as text: 50% %d %s 100%
+// expect: 50% NaN %s
 // expect: true false
 // case: string_raise_drops
 type P = { a: string; b: i64 };

@@ -17,14 +17,15 @@ function compare(name: string, imports: string, declarations: string, body: stri
   const untyped = (s: string) => s.replace(/: (i64|f64|string|boolean)(\[\])?( \| (i64|f64|string|null))*/g, "");
   const script = `${imports.replaceAll(/import (.*) from "(.*)";/g, (_, what: string, from: string) => `const ${what.startsWith("* as ") ? what.slice(5) : what} = require("${from}");`)}\n${untyped(declarations)}\n${untyped(body)}`;
   const node = Bun.spawnSync(["node", "-e", script]);
-  expect(fish.stderr.toString()).toBe("");
-  expect(node.stderr.toString()).toBe("");
+  expect(fish.stderr.toString()).toBe(node.stderr.toString());
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
 }
 
-test("format with a format string read at run time gives what node's gives", () => {
-  compare("format", `import { format } from "node:util";\nimport * as util from "util";`, `class P { x: i64 = 1; y: i64[] = [1, 2]; }`, `
-  const fmt: string = "%s|%d|%i|%f|%o|%O|%c|%%|%x|%";
+const IMPORTS = `import { format } from "node:util";\nimport * as util from "util";`;
+const P = `class P { x: i64 = 1; y: i64[] = [1, 2]; }`;
+
+// Every specifier over each kind of value, the format given as `fmt`.
+const CASES = `
   console.log(format(fmt, "a", 1, 2, 3, "s", "t", "css", 9));
   console.log(format(fmt, { a: { b: 1 } }, "42", "0x10", "1.5e3x", [1, 2], { a: { b: { c: { d: 1 } } } }, 1));
   console.log(format(fmt, [1, [2, [3]]], true, -0.5, true, new P(), new P(), 2));
@@ -38,5 +39,28 @@ test("format with a format string read at run time gives what node's gives", () 
   const w: i64 | string = "w";
   for (const s of [util.format("%s %d %s %s", u, w, "x"), format(1, "a", { b: "c" }), format("x", "y", 3), format("100%%"), format("%s")]) console.log(s);
   for (const s of [format("%s:%s", "only"), format("%d", 1.5), format("%i", 1e21), format("%s", 0.1 + 0.2), format("a%", 1), format("%%%s%%", "p")]) console.log(s);
-  for (const s of [format("%o", "multi\\nline string that is long enough to break across lines when inspected"), format("%s", "€%s"), format("€%sé", 1)]) console.log(s);`);
+  for (const s of [format("%o", "multi\\nline string that is long enough to break across lines when inspected"), format("%s", "€%s"), format("€%sé", 1)]) console.log(s);`;
+
+test("format with a format string read at run time gives what node's gives", () => {
+  compare("format", IMPORTS, P, `\n  const fmt: string = "%s|%d|%i|%f|%o|%O|%c|%%|%x|%";${CASES}`);
+});
+
+test("format with a literal format gives what node's gives", () => {
+  compare("literal", IMPORTS, P, CASES.replaceAll("format(fmt, ", `format("%s|%d|%i|%f|%o|%O|%c|%%|%x|%", `));
+});
+
+test("console.log, console.error and print format their first argument as node's console does", () => {
+  compare("console", "", P, `
+  const fmt: string = "%s-%d";
+  const xs = [1, 2, 3];
+  console.log("%s has %d items: %o", "xs", xs.length, xs);
+  console.log(fmt, "a", 1, "and", { b: [2] });
+  console.log("100%%");
+  console.log("100%%", "done");
+  console.log("%s", "a", "b", { x: "y" });
+  console.log("no specifiers", 1, "two", new P());
+  console.log(1, "%s", 2);
+  console.log("%c%s", "color: red", "styled");
+  console.error("%s to stderr %i", "written", 4.7);
+  console.log(xs.length);`);
 });

@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, formatPlan, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -2877,16 +2877,49 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function formatted(e: Extract<Expr, { kind: "call" }>): string {
     const n = e.args.length;
     const slots = alloca(`[${n} x ${FARG}]`);
+    const needs = formatNeeds(e.args);
     e.args.forEach((a, i) => {
       const v = a.kind === "string" ? text(a.value) : operand(a, e.args.slice(i + 1));
       const at = temp();
       emit(`${at} = getelementptr [${n} x ${FARG}], ptr ${slots}, i32 0, i32 ${i}`);
-      describe(at, v, a.kind === "string" ? "string" : (current.spelled?.get(a) ?? valueType(a)), { text: true, depth: 4 });
+      describe(at, v, printedType(a), needs[i]!);
     });
     const result = temp();
     emit(`${result} = call ptr @fsh_rt_format(ptr ${slots}, i64 ${n})`);
     if (!types.has(e)) pending.push({ v: result, type: "string" });
     return result;
+  }
+
+  function printedType(a: Expr): Type {
+    return a.kind === "string" ? "string" : (current.spelled?.get(a) ?? valueType(a));
+  }
+
+  // Whether a first argument may be a format, a string with more arguments after it, as Node
+  // formats one: a literal holding a percent sign, or a string known only at run time.
+  function formats(args: Expr[]): boolean {
+    const [first] = args;
+    if (!first || args.length < 2) return false;
+    if (first.kind === "string") return first.value.includes("%");
+    const t = lower(printedType(first));
+    const text = (m: Type) => m === "string" || (typeof m !== "string" && m.kind === "literal" && typeof m.value === "string");
+    return text(t) || (typeof t !== "string" && t.kind === "union" && t.members.some(text));
+  }
+
+  // What each argument's description needs: a literal format says which specifier takes each,
+  // so only that is built; one read at run time may ask anything of any.
+  function formatNeeds(args: Expr[]): { text: boolean; depth: number }[] {
+    const [first] = args;
+    if (first?.kind !== "string" || args.length < 2) {
+      const inspected = !formats(args);
+      return args.map(() => (inspected ? { text: false, depth: 2 } : { text: true, depth: 4 }));
+    }
+    const { specs, rest } = formatPlan(first.value, args.length);
+    const DEPTHS: Record<string, number> = { s: 0, O: 2, o: 4 };
+    return args.map((_, i) => {
+      if (i === 0 || i >= rest) return { text: false, depth: 2 };
+      const spec = specs[i - 1]!;
+      return { text: "dif".includes(spec), depth: DEPTHS[spec] ?? -1 };
+    });
   }
 
   // An argument's description: its kind and value, and for a value with parts its String(x) when
@@ -5221,6 +5254,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(e);
     if (!target) {
       if (formatCalls.has(e)) return formatted(e);
+      // A print whose first argument may be a format prints what format gives.
+      if (printCalls.has(e) && formats(e.args)) {
+        const line = formatted(e);
+        // The statement releases the line, as it does a format call's value it drops.
+        write(printStream(e.callee), [[line, "string"]], builder, convert);
+        return undefined;
+      }
       if (printCalls.has(e)) {
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert, printStream(e.callee));
         return undefined;
