@@ -459,3 +459,32 @@ function main() {
   console.log(t("{\"f\":\"c\"}"));
   console.log(t("{\"f\": \"c\"}"));
 }
+// case: json_kind_narrowing
+// expect: number 1.5
+// expect: array of 2
+// expect: map of 1
+// expect: set of 2
+// expect: null
+// expect: array p,q scalar scalar
+type V = f64 | string[] | Map<string, i64> | Set<i64> | null;
+function describe(v: Ref<V>): string {
+  if (v === null) return "null";
+  if (typeof v === "number") return "number " + String(v);
+  if (Array.isArray(v)) return "array of " + String(v.length);
+  if (v instanceof Set) return "set of " + String(v.size);
+  if (v instanceof Map) return "map of " + String(v.size);
+  return "never";
+}
+function owned(v: V): string {
+  return v instanceof Array ? "array " + v.join(",") : typeof v === "object" ? "object-ish" : "scalar";
+}
+function main() {
+  let m = new Map<string, i64>();
+  m.set("a", 1);
+  let s = new Set<i64>();
+  s.add(1);
+  s.add(2);
+  const vs: V[] = [1.5, ["x", "y"], m, s, null];
+  for (const v of vs) console.log(describe(v));
+  console.log(owned(["p", "q"]), owned(null), owned(2));
+}
