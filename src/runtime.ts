@@ -98,6 +98,7 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_channel_send(ptr, ptr, ptr, ptr)",
   "declare i32 @fsh_rt_channel_receive(ptr, ptr, ptr, ptr)",
   "declare void @fsh_rt_channel_close(ptr)",
+  "declare i32 @fsh_rt_channel_settle(ptr, ptr)",
   "declare ptr @fsh_rt_signal_new()",
   "declare void @fsh_rt_signal_release(ptr)",
   "declare i32 @fsh_rt_signal_aborted(ptr)",

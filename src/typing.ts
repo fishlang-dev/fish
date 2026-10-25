@@ -1181,6 +1181,12 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     }
     return made;
   }
+  // A stored callable is remade from the function type it was written as.
+  const fn = typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined;
+  if (fn) {
+    const made = replaced(fn, swap);
+    return made === fn ? t : callableType(made as FunctionType);
+  }
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
   if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), replaced(t.value, swap), t.set);
@@ -1418,7 +1424,7 @@ export function fits(from: Type, to: Type): boolean {
     // A stored callable's call passes all its parameters, so it takes exactly as many.
     if (callable && typeof sig !== "string" && sig.kind === "function" && sig.params.length !== to.params.length) return false;
     return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
-      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
+      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!) || sameCallable(p, to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
   }
   if (typeof from !== "string" && from.kind === "ref") return false;
   // A tuple fits only a tuple of its length, element by element.

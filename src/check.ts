@@ -1036,6 +1036,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
         }
       },
       errorOf,
+      throwsDeclared: () => instance.throws,
       thrown,
       noteThis,
       closing: f.closure !== undefined,

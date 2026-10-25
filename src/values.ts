@@ -6,7 +6,7 @@ import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
@@ -132,6 +132,8 @@ export type Context = {
   // Checks what a `throw` raises.
   thrown(at: Expr, value: Expr): void;
   errorOf(instance: Instance): Type | undefined;
+  // What the body's function declares it throws.
+  throwsDeclared(): Type | undefined;
   // Whether a binding stands for a variable a closure captures, and whether this is a closure;
   // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
@@ -446,6 +448,8 @@ export function expressions(ctx: Context) {
     // that type gives it: an arrow calling it, its parameters typed from there.
     if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    // A `new Promise` meeting a `Promise<T>` takes its T from there.
+    if (e.kind === "new" && typeof t !== "string" && (t?.kind === "dyn" || t?.kind === "interface") && promiseElement(t.kind === "dyn" ? t.of : t) !== undefined) wanted.set(e, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
     const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
@@ -2560,7 +2564,7 @@ export function expressions(ctx: Context) {
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
-    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0 }
+    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
       : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
@@ -2572,7 +2576,8 @@ export function expressions(ctx: Context) {
     const signalled = waits && e.args.length === methods[callee.name]! + 1;
     if (e.args.length !== methods[callee.name] && !signalled) throw new CompileError(`'${callee.name}' takes ${methods[callee.name] === 1 ? "1 argument" : "no arguments"}${waits ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
     if (signalled) signalArgument(e.args.at(-1)!, `'${callee.name}'`);
-    if (callee.name === "send") {
+    // The std's own non-waiting send, which a promise's resolve and reject make.
+    if (callee.name === "send" || callee.name === "settle") {
       const of = lower(t.of);
       expect(e.args[0]!, of);
       const given = value(e.args[0]!);
@@ -2593,7 +2598,7 @@ export function expressions(ctx: Context) {
       raise(e, abortError(), "'throwIfAborted'");
       return { type: "void", what: "'throwIfAborted'" };
     }
-    if (callee.name === "close") return { type: "void", what: "'close'" };
+    if (callee.name === "close" || callee.name === "settle") return { type: "void", what: `'${callee.name}'` };
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
@@ -2644,6 +2649,42 @@ export function expressions(ctx: Context) {
     const signal = blockType("AbortSignal");
     const given = value(a);
     coerce(a, given, refType(signal, false), `${what} takes an 'AbortSignal' to stop waiting early, not '${show(given)}'`);
+  }
+
+  // `new Promise<T>(executor)`, rewritten as the prelude's cell its executor settles, awaited.
+  // T is written or the `Promise<T>` it meets; reject's error is its annotation's, or what the
+  // function declares it throws, or `Error`.
+  function promiseNew(e: Extract<Expr, { kind: "new" }>, list: Expr[]) {
+    const example = "as in 'new Promise<i64>((resolve, reject) => resolve(1))'";
+    if (list.length !== 1 || list[0]!.kind === "spread") throw new CompileError(`'new Promise' takes one executor, ${example}`, e.start, e.end);
+    if (e.typeArgs.length > 1) throw new CompileError("'Promise' takes one type argument, what it gives", e.start, e.end);
+    const executor = list[0]!;
+    const expected = wanted.get(e);
+    // A stored `Promise<T>`, or one a parameter takes, gives its T and can't throw.
+    const stored = typeof expected !== "string" && (expected?.kind === "dyn" || expected?.kind === "interface") ? promiseElement(expected.kind === "dyn" ? expected.of : expected) : undefined;
+    const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : stored;
+    if (gives === undefined) throw new CompileError(`can't tell what this Promise gives; write it, ${example}, since Fish has no 'unknown'`, e.start, e.end);
+    const declared = executor.kind === "arrow" ? executor.params : executor.kind === "ident" && !lookup(executor.name) ? byName.get(executor.name)?.params : undefined;
+    const held = declared === undefined ? lower(value(executor)) : undefined;
+    const fn = typeof held !== "string" && (held?.kind === "closure" || held?.kind === "function") ? held : held !== undefined && isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
+    if (declared === undefined && fn === undefined) throw new CompileError(`'new Promise' takes an executor, a function given 'resolve' and 'reject', ${example}; not '${show(held!)}'`, executor.start, executor.end);
+    const takes = declared?.length ?? fn!.params.length;
+    const rejects = takes >= 2;
+    if (rejects && stored !== undefined) throw new CompileError(`a Promise stored as a '${show(expected!)}' can't throw yet, so its executor can't take 'reject'; await it where it is made, or resolve it with a value saying it failed`, executor.start, executor.end);
+    const annotated = executor.kind === "arrow" ? executor.params[1]?.type : undefined;
+    const reason = annotated ? resolveType(annotated) : undefined;
+    if (reason !== undefined && (typeof reason === "string" || reason.kind !== "function" || reason.params.length !== 1)) throw new CompileError(`'reject' takes the error it fails with, as in 'reject: (reason: Error) => void', not '${show(reason)}'`, annotated!.start, annotated!.end);
+    const error = reason !== undefined ? (reason as FunctionType).params[0]! : ctx.throwsDeclared() ?? classes.get("Error")!.type;
+    const node = (t: Type): TypeNode => {
+      const made: TypeNode = { kind: "ref", name: show(t), args: [], start: e.start, end: e.end };
+      presetTypes.set(made, t);
+      return made;
+    };
+    const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
+    const typeArgs = [...(gives === "void" ? [] : [node(gives)]), ...(rejects ? [node(error)] : [])];
+    const at = { start: e.start, end: e.end };
+    const cell: Expr = { kind: "call", callee: { kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
+    Object.assign(e, { kind: "call", callee: { kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
   }
 
   // The std `AbortError` class, which aborted work throws.
@@ -3465,6 +3506,10 @@ export function expressions(ctx: Context) {
           return blockNew(e, e.callee.name, list);
         }
         if (e.callee.kind === "ident" && (e.callee.name === "Map" || e.callee.name === "Set") && !lookup(e.callee.name)) return mapNew(e, e.callee.name === "Set", list);
+        if (e.callee.kind === "ident" && e.callee.name === "Promise" && !lookup("Promise") && !classes.has("Promise")) {
+          promiseNew(e, list);
+          return typeOf(e);
+        }
         if (e.callee.kind === "ident" && e.callee.name === "RegExp" && !lookup("RegExp") && !classes.has("RegExp")) return regexNew(e, list);
         if (e.callee.kind === "ident" && e.callee.name === "AbortController" && !lookup(e.callee.name) && !classes.has(e.callee.name)) {
           if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("'AbortController' takes no arguments", e.start, e.end);

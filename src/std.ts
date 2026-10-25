@@ -70,6 +70,67 @@ class AggregateError<E> {
   errors: E[];
   constructor(errors: E[]) { this.errors = errors; }
 }
+// new Promise(executor): the executor runs now, given callables that settle a one-value cell,
+// which the promise awaits. The first settle closes the cell, so a later one is dropped. A cell
+// never settled is never closed, so its promise waits forever, as JavaScript's does.
+function __promiseCell<T, E>(executor: (resolve: (value: T) => void, reject: (reason: E) => void) => void): Channel<{ ok: true; value: T } | { ok: false; reason: E }> {
+  const cell = new Channel<{ ok: true; value: T } | { ok: false; reason: E }>(1);
+  const resolved = cell.clone();
+  const rejected = cell.clone();
+  executor((value) => { resolved.settle({ ok: true, value }); }, (reason) => { rejected.settle({ ok: false, reason }); });
+  return cell;
+}
+async function __promiseAwait<T, E>(cell: Channel<{ ok: true; value: T } | { ok: false; reason: E }>): Promise<T> throws E {
+  // Never empty: the cell closes holding its value.
+  while (true) {
+    const got = await cell.receive();
+    if (got !== null) {
+      if (got.ok === true) return got.value;
+      throw got.reason;
+    }
+  }
+}
+function __promiseCellVoid<E>(executor: (resolve: () => void, reject: (reason: E) => void) => void): Channel<{ ok: true } | { ok: false; reason: E }> {
+  const cell = new Channel<{ ok: true } | { ok: false; reason: E }>(1);
+  const resolved = cell.clone();
+  const rejected = cell.clone();
+  executor(() => { resolved.settle({ ok: true }); }, (reason) => { rejected.settle({ ok: false, reason }); });
+  return cell;
+}
+async function __promiseAwaitVoid<E>(cell: Channel<{ ok: true } | { ok: false; reason: E }>): Promise<void> throws E {
+  while (true) {
+    const got = await cell.receive();
+    if (got !== null) {
+      if (got.ok === true) return;
+      throw got.reason;
+    }
+  }
+}
+// One whose executor takes no reject can't fail, so it may be stored as a Promise<T>.
+function __promiseCellResolve<T>(executor: (resolve: (value: T) => void) => void): Channel<T> {
+  const cell = new Channel<T>(1);
+  const resolved = cell.clone();
+  executor((value) => { resolved.settle(value); });
+  return cell;
+}
+async function __promiseAwaitResolve<T>(cell: Channel<T>): Promise<T> {
+  while (true) {
+    const got = await cell.receive();
+    if (got !== null) return got;
+  }
+}
+function __promiseCellResolveVoid(executor: (resolve: () => void) => void): Channel<boolean> {
+  const cell = new Channel<boolean>(1);
+  const resolved = cell.clone();
+  executor(() => { resolved.settle(true); });
+  return cell;
+}
+async function __promiseAwaitResolveVoid(cell: Channel<boolean>): Promise<void> {
+  while (true) {
+    const got = await cell.receive();
+    if (got !== null) return;
+  }
+}
 class ParseArgsError {
   message: string;
   code: string;
@@ -1319,8 +1380,9 @@ export const STD_FILE = "<fish std>";
 export function stdFor(written: Stmt[]): Stmt[] {
   const all = parse(STD_SOURCE);
   shiftSpans(all, STD_BASE);
-  // The array iterators' generators take names no program can write, so none hides them.
-  for (const s of all) if (s.kind === "function" && s.name.startsWith("__array")) s.name = `array ${s.name.slice("__array".length).toLowerCase()}`;
+  // The array iterators' generators and the promise cells take names no program can write, so
+  // none hides them.
+  for (const s of all) if (s.kind === "function" && /^__(array|promise)/.test(s.name)) s.name = s.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   const at = (s: Stmt) => s.start - STD_BASE;
   const prelude = all.filter((s) => at(s) < PRELUDE.length);
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);

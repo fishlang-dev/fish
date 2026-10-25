@@ -30,6 +30,9 @@ export function paramName(p: Param): string {
 }
 
 // The classes every program's prelude declares.
+// Type nodes the checker makes for a type it already knows, as a rewritten call's type arguments.
+export const presetTypes = new WeakMap<TypeNode, Type>();
+
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
 
 export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
@@ -265,6 +268,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
 
   function resolveType(t: TypeNode): Type {
+    const preset = presetTypes.get(t);
+    if (preset !== undefined) return preset;
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
     if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);

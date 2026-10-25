@@ -1152,6 +1152,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       startBlock(fine);
       return undefined;
     }
+    // A settle the cell no longer takes leaves its value here to drop.
+    if (callee.name === "settle") {
+      const of = lower(t.of);
+      const [slot, taken, kept, drop, done] = [alloca(llvm(of)), temp(), temp(), label(), label()];
+      emit(`store ${llvm(of)} ${owned(e.args[0]!)}, ptr ${slot}`);
+      emit(`${taken} = call i32 @fsh_rt_channel_settle(ptr ${handle}, ptr ${slot})`);
+      const no = temp();
+      emit(`${no} = icmp eq i32 ${taken}, 0`);
+      emit(`br i1 ${no}, label %${drop}, label %${done}`);
+      startBlock(drop);
+      emit(`${kept} = load ${llvm(of)}, ptr ${slot}`);
+      dispose(kept, of);
+      emit(`br label %${done}`);
+      startBlock(done);
+      return undefined;
+    }
     if (callee.name === "available" || callee.name === "close") {
       const result = temp();
       if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
