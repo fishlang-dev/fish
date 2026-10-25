@@ -2936,7 +2936,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A literal type's value, read as its base and checked; the error points at where it starts.
   function readLiteral(r: string, t: LiteralType): string {
-    const mark = alloca("[3 x i64]");
+    const [mark, start] = [alloca("[3 x i64]"), temp()];
+    emit(`${start} = call i32 @fsh_rt_json_peek(ptr ${r})`);
     emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
     const what = typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
     const base = typeof t.value === "string" ? "string" : typeof t.value === "boolean" ? "boolean" : "i64";

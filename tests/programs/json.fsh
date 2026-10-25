@@ -443,3 +443,19 @@ function main() {
     console.log(e.message);
   }
 }
+// case: json_parse_literal_union
+// expect: expected "a" | "b" at $.f
+// expect: expected "a" | "b" at $.f
+type F = { f: "a" | "b" };
+function t(s: string): string {
+  try {
+    JSON.parse<F>(s);
+    return "ok";
+  } catch (e) {
+    return e.message;
+  }
+}
+function main() {
+  console.log(t("{\"f\":\"c\"}"));
+  console.log(t("{\"f\": \"c\"}"));
+}
