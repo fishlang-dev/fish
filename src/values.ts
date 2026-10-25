@@ -8,7 +8,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -213,6 +213,12 @@ export const formatCalls = new WeakSet<Expr>();
 // The ways several Promises are awaited at once.
 type Combiner = "all" | "race" | "allSettled" | "any";
 const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
+// The timer calls written in a program, rewritten into the std's own, and the async arrows
+// running their callbacks.
+const timerSets = new WeakSet<Expr>();
+export const timerWrappers = new WeakSet<Expr>();
+// The timer globals, Node's and the browser's.
+const TIMER_CALLS = new Set(["setTimeout", "clearTimeout"]);
 // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
 export const combinedCalls = new WeakSet<Expr>();
 // The operands of an `await`, while they are checked.
@@ -326,6 +332,8 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
 // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
+// The std's timer calls, by which one each is.
+export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerClear">();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -918,6 +926,10 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && !lookup("Promise") && !classes.has("Promise")) {
       return combined(e, callee.name as Combiner);
     }
+    if (callee.kind === "ident" && TIMER_CALLS.has(callee.name) && !lookup(callee.name) && !byName.has(callee.name)) {
+      timerCall(e, callee.name);
+      return call(e);
+    }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && callee.name === "withResolvers" && !lookup("Promise") && !classes.has("Promise")) {
       promiseResolvers(e);
       return call(e);
@@ -1132,6 +1144,24 @@ export function expressions(ctx: Context) {
       if (throws) raise(e, ioError(), `'${name}'`);
       syncFileCalls.set(e, name);
       return { type: returns, what: `'${name}'` };
+    }
+    // The std's timers: `timerSet(callback, ms, repeat, loop)` hands a callable to the runtime,
+    // starting the timer task `loop` once; `timerNext()` waits for the next one due, and
+    // `timerClear(id)` drops one.
+    if (callee.kind === "ident" && (inStd || timerSets.has(e)) && (callee.name === "timerSet" || callee.name === "timerNext" || callee.name === "timerClear")) {
+      timerCalls.set(e, callee.name);
+      if (callee.name === "timerNext") return { type: leafFuture("timerNext", timerCallback()), what: "'timerNext'" };
+      if (callee.name === "timerClear") {
+        coerce(e.args[0]!, value(e.args[0]!), "i64", "a timer's id is an 'i64'");
+        return { type: "void", what: "'timerClear'" };
+      }
+      expect(e.args[0]!, timerCallback());
+      coerce(e.args[0]!, value(e.args[0]!), timerCallback(), "a timer runs an async function");
+      const delay = value(e.args[1]!);
+      coerce(e.args[1]!, delay, "i64", `a delay is milliseconds as an 'i64', not '${show(delay)}'`);
+      coerce(e.args[2]!, value(e.args[2]!), "boolean", "whether it repeats is a 'boolean'");
+      value(e.args[3]!);
+      return { type: "i64", what: "'timerSet'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && (!byName.has("yieldNow") || inStd)) {
@@ -2729,6 +2759,45 @@ export function expressions(ctx: Context) {
     const made: TypeNode = { kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
     presetTypes.set(made, t);
     return made;
+  }
+
+  // `setTimeout(callback, ms)` and `clearTimeout(id)`, rewritten as the prelude's timers.
+  function timerCall(e: Call, name: string) {
+    const at = { start: e.start, end: e.end };
+    const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
+    if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
+    if (e.args.some((a) => a.kind === "spread")) throw new CompileError(`'${name}' takes its arguments written out, not spread`, e.start, e.end);
+    if (name === "clearTimeout") {
+      if (e.args.length > 1) throw new CompileError(`'${name}' takes the timer to clear`, e.start, e.end);
+      return helper("timeout clear", [e.args[0] ?? { kind: "null", ...at }]);
+    }
+    if (e.args.length === 0) throw new CompileError(`'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
+    if (e.args.length > 2) throw new CompileError(`passing arguments on to a timer's function isn't supported yet; call it from an arrow, as in '${name}(() => f(x), ms)'`, e.args[2]!.start, e.args.at(-1)!.end);
+    // The callback runs inside an async arrow the timer keeps, which owns what it captures. It is
+    // named or written in place, so making that arrow evaluates nothing early or late.
+    const callback = e.args[0]!;
+    if (callback.kind !== "arrow" && callback.kind !== "ident") throw new CompileError(`'${name}' takes a function written here or named, as in '${name}(() => tick(), ms)'; give this one a name first`, callback.start, callback.end);
+    const span = { start: callback.start, end: callback.end };
+    const run: Expr = { kind: "call", callee: callback, args: [], typeArgs: [], optional: false, ...span };
+    const body: Expr = timerAsync(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
+    const wrapper: Expr = { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
+    timerWrappers.add(wrapper);
+    const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
+    const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
+    helper("timerSet", [wrapper, ms, { kind: "bool", value: false, ...at }, loop]);
+    timerSets.add(e);
+  }
+
+  // Whether a timer's callback is async: an async arrow, or a function or value giving a Promise.
+  function timerAsync(callback: Expr): boolean {
+    if (callback.kind === "arrow") return callback.async;
+    if (callback.kind !== "ident") return false;
+    const local = lookup(callback.name);
+    if (!local) return byName.get(callback.name)?.async === true;
+    const held = lower(local.type);
+    const fn = typeof held !== "string" && (held.kind === "closure" || held.kind === "function") ? held : isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
+    const returns = fn?.returns;
+    return typeof returns !== "string" && returns !== undefined && (returns.kind === "future" || promiseMet(returns) !== undefined);
   }
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the

@@ -3196,6 +3196,8 @@ static fsh_task *fsh_alive = NULL;
 static pthread_cond_t fsh_finished = PTHREAD_COND_INITIALIZER;
 static int32_t fsh_panicked = 0;
 static fsh_task *fsh_main_task = NULL;
+// The task running timers' callbacks, once one is set.
+static fsh_task *fsh_timeouts_task = NULL;
 
 static void fsh_push(fsh_queue *q, fsh_task *t) {
   pthread_mutex_lock(&q->lock);
@@ -3284,7 +3286,7 @@ static void fsh_run(fsh_task *t) {
   fsh_unlink(t);
   fsh_task *joiner = t->joiner;
   t->joiner = NULL;
-  if (t == fsh_main_task) pthread_cond_broadcast(&fsh_finished);
+  if (t == fsh_main_task || t == fsh_timeouts_task) pthread_cond_broadcast(&fsh_finished);
   pthread_mutex_unlock(&fsh_alive_lock);
   if (joiner) {
     fsh_rt_wake(joiner);
@@ -3487,6 +3489,135 @@ static void *fsh_timing(void *arg) {
   }
   pthread_mutex_unlock(&fsh_timer_lock);
   return arg;
+}
+
+// The callbacks setTimeout and setInterval set, earliest first and ties in the order set, which
+// the prelude's one timer task runs in turn. Each holds its callable's block and vtable.
+// ponytail: a sorted array, inserted into in O(n); a heap if programs keep many timers
+typedef struct { int64_t deadline, seq, id, every; void *block; void **vtable; } fsh_timeout;
+static pthread_mutex_t fsh_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_timeout *fsh_timeouts = NULL;
+static int64_t fsh_timeout_count = 0, fsh_timeout_capacity = 0, fsh_timeout_ids = 0, fsh_timeout_seq = 0;
+// The timer task's wait for the next timer, and the deadline it has a wake set for.
+static fsh_task *fsh_timeouts_waiter = NULL;
+static int64_t fsh_timeouts_armed = INT64_MAX;
+static int32_t fsh_timeouts_claimed = 0, fsh_main_returned = 0;
+
+static void fsh_timeout_insert(fsh_timeout t) {
+  if (fsh_timeout_count == fsh_timeout_capacity) {
+    fsh_timeout_capacity = fsh_timeout_capacity ? fsh_timeout_capacity * 2 : 16;
+    fsh_timeouts = realloc(fsh_timeouts, fsh_timeout_capacity * sizeof(fsh_timeout));
+  }
+  int64_t at = fsh_timeout_count;
+  while (at > 0 && fsh_timeouts[at - 1].deadline > t.deadline) at--;
+  memmove(fsh_timeouts + at + 1, fsh_timeouts + at, (fsh_timeout_count - at) * sizeof(fsh_timeout));
+  fsh_timeouts[at] = t;
+  fsh_timeout_count++;
+}
+
+static fsh_timeout fsh_timeout_take(int64_t at) {
+  fsh_timeout t = fsh_timeouts[at];
+  memmove(fsh_timeouts + at, fsh_timeouts + at + 1, (fsh_timeout_count - at - 1) * sizeof(fsh_timeout));
+  fsh_timeout_count--;
+  return t;
+}
+
+// Wakes the timer task waiting for the next timer, once something it waits on changed. Called
+// with the timers' lock held; the wake happens after it is let go.
+static fsh_task *fsh_timeouts_changed(void) {
+  fsh_task *waiter = fsh_timeouts_waiter;
+  fsh_timeouts_waiter = NULL;
+  return waiter;
+}
+
+static void fsh_timeouts_wake(fsh_task *waiter) {
+  if (!waiter) return;
+  fsh_rt_wake(waiter);
+  fsh_task_release(waiter);
+}
+
+// Whether this call is the one to start the timer task, which then registers it.
+int32_t fsh_rt_timeouts_claim(void) {
+  return __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
+}
+
+void fsh_rt_timeouts_task(fsh_task *task) {
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  fsh_timeouts_task = task;
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+}
+
+// Sets a timer for a callable, its delay at least 1 ms as Node's is, giving its id.
+int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repeat) {
+  if (ms < 1 || ms > 2147483647) ms = 1;
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  int64_t id = ++fsh_timeout_ids;
+  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, ++fsh_timeout_seq, id, repeat ? ms : 0, block, vtable });
+  fsh_task *waiter = fsh_timeouts_changed();
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+  fsh_timeouts_wake(waiter);
+  return id;
+}
+
+// Clears a timer, dropping its callable; one already run or cleared is left alone.
+void fsh_rt_timeout_clear(int64_t id) {
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  int64_t at = 0;
+  while (at < fsh_timeout_count && fsh_timeouts[at].id != id) at++;
+  if (at == fsh_timeout_count) return (void)pthread_mutex_unlock(&fsh_timeouts_lock);
+  fsh_timeout t = fsh_timeout_take(at);
+  fsh_task *waiter = fsh_timeouts_changed();
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+  ((void (*)(void *))t.vtable[0])(t.block);
+  fsh_timeouts_wake(waiter);
+}
+
+// Polls for the next timer due, giving its callable's block and vtable in out: 1 with one, an
+// interval's own kept and set again its delay from now; 2 once main has returned and no timer
+// is left; 0 to wait, woken when one is due or the timers change.
+int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  // Polled again, it is no longer waiting: its count as the waiter is given up, and taken anew
+  // if it waits on.
+  fsh_task *polled = fsh_timeouts_changed();
+  int32_t result = 0;
+  int64_t now = fsh_now();
+  if (now >= fsh_timeouts_armed) fsh_timeouts_armed = INT64_MAX;
+  if (fsh_timeout_count > 0 && fsh_timeouts[0].deadline <= now) {
+    fsh_timeout t = fsh_timeout_take(0);
+    out[0] = t.block;
+    out[1] = t.vtable;
+    if (t.every) {
+      out[0] = ((void *(*)(void *))t.vtable[1])(t.block);
+      t.deadline = now + t.every * 1000000;
+      t.seq = ++fsh_timeout_seq;
+      fsh_timeout_insert(t);
+    }
+    result = 1;
+  } else if (fsh_timeout_count == 0 && fsh_main_returned) result = 2;
+  int64_t arm = 0;
+  if (result == 0) {
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    fsh_timeouts_waiter = task;
+    arm = fsh_timeout_count > 0 && fsh_timeouts[0].deadline < fsh_timeouts_armed ? fsh_timeouts[0].deadline : 0;
+    if (arm) fsh_timeouts_armed = arm;
+  }
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+  if (polled) fsh_task_release(polled);
+  if (arm) {
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    fsh_timer_add(arm, task, NULL, &fsh_timeouts);
+  }
+  return result;
+}
+
+// Main has returned: the timer task ends once no timer is left.
+static void fsh_timeouts_main_returned(void) {
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  fsh_main_returned = 1;
+  fsh_task *waiter = fsh_timeouts_changed();
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+  fsh_timeouts_wake(waiter);
 }
 
 // Polls a sleep, whose frame holds its state and first the delay in milliseconds, then its
@@ -4730,6 +4861,21 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
+  // Pending timers keep the program alive, as Node's do: the timer task runs them, then ends.
+  fsh_timeouts_main_returned();
+  pthread_mutex_lock(&fsh_alive_lock);
+  while (!fsh_panicked) {
+    pthread_mutex_lock(&fsh_timeouts_lock);
+    fsh_task *timers = fsh_timeouts_task;
+    pthread_mutex_unlock(&fsh_timeouts_lock);
+    if (!timers || __atomic_load_n(&timers->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
+    pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
+  }
+  pthread_mutex_unlock(&fsh_alive_lock);
+  if (fsh_timeouts_task && !fsh_panicked) {
+    fsh_task_release(fsh_timeouts_task);
+    free(fsh_timeouts);
+  }
   pthread_mutex_lock(&fsh_park);
   __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&fsh_parked);

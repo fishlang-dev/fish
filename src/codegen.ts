@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -5422,6 +5422,42 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         });
         return frame;
       }
+      // The std's timers. A timer's callable goes to the runtime, the timer task started with
+      // the first; the next one due is waited for as a leaf future holding only its state.
+      const timer = timerCalls.get(e);
+      if (timer === "timerNext") {
+        const frame = temp();
+        emit(`${frame} = insertvalue ${llvm(types.get(e)!)} zeroinitializer, i32 0, 0`);
+        return frame;
+      }
+      if (timer === "timerClear") return void emit(`call void @fsh_rt_timeout_clear(i64 ${value(e.args[0]!)})`);
+      if (timer === "timerSet") {
+        const callable = owned(e.args[0]!);
+        const [ms, repeats] = [value(e.args[1]!), value(e.args[2]!)];
+        const loop = valueType(e.args[3]!) as FutureType;
+        const held = owned(e.args[3]!);
+        const [block, table, repeat, claimed, id, start, skip, done] = [temp(), temp(), temp(), temp(), temp(), label(), label(), label()];
+        emit(`${claimed} = call i32 @fsh_rt_timeouts_claim()`);
+        const first = temp();
+        emit(`${first} = icmp ne i32 ${claimed}, 0`);
+        emit(`br i1 ${first}, label %${start}, label %${skip}`);
+        startBlock(start);
+        const [poll, drop, dropOutput] = taskGlue(loop);
+        const [frame, task] = [alloca(llvm(loop)), temp()];
+        emit(`store ${llvm(loop)} ${held}, ptr ${frame}`);
+        unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(loop))}, i64 ${sizeOf(pollType(loop))})`, task);
+        emit(`call void @fsh_rt_timeouts_task(ptr ${task})`);
+        emit(`br label %${done}`);
+        startBlock(skip);
+        dispose(held, loop);
+        emit(`br label %${done}`);
+        startBlock(done);
+        emit(`${block} = extractvalue ${DYN} ${callable}, 0`);
+        emit(`${table} = extractvalue ${DYN} ${callable}, 1`);
+        emit(`${repeat} = zext i1 ${repeats} to i32`);
+        emit(`${id} = call i64 @fsh_rt_timeout_set(ptr ${block}, ptr ${table}, i64 ${ms}, i32 ${repeat})`);
+        return id;
+      }
       // A file's future: the path, and a write's bytes, in its frame for the pool to take.
       if (fileCalls.has(e)) {
         const future = types.get(e) as FutureType;
@@ -6692,8 +6728,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
       // slot empty.
       const [slot, handle, outcome] = [temp(), temp(), temp()];
-      emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
-      if (leaf.method !== "sleep") emit(`${handle} = load ptr, ptr ${slot}`);
+      // The timer task's wait holds nothing but its state.
+      if (leaf.method !== "timerNext") emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
+      if (leaf.method !== "sleep" && leaf.method !== "timerNext") emit(`${handle} = load ptr, ptr ${slot}`);
       // A socket's poll gives its result through `made`, and on failure the system's reason
       // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
       const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
@@ -6769,6 +6806,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           given = temp();
           emit(`${given} = load ${ARRAY}, ptr ${made}`);
         }
+      } else if (leaf.method === "timerNext") {
+        // The next timer's callable, or none once the program is done with timers.
+        // Ended with nothing, it is ready all the same.
+        const [made, raw, dyn, option, got, nothing] = [alloca("[2 x ptr]"), temp(), temp(), temp(), temp(), temp()];
+        emit(`${raw} = call i32 @fsh_rt_timeout_next(ptr %cx, ptr ${made})`);
+        emit(`${dyn} = load ${DYN}, ptr ${made}`);
+        emit(`${got} = icmp eq i32 ${raw}, 1`);
+        emit(`${nothing} = icmp eq i32 ${raw}, 2`);
+        emit(`${option} = select i1 ${got}, ${llvm(shape.gives)} ${convert(dyn, leaf.of, shape.gives)}, ${llvm(shape.gives)} ${convert("zeroinitializer", "null", shape.gives)}`);
+        given = option;
+        emit(`${outcome} = select i1 ${nothing}, i32 1, i32 ${raw}`);
       } else if (leaf.method === "sleep") {
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {

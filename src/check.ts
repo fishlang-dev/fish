@@ -22,7 +22,7 @@ import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsonCalls, printed, expressions, presetParams, restStarts, substituted, stringLike } from "./values.ts";
+import { jsonCalls, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -1671,6 +1671,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {
         const at = inner.captureUses!.get(changed) ?? e;
+        if (timerWrappers.has(e)) throw new CompileError(`a timer's function owns what it captures, so changing '${changed.name}' would change only its own copy; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
         throw new CompileError(`this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
       }
       // Its future holds the captures as it holds parameters, for what crosses threads.

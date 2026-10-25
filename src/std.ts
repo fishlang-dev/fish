@@ -153,6 +153,20 @@ function __promiseWithResolversVoid<E>() {
     reject: (reason: E) => { rejected.settle({ ok: false, reason }); },
   };
 }
+// A timer's id, which setTimeout and setInterval give and clearTimeout and clearInterval take.
+type Timeout = i64;
+// The runtime keeps the timers, earliest first, and this one task runs each callback in turn. It
+// ends once main has returned and no timer is left.
+async function __timerLoop(): Promise<void> {
+  while (true) {
+    const next = await timerNext();
+    if (next === null) return;
+    await next();
+  }
+}
+function __timeoutClear(id: Timeout | null): void {
+  if (id !== null) timerClear(id);
+}
 // Promise.resolve(v) and Promise.reject(e).
 async function __promiseResolve<T>(value: T): Promise<T> { return value; }
 async function __promiseResolveVoid(): Promise<void> {}
@@ -1429,7 +1443,7 @@ function hideHelpers(nodes: unknown) {
   if (Array.isArray(nodes)) return nodes.forEach(hideHelpers);
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
-  if ((node.kind === "function" || node.kind === "ident") && typeof node.name === "string" && /^__(array|promise)/.test(node.name)) {
+  if ((node.kind === "function" || node.kind === "ident") && typeof node.name === "string" && /^__(array|promise|timer|timeout)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);
