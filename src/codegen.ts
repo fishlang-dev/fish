@@ -2719,7 +2719,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return jsonWrite(w, held, writtenPart(written, t, (x) => (x.kind === "ref" ? x.to : undefined)) ?? to);
     }
     if (t.kind === "array" || t.kind === "fixed") return jsonElements(w, v, t, writtenPart(written, t, (x) => (x as ArrayType).element) ?? t.element);
-    if (t.kind === "map") return jsonEntries(w, v, t);
+    if (t.kind === "map") return jsonEntries(w, v, t, writtenPart(written, t, (x) => (x as MapType).value) ?? t.value);
     if (t.kind === "union") {
       const members = writtenPart(written, t, (x) => x) as UnionType | undefined;
       return jsonMember(w, v, t, members?.members.length === t.members.length ? members.members : t.members);
@@ -2739,20 +2739,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (t.kind === "class") return jsonObject(w, v, t, jsonFields(t));
     const object = t as ObjectType;
+    const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
+    const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     if (isTuple(object)) {
       const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
       jsonRaw(w, "[");
-      order.forEach(({ f, i }, n) => {
+      order.forEach(({ i }, n) => {
         if (n > 0) jsonRaw(w, ",");
         const x = temp();
         emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        jsonWrite(w, x, f.type);
+        jsonWrite(w, x, as[i]!.type);
       });
       jsonRaw(w, "]");
       return;
     }
-    const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
-    const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     jsonObject(w, v, t, object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional === "added" })));
   }
 
@@ -3365,7 +3365,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A string-keyed Map's live entries, in the order they went in, as an object's fields.
-  function jsonEntries(w: string, map: string, t: MapType) {
+  function jsonEntries(w: string, map: string, t: MapType, written: Type) {
     const entry = entryType(t);
     jsonRaw(w, "{");
     const [counter, wrote] = [alloca("i64"), alloca("i1")];
@@ -3401,7 +3401,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     jsonRaw(w, ":");
     emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
     emit(`${x} = load ${llvm(lower(t.value))}, ptr ${valueAt}`);
-    jsonWrite(w, x, t.value);
+    jsonWrite(w, x, written);
     emit(`br label %${next}`);
     startBlock(next);
     const step = temp();

@@ -628,3 +628,14 @@ function main() {
   const first: { a?: i64 } = {};
   console.log(JSON.stringify(first), JSON.stringify(new C(null, null)), JSON.stringify(new C(1, "y")));
 }
+// case: json_optional_spelling_parts
+// expect: {"k":{"b":2}} [{"b":3},4] {"p":{"b":1}}
+type P = { a?: i64, b: i64 };
+@derive(Json)
+class C { x?: string; p: P; constructor() { this.p = { b: 1 }; } }
+function main() {
+  let m = new Map<string, P>();
+  m.set("k", { b: 2 });
+  const t: [P, i64] = [{ b: 3 }, 4];
+  console.log(JSON.stringify(m), JSON.stringify(t), JSON.stringify(new C()));
+}
