@@ -2082,7 +2082,10 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
       const target = s.expr.target;
       if (target.kind !== "member" || target.object.kind !== "this") return undefined;
-      return classOf(f.self!.type).fields.some((d) => d.name === target.name) ? target : undefined;
+      // Once `super(...)` has run, the base's fields are set, and may be set again before the
+      // class's own are.
+      const inherited = !unset.has(SUPER) && f.self!.type.base !== undefined && field(f.self!.type.base, target.name) !== undefined;
+      return classOf(f.self!.type).fields.some((d) => d.name === target.name) || inherited ? target : undefined;
     }
 
     function within(target: Target, check: () => void) {

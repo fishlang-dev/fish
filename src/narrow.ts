@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { isNumeric, refType, unfold, unionType, type Type } from "./typing.ts";
+import { isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -69,7 +69,7 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
   }
   if (e.op === "instanceof") {
     const c = types.get(e.right);
-    return split(e.left, (m) => (m === c ? "yes" : "no"), true);
+    return split(e.left, (m) => (c !== undefined && isSubclass(m, c) ? "yes" : "no"), true);
   }
   if (e.op !== "===" && e.op !== "!==") return nothing;
   const test = typeofTest(e);

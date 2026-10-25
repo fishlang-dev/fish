@@ -4205,7 +4205,10 @@ export function expressions(ctx: Context) {
     if (typeof field.type !== "string" && field.type.kind === "closure" && field.type.generic) return field;
     // A value for a field the object's type holds a Dyn in is boxed into it.
     const boxed = p.kind === "property" ? wanted.get(p.value) : undefined;
-    if (p.kind === "property" && typeof boxed !== "string" && boxed?.kind === "dyn" && lower(field.type) !== lower(boxed)) {
+    // `null`, or an Option, already is what an optional Dyn field holds.
+    const plain = lower(field.type);
+    const already = plain === "null" || (typeof plain !== "string" && (plain.kind === "union" || plain.kind === "dyn"));
+    if (p.kind === "property" && typeof boxed !== "string" && boxed?.kind === "dyn" && !already) {
       coerce(p.value, field.type, boxed, `type '${show(field.type)}' is not assignable to type '${show(boxed)}'`);
       return { ...field, type: boxed };
     }

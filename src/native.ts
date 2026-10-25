@@ -2379,8 +2379,9 @@ fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
     }
     fsh_rt_free(own);
   } else fsh_sb_put(&b, name->bytes, n);
+  // As V8's ErrorUtils::ToString: an empty name or message leaves the colon out.
   if (message->length > 0) {
-    fsh_sb_str(&b, ": ");
+    if (b.n > 1) fsh_sb_str(&b, ": ");
     fsh_sb_put(&b, message->bytes, message->length);
   }
   fsh_sb_str(&b, "]");
@@ -2618,7 +2619,8 @@ static char *fsh_insp_reduce(fsh_ictx *c, char **output, int64_t n, const char *
   }
   fsh_sb b = {0};
   int done = 0;
-  if (c->depth - recurse < 3 && entries == n) {
+  // A base of several lines, as an Error's header may be, never sits on one line with its parts.
+  if (c->depth - recurse < 3 && entries == n && !strchr(open, '\n')) {
     int64_t start = n + c->indent + fsh_ulen(open) + 10;
     if (fsh_insp_below(lines, n, start)) {
       fsh_sb joined = {0};
@@ -2669,6 +2671,16 @@ static char *fsh_insp_copy(const char *s) {
   return fsh_sb_done(&b);
 }
 
+// A text with each line after its first indented by indent spaces.
+static char *fsh_insp_indented(const char *text, int64_t indent) {
+  fsh_sb b = {0};
+  for (const char *p = text; *p; p++) {
+    fsh_sb_put(&b, p, 1);
+    if (*p == '\n') fsh_sb_spaces(&b, indent);
+  }
+  return fsh_sb_done(&b);
+}
+
 // Node's formatValue and formatRaw for the kinds Fish values have.
 static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   if (v->kind == FSH_INSP_TEXT) return fsh_insp_copy(v->text);
@@ -2691,31 +2703,39 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     }
     return fsh_sb_done(&b);
   }
-  // Sized to the text, a class's name or an Error's header, which may be long.
-  char open[v->length + 40], cut[v->length + 40];
   const char *close = v->kind == FSH_INSP_ARRAY ? "]" : "}";
   int64_t size = v->kind == FSH_INSP_OBJECT ? v->count : v->size;
+  // An Error with nothing to show beside its header is its header; past the depth, its class.
+  // A header of several lines is indented as Node indents it, to where it is written.
+  if (v->error && size == 0) return fsh_insp_indented(v->text, c->indent);
+  if (v->error && recurse > 2) return fsh_insp_copy(v->cut);
+  // On the heap, sized to the text, a class's name or an Error's header, which may be long.
+  char *text = v->error ? fsh_insp_indented(v->text, c->indent) : fsh_insp_copy(v->text);
+  int64_t room = strlen(text) + 40;
+  char *open = fsh_rt_alloc(room), *cut = fsh_rt_alloc(room);
   if (v->kind == FSH_INSP_ARRAY) {
     strcpy(open, "[");
     strcpy(cut, "[Array]");
   } else if (v->kind == FSH_INSP_OBJECT) {
-    snprintf(open, sizeof open, "%s%s{", v->text, v->length ? " " : "");
-    snprintf(cut, sizeof cut, "[%s]", v->length ? v->text : "Object");
+    snprintf(open, room, "%s%s{", text, v->length ? " " : "");
+    snprintf(cut, room, "[%s]", v->length ? text : "Object");
   } else {
-    snprintf(open, sizeof open, "%s(%lld) {", v->kind == FSH_INSP_MAP ? "Map" : "Set", (long long)size);
+    snprintf(open, room, "%s(%lld) {", v->kind == FSH_INSP_MAP ? "Map" : "Set", (long long)size);
     strcpy(cut, v->kind == FSH_INSP_MAP ? "[Map]" : "[Set]");
   }
+  fsh_rt_free(text);
   int hidden = c->hidden && v->kind == FSH_INSP_ARRAY;
-  // An Error with nothing to show beside its header is its header; past the depth, its class.
-  if (v->error && recurse > 2) return fsh_insp_copy(v->cut);
-  if (v->error && size == 0) return fsh_insp_copy(v->text);
-  if (size == 0 && !hidden) {
+  if ((size == 0 && !hidden) || recurse > 2) {
     fsh_sb b = {0};
-    fsh_sb_str(&b, open);
-    fsh_sb_str(&b, close);
+    if (recurse > 2 && !(size == 0 && !hidden)) fsh_sb_str(&b, cut);
+    else {
+      fsh_sb_str(&b, open);
+      fsh_sb_str(&b, close);
+    }
+    fsh_rt_free(open);
+    fsh_rt_free(cut);
     return fsh_sb_done(&b);
   }
-  if (recurse > 2) return fsh_insp_copy(cut);
   recurse++;
   c->depth = recurse;
   int64_t kept = v->kind == FSH_INSP_MAP ? v->count / 2 : v->count;
@@ -2771,6 +2791,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   char *result = fsh_insp_reduce(c, output, n, open, close, v->kind == FSH_INSP_ARRAY, n > 100, numeric, recurse);
   for (int64_t i = 0; i < n; i++) fsh_rt_free(output[i]);
   fsh_rt_free(output);
+  fsh_rt_free(open);
+  fsh_rt_free(cut);
   return result;
 }
 

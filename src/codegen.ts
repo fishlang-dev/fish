@@ -3325,7 +3325,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // An Error as Node prints one with its stack left out: its header, then the fields beyond
   // Error's own and its cause, read through what ErrorLike gives.
-  function errorTree(v: string, t: ClassType, fields: { name: string; type: Type; path: number[]; omit?: boolean }[], depth: string): string {
+  // `shell`, past the depth, it keeps only whether it has more than its header to show.
+  function errorTree(v: string, t: ClassType, fields: { name: string; type: Type; path: number[]; omit?: boolean }[], depth: string, shell = false): string {
+    const blank = () => {
+      const b = temp();
+      emit(`${b} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
+      return b;
+    };
     const all = jsonFields(t);
     const read = (name: string) => {
       const f = all.find((x) => x.name === name)!;
@@ -3348,7 +3354,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       // An AggregateError's errors are shown as Node shows them, apart from its own fields.
       const key = f.name === "errors" && t.generic?.name === "AggregateError" ? "[errors]" : f.name;
-      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(key)}, ptr ${inspectTree(x, f.type, depth)})`);
+      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(key)}, ptr ${shell ? blank() : inspectTree(x, f.type, depth)})`);
       emit(`br label %${after}`);
       startBlock(after);
     }
@@ -3359,12 +3365,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [yes, after] = [label(), label()];
     emit(`br i1 ${holds(cause, option, [dyn])}, label %${yes}, label %${after}`);
     startBlock(yes);
-    const d = convert(cause, option, dyn);
-    const [data, table, inner] = [temp(), temp(), temp()];
-    emit(`${data} = extractvalue ${DYN} ${d}, 0`);
-    emit(`${table} = extractvalue ${DYN} ${d}, 1`);
-    // The slot after its fields prints the boxed value as its own type does.
-    emit(`${inner} = call ptr ${vslot(table, dyn.of.methods.length + dyn.of.fields.length)}(ptr ${data}, i64 ${depth})`);
+    let inner: string;
+    if (shell) inner = blank();
+    else {
+      const d = convert(cause, option, dyn);
+      const [data, table] = [temp(), temp()];
+      inner = temp();
+      emit(`${data} = extractvalue ${DYN} ${d}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${d}, 1`);
+      // The slot after its fields prints the boxed value as its own type does.
+      emit(`${inner} = call ptr ${vslot(table, dyn.of.methods.length + dyn.of.fields.length)}(ptr ${data}, i64 ${depth})`);
+    }
     emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString("[cause]")}, ptr ${inner})`);
     emit(`br label %${after}`);
     startBlock(after);
@@ -3397,8 +3408,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
     const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     const fields = t.kind === "class" ? jsonFields((spelled as unknown as ClassType | undefined) ?? t) : object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
-    // Past the depth, an Error is its header alone.
-    if (t.kind === "class" && errorClass(t)) return errorTree(v, t, [], "0");
+    // Past the depth, an Error is its header alone, or its class's name when it has more to show.
+    if (t.kind === "class" && errorClass(t)) return errorTree(v, t, fields, "0", true);
     emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(t.kind === "class" ? t.name.replace(/[@<].*$/, "") : "")})`);
     for (const f of fields) {
       const after = label();

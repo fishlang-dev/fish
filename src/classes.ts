@@ -255,7 +255,7 @@ export function extend(c: ClassInfo, base: ClassInfo) {
   for (let b: ClassInfo | undefined = base; b; b = b.base) {
     const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
     if (redeclared) {
-      throw new CompileError(`'${redeclared.name}' is already a field of '${b.type.name}'; with 'extends' as embedding it would be a second, separate field`, redeclared.start, redeclared.end);
+      throw new CompileError(`'${redeclared.name}' is already a field of '${b.type.name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
     }
   }
   const explicit = c.node.members.find((m) => m.kind === "constructor");

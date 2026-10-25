@@ -1003,6 +1003,12 @@ const variants = new Map<string, VariantType>();
 // Primitives, literals, references, and unions of nothing else are copied; objects,
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
 // lent again rather than moved, so it copies too.
+// Whether a type is the class `c`, or a class extending it: what `instanceof c` tests.
+export function isSubclass(t: Type, c: Type): boolean {
+  for (let x: Type | undefined = t; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x === c) return true;
+  return false;
+}
+
 export function isCopy(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer" || t.kind === "regex") return true;
   // A closure copies when what it captures does, and it changes nothing through it.

@@ -7,7 +7,7 @@ function main() {
   const pet: Animal | Dog = new Dog()
   print(pet instanceof Animal, pet instanceof Dog)
 }
-// expect: false true
+// expect: true true
 // case: instanceof_not_class
 function main() {
   const x: i64 | boolean = 1

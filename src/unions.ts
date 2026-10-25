@@ -103,8 +103,8 @@ export function unionField(union: UnionType, name: string, at: Span): Type | und
   return unionType(found.map((f) => f!.type));
 }
 
-// `x instanceof C` checks whether x holds an instance of exactly C: with embedding, an
-// instance of a class that extends C is not a C.
+// `x instanceof C` checks whether x holds an instance of C or of a class extending it; each
+// keeps its own type when narrowed, its base's fields reached through the base it embeds.
 export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, value, classNamed }: Union): Type {
   const left = value(e.left);
   const held = typeof left !== "string" && left.kind === "ref" ? left.to : left;

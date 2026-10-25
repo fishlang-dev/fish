@@ -1,7 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -93,7 +93,7 @@ export function conversions(b: Slots) {
     if (e.op === "instanceof") {
       const [type, c] = [typeOf(e.left), typeOf(e.right)];
       const v = value(e.left);
-      return typeof type !== "string" && type.kind === "union" ? holds(v, type, [c]) : String(type === c);
+      return typeof type !== "string" && type.kind === "union" ? holds(v, type, type.members.filter((m) => isSubclass(m, c))) : String(isSubclass(type, c));
     }
     if (e.op !== "===" && e.op !== "!==") return undefined;
     const kind = typeofTest(e);
