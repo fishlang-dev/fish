@@ -655,7 +655,7 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
       return t.match ? t : first(t.fields.map((f) => f.type));
     case "class":
       // The prelude's Error prints its cause through what ErrorLike gives.
-      if (t.name === "Error" && !t.generic) return undefined;
+      if ((t.name === "Error" && !t.generic) || t.generic?.name === "AggregateError") return t.generic ? part(t.generic.args[0]!) : undefined;
       return first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]);
     case "variant":
       return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));

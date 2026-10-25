@@ -62,8 +62,11 @@ class Error {
     this.cause = options?.cause ?? null;
   }
 }
+// Error's fields of its own, printing as an Error does, until a generic class can extend one.
 class AggregateError<E> {
+  name: string = "AggregateError";
   message: string = "All promises were rejected";
+  cause: Dyn<ErrorLike> | null = null;
   errors: E[];
   constructor(errors: E[]) { this.errors = errors; }
 }

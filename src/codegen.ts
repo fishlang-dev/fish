@@ -3318,6 +3318,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // Whether a class is the prelude's Error, or extends it.
   function errorClass(t: ClassType): boolean {
+    if (t.generic?.name === "AggregateError") return true;
     for (let c: ClassType | undefined = t; c; c = c.base) if (c.name === "Error" && !c.generic) return true;
     return false;
   }
@@ -3345,7 +3346,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`br i1 ${present}, label %${write}, label %${after}`);
         startBlock(write);
       }
-      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(f.name)}, ptr ${inspectTree(x, f.type, depth)})`);
+      // An AggregateError's errors are shown as Node shows them, apart from its own fields.
+      const key = f.name === "errors" && t.generic?.name === "AggregateError" ? "[errors]" : f.name;
+      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(key)}, ptr ${inspectTree(x, f.type, depth)})`);
       emit(`br label %${after}`);
       startBlock(after);
     }
@@ -6514,8 +6517,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${n}, 1`);
     emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${n}, 2`);
     emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${ARRAY} ${c}, ${fieldPath(type, "errors").join(", ")}`);
+    const [named] = [temp()];
     emit(`${done} = insertvalue ${llvm(type)} ${made}, ptr ${text("All promises were rejected")}, ${fieldPath(type, "message").join(", ")}`);
-    return done;
+    emit(`${named} = insertvalue ${llvm(type)} ${done}, ptr ${text("AggregateError")}, ${fieldPath(type, "name").join(", ")}`);
+    return named;
   }
 
   // `then` where a combined future's flag at `doneAt` says its future is waiting.

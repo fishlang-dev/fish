@@ -51,3 +51,23 @@ function main() {
 function main() {
   const e = new Error("outer", { cause: { x: 1 } });
 }
+// case: error_aggregate
+// expect: [AggregateError: All promises were rejected] {
+// expect:   [errors]: [ [Boom: a], [Boom: b] ]
+// expect: }
+// expect: AggregateError All promises were rejected 2
+class Boom extends Error {
+  constructor(m: string) { super(m); this.name = "Boom"; }
+}
+async function fail(ms: i64, m: string): Promise<string> throws Boom {
+  await sleep(ms);
+  throw new Boom(m);
+}
+async function main() {
+  try {
+    await Promise.any([fail(2, "a"), fail(1, "b")]);
+  } catch (e) {
+    console.log(e);
+    console.log(e.name, e.message, e.errors.length);
+  }
+}
