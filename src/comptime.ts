@@ -4,7 +4,7 @@ import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { equalities, quotes, restStarts, stringBuilds } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, elementsOf, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -769,7 +769,7 @@ function interpreter() {
     }
     if (e.op === "instanceof") {
       const v = unwrap(expr(f, e.left));
-      return v !== null && typeof v === "object" && v.kind === "record" && v.type === f.instance.types.get(e.right);
+      return v !== null && typeof v === "object" && v.kind === "record" && isSubclass(v.type, f.instance.types.get(e.right)!);
     }
     const [a, b] = [expr(f, e.left), expr(f, e.right)];
     switch (e.op) {

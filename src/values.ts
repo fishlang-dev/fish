@@ -4207,7 +4207,7 @@ export function expressions(ctx: Context) {
     const boxed = p.kind === "property" ? wanted.get(p.value) : undefined;
     // `null`, or an Option, already is what an optional Dyn field holds.
     const plain = lower(field.type);
-    const already = plain === "null" || (typeof plain !== "string" && (plain.kind === "union" || plain.kind === "dyn"));
+    const already = plain === "null" || (typeof plain !== "string" && plain.kind === "union") || (boxed !== undefined && plain === lower(boxed));
     if (p.kind === "property" && typeof boxed !== "string" && boxed?.kind === "dyn" && !already) {
       coerce(p.value, field.type, boxed, `type '${show(field.type)}' is not assignable to type '${show(boxed)}'`);
       return { ...field, type: boxed };

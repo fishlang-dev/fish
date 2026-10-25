@@ -195,3 +195,11 @@ function main() {
   console.log([[new Error("deep\nmsg")]]);
   const m = new Map<string, Error>();
 }
+// case: error_cause_other_dyn
+interface Rich extends ErrorLike { code(): i64; }
+class R { name: string = "R"; message: string = "rich"; code(): i64 { return 9; } }
+function main() {
+  const r: Dyn<Rich> = new R();
+  console.log(new Error("outer", { cause: r }));
+}
+// error: a 'Dyn<Rich>' can't become a 'Dyn<ErrorLike>' yet; box the value it was made from
