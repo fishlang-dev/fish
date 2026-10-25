@@ -1208,13 +1208,14 @@ function main() {
   console.log(addK(1));
 }
 // case: generic_arrow_value
-// error: 'id' is generic, a family of functions made one per call, so it can only be called here, not used as a value
+// expect: 1 a
 function main() {
   const id = <T>(x: T): T => x;
   const f = id;
+  console.log(f(1), f("a"));
 }
 // case: generic_arrow_passed
-// error: a generic arrow is a family of functions, one per call, so it can only be held by a const and called; passing or storing one needs one type for it, as in '(x: i64) => i64'
+// error: argument of type 'a generic function' is not assignable to parameter of type '(x: i64) => i64'
 function apply(f: (x: i64) => i64): i64 { return f(1); }
 function main() {
   console.log(apply(<T>(x: T): T => x));

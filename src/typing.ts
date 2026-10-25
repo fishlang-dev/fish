@@ -83,7 +83,9 @@ export type MapType = { kind: "map"; key: Type; value: Type; set: boolean; field
 // as its fields, which are never read by name.
 // A closure that moves a captured value out of itself can run only once; `once` names one. A
 // closure made in a generic body's definition check is never compiled, so it isn't concrete.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string; concrete: boolean };
+// A generic function used as a value, `generic` naming it, is a closure capturing nothing whose
+// calls each instantiate that function, as calls of it by name do.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -785,6 +787,19 @@ export function functionType(names: string[], params: Type[], returns: Type): Fu
 export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean): ClosureType {
   const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once, concrete };
   keys.set(t, `closure ${declared++}`);
+  return t;
+}
+
+const genericValues = new Map<string, ClosureType>();
+
+// The one type of a generic function used as a value, by the function's name.
+export function genericFunctionType(name: string, shown: string): ClosureType {
+  let t = genericValues.get(name);
+  if (!t) {
+    t = { kind: "closure", name: shown, params: [], returns: "void", fields: [], concrete: true, generic: name };
+    keys.set(t, `generic function ${name}`);
+    genericValues.set(name, t);
+  }
   return t;
 }
 

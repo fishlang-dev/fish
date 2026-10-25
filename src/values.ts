@@ -8,7 +8,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -158,6 +158,8 @@ export type Context = {
   // An arrow function's type, its body checked; and the instance a closure type runs.
   // A closure written inside `unsafe` is checked inside it too.
   closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean, owning?: boolean): ClosureType;
+  // Makes a generic arrow written as a value a generic function of its own, the arrow its name.
+  liftArrow(e: Extract<Expr, { kind: "arrow" }>): void;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
   implicitOf(f: Body): Map<number, Bound>;
@@ -995,6 +997,8 @@ export function expressions(ctx: Context) {
       const method = receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name);
       const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
       if (held && !method && isCallable(held)) return callableCall(e, callee, held as DynType);
+      // A field holding a generic function value calls that function.
+      if (held && !method && typeof held !== "string" && held.kind === "closure" && held.generic) return closureCall(e, callee, held);
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
       const given = value(callee);
@@ -1315,6 +1319,17 @@ export function expressions(ctx: Context) {
     if (declared && !declared.comptime) functionValue(callback, declared);
   }
 
+  // A generic function named as a value: its own type, each call of which instantiates it.
+  function genericValue(f: Body, e: Expr): Type {
+    if (f.foreign) throw unsupported("C functions used as values", e);
+    return genericFunctionType(f.name, "a generic function");
+  }
+
+  // A name, or fields read from one, which reading has no effect of its own.
+  function pure(e: Expr): boolean {
+    return e.kind === "ident" || (e.kind === "member" && !e.optional && pure(e.object));
+  }
+
   // `double` named where a value is wanted becomes `(x) => double(x)`, its parameters and their
   // types its declaration's, capturing nothing, so it passes, stores and boxes as any closure.
   function functionValue(e: Extract<Expr, { kind: "ident" }>, f: Body) {
@@ -1376,6 +1391,13 @@ export function expressions(ctx: Context) {
     const held = known ?? value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";
     const through = lower(isRefType(held) ? held.to : held);
+    // A generic function value's call is a call of the function it names, instantiated for this
+    // call; read from a name or a field, nothing is lost by not reading it.
+    if (typeof through !== "string" && through.kind === "closure" && through.generic) {
+      if (!pure(callee)) throw unsupported("calls of a generic function value that isn't a name or a field", callee);
+      e.callee = { kind: "ident", name: through.generic, start: callee.start, end: callee.end };
+      return call(e);
+    }
     if (isCallable(through)) return callableCall(e, callee, through as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
     // closure it was given.
@@ -3032,7 +3054,11 @@ export function expressions(ctx: Context) {
           return nested.type;
         }
         const local = lookup(e.name, e);
-        if (local?.generic) throw new CompileError(`'${e.name}' is generic, a family of functions made one per call, so it can only be called here, not used as a value`, e.start, e.end);
+        // A generic arrow a const holds, as a value, is the function it was lifted to.
+        if (local?.generic) {
+          e.name = local.generic.name;
+          return typeOf(e);
+        }
         if (!local && e.name === "undefined") return "null";
         // A top-level const: its value, computed while compiling. An aggregate is read where it
         // lives, through a reference, as a const can't change.
@@ -3045,6 +3071,7 @@ export function expressions(ctx: Context) {
         }
         // A declared function named as a value is a closure calling it.
         const declared = local ? undefined : byName.get(e.name);
+        if (declared && !declared.comptime && declared.typeParams?.some((p) => !isLifetime(p))) return genericValue(declared, e);
         if (declared && !declared.comptime) {
           functionValue(e, declared);
           return typeOf(e);
@@ -3284,6 +3311,12 @@ export function expressions(ctx: Context) {
         return arrayType(element);
       }
       case "arrow":
+        // A generic arrow is a family of functions: a generic function value, named by the
+        // function it is lifted to.
+        if (e.typeParams.some((p) => !isLifetime(p))) {
+          ctx.liftArrow(e);
+          return typeOf(e);
+        }
         return closure(e, expecting.get(e), unsafeDepth > 0, owning.has(e));
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
@@ -4058,6 +4091,8 @@ export function expressions(ctx: Context) {
 
   function property(p: ObjectProp): Field {
     const field = propertyField(p);
+    // A generic function value is held as it is, captures nothing, and is called by name.
+    if (typeof field.type !== "string" && field.type.kind === "closure" && field.type.generic) return field;
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
     if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {

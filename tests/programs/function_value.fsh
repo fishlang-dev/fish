@@ -50,9 +50,12 @@ type Point = { x: i64; y: i64 };
 function norm(p: Point): i64 { return p.x * p.x + p.y * p.y; }
 function main(): void { const pts: Point[] = [{ x: 1, y: 2 }]; console.log(pts.map(norm)); }
 // case: function_value_generic
-// error: 'id' is generic, a family of functions made one per call, so it can only be called here
+// expect: 2 b
 function id<T>(x: T): T { return x; }
-function main(): void { const f = id; }
+function main(): void {
+  const f = id;
+  console.log(f(2), f("b"));
+}
 // case: function_value_throws
 // error: functions that throw used as values are not supported yet
 function t(n: i64): i64 throws i64 { if (n > 0) throw n; return 0; }

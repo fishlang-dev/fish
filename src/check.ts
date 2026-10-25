@@ -287,8 +287,8 @@ export const nestedFunctions = new WeakMap<Expr, string>();
 // The bindings nested function declarations make, and closures' captures of them.
 const nestedBindings = new WeakSet<Local>();
 // The generic functions written inside bodies, each lifted to a function of its own, by the
-// statement that declared it.
-const liftedFunctions = new WeakMap<Stmt, { name: string; fn: Func }>();
+// statement that declared it, or the generic arrow written as a value.
+const liftedFunctions = new WeakMap<Stmt | Expr, { name: string; fn: Func }>();
 let lifts = 0;
 let destructures = 0;
 // Every name a class or object literal gives a getter, so a destructuring source reading one
@@ -1043,6 +1043,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       rewritten,
       depthOf: (l) => depths.get(l)!,
       closure,
+      liftArrow,
       closureBody: (t) => closureBodies.get(t)!,
       resolveType,
       implicitOf,
@@ -2018,7 +2019,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           // An arrow's expression body may be a call returning nothing.
           const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? result(s.value) : value(s.value);
           // A closure returned is boxed into the callable the function declares.
-          if (typeof type !== "string" && type.kind === "closure" && (typeof declared === "string" || declared?.kind !== "dyn")) throw unsupported("functions returned without a function return type", s.value!);
+          // A generic function value is returned as it is, capturing nothing.
+          if (typeof type !== "string" && type.kind === "closure" && !type.generic && (typeof declared === "string" || declared?.kind !== "dyn")) throw unsupported("functions returned without a function return type", s.value!);
           // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
           if (!declared && typeof inferred !== "string" && inferred?.kind === "regex" && typeof type !== "string" && type.kind === "regex" && inferred !== type) inferred = ANY_REGEX;
           const expected = declared ?? inferred;
@@ -2151,22 +2153,38 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     // A generic function written in a body, or a generic arrow a const holds, is a generic
     // function of its own, instantiated per call, so it can use nothing of the body around it.
     function lift(s: Stmt, name: string, fn: Func): undefined {
+      lifted(s, name, fn, `'${name}'`);
+      Object.assign(s, { kind: "empty" });
+      return statement(s) as undefined;
+    }
+
+    // A generic arrow written as a value is a generic function of its own, as one a const holds
+    // is, and the arrow becomes its name.
+    function liftArrow(e: Extract<Expr, { kind: "arrow" }>) {
+      const fn = lifted(e, "", arrowFunction("", e, e), "this arrow");
+      for (const key of Object.keys(e)) if (key !== "start" && key !== "end") delete (e as Record<string, unknown>)[key];
+      Object.assign(e, { kind: "ident", name: fn.name });
+    }
+
+    // Lifts a generic function out of the body around it, once per place it is written. `who`
+    // names it in messages.
+    function lifted(key: Stmt | Expr, name: string, fn: Func, who: string): Func {
       const own = fn as Extract<Stmt, { kind: "function" }>;
       if (holdsNode(fn.body, (n) => n.kind === "this")) {
-        throw new CompileError(`'${name}' is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
+        throw new CompileError(`${who} is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
       }
       // It is checked apart from the body around it, so a name that body declares anywhere,
       // before or after, a sibling generic function or a type parameter included, would mean
       // something else inside it.
       const around = new Set([...declaredIn(f), ...(f.scope?.keys() ?? []), ...scopes.flatMap((s) => [...s.keys()])]);
       for (const n of freeNames(own)) {
-        if (n !== name && (around.has(n) || lookup(n))) throw new CompileError(`'${name}' is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
+        if (n !== name && (around.has(n) || lookup(n))) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
       }
       const typed = holdsNode([fn.params, fn.returnType, fn.body], (n) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name));
-      if (typed) throw new CompileError(`'${name}' is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
-      let lifted = liftedFunctions.get(s);
+      if (typed) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
+      let lifted = liftedFunctions.get(key);
       if (!lifted) {
-        lifted = { name, fn: { ...fn, name: `${f.name}.${name}#${lifts++}` } };
+        lifted = { name, fn: { ...fn, name: `${f.name}.${name || "arrow"}#${lifts++}` } };
         // Its calls of itself call what it was lifted to.
         const symbol = lifted.fn.name;
         holdsNode(fn.body, (n) => {
@@ -2174,12 +2192,11 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) c.callee.name = symbol;
           return false;
         });
-        liftedFunctions.set(s, lifted);
+        liftedFunctions.set(key, lifted);
         byName.set(lifted.fn.name, lifted.fn);
         funcs.push(lifted.fn);
       }
-      Object.assign(s, { kind: "empty" });
-      return statement(s) as undefined;
+      return lifted.fn;
     }
 
     // Whether `this` may be used: a constructor's can't until every field is assigned, nor can
