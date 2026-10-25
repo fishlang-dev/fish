@@ -1188,3 +1188,7 @@ function main(): void { console.log(String.fromCharCode("a")); }
 // case: string_static_unknown
 // error: 'String' has no 'raw' yet; it has 'fromCharCode' and 'fromCodePoint'
 function main(): void { console.log(String.raw("a")); }
+// case: string_statics_shadowed
+// error: 'i64' has no method 'fromCharCode'
+const String: i64 = 5;
+function main(): void { console.log(String.fromCharCode(65)); }
