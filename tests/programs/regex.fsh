@@ -224,7 +224,7 @@ function main() {
   console.log(/σ/iu.test("ς"), /Σ/i.test("ς"), /k/iu.test("K"), /k/i.test("K"), /ß/iu.test("ẞ"), /[\q{abc|d}]/v.exec("xxabc")?.index ?? -1);
   console.log(/\w/iu.test("ſ"), /\w/i.test("ſ"), /\bſ/iu.test("ſ"), /[^\P{Lu}]/u.test("A"));
 }
-// case: regex_review_repairs
+// case: regex_values_and_flags
 // expect: true ^https?:\/\/ a\/b (?:)
 // expect: true true false true true
 // expect: true

@@ -12,7 +12,7 @@ function g(c: boolean): void throws i64 {
 }
 function main() throws i64 { g(true) }
 // error: 'o.n' can't be used here because 'o' was moved
-// case: finally_inner_exit_p1
+// case: finally_inner_catch_stays_inside
 // A way out that doesn't leave the try doesn't reach its finally.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}
@@ -26,7 +26,7 @@ function main() {
   }
 }
 // expect: 2
-// case: finally_inner_exit_p2
+// case: finally_inner_break_stays_inside
 // A way out that doesn't leave the try doesn't reach its finally.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}
@@ -126,7 +126,7 @@ function g(c: boolean): i64 throws i64 {
 }
 function main() throws i64 { print(g(true)) }
 // error: 'o.n' can't be used here because 'o' was moved
-// case: finally_revives_q1
+// case: finally_revives_after_throw
 // A finally that gives a moved variable a new value makes it usable where its way out lands.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}
@@ -138,7 +138,7 @@ function main() {
   } catch (e) { print(o.n) }
 }
 // expect: 2
-// case: finally_revives_q2
+// case: finally_revives_after_break
 // A finally that gives a moved variable a new value makes it usable where its way out lands.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}
@@ -150,7 +150,7 @@ function main() {
   print(o.n)
 }
 // expect: 2
-// case: finally_revives_q3
+// case: finally_moved_before_throw_in_loop
 // A finally that gives a moved variable a new value makes it usable where its way out lands.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}
@@ -164,7 +164,7 @@ function g(c: boolean): void throws i64 {
 function main() throws i64 { g(false) }
 // expect: fin
 // expect: 1
-// case: finally_revives_q7
+// case: finally_revives_after_return
 // A finally that gives a moved variable a new value makes it usable where its way out lands.
 class O { constructor(public n: i64) {} }
 function take(o: O) {}

@@ -154,7 +154,7 @@ function main() {
   ys.push(3);
   console.log(ys[0], ys.capacity);
 }
-// case: array_capacity_b1
+// case: array_reserve_while_element_borrowed
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
 function main() {
   let xs = ["a" + "1", "b" + "2"];
@@ -162,24 +162,24 @@ function main() {
   xs.reserve(100);
   console.log(r);
 }
-// case: array_capacity_b2
+// case: array_reserve_in_its_own_loop
 // error: cannot change 'xs' while a 'for...of' loop is reading 'xs'
 function main() {
   let xs = ["a" + "1", "b" + "2"];
   for (const x of xs) { xs.reserve(100); console.log(x); }
 }
-// case: array_capacity_e1
+// case: array_reserve_through_ref
 // error: cannot reserve 'xs' because 'xs' is a shared reference ('Ref'), which only reads
 function f(xs: Ref<i64[]>) { xs.reserve(1); }
 function main() { let xs = [1]; f(xs); }
-// case: array_capacity_e2
+// case: array_shrink_through_ref
 // error: cannot shrinkToFit 'xs' because 'xs' is a shared reference ('Ref'), which only reads
 function f(xs: Ref<i64[]>) { xs.shrinkToFit(); }
 function main() { let xs = [1]; f(xs); }
-// case: array_capacity_e3
+// case: array_reserve_without_count
 // error: 'reserve' takes a count of elements to make room for
 function main() { let xs = [1]; xs.reserve(); }
-// case: array_capacity_s4
+// case: array_capacity_of_shared_copy
 // error: a shared value's array is read as a copy, so read its capacity inside 'st.update(...)'
 type State = { names: string[]; n: i64 };
 async function main() {
@@ -878,11 +878,11 @@ function main() {
   g[0].push(growG(g));
 }
 // error: cannot mutably lend 'g' while 'g[...]' is lent to 'push' for this call
-// case: array_q01_last_str
+// case: array_options_last_index_of
 // expect: 1
 // Searching an array of Options compares each element by value.
 function main() { const os: (string | null)[] = [null, "a" + 1, null]; console.log(os.lastIndexOf("a" + 1)); }
-// case: array_q03_inc_str
+// case: array_options_includes
 // expect: true
 // Searching an array of Options compares each element by value.
 function main() { const os: (string | null)[] = [null, "a" + 1, null]; console.log(os.includes("a" + 1)); }
@@ -1022,21 +1022,21 @@ function main() {
 // case: array_splice_constant
 // error: cannot splice 'xs' because it is a constant
 function main() { const xs = [1, 2]; xs.splice(0, 1); }
-// case: array_u01_concat_panic
+// case: array_concat_argument_panics
 // panic: attempt to divide by zero
 // A panicking argument drops what the call was already handed.
 function boom(): string[] { const z = 1 / (0 * 1); return ["never" + z]; }
 function boomS(): string { const z = 1 / (0 * 1); return "never" + z; }
 function boomI(): i64 { return 1 / (0 * 1); }
 function main() { const a = ["a" + 1, "b" + 2]; const c = a.concat(a, boom()); console.log(c.length); }
-// case: array_u02_unshift_panic
+// case: array_unshift_argument_panics
 // panic: attempt to divide by zero
 // A panicking argument drops what the call was already handed.
 function boom(): string[] { const z = 1 / (0 * 1); return ["never" + z]; }
 function boomS(): string { const z = 1 / (0 * 1); return "never" + z; }
 function boomI(): i64 { return 1 / (0 * 1); }
 function main() { let a = ["a" + 1]; a.unshift("u" + 1, boomS()); console.log(a.length); }
-// case: array_u04_fill_panic
+// case: array_fill_argument_panics
 // panic: attempt to divide by zero
 // A panicking argument drops what the call was already handed.
 function boom(): string[] { const z = 1 / (0 * 1); return ["never" + z]; }

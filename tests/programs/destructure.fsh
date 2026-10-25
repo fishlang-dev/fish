@@ -230,7 +230,7 @@ function main() {
   let i = 0, j = 1;
   for (let t = 0; t < 3; [i, j] = [j, i + j]) t++;
 }
-// case: destructuring_assignment_review_def
+// case: destructuring_assignment_defaults_from_earlier
 // expect: 5 5
 // expect: 7 7
 function main() {
@@ -242,7 +242,7 @@ function main() {
   ({ x, y = x } = src);
   console.log(x, y);
 }
-// case: destructuring_assignment_review_buf
+// case: destructuring_assignment_swaps_arrays
 // expect: 1 0
 function main() {
   let prev: i64[] = [0, 0];
@@ -250,7 +250,7 @@ function main() {
   [prev, curr] = [curr, prev];
   console.log(prev[0], curr[0]);
 }
-// case: destructuring_assignment_review_mixed
+// case: destructuring_assignment_mixed_types
 // expect: x 1
 function main() {
   let s = "";
@@ -258,21 +258,21 @@ function main() {
   [s, n] = ["x", 1];
   console.log(s, n);
 }
-// case: destructuring_assignment_review_lit_u8
+// case: destructuring_assignment_literal_into_u8
 // expect: 1
 function main() {
   let a: u8 = 0;
   [a] = [1];
   console.log(a);
 }
-// case: destructuring_assignment_review_lit_union
+// case: destructuring_assignment_literal_into_union
 // expect: on
 function main() {
   let k: "on" | "off" = "off";
   [k] = ["on"];
   console.log(k);
 }
-// case: destructuring_assignment_review_narrow
+// case: destructuring_assignment_narrowed_target
 // expect: 5
 function main() {
   let v: string | i64 = "s" + 1;
@@ -281,7 +281,7 @@ function main() {
   }
   console.log(v);
 }
-// case: destructuring_assignment_review_ctor
+// case: destructuring_assignment_in_constructors
 // expect: a1 2
 // expect: b1 3
 class P {
@@ -300,7 +300,7 @@ function main() {
   const q = new Q("b" + 1, 3);
   console.log(q.x, q.y);
 }
-// case: destructuring_assignment_review_ref
+// case: destructuring_assignment_points_reference
 // expect: x
 class C { s: string; constructor(s: string) { this.s = s; } }
 function main() {
@@ -309,7 +309,7 @@ function main() {
   ({ r } = { r: x });
   console.log(r.s);
 }
-// case: destructuring_assignment_rereview_place
+// case: destructuring_assignment_copies_from_places
 // expect: 1 2 1
 // expect: m1 n2 m1
 function main() {
@@ -322,7 +322,7 @@ function main() {
   [u, w] = pair;
   console.log(u, w, pair[0]);
 }
-// case: destructuring_assignment_rereview_t1
+// case: destructuring_assignment_strings_from_places
 // expect: q2 p1
 // expect: m1 n2 m1 n2
 // expect: X1 Y2 X1
@@ -341,7 +341,7 @@ function main() {
   ({ x: px, y: py } = pt);
   console.log(px, py, pt.x);
 }
-// case: destructuring_assignment_rereview_own
+// case: destructuring_assignment_moves_instances
 // expect: t0 t1
 // expect: took m0
 // expect: m1
@@ -378,7 +378,7 @@ function main() {
   ({ k: kk, n: nn } = o);
   console.log(kk.s, nn, o.n);
 }
-// case: destructuring_assignment_rereview_r2e
+// case: destructuring_assignment_generic_default
 // expect: 3
 // expect: d3
 // expect: 5
@@ -392,7 +392,7 @@ function main() {
   console.log(pick<string | null>(null, "i" + 1, "d" + 3));
   console.log(pick<i64>(5, 1, 3));
 }
-// case: destructuring_assignment_rereview_r2b
+// case: destructuring_assignment_generic_default_from_earlier
 // expect: 7
 // expect: 2
 // expect: q1
@@ -412,7 +412,7 @@ function main() {
   console.log(pick<string | null>(m, "f"));
   console.log(pick<string>(["u" + 1, "v" + 1], "f"));
 }
-// case: destructuring_assignment_rereview_nested
+// case: destructuring_assignment_nested_instances
 // expect: n m
 class C { s: string; constructor(s: string) { this.s = s; } }
 function main() {
@@ -420,7 +420,7 @@ function main() {
   [[x], b] = [[new C("n")], new C("m")];
   console.log(x.s, b.s);
 }
-// case: destructuring_assignment_rereview_r2a
+// case: destructuring_assignment_from_calls
 // expect: mk
 // expect: a1 b1
 // expect: mk
@@ -455,7 +455,7 @@ function main() {
   [a, t] = [new C("q" + 2), [new C("tt" + 1), "u" + 1]];
   console.log(a.s, t[0].s, t[1], n1.length);
 }
-// case: destructuring_assignment_rereview_r2l
+// case: destructuring_assignment_evaluation_order
 // expect: a
 // expect: c
 // expect: b
@@ -480,7 +480,7 @@ function main() {
   [a, b] = [f("x", 7), f("y", 8), f("z", 9)];
   console.log(a, b);
 }
-// case: destructuring_assignment_rereview_r2h
+// case: destructuring_assignment_computed_index_targets
 // expect: 5
 // expect: z1 9
 // expect: q1 1
@@ -505,7 +505,7 @@ function main() {
   b.set("q" + 1);
   console.log(b.items[0], b.n);
 }
-// case: destructuring_assignment_rereview_r2f
+// case: destructuring_assignment_generic_default_wrong_type
 // error: type '"str"' is not assignable to type 'i64 | null', what 'i64 | null' holds
 function pick<T>(x: T, init: T): T {
   let b = init;
@@ -515,7 +515,7 @@ function pick<T>(x: T, init: T): T {
 function main() {
   console.log(pick<i64 | null>(null, 1));
 }
-// case: destructuring_assignment_rereview_r2d
+// case: destructuring_assignment_default_moved
 // error: 'fallback' was moved, so it can't be used here
 function pick<T>(x: T, fallback: T): T {
   let b = fallback;

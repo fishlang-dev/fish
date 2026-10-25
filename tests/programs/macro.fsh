@@ -136,7 +136,7 @@ macro function withSecret(input: AstStmt): Ast[] {
 function main() {
   console.log(secret());
 }
-// case: macro_h1b_ident_binding_silent
+// case: macro_hygiene_spliced_ident
 // expect: 5
 const total: i64 = 99;
 macro function m(input: AstStmt): Ast[] {
@@ -159,7 +159,7 @@ macro function m(input: AstStmt): Ast[] {
 function main() {
   console.log(withTotal());
 }
-// case: macro_h19_match_binding_capture
+// case: macro_hygiene_match_binding
 // expect: 10
 const v: i64 = 10;
 macro function wrap(input: AstStmt): Ast[] {
@@ -179,7 +179,7 @@ macro function wrap(input: AstStmt): Ast[] {
 function main() {
   console.log(w(5));
 }
-// case: macro_h18_this_param
+// case: macro_quoted_mut_this
 // expect: 2
 macro function m(input: AstStmt): Ast[] {
   return [input,
@@ -191,7 +191,7 @@ function main() {
   c.inc();
   console.log(c.n);
 }
-// case: macro_h2_shorthand
+// case: macro_quoted_shorthand
 // expect: 1 2
 type P = { x: i64; y: i64 };
 macro function m(input: AstStmt): Ast[] {
@@ -202,7 +202,7 @@ function main() {
   const p = make();
   console.log(p.x, p.y);
 }
-// case: macro_h21_type_param_capture
+// case: macro_hygiene_type_parameter
 // expect: hello
 type T = string;
 macro function wrap(input: AstStmt): Ast[] {
@@ -216,7 +216,7 @@ macro function wrap(input: AstStmt): Ast[] {
 function main() {
   console.log(keepFirst("hello", 5));
 }
-// case: macro_h3_helper_quote
+// case: macro_hygiene_helper_quote
 // expect: 42 1
 function build(): AstStmt {
   return quote`function helper(): i64 { return 41; }`;
@@ -229,7 +229,7 @@ function helper(): i64 { return 1; }
 function main() {
   console.log(answer(), helper());
 }
-// case: macro_s3e_macro_local_type
+// case: macro_local_type_alias
 // expect: 3
 macro function m(input: Ast): Ast[] {
   type Name = string;
@@ -240,7 +240,7 @@ macro function m(input: Ast): Ast[] {
 function main() {
   console.log(three());
 }
-// case: macro_e2_export_const
+// case: macro_adds_const_to_export
 // expect: 3
 macro function withConst(input: AstStmt): Ast[] {
   return [input, quote`const ${ident("THREE")}: i64 = 3;`];
@@ -562,7 +562,7 @@ class A {
   m(@keep x: i64) {}
 }
 function main() {}
-// case: macro_c_w1
+// case: macro_member_replace_keeps_outer_decorators
 // expect: HELLO extra ran
 // expect: own ran
 // a member macro that replaces its member: the member's outer decorator and the class's own should still apply
@@ -590,7 +590,7 @@ class A {
   @rebuild hello(): string { return "hello"; }
 }
 function main() { console.log(new A().hello(), extraRan()); console.log(ownRan()); }
-// case: macro_c_w2
+// case: macro_member_replace_keeps_class_decorator
 // expect: own ran
 // a member macro that replaces its member: the member's outer decorator and the class's own should still apply
 macro function loud(input: AstStmt, member: usize): AstStmt {
@@ -617,7 +617,7 @@ class A {
   @rebuild hello(): string { return "hello"; }
 }
 function main() { console.log(ownRan()); }
-// case: macro_c_x1
+// case: macro_inner_exports_outer_runs
 // expect: 1 outer ran
 // the inner macro gives the declaration back as an export; the outer decorator must still run
 macro function exp(input: AstStmt): AstStmt {
@@ -628,7 +628,7 @@ macro function also(input: AstStmt): Ast[] {
 }
 @also @exp function f(): i64 { return 1; }
 function main() { console.log(f(), ran()); }
-// case: macro_c_q1
+// case: macro_defaulted_parameter
 // expect: 1 1
 // an optional and a defaulted macro parameter, the argument left out
 macro function e(input: AstStmt, label: string = "dflt"): Ast[] {
@@ -637,7 +637,7 @@ macro function e(input: AstStmt, label: string = "dflt"): Ast[] {
 @e function f() {}
 @e("given") function g() {}
 function main() { console.log(dflt(), given()); }
-// case: macro_c_a2
+// case: macro_u8_parameter_literal
 // expect: ok
 // u8 parameter given a literal
 macro function small(input: AstStmt, v: u8): Ast {
@@ -645,7 +645,7 @@ macro function small(input: AstStmt, v: u8): Ast {
 }
 @small(5) function f() {}
 function main() { console.log("ok"); }
-// case: macro_c_r1
+// case: macro_many_member_macros
 // expect: 64
 macro function keep(input: AstStmt, member: i64): Ast { return input; }
 @own class C {
@@ -726,7 +726,7 @@ function main() {
     @keep x: i64 = 1;
   }
 }
-// case: macro_c2_enum
+// case: macro_outer_matches_inner_enum
 // expect: light dark
 // the inner macro gives an enum; the outer quotes a match on its members by bare name
 macro function inner(input: AstStmt): Ast[] {
@@ -737,7 +737,7 @@ macro function outer(input: AstStmt): Ast[] {
 }
 @outer @inner function f() {}
 function main() { console.log(name(Shade.Light), name(Shade.Dark)); }
-// case: macro_c2_gs
+// case: macro_getter_and_setter_decorated
 // expect: g1 on get@1
 // expect: g2 on get@1
 // expect: s1 on set@2
@@ -760,7 +760,7 @@ class A {
   @note("s2") @note("s1") set v(x: i64) { this.n = x; }
 }
 function main() { console.log(g1()); console.log(g2()); console.log(s1()); console.log(s2()); }
-// case: macro_c2_ctor
+// case: macro_member_insert_keeps_constructor_decorator
 // expect: outer on constructor@2
 // a member macro that inserts a member in front; the constructor's outer decorator must stay on the constructor
 function kindAt(c: AstStmt, i: usize): string {
@@ -792,7 +792,7 @@ class A {
   m(): i64 { return 2; }
 }
 function main() { console.log(outer()); }
-// case: macro_c2_def4
+// case: macro_syntax_parameter_default
 // expect: 10 3
 // a syntax parameter whose default is a quote
 const LIMIT = 5;
@@ -802,7 +802,7 @@ macro function addFn(input: AstStmt, name: string, e: AstExpr = quote`LIMIT * 2`
 @addFn("got") function f() {}
 @addFn("given", 3) function g() {}
 function main() { console.log(got(), given()); }
-// case: macro_c2_def2
+// case: macro_optional_parameters_left_out
 // expect: n=-1 e=none
 // an optional value parameter and an optional syntax parameter, left out
 macro function opt(input: AstStmt, n?: i64, e?: AstExpr): Ast[] {
@@ -814,7 +814,7 @@ macro function opt(input: AstStmt, n?: i64, e?: AstExpr): Ast[] {
 }
 @opt function f() {}
 function main() { console.log(got()); }
-// case: macro_c3_del
+// case: macro_removes_decorated_member
 // error: a macro took away what these decorators were waiting to apply to
 function kindAt(c: AstStmt, i: usize): string {
   if (c.kind === "class") {

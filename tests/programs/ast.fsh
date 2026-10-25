@@ -155,7 +155,7 @@ function main() {
   const e = quote`1 + 2`;
   console.log(e.kind);
 }
-// case: ast_quote_repairs
+// case: ast_quote_regex_and_escapes
 // expect: \d+ a\nb
 // expect: function class expr binary
 // expect: y 1

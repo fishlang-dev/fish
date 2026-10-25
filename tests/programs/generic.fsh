@@ -1231,13 +1231,13 @@ class C {
 function main() {
   console.log(new C().m());
 }
-// case: generic_review_k8
+// case: generic_callback_parameter_uninferred
 // error: can't infer a type for 'T'; pass the type arguments explicitly
 function on<T>(h: (e: T) => void): i64 { return 1; }
 function main() {
   console.log(on((e) => console.log("hi")));
 }
-// case: generic_review_h3
+// case: generic_arrow_refuses_local_arrow
 // error: 'twice' is generic, so it is made apart from the function around it and can't use 'pick' from there; pass it as a parameter, or declare it at the top level
 function id<T>(x: T): T { return x.clone(); }
 function pick<T>(x: T): string { return "top"; }
@@ -1246,7 +1246,7 @@ function main() {
   const twice = <T>(x: T): string => pick(x);
   console.log(twice(true));
 }
-// case: generic_review_h1
+// case: generic_arrow_refuses_local_const
 // error: 'f' is generic, so it is made apart from the function around it and can't use 'K' from there; pass it as a parameter, or declare it at the top level
 const K: i64 = 10;
 function main() {
@@ -1254,21 +1254,21 @@ function main() {
   const K = 5;
   console.log(f(1));
 }
-// case: generic_review_h7
+// case: generic_arrow_refuses_outer_type
 // error: 'keep' is generic, so it is made apart from the function around it and can't use its types; declare it at the top level
 function outer<U>(u: U): U {
   const keep = <T>(x: T, y: U): U => y;
   return keep(1, u);
 }
 function main() { console.log(outer(3), outer("s")); }
-// case: generic_review_i3a
+// case: generic_async_arrow
 // expect: a
 async function main() {
   const ag = async <T>(x: T): Promise<T> => x;
   const r = await ag("a");
   console.log(r);
 }
-// case: generic_review_i3b
+// case: generic_arrow_in_async_function
 // expect: w
 async function work(): Promise<string> {
   const id = <T>(x: T): T => x;
@@ -1278,19 +1278,19 @@ async function main() {
   const s = await work();
   console.log(s);
 }
-// case: generic_review_h9
+// case: generic_arrow_unused_type_parameter
 // expect: 1
 function main() {
   const one = <T>(x: T): i64 => 1;
   console.log(one("a"));
 }
-// case: generic_review_h5
+// case: generic_nested_function_recursion
 // expect: 3
 function main() {
   function g<T>(x: T, n: i64): i64 { if (n === 0) return 0; return g(x, n - 1) + 1; }
   console.log(g("a", 3));
 }
-// case: generic_review_f1
+// case: generic_dyn_of_generic_interface
 // expect: 1
 interface Container<T> { get(): T }
 class K<T> implements Container<T> {
@@ -1303,7 +1303,7 @@ function main() {
   const d = mk(1);
   console.log(d.get());
 }
-// case: generic_review_f5
+// case: generic_interface_parameter_infers
 // expect: 100
 interface Container<T> { get(): T }
 class J implements Container<i64> { get(): i64 { return 100; } }

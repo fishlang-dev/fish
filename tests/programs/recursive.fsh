@@ -213,7 +213,7 @@ function main() {
   console.log(weight({ v: 1, kids: [{ v: 2, kids: [] }, { v: 3, kids: [{ v: 4, kids: [] }] }] }));
   console.log(ev(Expr.Add(Expr.Num(5), Expr.Add(Expr.Num(6), Expr.Num(7)))));
 }
-// case: recursive_repairs
+// case: recursive_types_mixed
 // expect: 9 1 5
 // expect: 2 2 9
 // expect: a 2
