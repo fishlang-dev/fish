@@ -3021,18 +3021,20 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
 
 // One printed line is several writes; holding the stream's lock across them keeps lines from
 // tasks on other threads whole.
-// A line for stderr waits for what stdout holds, so the two keep their order in one pipe or file.
+// A line for stderr waits for what stdout holds and keeps stdout's lock while it writes, so the
+// two streams keep their order and their lines whole in one pipe or file. Stdout's lock is always
+// taken first.
 void fsh_rt_print_begin(int32_t stream) {
+  flockfile(stdout);
   if (stream == 2) {
-    flockfile(stdout);
     fflush(stdout);
-    funlockfile(stdout);
+    flockfile(stderr);
   }
-  flockfile(stream == 2 ? stderr : stdout);
 }
 
 void fsh_rt_print_end(int32_t stream) {
-  funlockfile(stream == 2 ? stderr : stdout);
+  if (stream == 2) funlockfile(stderr);
+  funlockfile(stdout);
 }
 
 // A Lock's word: 0 unlocked, or the token of the thread holding it. A lock is held only for a
