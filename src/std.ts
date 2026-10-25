@@ -43,7 +43,13 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
   return out;
 }
 class AbortError { message: string = "This operation was aborted"; }
-class IoError { message: string; constructor(message: string) { this.message = message; } }
+class IoError {
+  message: string;
+  code: string = "";
+  syscall: string = "";
+  path: string | null = null;
+  constructor(message: string) { this.message = message; }
+}
 class JsonError { message: string; constructor(message: string) { this.message = message; } }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
 class TextDecoder { decode(input: Ref<u8[]>): string { return utf8Decode(input); } }

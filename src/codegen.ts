@@ -5528,8 +5528,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
       const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
       if (socket) {
-        reason = alloca("ptr");
-        emit(`store ptr null, ptr ${reason}`);
+        reason = alloca("[4 x ptr]");
+        emit(`store [4 x ptr] zeroinitializer, ptr ${reason}`);
       }
       // One given a signal joins its waiters first, and stops if it has aborted, leaving the
       // waiters it joined; once done any other way, it leaves the signal's.
@@ -5669,10 +5669,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A socket's failure is an IoError with the system's reason; any other leaf's, an abort.
       let error = "";
       if (leaf && reason && !leaf.signal) {
-        const [text, made] = [temp(), temp()];
-        emit(`${text} = load ptr, ptr ${reason}`);
-        emit(`${made} = insertvalue ${llvm(shape.throws)} zeroinitializer, ptr ${text}, 0`);
-        error = made;
+        error = ioError(reason, shape.throws as ClassType);
       } else if (leaf && reason) {
         // Given a signal, it throws either: an AbortError when it was aborted, leaving no reason.
         const members = (shape.throws as UnionType).members as ClassType[];
@@ -5682,9 +5679,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${none} = icmp eq ptr ${text}, null`);
         emit(`br i1 ${none}, label %${abortAt}, label %${ioAt}`);
         startBlock(ioAt);
-        const failure = temp();
-        emit(`${failure} = insertvalue ${llvm(io)} zeroinitializer, ptr ${text}, 0`);
-        const asIo = convert(failure, io, shape.throws);
+        const asIo = convert(ioError(reason, io), io, shape.throws);
         const fromIo = block;
         emit(`br label %${join}`);
         startBlock(abortAt);
@@ -5780,6 +5775,37 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit("ret i32 1");
     } else emit("unreachable");
     return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+  }
+
+  // An IoError from the parts the runtime gave at `parts`: its message, code, system call and
+  // path, the path empty where the runtime gave none.
+  function ioError(parts: string, io: ClassType): string {
+    const part = (i: number) => {
+      const [at, v] = [temp(), temp()];
+      emit(`${at} = getelementptr [4 x ptr], ptr ${parts}, i32 0, i32 ${i}`);
+      emit(`${v} = load ptr, ptr ${at}`);
+      return v;
+    };
+    const [message, code, syscall, path] = [part(0), part(1), part(2), part(3)];
+    // A part the runtime left out is an empty string, or for the path, no path.
+    const orEmpty = (v: string) => {
+      const [none, given] = [temp(), temp()];
+      emit(`${none} = icmp eq ptr ${v}, null`);
+      emit(`${given} = select i1 ${none}, ptr ${text("")}, ptr ${v}`);
+      return given;
+    };
+    const option = io.fields.find((f) => f.name === "path")!.type;
+    const [none, held] = [temp(), temp()];
+    emit(`${none} = icmp eq ptr ${path}, null`);
+    emit(`${held} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(path, "string", option)}`);
+    let made = "zeroinitializer";
+    for (const [name, v] of [["message", orEmpty(message)], ["code", orEmpty(code)], ["syscall", orEmpty(syscall)], ["path", held]] as const) {
+      const index = io.fields.findIndex((f) => f.name === name);
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(io)} ${made}, ${llvm(io.fields[index]!.type)} ${v}, ${index}`);
+      made = next;
+    }
+    return made;
   }
 
   // The size of an LLVM type in bytes, as a constant.

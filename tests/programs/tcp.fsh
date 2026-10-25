@@ -354,3 +354,12 @@ async function main(): Promise<void> throws IoError {
   const conn = await TcpStream.connect("127.0.0.1", listener.port);
   await conn.write("hello");
 }
+// case: tcp_error_fields
+// expect: ECONNREFUSED connect null
+async function main(): Promise<void> {
+  try {
+    const conn = await TcpStream.connect("127.0.0.1", 1);
+  } catch (e) {
+    console.log(e.code, e.syscall, e.path);
+  }
+}

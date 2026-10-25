@@ -3567,16 +3567,73 @@ void fsh_rt_socket_release(fsh_socket *s) {
 }
 
 // A failed call's IoError message: what was being done, and the system's reason.
-static int32_t fsh_io_failed(fsh_str **message, const char *doing) {
-  // strerror's text may be shared between threads, so it is copied under a lock.
+// An errno's Node code and libuv's wording for it, as Node's errors give them.
+static const struct { int number; const char *code, *text; } fsh_errnos[] = {
+  {ENOENT, "ENOENT", "no such file or directory"}, {EACCES, "EACCES", "permission denied"},
+  {EISDIR, "EISDIR", "illegal operation on a directory"}, {ENOTDIR, "ENOTDIR", "not a directory"},
+  {EEXIST, "EEXIST", "file already exists"}, {EMFILE, "EMFILE", "too many open files"},
+  {ENFILE, "ENFILE", "file table overflow"}, {ENOSPC, "ENOSPC", "no space left on device"},
+  {EROFS, "EROFS", "read-only file system"}, {ELOOP, "ELOOP", "too many symbolic links encountered"},
+  {ENAMETOOLONG, "ENAMETOOLONG", "name too long"}, {EPERM, "EPERM", "operation not permitted"},
+  {EINVAL, "EINVAL", "invalid argument"}, {EIO, "EIO", "i/o error"}, {EBUSY, "EBUSY", "resource busy or locked"},
+  {EAGAIN, "EAGAIN", "resource temporarily unavailable"}, {ENOTEMPTY, "ENOTEMPTY", "directory not empty"},
+  {EXDEV, "EXDEV", "cross-device link not permitted"}, {EFBIG, "EFBIG", "file too large"},
+  {EBADF, "EBADF", "bad file descriptor"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
+  {ECONNRESET, "ECONNRESET", "connection reset by peer"}, {EPIPE, "EPIPE", "broken pipe"},
+  {ETIMEDOUT, "ETIMEDOUT", "connection timed out"}, {EADDRINUSE, "EADDRINUSE", "address already in use"},
+  {EADDRNOTAVAIL, "EADDRNOTAVAIL", "address not available"}, {ENOTCONN, "ENOTCONN", "socket is not connected"},
+  {EHOSTUNREACH, "EHOSTUNREACH", "host is unreachable"}, {ENETUNREACH, "ENETUNREACH", "network is unreachable"},
+};
+
+// The code and wording for an errno, falling back on strerror's, copied out under a lock since its
+// text may be shared between threads.
+static void fsh_errno_words(int error, char *code, size_t code_size, char *text, size_t text_size) {
+  for (size_t i = 0; i < sizeof fsh_errnos / sizeof fsh_errnos[0]; i++) {
+    if (fsh_errnos[i].number != error) continue;
+    snprintf(code, code_size, "%s", fsh_errnos[i].code);
+    snprintf(text, text_size, "%s", fsh_errnos[i].text);
+    return;
+  }
   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-  int error = errno;
-  char text[256];
+  snprintf(code, code_size, "E%d", error);
   pthread_mutex_lock(&lock);
-  snprintf(text, sizeof text, "%s: %s", doing, strerror(error));
+  snprintf(text, text_size, "%s", strerror(error));
   pthread_mutex_unlock(&lock);
-  *message = fsh_rt_str_from_cstring(text);
+}
+
+// An IoError's parts, as the runtime gives them to the code that throws one: its message, code,
+// system call and path, the last NULL when it has none.
+static int32_t fsh_io_parts(fsh_str **error, const char *message, const char *code, const char *syscall, const char *path) {
+  error[0] = fsh_rt_str_from_cstring(message);
+  error[1] = fsh_rt_str_from_cstring(code);
+  error[2] = fsh_rt_str_from_cstring(syscall);
+  error[3] = path ? fsh_rt_str_from_cstring(path) : NULL;
   return 5;
+}
+
+// A socket call's failure: Fish's message with the system's reason, and Node's code and system
+// call.
+static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *syscall) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  int number = errno;
+  char code[32], text[200], message[256];
+  fsh_errno_words(number, code, sizeof code, text, sizeof text);
+  pthread_mutex_lock(&lock);
+  snprintf(message, sizeof message, "%s: %s", doing, strerror(number));
+  pthread_mutex_unlock(&lock);
+  return fsh_io_parts(error, message, code, syscall, NULL);
+}
+
+// A file call's failure, in Node's words: "ENOENT: no such file or directory, open 'x'".
+static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, const char *path) {
+  char code[32], text[200];
+  fsh_errno_words(number, code, sizeof code, text, sizeof text);
+  size_t size = strlen(code) + strlen(text) + strlen(syscall) + strlen(path) + 16;
+  char *message = fsh_rt_alloc(size);
+  snprintf(message, size, "%s: %s, %s '%s'", code, text, syscall, path);
+  int32_t failed = fsh_io_parts(error, message, code, syscall, path);
+  fsh_rt_free(message);
+  return failed;
 }
 
 // An IPv4 address and port from a string and a number, or 0 with the message saying why not.
@@ -3592,7 +3649,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
     snprintf(reason, sizeof reason, "'%.200s' is not an IPv4 address like 127.0.0.1; host names aren't looked up", text ? text : "");
   }
   fsh_rt_free(text);
-  if (reason[0]) *message = fsh_rt_str_from_cstring(reason);
+  if (reason[0]) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
   return !reason[0];
 }
 
@@ -3601,11 +3658,11 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
   struct sockaddr_in at;
   if (!fsh_address(host, port, &at, message)) return 5;
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return fsh_io_failed(message, "can't make a socket");
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   int on = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
   if (bind(fd, (struct sockaddr *)&at, sizeof at) < 0 || listen(fd, 128) < 0) {
-    int32_t failed = fsh_io_failed(message, "can't listen there");
+    int32_t failed = fsh_io_failed(message, "can't listen there", "listen");
     close(fd);
     return failed;
   }
@@ -3633,7 +3690,7 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
     fsh_io_wait(listener->fd, 0, task);
     return 0;
   }
-  return fsh_io_failed(message, "can't accept a connection");
+  return fsh_io_failed(message, "can't accept a connection", "accept");
 }
 
 // A task's wait on a socket was aborted: it is no longer woken when the socket is ready. A
@@ -3659,8 +3716,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
   if (max < 1) {
     char text[96];
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
-    *message = fsh_rt_str_from_cstring(text);
-    return 5;
+    return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
@@ -3679,7 +3735,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     fsh_io_wait(s->fd, 0, task);
     return 0;
   }
-  return fsh_io_failed(message, "can't read");
+  return fsh_io_failed(message, "can't read", "read");
 }
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
@@ -3699,7 +3755,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
       fsh_io_wait(s->fd, 1, task);
       return 0;
     }
-    return fsh_io_failed(message, "can't write");
+    return fsh_io_failed(message, "can't write", "write");
   }
   return 1;
 }
@@ -3712,22 +3768,22 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     struct sockaddr_in at;
     if (!fsh_address(host, port, &at, message)) return 5;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return fsh_io_failed(message, "can't make a socket");
+    if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
     s = *socket_at = fsh_socket_new(fd);
     // Interrupted, it goes on connecting all the same.
-    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect");
+    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
   }
   int error = 0;
   socklen_t size = sizeof error;
   getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
   if (error) {
     errno = error;
-    return fsh_io_failed(message, "can't connect");
+    return fsh_io_failed(message, "can't connect", "connect");
   }
   struct sockaddr_in peer;
   socklen_t peer_size = sizeof peer;
   if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) < 0) {
-    if (errno != ENOTCONN) return fsh_io_failed(message, "can't connect");
+    if (errno != ENOTCONN) return fsh_io_failed(message, "can't connect", "connect");
     fsh_io_wait(s->fd, 1, task);
     return 0;
   }
