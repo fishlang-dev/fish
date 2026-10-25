@@ -1956,6 +1956,543 @@ int64_t fsh_rt_os_parallelism(void) {
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   return n > 0 ? n : 1;
 }
+
+// A value to print as Node's util.inspect prints it: a tree codegen builds, laid out here by
+// a port of Node's formatValue, reduceToSingleString and groupArrayElements, with its defaults:
+// depth 2, a break length of 80, compact 3, 100 elements and 10000 characters at most.
+enum { FSH_INSP_TEXT, FSH_INSP_STRING, FSH_INSP_OBJECT, FSH_INSP_ARRAY, FSH_INSP_MAP, FSH_INSP_SET, FSH_INSP_VARIANT };
+
+typedef struct fsh_insp {
+  int32_t kind;
+  // A number's text, set once it is a number, as an array's grouping pads them to the right.
+  int32_t numeric;
+  // TEXT: what it prints as; STRING: its bytes, quoted where it isn't printed on its own;
+  // OBJECT: a class's name, or empty; VARIANT: the member's name.
+  char *text;
+  int64_t length;
+  // The fields' keys, for an OBJECT.
+  char **keys;
+  // The parts: fields, elements, members, a Map's keys and values in turn, a member's values.
+  struct fsh_insp **items;
+  int64_t count, room;
+  // An ARRAY's, Map's or Set's size, of which the first 100 are kept.
+  int64_t size;
+} fsh_insp;
+
+static fsh_insp *fsh_insp_new(int32_t kind, const char *text, int64_t length) {
+  fsh_insp *v = fsh_rt_alloc(sizeof(fsh_insp));
+  memset(v, 0, sizeof *v);
+  v->kind = kind;
+  v->text = fsh_rt_alloc(length + 1);
+  memcpy(v->text, text, length);
+  v->text[length] = 0;
+  v->length = length;
+  return v;
+}
+
+static void fsh_insp_add(fsh_insp *v, fsh_insp *item, const char *key) {
+  if (v->count == v->room) {
+    int64_t room = v->room ? v->room * 2 : 4;
+    fsh_insp **items = fsh_rt_alloc(room * sizeof(fsh_insp *));
+    char **keys = fsh_rt_alloc(room * sizeof(char *));
+    if (v->count) {
+      memcpy(items, v->items, v->count * sizeof(fsh_insp *));
+      memcpy(keys, v->keys, v->count * sizeof(char *));
+    }
+    fsh_rt_free(v->items);
+    fsh_rt_free(v->keys);
+    v->items = items;
+    v->keys = keys;
+    v->room = room;
+  }
+  v->items[v->count] = item;
+  v->keys[v->count] = NULL;
+  if (key) {
+    size_t n = strlen(key);
+    v->keys[v->count] = fsh_rt_alloc(n + 1);
+    memcpy(v->keys[v->count], key, n + 1);
+  }
+  v->count++;
+}
+
+static void fsh_insp_free(fsh_insp *v) {
+  for (int64_t i = 0; i < v->count; i++) {
+    fsh_insp_free(v->items[i]);
+    fsh_rt_free(v->keys[i]);
+  }
+  fsh_rt_free(v->items);
+  fsh_rt_free(v->keys);
+  fsh_rt_free(v->text);
+  fsh_rt_free(v);
+}
+
+fsh_insp *fsh_rt_insp_text(const char *text) {
+  return fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+}
+
+fsh_insp *fsh_rt_insp_i64(int64_t n) {
+  char text[24];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, snprintf(text, sizeof text, "%lld", (long long)n));
+  v->numeric = 1;
+  return v;
+}
+
+fsh_insp *fsh_rt_insp_u64(uint64_t n) {
+  char text[24];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, snprintf(text, sizeof text, "%llu", (unsigned long long)n));
+  v->numeric = 1;
+  return v;
+}
+
+// A float as Node prints a number: as String(x) writes it, and -0 as -0.
+fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
+  char text[40];
+  if (x == 0 && signbit(x)) strcpy(text, "-0");
+  else fsh_format(x, single, text);
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+  v->numeric = 1;
+  return v;
+}
+
+fsh_insp *fsh_rt_insp_string(fsh_str *s) {
+  return fsh_insp_new(FSH_INSP_STRING, s->bytes, s->length);
+}
+
+fsh_insp *fsh_rt_insp_object(const char *name) {
+  return fsh_insp_new(FSH_INSP_OBJECT, name, strlen(name));
+}
+
+void fsh_rt_insp_field(fsh_insp *object, const char *key, fsh_insp *value) {
+  fsh_insp_add(object, value, key);
+}
+
+fsh_insp *fsh_rt_insp_list(int32_t kind, int64_t size) {
+  fsh_insp *v = fsh_insp_new(kind, "", 0);
+  v->size = size;
+  return v;
+}
+
+// An element, member, key or value; those past the first 100 are dropped, as Node prints only
+// those and counts the rest.
+void fsh_rt_insp_push(fsh_insp *list, fsh_insp *item) {
+  int64_t limit = list->kind == FSH_INSP_MAP ? 200 : list->kind == FSH_INSP_VARIANT ? INT64_MAX : 100;
+  if (list->count >= limit) fsh_insp_free(item);
+  else fsh_insp_add(list, item, NULL);
+}
+
+fsh_insp *fsh_rt_insp_variant(const char *name) {
+  return fsh_insp_new(FSH_INSP_VARIANT, name, strlen(name));
+}
+
+// Text being built, NUL-terminated.
+typedef struct {
+  char *p;
+  int64_t n, room;
+} fsh_sb;
+
+static void fsh_sb_put(fsh_sb *b, const char *p, int64_t n) {
+  if (b->n + n + 1 > b->room) {
+    int64_t room = b->room ? b->room * 2 : 64;
+    while (room < b->n + n + 1) room *= 2;
+    char *grown = fsh_rt_alloc(room);
+    if (b->n) memcpy(grown, b->p, b->n);
+    fsh_rt_free(b->p);
+    b->p = grown;
+    b->room = room;
+  }
+  memcpy(b->p + b->n, p, n);
+  b->n += n;
+  b->p[b->n] = 0;
+}
+
+static void fsh_sb_str(fsh_sb *b, const char *s) {
+  fsh_sb_put(b, s, strlen(s));
+}
+
+static void fsh_sb_spaces(fsh_sb *b, int64_t n) {
+  for (int64_t i = 0; i < n; i++) fsh_sb_put(b, " ", 1);
+}
+
+static char *fsh_sb_done(fsh_sb *b) {
+  if (!b->p) fsh_sb_put(b, "", 0);
+  return b->p;
+}
+
+// A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which Node's layout
+// measures with.
+static int64_t fsh_units(const char *p, int64_t n) {
+  int64_t units = 0;
+  for (int64_t i = 0; i < n; i++) {
+    unsigned char c = p[i];
+    if ((c & 0xC0) != 0x80) units += c >= 0xF0 ? 2 : 1;
+  }
+  return units;
+}
+
+static int64_t fsh_ulen(const char *s) {
+  return fsh_units(s, strlen(s));
+}
+
+// The code point at p, moving p past it.
+static uint32_t fsh_insp_cp(const unsigned char **p, const unsigned char *end) {
+  const unsigned char *s = *p;
+  uint32_t c = s[0];
+  int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+  if (s + n > end) n = end - s;
+  if (n == 2) c = (c & 0x1F) << 6 | (s[1] & 0x3F);
+  else if (n == 3) c = (c & 0x0F) << 12 | (s[1] & 0x3F) << 6 | (s[2] & 0x3F);
+  else if (n == 4) c = (c & 0x07) << 18 | (s[1] & 0x3F) << 12 | (s[2] & 0x3F) << 6 | (s[3] & 0x3F);
+  *p = s + n;
+  return c;
+}
+
+// Columns a text takes, by Node's tables for builds without ICU.
+// ponytail: East Asian width from Node's fallback table, not ICU's; switch to ICU data if grouped
+// arrays of wide text must line up as Node's ICU build lines them
+static int64_t fsh_insp_width(const char *text) {
+  const unsigned char *p = (const unsigned char *)text, *end = p + strlen(text);
+  int64_t width = 0;
+  while (p < end) {
+    uint32_t c = fsh_insp_cp(&p, end);
+    int full = c >= 0x1100 && (c <= 0x115f || c == 0x2329 || c == 0x232a || (c >= 0x2e80 && c <= 0x3247 && c != 0x303f) || (c >= 0x3250 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0xa4c6) || (c >= 0xa960 && c <= 0xa97c) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe10 && c <= 0xfe19) || (c >= 0xfe30 && c <= 0xfe6b) || (c >= 0xff01 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1b000 && c <= 0x1b001) || (c >= 0x1f200 && c <= 0x1f251) || (c >= 0x1f300 && c <= 0x1f64f) || (c >= 0x20000 && c <= 0x3fffd));
+    int zero = c <= 0x1F || (c >= 0x7F && c <= 0x9F) || (c >= 0x300 && c <= 0x36F) || (c >= 0x200B && c <= 0x200F) || (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0xFE20 && c <= 0xFE2F) || (c >= 0xE0100 && c <= 0xE01EF);
+    width += full ? 2 : zero ? 0 : 1;
+  }
+  return width;
+}
+
+// Node's strEscape: single quotes unless the text holds one, then double quotes, then
+// backticks; control characters, the quote and backslashes escaped, a lone surrogate by its hex.
+static void fsh_insp_quote(fsh_sb *b, const char *p, int64_t n) {
+  int quote = '\'';
+  if (memchr(p, '\'', n)) {
+    int doubles = memchr(p, '"', n) != NULL, ticks = memchr(p, 96, n) != NULL;
+    int splice = 0;
+    for (int64_t i = 0; i + 1 < n; i++) if (p[i] == '$' && p[i + 1] == '{') splice = 1;
+    if (!doubles) quote = '"';
+    else if (!ticks && !splice) quote = 96;
+  }
+  char q = (char)quote;
+  fsh_sb_put(b, &q, 1);
+  const unsigned char *s = (const unsigned char *)p;
+  for (int64_t i = 0; i < n;) {
+    unsigned char c = s[i];
+    char escape[12];
+    if (c == quote && quote == '\'') { fsh_sb_str(b, "\\'"); i++; continue; }
+    if (c == '\\') { fsh_sb_str(b, "\\\\"); i++; continue; }
+    if (c < 0x20 || c == 0x7F) {
+      const char *named = c == '\b' ? "\\b" : c == '\t' ? "\\t" : c == '\n' ? "\\n" : c == '\f' ? "\\f" : c == '\r' ? "\\r" : NULL;
+      if (named) fsh_sb_str(b, named);
+      else {
+        snprintf(escape, sizeof escape, "\\x%02X", c);
+        fsh_sb_str(b, escape);
+      }
+      i++;
+      continue;
+    }
+    // C1 controls, U+0080 to U+009F, are C2 80 to C2 9F in UTF-8.
+    if (c == 0xC2 && i + 1 < n && s[i + 1] >= 0x80 && s[i + 1] <= 0x9F) {
+      snprintf(escape, sizeof escape, "\\x%02X", s[i + 1]);
+      fsh_sb_str(b, escape);
+      i += 2;
+      continue;
+    }
+    if (i + 2 < n && (fsh_high_at(s + i) || fsh_low_at(s + i))) {
+      snprintf(escape, sizeof escape, "\\" "u%x", fsh_three(s + i));
+      fsh_sb_str(b, escape);
+      i += 3;
+      continue;
+    }
+    fsh_sb_put(b, (const char *)s + i, 1);
+    i++;
+  }
+  fsh_sb_put(b, &q, 1);
+}
+
+typedef struct {
+  int64_t indent, depth;
+} fsh_ictx;
+
+static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse);
+
+// A string inside a value: quoted, cut past 10000 characters, and split after each line break
+// when it is longer than the line has room for.
+static char *fsh_insp_string(fsh_ictx *c, fsh_insp *v) {
+  fsh_sb b = {0};
+  int64_t units = fsh_units(v->text, v->length), n = v->length;
+  int64_t remaining = 0;
+  if (units > 10000) {
+    remaining = units - 10000;
+    int64_t seen = 0, i = 0;
+    for (; i < v->length && seen < 10000; i++) {
+      unsigned char ch = v->text[i];
+      if ((ch & 0xC0) != 0x80) seen += ch >= 0xF0 ? 2 : 1;
+    }
+    while (i < v->length && ((unsigned char)v->text[i] & 0xC0) == 0x80) i++;
+    n = i;
+    units = 10000;
+  }
+  if (units > 16 && units > 80 - c->indent - 4) {
+    int64_t from = 0;
+    for (int64_t i = 0; i < n; i++) {
+      if (v->text[i] != '\n' && i != n - 1) continue;
+      if (from > 0) {
+        fsh_sb_str(&b, " +\n");
+        fsh_sb_spaces(&b, c->indent + 2);
+      }
+      fsh_insp_quote(&b, v->text + from, i + 1 - from);
+      from = i + 1;
+    }
+  } else fsh_insp_quote(&b, v->text, n);
+  if (remaining > 0) {
+    char trailer[64];
+    snprintf(trailer, sizeof trailer, "... %lld more character%s", (long long)remaining, remaining > 1 ? "s" : "");
+    fsh_sb_str(&b, trailer);
+  }
+  return fsh_sb_done(&b);
+}
+
+static int fsh_insp_below(char **output, int64_t n, int64_t start) {
+  int64_t total = n + start;
+  if (total + n > 80) return 0;
+  for (int64_t i = 0; i < n; i++) {
+    total += fsh_ulen(output[i]);
+    if (total > 80) return 0;
+  }
+  return 1;
+}
+
+// Node's groupArrayElements: short entries of a long array in aligned columns. Gives the
+// number of lines written to grouped, or 0 when the entries stay as they are.
+static int64_t fsh_insp_group(fsh_ictx *c, char **output, int64_t n, int more, int numeric, char **grouped) {
+  int64_t length = more ? n - 1 : n;
+  int64_t total = 0, max = 0;
+  int64_t *widths = fsh_rt_alloc((length + 1) * sizeof(int64_t));
+  for (int64_t i = 0; i < length; i++) {
+    widths[i] = fsh_insp_width(output[i]);
+    total += widths[i] + 2;
+    if (max < widths[i]) max = widths[i];
+  }
+  int64_t actual = max + 2, lines = 0;
+  if (actual * 3 + c->indent < 80 && ((double)total / actual > 5 || max <= 6)) {
+    double bias = sqrt(actual - (double)total / n);
+    double biased = fmax(actual - 3 - bias, 1);
+    double ideal = floor(sqrt(2.5 * biased * length) / biased + 0.5);
+    int64_t columns = (int64_t)ideal;
+    int64_t fit = (80 - c->indent) / actual;
+    if (fit < columns) columns = fit;
+    // Node's limits: compact times four, and fifteen.
+    if (12 < columns) columns = 12;
+    if (columns > 1) {
+      int64_t *widest = fsh_rt_alloc(columns * sizeof(int64_t));
+      for (int64_t i = 0; i < columns; i++) {
+        int64_t line = 0;
+        for (int64_t j = i; j < length; j += columns)
+          if (widths[j] > line) line = widths[j];
+        widest[i] = line + 2;
+      }
+      for (int64_t i = 0; i < length; i += columns) {
+        int64_t end = i + columns < length ? i + columns : length;
+        fsh_sb b = {0};
+        int64_t j = i;
+        for (; j < end - 1; j++) {
+          // Pads the entry and its comma to the column's width, in UTF-16 units as JavaScript pads.
+          int64_t pad = widest[j - i] + fsh_ulen(output[j]) - widths[j] - (fsh_ulen(output[j]) + 2);
+          if (numeric) fsh_sb_spaces(&b, pad);
+          fsh_sb_str(&b, output[j]);
+          fsh_sb_str(&b, ", ");
+          if (!numeric) fsh_sb_spaces(&b, pad);
+        }
+        if (numeric) {
+          int64_t pad = widest[j - i] + fsh_ulen(output[j]) - widths[j] - 2 - fsh_ulen(output[j]);
+          fsh_sb_spaces(&b, pad);
+        }
+        fsh_sb_str(&b, output[j]);
+        grouped[lines++] = fsh_sb_done(&b);
+      }
+      if (more) {
+        size_t m = strlen(output[n - 1]);
+        grouped[lines] = fsh_rt_alloc(m + 1);
+        memcpy(grouped[lines++], output[n - 1], m + 1);
+      }
+      fsh_rt_free(widest);
+    }
+  }
+  fsh_rt_free(widths);
+  return lines;
+}
+
+// Node's reduceToSingleString: the entries on one line when they are few and short enough,
+// else one to a line.
+static char *fsh_insp_reduce(fsh_ictx *c, char **output, int64_t n, const char *open, const char *close, int array, int more, int numeric, int64_t recurse) {
+  int64_t entries = n;
+  char **lines = output;
+  char **grouped = NULL;
+  if (array && n > 6) {
+    grouped = fsh_rt_alloc(n * sizeof(char *));
+    int64_t made = fsh_insp_group(c, output, n, more, numeric, grouped);
+    if (made > 0) {
+      lines = grouped;
+      n = made;
+    }
+  }
+  fsh_sb b = {0};
+  int done = 0;
+  if (c->depth - recurse < 3 && entries == n) {
+    int64_t start = n + c->indent + fsh_ulen(open) + 10;
+    if (fsh_insp_below(lines, n, start)) {
+      fsh_sb joined = {0};
+      for (int64_t i = 0; i < n; i++) {
+        if (i > 0) fsh_sb_str(&joined, ", ");
+        fsh_sb_str(&joined, lines[i]);
+      }
+      char *text = fsh_sb_done(&joined);
+      if (!strchr(text, '\n')) {
+        fsh_sb_str(&b, open);
+        fsh_sb_str(&b, " ");
+        fsh_sb_str(&b, text);
+        fsh_sb_str(&b, " ");
+        fsh_sb_str(&b, close);
+        done = 1;
+      }
+      fsh_rt_free(text);
+    }
+  }
+  if (!done) {
+    fsh_sb_str(&b, open);
+    for (int64_t i = 0; i < n; i++) {
+      if (i > 0) fsh_sb_str(&b, ",");
+      fsh_sb_str(&b, "\n");
+      fsh_sb_spaces(&b, c->indent + 2);
+      fsh_sb_str(&b, lines[i]);
+    }
+    fsh_sb_str(&b, "\n");
+    fsh_sb_spaces(&b, c->indent);
+    fsh_sb_str(&b, close);
+  }
+  if (grouped && lines == grouped)
+    for (int64_t i = 0; i < n; i++) fsh_rt_free(grouped[i]);
+  fsh_rt_free(grouped);
+  return fsh_sb_done(&b);
+}
+
+static int fsh_insp_identifier(const char *key) {
+  if (!((key[0] >= 'a' && key[0] <= 'z') || (key[0] >= 'A' && key[0] <= 'Z') || key[0] == '_')) return 0;
+  for (const char *p = key + 1; *p; p++)
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_')) return 0;
+  return 1;
+}
+
+static char *fsh_insp_copy(const char *s) {
+  fsh_sb b = {0};
+  fsh_sb_str(&b, s);
+  return fsh_sb_done(&b);
+}
+
+// Node's formatValue and formatRaw for the kinds Fish values have.
+static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
+  if (v->kind == FSH_INSP_TEXT) return fsh_insp_copy(v->text);
+  if (v->kind == FSH_INSP_STRING) return fsh_insp_string(c, v);
+  if (v->kind == FSH_INSP_VARIANT) {
+    // A data enum's member, as Fish prints one: its name, then its values.
+    fsh_sb b = {0};
+    fsh_sb_str(&b, v->text);
+    if (v->count > 0) {
+      fsh_sb_str(&b, "(");
+      c->indent += 2;
+      for (int64_t i = 0; i < v->count; i++) {
+        if (i > 0) fsh_sb_str(&b, ", ");
+        char *part = fsh_insp_value(c, v->items[i], recurse);
+        fsh_sb_str(&b, part);
+        fsh_rt_free(part);
+      }
+      c->indent -= 2;
+      fsh_sb_str(&b, ")");
+    }
+    return fsh_sb_done(&b);
+  }
+  char open[64], cut[64];
+  const char *close = v->kind == FSH_INSP_ARRAY ? "]" : "}";
+  int64_t size = v->kind == FSH_INSP_OBJECT ? v->count : v->size;
+  if (v->kind == FSH_INSP_ARRAY) {
+    strcpy(open, "[");
+    strcpy(cut, "[Array]");
+  } else if (v->kind == FSH_INSP_OBJECT) {
+    snprintf(open, sizeof open, "%s%s{", v->text, v->length ? " " : "");
+    snprintf(cut, sizeof cut, "[%s]", v->length ? v->text : "Object");
+  } else {
+    snprintf(open, sizeof open, "%s(%lld) {", v->kind == FSH_INSP_MAP ? "Map" : "Set", (long long)size);
+    strcpy(cut, v->kind == FSH_INSP_MAP ? "[Map]" : "[Set]");
+  }
+  if (size == 0) {
+    fsh_sb b = {0};
+    fsh_sb_str(&b, open);
+    fsh_sb_str(&b, close);
+    return fsh_sb_done(&b);
+  }
+  if (recurse > 2) return fsh_insp_copy(cut);
+  recurse++;
+  c->depth = recurse;
+  int64_t kept = v->kind == FSH_INSP_MAP ? v->count / 2 : v->count;
+  int64_t rest = size - kept;
+  char **output = fsh_rt_alloc((kept + 1) * sizeof(char *));
+  int64_t n = 0;
+  int numeric = 1;
+  c->indent += 2;
+  for (int64_t i = 0; i < kept; i++) {
+    if (v->kind == FSH_INSP_MAP) {
+      fsh_sb b = {0};
+      char *k = fsh_insp_value(c, v->items[2 * i], recurse);
+      char *x = fsh_insp_value(c, v->items[2 * i + 1], recurse);
+      fsh_sb_str(&b, k);
+      fsh_sb_str(&b, " => ");
+      fsh_sb_str(&b, x);
+      fsh_rt_free(k);
+      fsh_rt_free(x);
+      output[n++] = fsh_sb_done(&b);
+      continue;
+    }
+    char *x = fsh_insp_value(c, v->items[i], recurse);
+    if (!v->items[i]->numeric) numeric = 0;
+    if (v->kind != FSH_INSP_OBJECT) {
+      output[n++] = x;
+      continue;
+    }
+    fsh_sb b = {0};
+    const char *key = v->keys[i];
+    if (fsh_insp_identifier(key)) fsh_sb_str(&b, key);
+    else fsh_insp_quote(&b, key, strlen(key));
+    fsh_sb_str(&b, ": ");
+    fsh_sb_str(&b, x);
+    fsh_rt_free(x);
+    output[n++] = fsh_sb_done(&b);
+  }
+  c->indent -= 2;
+  if (rest > 0) {
+    char text[64];
+    snprintf(text, sizeof text, "... %lld more item%s", (long long)rest, rest > 1 ? "s" : "");
+    output[n++] = fsh_insp_copy(text);
+  }
+  char *result = fsh_insp_reduce(c, output, n, open, close, v->kind == FSH_INSP_ARRAY, rest > 0, numeric, recurse);
+  for (int64_t i = 0; i < n; i++) fsh_rt_free(output[i]);
+  fsh_rt_free(output);
+  return result;
+}
+
+// The value as console.log prints it, the tree freed: a string on its own as it is, anything
+// else laid out.
+fsh_str *fsh_rt_insp_done(fsh_insp *v) {
+  fsh_str *s;
+  if (v->kind == FSH_INSP_STRING) s = fsh_str_of(v->text, v->length);
+  else {
+    fsh_ictx c = {0, 0};
+    char *text = fsh_insp_value(&c, v, 0);
+    s = fsh_str_of(text, strlen(text));
+    fsh_rt_free(text);
+  }
+  fsh_insp_free(v);
+  return s;
+}
 ` + CASEMAP + String.raw`
 // A code point found in a sorted table of pairs, by its first column.
 static const uint32_t *fsh_lookup(const uint32_t (*table)[2], int64_t n, uint32_t cp) {
