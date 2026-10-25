@@ -77,7 +77,7 @@ const RULES: Rule[] = [
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
-  { id: "stderr", action: "unsupported", title: "console.error, console.warn, Date.now and performance.now (logging to stderr and clocks)", feature: "Logging to stderr and clocks" },
+  { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "promiseAll", action: "unsupported", title: "Promise.all and Promise.race", feature: "Promise.all and Promise.race" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
@@ -176,7 +176,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn")], ["string_decoder", STD("TextDecoder")],
   ["timers/promises", STD("sleep")],
   // `http` is a client as well as a server, and Fish has only the server so far.
-  ["http", PLANNED("HTTP client")], ["console", PLANNED("Logging to stderr and clocks")],
+  ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")],
   ["fs", PLANNED("Async file I/O")], ["path", PLANNED("Path utilities")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
@@ -184,7 +184,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
-  ["process", STD("process, for argv, env and exit")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
+  ["process", STD("process, for argv, env and exit")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
   // console.log prints as util.inspect does, but no plan gives util itself, as inspect or format.
 ]);
@@ -486,7 +486,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
   if (["setTimeout", "setInterval", "clearTimeout", "clearInterval"].some((name) => named(callee, name))) push("timers");
-  if (memberOf(callee, "console", ["error", "warn"]) || memberOf(callee, "Date", ["now"]) || memberOf(callee, "performance", ["now"])) push("stderr");
+  if (isNode(callee) && callee.kind === "member" && named(callee.object, "console") && !["log", "error", "warn"].includes(callee.name as string)) push("console");
   // Fish's parse takes no reviver, and its stringify one value.
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");
   if (memberOf(callee, "Promise", ["all", "race", "allSettled", "any"])) push("promiseAll");

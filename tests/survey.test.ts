@@ -48,7 +48,7 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
-    classForms: 1, fetch: 1, timers: 1, stderr: 1,
+    classForms: 1, fetch: 1, timers: 1,
     G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
@@ -60,6 +60,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("import os from \"node:os\";\nimport { hostname } from \"os\";\nimport { cpus } from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("export { hostname } from \"node:os\";\nexport * from \"os\";\n")).toEqual({});
   expect(counts("export * as system from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
+  expect(counts("function f() {\n  console.error(1);\n  console.warn(2);\n  console.info(3);\n  const t = Date.now() + performance.now();\n}\n")).toEqual({ console: 1 });
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
   expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.pid;\n}\n")).toEqual({ process: 3, R3: 1 });
   expect(counts("function f() {\n  const { HOME } = process.env;\n  const k = Object.keys(process.env);\n  const h = process.env?.HOME;\n  process.env.N++;\n}\n")).toEqual({ process: 4 });
@@ -445,7 +446,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], ["HTTP client", "Logging to stderr and clocks", "Test runner"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], ["HTTP client", "Test runner", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
 });
