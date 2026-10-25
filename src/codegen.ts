@@ -5062,7 +5062,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!) : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
+    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
@@ -6234,6 +6234,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         // a pointer to its global.
         const read = calls.get(e);
         if (read?.body.comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(read), types.get(e)!);
+        // A nested function used as a value is its closure, made here.
+        const built = current.envs?.get(e);
+        if (built) return environment(built.of, built.env);
         // `undefined` is the empty value, unless a variable takes the name.
         if (!locals.has(e)) return "zeroinitializer";
         const local = resolved(e);

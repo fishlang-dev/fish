@@ -90,9 +90,10 @@ export type Instance = {
   // The captures it changes, which it captures mutably, and those it moves out of itself.
   changed?: Set<Local>;
   moved?: Set<Local>;
-  // Each call of a nested function by name, and this body's bindings for what that function
-  // captures, in its environment's order, from which the call builds it.
-  envs?: Map<Expr, Local[]>;
+  // Each call or use as a value of a nested function by name, the function, and this body's
+  // bindings for what it captures, in its environment's order, from which the call or the
+  // value builds it.
+  envs?: Map<Expr, { of: Instance; env: Local[] }>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -978,7 +979,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
-      envOf: (e, env) => void (instance.envs ??= new Map()).set(e, env),
+      envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
       self,
       owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
       superCall,

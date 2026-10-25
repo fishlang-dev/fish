@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { computed, restText, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
-import { selfCalls } from "./check.ts";
+import { nestedFunctions, selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -428,6 +428,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "string":
         return;
       case "ident":
+        if (instance.envs?.has(e)) return made(e);
         return locals.has(e) ? use(e, consume) : undefined;
       case "super":
       case "this":
@@ -448,17 +449,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         }
         return expr(e.object);
       case "arrow":
-        for (const [place, use, from, mutable, held] of captured(e)) {
-          usable(use, place);
-          if (!held || isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
-          else {
-            free(place, use, "move");
-            state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new Map(passes) });
-            // A closure moving one of this closure's captures into itself moves it out of this one.
-            if (instance.captures?.has(from!)) instance.moved!.add(from!);
-          }
-        }
-        return;
+        return made(e);
       case "object": {
         // One value can't hold a mutable borrow of a place beside another borrow of it.
         const lends = e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
@@ -494,10 +485,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // call: lent shared while its arguments run, so they may read it, then mutably for the
           // call where it changes it, so nothing borrowed from those may be live across it. Keys
           // below zero, one per capture, so no argument's loan can replace these.
-          const env = instance.envs?.get(e);
-          const callee = env && calls.get(e);
+          const built = instance.envs?.get(e);
           const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias, changes: instance.changed?.has(alias) === true }))
-            : env ? env.map((alias, i) => ({ alias, changes: callee!.changed?.has([...callee!.captures!.keys()][i]!) === true })) : [];
+            : built ? built.env.map((alias, i) => ({ alias, changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
           const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 256 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             usable(c.at, String(c.alias.id));
@@ -785,7 +775,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
     // A closure made for a call lends what it captures for the call.
-    if (e.kind === "arrow") {
+    if (e.kind === "arrow" || instance.envs?.has(e)) {
       return captured(e).filter(([, , from, , held]) => !held || reborrows(from!)).map(([place, use, , mutable, held]) => [place, use as Expr, mutable || held]);
     }
     // A call's returned reference lends again what it borrows from, a receiver included.
@@ -941,7 +931,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
     // A closure holds what it captures.
-    if (e.kind === "arrow") {
+    if (e.kind === "arrow" || instance.envs?.has(e)) {
       for (const [place, use, from, mutable, held] of captured(e)) {
         // A copy of a mutable reference lends it again.
         if (!held || reborrows(from!)) lend(place, mutable || held, use, holder);
@@ -1087,7 +1077,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function pointsInto(e: Expr): string[] {
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
     // A closure points at what it borrows, and wherever what it holds points.
-    if (e.kind === "arrow") return captured(e).flatMap(([place, , from, , held]) => (held ? (from && holdsRef(from.type) ? heldBy(from) : []) : [place]));
+    if (e.kind === "arrow" || instance.envs?.has(e)) return captured(e).flatMap(([place, , from, , held]) => (held ? (from && holdsRef(from.type) ? heldBy(from) : []) : [place]));
     const from = borrowsFrom.get(e);
     if (from) {
       return from.flatMap((s) => {
@@ -1272,7 +1262,29 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // The places a closure captures, where it first uses each, the variable, if not `this`,
   // whether it changes it, and whether it holds it rather than borrowing it.
-  function captured(e: Extract<Expr, { kind: "arrow" }>): [string, Named, Local | undefined, boolean, boolean][] {
+  // A closure made here: what it borrows must be free to lend, and what it moves in leaves.
+  function made(e: Expr) {
+    for (const [place, use, from, mutable, held] of captured(e)) {
+      usable(use, place);
+      if (!held || isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
+      else {
+        free(place, use, "move");
+        state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new Map(passes) });
+        // A closure moving one of this closure's captures into itself moves it out of this one.
+        if (instance.captures?.has(from!)) instance.moved!.add(from!);
+      }
+    }
+  }
+
+  function captured(e: Expr): [string, Named, Local | undefined, boolean, boolean][] {
+    // A nested function's declaration makes nothing; each use as a value makes its closure, from
+    // this body's bindings for what it uses.
+    const built = e.kind === "ident" ? instance.envs?.get(e) : undefined;
+    if (built) {
+      const aliases = [...built.of.captures!.keys()];
+      return built.env.map((l, i) => [String(l.id), { kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, built.of.changed!.has(aliases[i]!), false]);
+    }
+    if (e.kind !== "arrow" || nestedFunctions.has(e)) return [];
     const inner = calls.get(e)!;
     return [...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;
@@ -1375,7 +1387,7 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): Map<Local, number> {
+function lastUses(body: Stmt[], { locals, types, coercions, calls, envs }: Instance): Map<Local, number> {
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
   const lentTo = (a: Expr) => {
@@ -1451,6 +1463,8 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
   function expr(e: Expr, call?: number) {
     switch (e.kind) {
       case "ident":
+        // A nested function used as a value uses what its closure lends from here.
+        for (const l of envs?.get(e)?.env ?? []) used(l, call ?? e.end);
         return used(locals.get(e), call ?? e.end);
       case "member":
         return expr(e.object, call);
@@ -1465,8 +1479,10 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls }: Instance): 
         return;
       case "call":
         if (e.callee.kind === "member") expr(e.callee.object, e.end);
-        // A closure called through a variable is in use until the call ends.
+        // A closure called through a variable is in use until the call ends, as is what a
+        // nested function called by name uses.
         if (e.callee.kind === "ident") expr(e.callee, e.end);
+        for (const l of envs?.get(e)?.env ?? []) used(l, e.end);
         for (const a of e.args) expr(a, lentTo(a) ? e.end : undefined);
         return;
       case "unary":

@@ -183,3 +183,68 @@ async function main() {
   const got = await g();
   console.log(got);
 }
+// case: nested_value_made_where_used
+// expect: 6
+// expect: 8
+// expect: 10
+// expect: 11
+// expect: 4 120
+// A nested function used as a value is a closure made there, borrowing from there on, so a
+// change before the use is allowed and seen.
+function twice(f: () => void): void { f(); f(); }
+function apply(f: (x: i64) => i64, v: i64): i64 { return f(v); }
+function main(): void {
+  let n = 0;
+  function inc(): void { n++; }
+  n = 5;
+  const g = inc;
+  g();
+  console.log(n);
+  twice(inc);
+  console.log(n);
+  const run = (): void => { twice(inc); };
+  run();
+  console.log(n);
+  inc();
+  console.log(n);
+  const k = 3;
+  function add(x: i64): i64 { return x + k; }
+  function fact(m: i64): i64 { return m <= 1 ? 1 : m * fact(m - 1); }
+  console.log(apply(add, 1), apply(fact, 5));
+}
+// case: nested_value_in_closure_conflict
+// error: cannot change 'n' while 'g' borrows 'n' mutably and is used later
+function main() { let n = 0; function inc(): void { n++; } const outer = (): void => { const g = inc; n = 3; g(); }; outer(); }
+// case: nested_value_reference_conflict
+// error: cannot mutably lend 'xs' while 'r' borrows 'xs[...]' and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; function reset(): void { xs = [new P(9)]; } const r: Ref<P> = xs[0]; const g = reset; console.log(r.n); g(); }
+// case: nested_call_argument_conflict
+// error: cannot mutably lend 'xs' while 'xs[...]' is lent to 'g' for this call
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; function g(r: Ref<P>): void { xs = [new P(2)]; console.log(r.n); } g(xs[0]); }
+// case: nested_call_reference_conflict
+// error: cannot mutably lend 'xs' while 'r' borrows 'xs[...]' and is used later
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; function reset(): void { xs = [new P(9)]; } const r: Ref<P> = xs[0]; reset(); console.log(r.n); }
+// case: nested_captured_reference
+// error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
+// A reference a nested function uses stays in use until its last call.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { let xs = [new P(1)]; const r: Ref<P> = xs[0]; function f(): void { console.log(r.n); } f(); xs = [new P(2)]; f(); }
+// case: nested_calls_each_other
+// expect: 3 3
+// expect: 1
+function main() {
+  let n = 1;
+  function get(): i64 { return n; }
+  function bump(): void { n = get() + 1; }
+  bump();
+  bump();
+  console.log(n, get());
+  let xs = [1];
+  const r: Ref<i64> = xs[0];
+  function show(): void { console.log(r); }
+  show();
+  xs = [2];
+}

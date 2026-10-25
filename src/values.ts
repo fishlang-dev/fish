@@ -80,7 +80,7 @@ export type Context = {
   peek(name: string): Local | undefined;
   reach(l: Local, at?: Expr | ObjectProp): Local;
   // Records the bindings a call of a nested function builds its environment from.
-  envOf(e: Call, env: Local[]): void;
+  envOf(e: Expr, of: Instance, env: Local[]): void;
   // Notes a closure's use of `this`, which it captures.
   noteThis(e: Expr): void;
   self: Body["self"];
@@ -1204,14 +1204,19 @@ export function expressions(ctx: Context) {
   // bindings for what it captures, so a closure calling it captures those, not the function,
   // and changes what the function changes.
   function nestedCall(e: Call, callee: Extract<Expr, { kind: "ident" }>, local: Local): { type: Type; what: string } {
-    const called = closureBody(lower(local.type) as ClosureType);
-    const env = [...called.captures!.entries()].map(([alias, from]) => {
-      const mine = ctx.reach(from as Local, callee);
-      if (called.changed?.has(alias)) changesLocal(mine, "", "change", callee, false);
-      return mine;
-    });
-    ctx.envOf(e, env);
+    nestedEnv(e, local, callee);
     return closureCall(e, callee, local.type);
+  }
+
+  // Records this body's bindings for what a nested function captures, captured if need be,
+  // each changing where the function changes it.
+  function nestedEnv(e: Expr, local: Local, at: Extract<Expr, { kind: "ident" }>) {
+    const called = closureBody(lower(local.type) as ClosureType);
+    ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, from]) => {
+      const mine = ctx.reach(from as Local, at);
+      if (called.changed?.has(alias)) changesLocal(mine, "", "change", at, false);
+      return mine;
+    }));
   }
 
   function closureCall(e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
@@ -2784,6 +2789,13 @@ export function expressions(ctx: Context) {
       case "bool":
         return "boolean";
       case "ident": {
+        // A nested function used as a value is a closure made here, from what it uses as it is
+        // here, which it borrows from here on.
+        const nested = nestedFunction(e.name);
+        if (nested) {
+          nestedEnv(e, nested, e);
+          return nested.type;
+        }
         const local = lookup(e.name, e);
         if (local?.generic) throw new CompileError(`'${e.name}' is generic, a family of functions made one per call, so it can only be called here, not used as a value`, e.start, e.end);
         if (!local && e.name === "undefined") return "null";
