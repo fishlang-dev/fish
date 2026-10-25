@@ -450,3 +450,38 @@ async function main() {
   console.log("other got", got, Date.now() - start < 1000);
   await f;
 }
+// case: promise_race_stale_send
+// expect: race done
+// expect: sum 320 true
+async function lateSend(ch: Ref<Channel<i64>>): Promise<i64> {
+  await sleep(10);
+  await ch.send(20);
+  return 1;
+}
+async function drainer(ch: Channel<i64>): Promise<i64> {
+  await sleep(30);
+  const a = await ch.receive();
+  await sleep(50);
+  const b = await ch.receive();
+  await sleep(20);
+  const c = await ch.receive();
+  return a! + b! + c!;
+}
+async function otherSend(ch: Channel<i64>): Promise<i64> {
+  await ch.send(300);
+  
+  return 0;
+}
+async function main() {
+  const ch = new Channel<i64>(1);
+  await ch.send(0);
+  const d = spawn(drainer(ch.clone()));
+  // ch.send(10) queues first; lateSend's send joins at 10 ms behind it.
+  const r = await Promise.race([lateSend(ch), ch.send(10)]);
+  console.log("race done");
+  const o = spawn(otherSend(ch.clone()));
+  const start = Date.now();
+  await o;
+  const sum = await d;
+  console.log("sum", sum, Date.now() - start < 1000);
+}
