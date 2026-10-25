@@ -494,3 +494,9 @@ test("node:fs and node:util wait on their plan items, while fs/promises is std",
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Synchronous file system"], [], ["The util module"]]);
   });
 });
+
+test("generic arrows not held by a const wait on generic function values", () => {
+  project({ "a.ts": "const o = { run: <T>(x: T): T => x };\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Generic function values"]]);
+  });
+});

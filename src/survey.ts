@@ -69,7 +69,7 @@ const RULES: Rule[] = [
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
-  { id: "genericMethods", action: "unsupported", title: "generic function types, generic arrows not held by a const, and generic methods in interfaces", feature: "Functions as values" },
+  { id: "genericMethods", action: "unsupported", title: "generic function types, generic arrows not held by a const, and generic methods in interfaces", feature: "Generic function values" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
