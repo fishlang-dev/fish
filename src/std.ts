@@ -51,6 +51,11 @@ class IoError {
   constructor(message: string) { this.message = message; }
 }
 class JsonError { message: string; constructor(message: string) { this.message = message; } }
+class ParseArgsError {
+  message: string;
+  code: string;
+  constructor(code: string, message: string) { this.code = code; this.message = message; }
+}
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
 class TextDecoder { decode(input: Ref<u8[]>): string { return utf8Decode(input); } }
 `;
@@ -708,6 +713,185 @@ export function inspect(...args: string[]): string {
 
 export function isDeepStrictEqual(...args: string[]): boolean {
   return args.length === 0;
+}
+
+declare function fsh_rt_argc(): i64;
+declare function fsh_rt_arg(i: i64): Ptr<u8>;
+
+// An option of the call's literal, as the checker gives it: its long name, its short one or "",
+// whether it takes a string, and whether it may be given more than once.
+export type ParseArgsSpec = { name: string; short: string; text: boolean; multiple: boolean };
+
+// What the arguments gave each option, by its place among the specs, for the checker's builder
+// of the typed values to read.
+export class ParsedArgs {
+  strings: string[][] = [];
+  flags: boolean[][] = [];
+  positionals: string[] = [];
+
+  text(i: i64): string | null {
+    const given: Ref<string[]> = this.strings[i as usize];
+    return given.length === 0 ? null : given[given.length - 1];
+  }
+
+  texts(i: i64): string[] | null {
+    return this.strings[i as usize].length === 0 ? null : this.strings[i as usize].clone();
+  }
+
+  flag(i: i64): boolean | null {
+    const given: Ref<boolean[]> = this.flags[i as usize];
+    return given.length === 0 ? null : given[given.length - 1];
+  }
+
+  flagList(i: i64): boolean[] | null {
+    return this.flags[i as usize].length === 0 ? null : this.flags[i as usize].clone();
+  }
+}
+
+function size(s: string): i64 {
+  return s.length as i64;
+}
+
+function specAt(name: string, specs: Ref<ParseArgsSpec[]>): i64 {
+  for (let i: usize = 0; i < specs.length; i++) if (specs[i].name === name) return i as i64;
+  return -1;
+}
+
+function longFor(short: string, specs: Ref<ParseArgsSpec[]>): string {
+  for (const s of specs) if (s.short === short) return s.name;
+  return short;
+}
+
+function takesText(name: string, specs: Ref<ParseArgsSpec[]>): boolean {
+  const i = specAt(name, specs);
+  return i >= 0 && specs[i as usize].text;
+}
+
+// The program's arguments, process.argv after the two paths it starts with, as Node's default
+// gives a script.
+function programArgs(): string[] {
+  let all: string[] = [];
+  const n = unsafe { fsh_rt_argc() };
+  for (let i: i64 = 2; i < n; i++) all.push(unsafe { fromCString(fsh_rt_arg(i)) });
+  return all;
+}
+
+// A JSON string of text with no control characters, as Node's message quotes an option.
+function quoted(s: string): string {
+  return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"";
+}
+
+// Node's message, which leaves its last quote open.
+function unknown(raw: string, allowPositionals: boolean): ParseArgsError {
+  const hint = allowPositionals ? ". To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- " + quoted(raw) : "";
+  return new ParseArgsError("ERR_PARSE_ARGS_UNKNOWN_OPTION", "Unknown option '" + raw + "'" + hint);
+}
+
+// One option met in the arguments, checked as Node's strict mode checks it, then stored.
+function option(p: Mut<ParsedArgs>, specs: Ref<ParseArgsSpec[]>, given: string, raw: string, value: string | null, inline: boolean, allowPositionals: boolean, allowNegative: boolean): void throws ParseArgsError {
+  let name = given;
+  let negated = false;
+  if (allowNegative && name.startsWith("no-")) {
+    const i = specAt(name.slice(3), specs);
+    if (i >= 0 && !specs[i as usize].text) {
+      name = name.slice(3);
+      negated = true;
+    }
+  }
+  const i = specAt(name, specs);
+  if (i < 0) throw unknown(raw, allowPositionals);
+  const spec: Ref<ParseArgsSpec> = specs[i as usize];
+  const both = (spec.short === "" ? "" : "-" + spec.short + ", ") + "--" + name;
+  if (spec.text && value === null) throw new ParseArgsError("ERR_PARSE_ARGS_INVALID_OPTION_VALUE", "Option '" + both + " <value>' argument missing");
+  if (!spec.text && value !== null) throw new ParseArgsError("ERR_PARSE_ARGS_INVALID_OPTION_VALUE", "Option '" + both + "' does not take an argument");
+  if (value !== null && !inline && size(value) > 1 && value.startsWith("-")) {
+    const example = raw.startsWith("--") ? "'" + raw + "=-XYZ'" : "'--" + name + "=-XYZ' or '" + raw + "-XYZ'";
+    throw new ParseArgsError("ERR_PARSE_ARGS_INVALID_OPTION_VALUE", "Option '" + raw + "' argument is ambiguous.\nDid you forget to specify the option argument for '" + raw + "'?\nTo specify an option argument starting with a dash use " + example + ".");
+  }
+  // A value given again replaces the last unless the option takes several.
+  if (value !== null && spec.multiple) p.strings[i as usize].push(value);
+  else if (value !== null) p.strings[i as usize] = [value];
+  else if (spec.multiple) p.flags[i as usize].push(!negated);
+  else p.flags[i as usize] = [!negated];
+}
+
+function positional(p: Mut<ParsedArgs>, arg: string, allowPositionals: boolean): void throws ParseArgsError {
+  if (!allowPositionals) throw new ParseArgsError("ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL", "Unexpected argument '" + arg + "'. This command does not take positional arguments");
+  p.positionals.push(arg);
+}
+
+// A port of Node's parseArgs in strict mode. The checker writes each call's arguments from its
+// options literal: the specs, and a builder giving the values typed from them.
+export function parseArgs<V>(given: string[] | null, specs: ParseArgsSpec[], allowPositionals: boolean, allowNegative: boolean, build: (p: Ref<ParsedArgs>) => V): { values: V; positionals: string[] } throws ParseArgsError {
+  let p = new ParsedArgs();
+  for (const _ of specs) {
+    p.strings.push([]);
+    p.flags.push([]);
+  }
+  let rest = given ?? programArgs();
+  let at: usize = 0;
+  while (at < rest.length) {
+    const arg = rest[at];
+    at++;
+    const next: string | null = at < rest.length ? rest[at] : null;
+    const n = size(arg);
+    if (arg === "--") {
+      for (; at < rest.length; at++) positional(p, rest[at], allowPositionals);
+      break;
+    }
+    const short = n >= 2 && arg.charAt(0) === "-" && arg.charAt(1) !== "-";
+    if (short && n === 2) {
+      const name = longFor(arg.charAt(1), specs);
+      let value: string | null = null;
+      if (takesText(name, specs) && next !== null) {
+        value = next;
+        at++;
+      }
+      option(p, specs, name, arg, value, false, allowPositionals, allowNegative);
+      continue;
+    }
+    if (short && !takesText(longFor(arg.charAt(1), specs), specs)) {
+      // -abc is -a -b -c, and a string option in it takes the rest, as -abfFILE is -a -b -fFILE.
+      let expanded: string[] = [];
+      for (let k: i64 = 1; k < n; k++) {
+        const one = arg.charAt(k);
+        if (!takesText(longFor(one, specs), specs) || k === n - 1) expanded.push("-" + one);
+        else {
+          expanded.push("-" + arg.slice(k));
+          break;
+        }
+      }
+      for (; at < rest.length; at++) expanded.push(rest[at]);
+      rest = expanded;
+      at = 0;
+      continue;
+    }
+    if (short) {
+      const one = arg.charAt(1);
+      option(p, specs, longFor(one, specs), "-" + one, arg.slice(2), true, allowPositionals, allowNegative);
+      continue;
+    }
+    if (n > 2 && arg.startsWith("--")) {
+      // As Node's: an "=" past the third character marks a value, which starts after the first.
+      if (arg.indexOf("=", 3) < 0) {
+        const name = arg.slice(2);
+        let value: string | null = null;
+        if (takesText(name, specs) && next !== null) {
+          value = next;
+          at++;
+        }
+        option(p, specs, name, arg, value, false, allowPositionals, allowNegative);
+      } else {
+        const eq = arg.indexOf("=");
+        const name = arg.slice(2, eq);
+        option(p, specs, name, "--" + name, arg.slice(eq + 1), true, allowPositionals, allowNegative);
+      }
+      continue;
+    }
+    positional(p, arg, allowPositionals);
+  }
+  const values = build(p);
+  return { values, positionals: p.positionals };
 }
 `,
   // A port of Node's path.posix for the functions Fish has, so each gives what Node gives.

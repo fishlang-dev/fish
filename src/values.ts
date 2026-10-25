@@ -15,6 +15,7 @@ import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { unusedDefaults } from "./check.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
+import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
@@ -193,6 +194,8 @@ export const printCalls = new WeakSet<Expr>();
 export const formatCalls = new WeakSet<Expr>();
 // node:util's `inspect` calls.
 export const inspectCalls = new WeakSet<Expr>();
+// The `parseArgs` calls whose config has been turned into the arguments std's port takes.
+const parsedArgs = new WeakSet<Expr>();
 
 // What a literal format does with the arguments after it, as the runtime's routine reads it:
 // the specifier each one it takes is given to, and where those left, appended, start.
@@ -1130,6 +1133,13 @@ export function expressions(ctx: Context) {
       shown(e.args);
       inspectCalls.add(e);
       return { type: "string", what: "'inspect'" };
+    }
+    // `parseArgs(config)` calls std's port with the arguments its literal says, once.
+    if (util === "parseArgs" && !parsedArgs.has(e)) {
+      if (e.optional) throw new CompileError("'parseArgs' is always there, so it is called without '?.'", e.start, e.end);
+      refuseSpread(e.args);
+      e.args = parseArgsArgs(e);
+      parsedArgs.add(e);
     }
     // Fish's value equality, which `===` already is.
     if (util === "isDeepStrictEqual") {

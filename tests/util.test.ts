@@ -7,16 +7,16 @@ import { join } from "node:path";
 // Fish one with its type annotations taken out.
 const tmp = mkdtempSync(join(tmpdir(), "fish-util-"));
 
-function compare(name: string, imports: string, declarations: string, body: string) {
+function compare(name: string, imports: string, declarations: string, body: string, argv: string[] = []) {
   const program = join(tmp, `${name}.fsh`);
   writeFileSync(program, `${imports}\n${declarations}\nfunction main() {${body}\n}\n`);
   const out = join(tmp, name);
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
-  const fish = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const fish = Bun.spawnSync([out, ...argv], { env: { ...process.env, FISH_LEAKS: "1" } });
   const untyped = (s: string) => s.replace(/: (i64|f64|string|boolean)(\[\])?( \| (i64|f64|string|null))*/g, "");
   const script = `${imports.replaceAll(/import (.*) from "(.*)";/g, (_, what: string, from: string) => `const ${what.startsWith("* as ") ? what.slice(5) : what} = require("${from}");`)}\n${untyped(declarations)}\n${untyped(body)}`;
-  const node = Bun.spawnSync(["node", "-e", script]);
+  const node = Bun.spawnSync(["node", "-e", script, "--", ...argv]);
   expect(fish.stderr.toString()).toBe(node.stderr.toString());
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
 }
@@ -73,4 +73,42 @@ test("inspect and isDeepStrictEqual give what node's give", () => {
   const a: string = "a";
   console.log(isDeepStrictEqual(1, 1), isDeepStrictEqual(a, "b"), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 3] }));
   console.log(isDeepStrictEqual([[1], [2]], [[1], [2]]), isDeepStrictEqual(u, "u"), isDeepStrictEqual([1, 2], [1, 2, 3]));`);
+});
+
+const OPTIONS = `{ color: { type: "boolean", short: "c" }, name: { type: "string", short: "n" }, tag: { type: "string", multiple: true, short: "t" }, v: { type: "boolean", multiple: true }, "dry-run": { type: "boolean" }, out: { type: "string", default: "x" } }`;
+const ARGS = [
+  ["--no-color"], ["--no-name"], ["--no-name", "z"], ["--no-zzz"], ["--no-color=1"], ["--color", "--no-color"], ["--no-v", "--v"],
+  ["-cn", "bob"], ["-nc"], ["-cnbob"], ["-ccc"], ["-xc"], ["-cx"], ["--name"], ["--name", "-x"], ["-n", "-x"], ["--name=-x"], ["-n-x"],
+  ["--color=1"], ["-t", "a", "-t", "b", "--tag=c"], ["--v", "--v"], ["--dry-run"], ["a"], ["--", "-a", "--b"], ["--zzz"], ["-z"], ["-"], ["--="], ["--=x"], ["--=a=b"],
+  ["---x"], ["--name", "--"], ["--out", "y"], [], ["--name", "a", "--name", "b"], ["--na\"me"], ["p", "--color", "q"],
+];
+
+test("parseArgs gives node's values, positionals and errors", () => {
+  const runs = [false, true].flatMap((negative) => [false, true].map((positionals) => `
+function run_${negative}_${positionals}(args: string[]) {
+  try {
+    const { values, positionals } = parseArgs({ args, options: ${OPTIONS}, allowNegative: ${negative}, allowPositionals: ${positionals} });
+    console.log([flag(values.color), values.name ?? "-", (values.tag ?? ["-"]).join(","), String((values.v ?? [false]).length), values.out, positionals.join(",")].join(" "));
+  } catch (e) {
+    console.log(e.code, e.message);
+  }
+}`)).join("\n");
+  const calls = ARGS.flatMap((a) => ["false_false", "false_true", "true_false", "true_true"].map((r) => `run_${r}(${JSON.stringify(a)});`)).join("\n  ");
+  const flag = `function flag(x: boolean | null): string {
+  return x === true ? "true" : x === false ? "false" : "-";
+}`;
+  compare("parse", `import { parseArgs } from "node:util";`, `${flag}\n${runs}`, `\n  ${calls}`);
+});
+
+test("parseArgs reads the program's arguments when given none, with defaults and the empty config", () => {
+  compare("argv", `import { parseArgs } from "node:util";`, "", `
+  try {
+    const { values, positionals } = parseArgs({ options: { level: { type: "string", short: "l", default: "info" }, tags: { type: "string", multiple: true, default: ["a"] }, quiet: { type: "boolean", default: false } }, allowPositionals: true });
+    console.log(values.level, values.tags.join(","), values.quiet, positionals.join(","));
+    const none = parseArgs({ args: [] });
+    console.log(none.positionals.length);
+    parseArgs();
+  } catch (e) {
+    console.log(e.code, e.message);
+  }`, ["-l", "debug", "file.txt", "--quiet"]);
 });
