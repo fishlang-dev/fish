@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -2747,10 +2747,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
     const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     if (isTuple(object)) {
-      const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      const [order, rest] = tupleOrder(object);
       const length = object.required === undefined ? undefined : tupleLength(v, object);
+      const fixed = order;
+      const many = () => {
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${rest!.i}`);
+        return x;
+      };
+      if (rest && fixed.length === 0) return jsonElements(w, many(), rest.f.type as ArrayType, (as[rest.i]!.type as ArrayType).element);
       jsonRaw(w, "[");
-      order.forEach(({ i }, n) => {
+      fixed.forEach(({ i }, n) => {
         present(length, n, () => {
           if (n > 0) jsonRaw(w, ",");
           const x = temp();
@@ -2758,6 +2765,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           jsonWrite(w, x, as[i]!.type);
         });
       });
+      if (rest) jsonElements(w, many(), rest.f.type as ArrayType, (as[rest.i]!.type as ArrayType).element, true);
       jsonRaw(w, "]");
       return;
     }
@@ -2809,7 +2817,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     jsonRaw(w, "}");
   }
 
-  function jsonElements(w: string, v: string, t: ArrayType | FixedType, written: Type) {
+  // `bare` writes the elements alone, each after a comma, as a rest tuple's follow its fixed ones.
+  function jsonElements(w: string, v: string, t: ArrayType | FixedType, written: Type, bare = false) {
     const element = llvm(lower(t.element));
     const [length, data] = [temp(), temp()];
     if (t.kind === "array") {
@@ -2821,7 +2830,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${length} = add i64 0, ${t.size}`);
       emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
     }
-    jsonRaw(w, "[");
+    if (!bare) jsonRaw(w, "[");
     const index = alloca("i64");
     emit(`store i64 0, ptr ${index}`);
     const [head, loop, comma, item, done] = [label(), label(), label(), label(), label()];
@@ -2832,8 +2841,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${more} = icmp slt i64 ${i}, ${length}`);
     emit(`br i1 ${more}, label %${loop}, label %${done}`);
     startBlock(loop);
-    const first = temp();
-    emit(`${first} = icmp eq i64 ${i}, 0`);
+    const first = bare ? "false" : temp();
+    if (!bare) emit(`${first} = icmp eq i64 ${i}, 0`);
     emit(`br i1 ${first}, label %${item}, label %${comma}`);
     startBlock(comma);
     jsonRaw(w, ",");
@@ -2847,7 +2856,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`store i64 ${next}, ptr ${index}`);
     emit(`br label %${head}`);
     startBlock(done);
-    jsonRaw(w, "]");
+    if (!bare) jsonRaw(w, "]");
   }
 
   // The string `console.log` prints for a value: its tree, laid out by the runtime.
@@ -2980,17 +2989,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
     const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     if (t.kind === "object" && isTuple(object)) {
-      const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      const [order, rest] = tupleOrder(object);
       const length = object.required === undefined ? undefined : tupleLength(v, object);
+      const fixed = order;
       const node = temp();
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
-      order.forEach(({ i }, n) => {
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? fixed.length})`);
+      fixed.forEach(({ i }, n) => {
         present(length, n, () => {
           const x = temp();
           emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
           emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, as[i]!.type, next)})`);
         });
       });
+      // A rest tuple's further elements join its own, as one array.
+      if (rest) {
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${rest.i}`);
+        emit(`call void @fsh_rt_insp_append(ptr ${node}, ptr ${inspectElements(x, rest.f.type as ArrayType, (as[rest.i]!.type as ArrayType).element, next)})`);
+      }
       return node;
     }
     const fields = t.kind === "class" ? jsonFields((writtenPart(written, t, (x) => x) as ClassType | undefined) ?? t) : object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
@@ -3034,7 +3050,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     const object = t as ObjectType;
     if (t.kind === "object" && isTuple(object)) {
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${object.required === undefined ? object.fields.length : tupleLength(v, object)})`);
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${object.required === undefined && object.rest === undefined ? object.fields.length : tupleLength(v, object)})`);
       return node;
     }
     const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
@@ -3311,20 +3327,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return "zeroinitializer";
   }
 
-  // An array's elements, each pushed as it is read; a failure drops what was read.
-  function readElements(r: string, t: ArrayType): string {
+  // An array's elements, each pushed as it is read; a failure drops what was read. `after` reads
+  // on from a rest tuple's fixed elements, `from` of them, which `undo` drops on a failure.
+  function readElements(r: string, t: ArrayType, after?: { from: number; undo: () => void }): string {
     const array = alloca(ARRAY);
     emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
     const undo = () => {
+      after?.undo();
       const held = temp();
       emit(`${held} = load ${ARRAY}, ptr ${array}`);
       dispose(held, t);
     };
-    const opened = temp();
-    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
-    jsonGuard(opened, "i32");
+    if (!after) {
+      const opened = temp();
+      emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
+      jsonGuard(opened, "i32");
+    }
     const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
+    emit(`store i64 ${after?.from ?? 0}, ptr ${index}`);
     const [head, item, done] = [label(), label(), label()];
     emit(`br label %${head}`);
     startBlock(head);
@@ -3363,7 +3383,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A tuple's elements, exactly as many as it has, in order.
   function readTuple(r: string, t: ObjectType): string {
-    const order = t.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+    const [order, rest] = tupleOrder(t);
     const opened = temp();
     emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
     jsonGuard(opened, "i32");
@@ -3384,7 +3404,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       read.forEach((x) => dispose(x.v, x.type));
       slots.forEach((x) => dispose(loaded(x), x.type));
     };
-    const what = required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
+    const what = rest ? `an array of at least ${order.length}` : required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
     const finish = label();
     // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
     const step = (n: number, wanted: 0 | 1) => {
@@ -3414,13 +3434,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (n < required) read.push({ v, type: f.type, i });
       else emit(`store ${llvm(lower(f.type))} ${v}, ptr ${slots[n - required]!.slot}`);
     });
-    const right = step(order.length, 0);
-    const [bad, good] = [label(), label()];
-    emit(`br i1 ${right}, label %${good}, label %${bad}`);
-    startBlock(bad);
-    jsonExpected(r, what, undo);
-    emit(`br label %${good}`);
-    startBlock(good);
+    if (rest) {
+      // The fixed elements dominate the rest's reads, so its failures can drop them.
+      read.push({ v: readElements(r, rest.f.type as ArrayType, { from: order.length, undo }), type: rest.f.type, i: rest.i });
+    } else {
+      const right = step(order.length, 0);
+      const [bad, good] = [label(), label()];
+      emit(`br i1 ${right}, label %${good}, label %${bad}`);
+      startBlock(bad);
+      jsonExpected(r, what, undo);
+      emit(`br label %${good}`);
+      startBlock(good);
+    }
     emit(`br label %${finish}`);
     startBlock(finish);
     return [...read, ...slots.map((x) => ({ v: loaded(x), type: x.type, i: x.i }))].reduce((agg, x) => {
@@ -4548,7 +4573,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     const [data, length, at] = [temp(), temp(), temp()];
     emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
-    bounds(length, index, e);
+    bounds(length, index, e, restStarts.get(e.object));
     emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
     emit(`${at} = getelementptr ${llvm(type.element)}, ptr ${data}, i64 ${index}`);
     return at;
@@ -5193,13 +5218,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     bounds(units(s), index, at);
   }
 
-  // Panics, as Rust's indexing does, unless a `usize` index is below a length.
-  function bounds(length: string, index: string, at: Expr) {
+  // Panics, as Rust's indexing does, unless a `usize` index is below a length. A rest tuple's
+  // array is named as the tuple, its `before` fixed elements counted in.
+  function bounds(length: string, index: string, at: Expr, before = 0) {
     const [outside, fail, ok] = [temp(), label(), label()];
     emit(`${outside} = icmp uge i64 ${index}, ${length}`);
     emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
     startBlock(fail);
-    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${where(at)}:\n`)}, i64 ${length}, i64 ${index})`);
+    const [told, asked] = before === 0 ? [length, index] : [temp(), temp()];
+    if (before !== 0) {
+      emit(`${told} = add i64 ${length}, ${before}`);
+      emit(`${asked} = add i64 ${index}, ${before}`);
+    }
+    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${where(at)}:\n`)}, i64 ${told}, i64 ${asked})`);
     emit("unreachable");
     startBlock(ok);
   }
@@ -5276,6 +5307,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return convert(result, field(object, e.name)!.type, types.get(e)!);
   }
 
+  // A tuple's fixed elements in order, with where each is in its fields, and its rest array's.
+  function tupleOrder(t: ObjectType): [{ f: Field; i: number }[], { f: Field; i: number } | undefined] {
+    const all = t.fields.map((f, i) => ({ f, i }));
+    return [all.filter(({ f }) => f.name !== "...").sort((a, b) => Number(a.f.name) - Number(b.f.name)), all.find(({ f }) => f.name === "...")];
+  }
+
   // `write`, for a tuple's element `n`, only when it is within `length`, when one is known.
   function present(length: string | undefined, n: number, write: () => void) {
     if (length === undefined) return write();
@@ -5298,6 +5335,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const union = field(t, String(i))!.type as UnionType;
       emit(`${next} = select i1 ${holds(x, union, union.members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
       length = next;
+    }
+    if (t.rest !== undefined) {
+      const [many, more, sum] = [temp(), temp(), temp()];
+      emit(`${many} = extractvalue ${llvm(t)} ${v}, ${fieldPath(t, "...").join(", ")}`);
+      emit(`${more} = extractvalue ${ARRAY} ${many}, 1`);
+      emit(`${sum} = add i64 ${length}, ${more}`);
+      length = sum;
     }
     return length;
   }

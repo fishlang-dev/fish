@@ -16,8 +16,9 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 // A tuple is an object whose fields are its positions, `0`, `1` and on, marked `tuple`.
 // A regex match is a tuple of its captures with `index`, `input` and `groups` beside them.
 // A tuple with optional elements has `required`, the count before them; each optional one holds
-// `T | null`.
-export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: number };
+// `T | null`. A tuple ending in `...T[]` has `rest`, T, and holds those elements as an array in
+// its field `...`, after its fixed ones.
+export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: number; rest?: Type };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
@@ -1128,12 +1129,15 @@ export function keyOf(t: Type): string {
 }
 
 // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
-export function tupleType(elements: Type[], required = elements.length): ObjectType {
-  const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}`;
+export function tupleType(elements: Type[], required = elements.length, rest?: Type): ObjectType {
+  const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${keyOf(rest)}`}`;
   let t = interned.get(key);
   if (!t) {
-    t = { kind: "object", fields: objectType(elements.map((type, i) => ({ name: String(i), type }))).fields, tuple: true };
+    const fields: Field[] = elements.map((type, i) => ({ name: String(i), type }));
+    if (rest !== undefined) fields.push({ name: "...", type: arrayType(rest) });
+    t = { kind: "object", fields: objectType(fields).fields, tuple: true };
     if (required < elements.length) t.required = required;
+    if (rest !== undefined) t.rest = rest;
     interned.set(key, t);
     keys.set(t, key);
   }
@@ -1141,7 +1145,7 @@ export function tupleType(elements: Type[], required = elements.length): ObjectT
 }
 
 // The same tuple shape over elements mapped by `f`.
-export const retuple = (t: ObjectType, f: (e: Type) => Type): ObjectType => tupleType(elementsOf(t).map(f), t.required);
+export const retuple = (t: ObjectType, f: (e: Type) => Type): ObjectType => tupleType(elementsOf(t).map(f), t.required, t.rest === undefined ? undefined : f(t.rest));
 
 // A tuple's element types, in order.
 export function elementsOf(t: ObjectType): Type[] {
@@ -1175,9 +1179,6 @@ export function matchType(t: RegexType): ObjectType {
   }
   return found;
 }
-
-// What an optional element holds when it is there.
-export const present = (t: Type): Type => (typeof t !== "string" && t.kind === "union" ? unionType(t.members.filter((m) => m !== "null")) : t);
 
 export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
 
@@ -1215,7 +1216,7 @@ export function shapeKey(t: Type): string {
   if (ties.has(t)) return keyOf(t);
   let found = shapeKeys.get(t);
   if (found === undefined) {
-    if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}${t.required === undefined ? "" : `?${t.required}`}]`;
+    if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}${t.required === undefined ? "" : `?${t.required}`}${t.rest === undefined ? "" : `...${shapeKey(t.rest)}`}]`;
     else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
     else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
     else if (t.kind === "fixed") found = `FixedArray<${shapeKey(t.element)},${t.size}>`;
@@ -1381,7 +1382,7 @@ export function show(t: Type): string {
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.match) return "RegExpExecArray";
-  if (t.tuple) return `[${elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(present(e))}?`)).join(", ")}]`;
+  if (t.tuple) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
   return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional && f.optional !== "undefined" ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;

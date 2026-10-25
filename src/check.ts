@@ -16,13 +16,13 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsonCalls, printed, expressions, substituted, stringLike } from "./values.ts";
+import { jsonCalls, printed, expressions, restStarts, substituted, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -1421,11 +1421,22 @@ export function check(written: Stmt[], library = false, macros = false): Checked
         }
       } else if (isTuple(whole)) {
         const elements = elementsOf(whole as ObjectType);
-        if (pattern.elements.length > elements.length) throw new CompileError(`tuple type '${show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
-        if (pattern.rest) throw unsupported("rest elements in tuple patterns", pattern.rest);
+        const many = (whole as ObjectType).rest;
+        if (pattern.elements.length > elements.length && many === undefined) throw new CompileError(`tuple type '${show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
+        // A rest tuple's `...rest` takes its array where its fixed elements end, or a copy of the
+        // part after the names taken from it, as an array pattern's rest is, when they copy.
+        const later = pattern.elements.length - elements.length;
+        if (pattern.rest && (many === undefined || later < 0 || (later > 0 && !isCopy(many)))) throw unsupported(many === undefined ? "rest elements in tuple patterns" : later < 0 ? "rest patterns that don't start where a tuple's rest elements do" : "rest patterns after names taken from rest elements whose type doesn't copy", pattern.rest);
         pattern.elements.forEach((p, i) => {
-          if (p) part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), start: p.start, end: p.end }, optional: false, start: p.start, end: p.end }, elements[i]!);
+          if (p) part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), start: p.start, end: p.end }, optional: false, start: p.start, end: p.end }, elements[i] ?? many!);
         });
+        if (pattern.rest) {
+          const at = { start: pattern.rest.start, end: pattern.rest.end };
+          const array: Expr = { kind: "member", object: from(pattern.rest), name: "...", optional: false, ...at };
+          restStarts.set(array, elements.length);
+          const taken: Expr = later === 0 ? array : { kind: "call", callee: { kind: "member", object: array, name: "slice", optional: false, ...at }, args: [{ kind: "int", value: BigInt(later), ...at }], typeArgs: [], optional: false, ...at };
+          part(pattern.rest, taken, arrayType(many!));
+        }
       } else if (typeof whole !== "string" && whole.kind === "array") {
         // An array's elements are read as `xs[i]`, which a value that moves would leave a hole in.
         if (!isCopy(whole.element)) throw new CompileError(`an array pattern reads each element as 'xs[i]', and a '${show(whole.element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);

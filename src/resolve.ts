@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -283,12 +283,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "intersection") return intersection(t.types);
     if (t.kind === "array") return array(resolveType(t.element), t);
     if (t.kind === "tuple") {
-      const rest = t.elements.find((e) => e.rest);
-      if (rest) throw unsupported("rest elements in tuple types", rest);
-      const required = t.elements.findIndex((e) => e.optional);
-      const late = required < 0 ? undefined : t.elements.slice(required).find((e) => !e.optional);
+      const rest = t.elements.findIndex((e) => e.rest);
+      if (rest >= 0 && rest < t.elements.length - 1) throw unsupported("rest elements before the end of a tuple type", t.elements[rest]!);
+      const fixed = rest < 0 ? t.elements : t.elements.slice(0, rest);
+      const required = fixed.findIndex((e) => e.optional);
+      const late = required < 0 ? undefined : fixed.slice(required).find((e) => !e.optional);
       if (late) throw new CompileError("a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
-      return tupleType(t.elements.map((e) => (e.optional ? unionType([storable(resolveType(e.type), e), "null"]) : storable(resolveType(e.type), e))), required < 0 ? undefined : required);
+      if (rest >= 0 && required >= 0) throw unsupported("tuple types with both optional and rest elements", t.elements[rest]!);
+      const many = rest < 0 ? undefined : resolveType(t.elements[rest]!.type);
+      if (many !== undefined && (typeof many === "string" || many.kind !== "array")) throw new CompileError(`a tuple's rest element is an array type, like '...${show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
+      return tupleType(fixed.map((e) => (e.optional ? unionType([storable(resolveType(e.type), e), "null"]) : storable(resolveType(e.type), e))), required < 0 ? undefined : required, many === undefined ? undefined : (many as ArrayType).element);
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {

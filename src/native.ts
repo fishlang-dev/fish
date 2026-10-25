@@ -2163,6 +2163,14 @@ void fsh_rt_insp_push(fsh_insp *list, fsh_insp *item) {
   else fsh_insp_add(list, item, NULL);
 }
 
+// A list's elements moved onto the end of another, as a rest tuple's array joins its fixed elements.
+void fsh_rt_insp_append(fsh_insp *list, fsh_insp *more) {
+  list->size += more->size;
+  for (int64_t i = 0; i < more->count; i++) fsh_rt_insp_push(list, more->items[i]);
+  more->count = 0;
+  fsh_insp_free(more);
+}
+
 fsh_insp *fsh_rt_insp_variant(const char *name) {
   return fsh_insp_new(FSH_INSP_VARIANT, name, strlen(name));
 }

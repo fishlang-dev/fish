@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { computed, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
+import { computed, restText, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -1333,6 +1333,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // How a place reads in a message.
   function text(e: Named): string {
     // A tuple's element reads as it is written, `t[0]`.
+    const rest = restText(e as Expr, (x) => text(x as Named));
+    if (rest) return rest;
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${text(e.object)}[${e.name}]` : `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
     if (e.kind === "nonNull") return `${text(e.expr)}!`;

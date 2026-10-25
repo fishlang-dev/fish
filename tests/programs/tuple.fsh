@@ -267,3 +267,90 @@ async function main() {
   g[1].add(1);
   console.log(g.update((s) => s[0]), g[1].load());
 }
+// case: tuple_rest
+// expect: [ 'a' ] 1 a ["a"]
+// expect: [ 'b', 1, 2, 3 ] 4 b ["b",1,2,3]
+// expect: 1 3
+// expect: b 1 [ 2, 3 ]
+// expect: a []
+// expect: [ 4, 5 ] 2 [4,5]
+// expect: [ 'c', 7, 8, 9 ]
+// expect: [ 1, 5 ] 1 5
+type Row = [string, ...i64[]];
+function show(t: Row): void {
+  console.log(t, t.length, t[0], JSON.stringify(t));
+}
+function main(): void {
+  const a: Row = ["a"];
+  const b: Row = ["b", 1, 2, 3];
+  show(a.clone());
+  show(b.clone());
+  console.log(b[1], b[3]);
+  const [name, first, ...others] = b;
+  console.log(name, first, others);
+  const [n, ...all] = a;
+  console.log(n, all);
+  const nums: [...i64[]] = [4, 5];
+  console.log(nums, nums.length, JSON.stringify(nums));
+  const xs = [7, 8];
+  const c: Row = ["c", ...xs, 9];
+  console.log(c);
+  let t: [i64, ...i64[]] = [1, 2];
+  t[1] = 5;
+  const [x, y] = t;
+  console.log(t, x, y);
+}
+// case: tuple_rest_json
+// expect: [ 'p', 1, 2 ] [ 'q' ]
+// expect: expected an array of at least 1 at $
+// expect: expected i64 at $[1]
+function main(): void throws JsonError {
+  console.log(JSON.parse<[string, ...i64[]]>("[\"p\", 1, 2]"), JSON.parse<[string, ...i64[]]>("[\"q\"]"));
+  for (const text of ["[]", "[\"x\", \"y\"]"]) {
+    try {
+      JSON.parse<[string, ...i64[]]>(text);
+    } catch (e) {
+      console.log(e.message);
+    }
+  }
+}
+// case: tuple_rest_instances
+// expect: 1 2 2
+// expect: [ 2 ]
+class C { constructor(public n: i64) {} }
+function main(): void {
+  const t: [i64, ...C[]] = [1, new C(1), new C(2)];
+  const [a, ...r] = t;
+  console.log(a, r.length, r[1].n);
+  const u: [i64, ...C[]] = [2];
+  console.log(u);
+}
+// case: tuple_rest_past
+// panic: index out of bounds: the len is 2 but the index is 2
+function main() { const t: [i64, ...i64[]] = [1, 2]; console.log(t[2]); }
+// case: tuple_rest_moved
+// error: 'b[1]' can't be used here because 'b' was moved
+function main() { const b: [string, ...i64[]] = ["b", 1]; const c = b; console.log(c, b[1]); }
+// case: tuple_rest_leading
+// error: rest elements before the end of a tuple type are not supported yet
+function main() { const t: [...i64[], string] = ["a"]; }
+// case: tuple_rest_optional
+// error: tuple types with both optional and rest elements are not supported yet
+function main() { const t: [i64, string?, ...i64[]] = [1]; }
+// case: tuple_rest_not_array
+// error: a tuple's rest element is an array type, like '...string[]'
+function main() { const t: [i64, ...string] = [1]; }
+// case: tuple_rest_short
+// error: type '[i64, i64, ...string[]]' has at least 2 elements, but this literal has 1
+function main() { const t: [i64, i64, ...string[]] = [1]; }
+// case: tuple_rest_element_type
+// error: type 'i64' is not assignable to type 'string'
+function main() { const t: [i64, ...string[]] = [1, 2]; }
+// case: tuple_rest_pattern_late
+// error: rest patterns after names taken from rest elements whose type doesn't copy are not supported yet
+class C { constructor(public n: i64) {} }
+function main() { const t: [i64, ...C[]] = [1, new C(1), new C(2)]; const [a, b, ...r] = t; }
+// case: tuple_rest_move_out
+// error: 't[1]' can't be moved out of its array; use 't[1].clone()' to take a copy, or 'pop()' to take the last element out
+class C { constructor(public n: i64) {} }
+function main() { const t: [i64, ...C[]] = [1, new C(1)]; const [a, b] = t; }

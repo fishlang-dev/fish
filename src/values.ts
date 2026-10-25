@@ -227,6 +227,16 @@ const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && cal
 
 // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
 // through a Dyn: values, not places.
+// A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
+export const restStarts = new WeakMap<Expr, number>();
+
+// How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`.
+export function restText(e: Expr, text: (e: Expr) => string): string | undefined {
+  if (e.kind === "index" && e.index.kind === "int" && restStarts.has(e.object)) return `${text((e.object as Extract<Expr, { kind: "member" }>).object)}[${BigInt(restStarts.get(e.object)!) + e.index.value}]`;
+  if (e.kind === "member" && restStarts.has(e)) return `${text(e.object)}[${restStarts.get(e)}...]`;
+  return undefined;
+}
+
 export const computed = new WeakSet<Expr>();
 
 // For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
@@ -1443,22 +1453,35 @@ export function expressions(ctx: Context) {
   // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
   function tupleLiteral(e: Expr, tuple: ObjectType): Type {
     const elements = elementsOf(tuple);
-    const given = tupleParts(e) as Expr[];
+    // Once a literal became an object, its rest elements are its field `...`, checked again.
+    const parts = tupleParts(e) as Expr[];
+    const given = tuple.rest !== undefined && e.kind === "object" ? parts.slice(0, -1) : [...parts];
     const least = tuple.required ?? elements.length;
-    if (given.length < least || given.length > elements.length) {
-      const count = least === elements.length ? `${least}` : `${least} to ${elements.length}`;
+    const fixed = given.slice(0, elements.length);
+    const spread = fixed.find((x) => x.kind === "spread");
+    if (spread) throw unsupported("spread elements in tuple literals", spread);
+    if (given.length < least || (given.length > elements.length && tuple.rest === undefined)) {
+      const count = tuple.rest !== undefined ? `at least ${least}` : least === elements.length ? `${least}` : `${least} to ${elements.length}`;
       throw new CompileError(`type '${show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
     }
     // Optional elements left out are empty.
-    for (let i = given.length; i < elements.length; i++) given.push({ kind: "null", start: e.end, end: e.end } as Expr);
-    const spread = given.find((x) => x.kind === "spread");
-    if (spread) throw unsupported("spread elements in tuple literals", spread);
-    given.forEach((x, i) => {
+    for (let i = fixed.length; i < elements.length; i++) fixed.push({ kind: "null", start: e.end, end: e.end } as Expr);
+    fixed.forEach((x, i) => {
       const t = value(x);
       coerce(x, t, elements[i]!, `type '${show(t)}' is not assignable to type '${show(elements[i]!)}'`);
     });
+    // A rest tuple's further elements are an array literal of its rest type, spreads allowed.
+    const many: Expr[] = [];
+    if (tuple.rest !== undefined) {
+      const rest = arrayType(tuple.rest);
+      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
+      expect(extra, rest);
+      const t = value(extra);
+      coerce(extra, t, rest, `type '${show(t)}' is not assignable to type '${show(rest)}'`);
+      many.push(extra);
+    }
     if (e.kind === "array") {
-      Object.assign(e, { kind: "object", props: given.map((value, i) => ({ kind: "property", key: String(i), value, start: value.start, end: value.end })) });
+      Object.assign(e, { kind: "object", props: [...fixed, ...many].map((value, i) => ({ kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })) });
       delete (e as { elements?: unknown }).elements;
       tupleLiterals.add(e);
     }
@@ -1481,6 +1504,14 @@ export function expressions(ctx: Context) {
     const count = elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError(`a tuple's element is named by a number written in place, like '[0]'; '${show(object)}' has no element for a computed index`, e.index.start, e.index.end);
     const n = e.index.value;
+    // Past a rest tuple's fixed elements, an index reads its array, panicking past the end.
+    if (n >= BigInt(count) && (object as ObjectType).rest !== undefined) {
+      const at = { start: e.index.start, end: e.index.end };
+      const array: Expr = { kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
+      restStarts.set(array, count);
+      Object.assign(e, { object: array, index: { kind: "int", value: n - BigInt(count), ...at } });
+      return false;
+    }
     if (n >= BigInt(count)) throw new CompileError(`tuple type '${show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     Object.assign(e, { kind: "member", name: String(n), optional: false });
@@ -4095,6 +4126,8 @@ export function expressions(ctx: Context) {
 
   // How a place reads in a message, like `p.inner.x`.
   function placeText(e: Expr): string {
+    const rest = restText(e, placeText);
+    if (rest) return rest;
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${e.name}`;
     if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
