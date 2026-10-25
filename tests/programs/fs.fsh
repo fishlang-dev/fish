@@ -27,3 +27,30 @@ import * as fs from "node:fs/promises";
 async function main(): Promise<void> {
   fs.readdir(".");
 }
+// case: fs_encoding_shadowed
+// expect: x:utf8
+// expect: y:utf8
+import { readFile } from "node:fs/promises";
+function local(): void {
+  const readFile = (p: string, e: string): string => `${p}:${e}`;
+  console.log(readFile("x", "utf8"));
+}
+function nested(): void {
+  function readFile(p: string, e: string): string {
+    return `${p}:${e}`;
+  }
+  console.log(readFile("y", "utf8"));
+}
+async function main(): Promise<void> {
+  local();
+  nested();
+}
+// case: fs_encoding_parameter
+// expect: in.txt:utf8
+import { readFile } from "node:fs/promises";
+function load(readFile: (p: string, e: string) => string): string {
+  return readFile("in.txt", "utf8");
+}
+async function main(): Promise<void> {
+  console.log(load((p: string, e: string): string => `${p}:${e}`));
+}

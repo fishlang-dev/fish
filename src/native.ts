@@ -50,6 +50,8 @@ export const NATIVE = String.raw`
 static int64_t fsh_live = 0;
 // Set when the program ends with tasks still running, whose memory is never freed.
 static int32_t fsh_abandoned = 0;
+// File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
+static int64_t fsh_pool_busy = 0;
 
 void *fsh_rt_alloc(int64_t size) {
   void *p = malloc(size);
@@ -76,6 +78,7 @@ void fsh_rt_constants(void (*drop)(void)) {
 }
 
 __attribute__((destructor)) static void fsh_leaks(void) {
+  if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   const char *check = getenv("FISH_LEAKS");
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
@@ -3742,6 +3745,7 @@ static void *fsh_pool_work(void *arg) {
     fsh_rt_wake(task);
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
+    __atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_RELEASE);
   }
   return NULL;
 }
@@ -3757,6 +3761,7 @@ static void fsh_pool_submit(fsh_file_job *job) {
     }
   }
   job->next = NULL;
+  __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
   if (fsh_pool_tail) fsh_pool_tail->next = job;
   else fsh_pool_head = job;
   fsh_pool_tail = job;

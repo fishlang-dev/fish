@@ -290,17 +290,20 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
   return l;
 }
 
-// Turns each `os.hostname` on a std module bound whole into a name imported from it, written
-// so no program can write it. A global's member the module doesn't have is left alone, since a
-// local of that name may be meant; an import's is refused. Where a function's parameter, a
-// block's declaration or a catch clause takes the name, it means that instead.
-function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void, valued: Map<string, "value" | "table"> = new Map()) {
-  const bound = new Set<string>();
-  const named = (d: string) => spaces.has(d) || valued.has(d);
-  const walk = (v: unknown, hidden: Set<string>) => {
+// Walks a tree keeping the names local declarations take, so a rewrite of a module's name leaves
+// the places it means something else alone: a block's declarations, a function's parameters, a
+// loop head's bindings and a catch clause's name in its handler. `visit` returns true when it
+// has handled a node and its children; only names `matters` cares about are tracked.
+function scoped(matters: (name: string) => boolean, visit: (n: Record<string, unknown>, hidden: Set<string>, walk: (v: unknown, hidden: Set<string>) => void) => boolean) {
+  const walk = (v: unknown, hidden: Set<string>): void => {
     if (Array.isArray(v)) {
-      const declared = v.flatMap((s) => (s && typeof s === "object" && (s as Stmt).kind === "let" ? (s as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : []));
-      const inner = declared.some(named) ? new Set([...hidden, ...declared]) : hidden;
+      const declared = v.flatMap((s) => {
+        const d = s as Stmt | null;
+        if (!d || typeof d !== "object") return [];
+        if (d.kind === "let") return d.declarations.flatMap((x) => bindings(x.target));
+        return d.kind === "function" || d.kind === "class" ? namesOf(d) : [];
+      });
+      const inner = declared.some(matters) ? new Set([...hidden, ...declared]) : hidden;
       return v.forEach((x) => walk(x, inner));
     }
     if (typeof v !== "object" || v === null) return;
@@ -309,14 +312,27 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     if (n.kind === "try" && n.param) {
       const caught = bindings(n.param);
       walk(n.block, hidden);
-      walk(n.handler, caught.some(named) ? new Set([...hidden, ...caught]) : hidden);
+      walk(n.handler, caught.some(matters) ? new Set([...hidden, ...caught]) : hidden);
       if (n.finalizer) walk(n.finalizer, hidden);
       return;
     }
     const head = n.kind === "forOf" || n.kind === "forIn" ? n.left : n.kind === "for" ? n.init : undefined;
     const declared = head && (head as { kind?: string }).kind === "let" ? (head as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : [];
     const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
-    if (own.some(named)) hidden = new Set([...hidden, ...own]);
+    if (own.some(matters)) hidden = new Set([...hidden, ...own]);
+    if (!visit(n, hidden, walk)) Object.values(n).forEach((x) => walk(x, hidden));
+  };
+  return walk;
+}
+
+// Turns each `os.hostname` on a std module bound whole into a name imported from it, written
+// so no program can write it. A global's member the module doesn't have is left alone, since a
+// local of that name may be meant; an import's is refused. Where a function's parameter, a
+// block's declaration or a catch clause takes the name, it means that instead.
+function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void, valued: Map<string, "value" | "table"> = new Map()) {
+  const bound = new Set<string>();
+  const named = (d: string) => spaces.has(d) || valued.has(d);
+  const walk = scoped(named, (n, hidden, walk) => {
     const object = n.object as { kind?: string; name?: string } | undefined;
     // `process.env.HOME` and `process.env[name]`: a table member's key, read through its function.
     const table = (x: unknown) => {
@@ -336,7 +352,7 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
       const callee = { kind: "ident", name: imported.name, start: imported.start, end: imported.end };
       for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [key], optional: false });
-      return;
+      return true;
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
@@ -344,7 +360,7 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
       const callee = { kind: "ident", name: n.name, start: n.start, end: n.end };
       for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
-      return;
+      return true;
     }
     const keyed = (n.kind === "member" || n.kind === "index") && !n.optional ? table(n.object) : undefined;
     if (keyed) {
@@ -355,26 +371,25 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
       walk(key, hidden);
       for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
       Object.assign(n, { kind: "call", callee: { kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
-      return;
+      return true;
     }
     // A call's callee is the function itself; a value member elsewhere reads through its function.
     if (n.kind === "call") {
       const callee = n.callee as Record<string, unknown>;
       if (callee.kind === "ident" && valued.has(callee.name as string)) {
         (n.args as unknown[]).forEach((x) => walk(x, hidden));
-        return;
+        return true;
       }
       const owner = callee.object as { kind?: string; name?: string } | undefined;
       if (callee.kind === "member" && owner?.kind === "ident" && spaces.has(owner.name!) && !hidden.has(owner.name!)) {
         rewrite(callee, spaces.get(owner.name!)!, owner.name!, false);
         (n.args as unknown[]).forEach((x) => walk(x, hidden));
-        return;
+        return true;
       }
     }
     const space = n.kind === "member" && object?.kind === "ident" && !hidden.has(object.name!) ? spaces.get(object.name!) : undefined;
-    if (space && rewrite(n, space, object!.name!, true)) return;
-    Object.values(n).forEach((x) => walk(x, hidden));
-  };
+    return space !== undefined && rewrite(n, space, object!.name!, true);
+  });
   // `os.hostname` into the name imported from the module, called when it is a value member.
   const rewrite = (n: Record<string, unknown>, space: { from: Module; explicit: boolean }, owner: string, read: boolean): boolean => {
     const name = n.name as string;
@@ -400,28 +415,29 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
 // `readFileText` gives; without an encoding, bytes. A write's "utf8" is what it writes anyway.
 // The encoding is read while compiling, so it must be a literal, and UTF-8 is the one known.
 function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: string, from: Module, name: string, at: Span) => void) {
-  const walk = (v: unknown) => {
-    if (Array.isArray(v)) return v.forEach(walk);
-    if (typeof v !== "object" || v === null) return;
-    const n = v as Record<string, unknown>;
-    Object.values(n).forEach(walk);
+  const file = (name: string) => {
+    const t = imports.get(name);
+    return t && t.from.path === "std:fs/promises" && (t.name === "readFile" || t.name === "writeFile") ? t : undefined;
+  };
+  const walk = scoped((name) => file(name) !== undefined, (n, hidden) => {
     const callee = n.callee as { kind?: string; name?: string } | undefined;
-    const target = n.kind === "call" && callee?.kind === "ident" ? imports.get(callee.name!) : undefined;
-    if (!target || target.from.path !== "std:fs/promises" || (target.name !== "readFile" && target.name !== "writeFile")) return;
+    const target = n.kind === "call" && callee?.kind === "ident" && !hidden.has(callee.name!) ? file(callee.name!) : undefined;
+    if (!target) return false;
     const args = n.args as Expr[];
     const at = target.name === "readFile" ? 1 : 2;
     const given = args[at];
-    if (!given) return;
+    if (!given) return false;
     const encoding = given.kind === "string" ? given.value : given.kind === "object" ? encodingOf(given) : undefined;
     if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like "utf8" or { encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
     if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
     args.splice(at, 1);
-    if (target.name === "writeFile" || encoding === null) return;
+    if (target.name === "writeFile" || encoding === null) return false;
     const alias = `${callee!.name}:text`;
     if (!imports.has(alias)) bind(alias, target.from, "readFileText", given);
     callee!.name = alias;
-  };
-  walk(body);
+    return false;
+  });
+  walk(body, new Set());
 }
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when

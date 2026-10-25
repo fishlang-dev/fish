@@ -47,3 +47,16 @@ test("readFile and writeFile give what node's give", () => {
   expect(fish.stderr.toString()).toBe("");
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
 });
+
+test("a read still waiting when main returns isn't reported as a leak", () => {
+  const dir = mkdtempSync(join(tmp, "fifo-"));
+  Bun.spawnSync(["mkfifo", join(dir, "fifo")]);
+  const program = join(dir, "main.fsh");
+  writeFileSync(program, `import { readFile } from "node:fs/promises";\nasync function reader(): Promise<void> throws IoError {\n  await readFile("fifo");\n}\nasync function main(): Promise<void> {\n  spawn(reader());\n  await sleep(50);\n  console.log("done");\n}\n`);
+  const out = join(dir, "main");
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  expect(built.stderr.toString()).toBe("");
+  const fish = Bun.spawnSync([out], { cwd: dir, env: { ...process.env, FISH_LEAKS: "1" } });
+  expect(fish.stderr.toString()).toBe("");
+  expect(fish.stdout.toString()).toBe("done\n");
+});
