@@ -159,10 +159,12 @@ export function featuresOf(f: FileScan): string[] {
 }
 
 // The feature a finding waits on: its rule's, or for a Node built-in, the planned feature that
-// replaces that module, none when std already does, and "Node built-ins" when nothing will.
+// replaces that module, none when std already does, and "Node built-ins" when nothing will. An
+// import of a Fish std module is found only for a member std lacks, which nothing plans.
 export function featureOf(id: string, module?: string): string | undefined {
   if (id !== "nodeBuiltins" || module === undefined) return FEATURES.get(id);
   const equivalent = BUILTINS.get(module);
+  if (equivalent && !equivalent.planned && stdModule(module)) return FEATURES.get(id);
   return equivalent ? (equivalent.planned ? equivalent.name : undefined) : FEATURES.get(id);
 }
 
@@ -177,7 +179,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `http` is a client as well as a server, and Fish has only the server so far.
   ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")],
-  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", PLANNED("Synchronous file system")], ["util", PLANNED("The util module")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
+  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", PLANNED("The util module")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],

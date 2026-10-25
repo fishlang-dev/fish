@@ -500,3 +500,9 @@ test("generic arrows not held by a const wait on generic function values", () =>
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Generic function values"]]);
   });
 });
+
+test("node:fs members the std module answers are portable; others are Node built-ins", () => {
+  project({ "a.ts": "import { readFileSync, statSync, rmSync } from \"node:fs\";\n", "b.ts": "import { mkdirSync } from \"fs\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
+  });
+});
