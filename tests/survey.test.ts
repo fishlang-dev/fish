@@ -489,9 +489,9 @@ test("optional and trailing rest tuple elements are portable; a leading rest, or
   });
 });
 
-test("node:fs, fs/promises and util are std, and a util member std lacks waits on its plan item", () => {
+test("node:fs, fs/promises and util are std, and a util member std lacks waits on Node built-ins", () => {
   project({ "a.ts": "import { readFileSync } from \"node:fs\";\n", "b.ts": "import { readFile } from \"node:fs/promises\";\nreadFile(\"x\");\n", "c.ts": "import { parseArgs, format } from \"node:util\";\n", "d.ts": "import { promisify } from \"node:util\";\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], [], ["The util module"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], [], ["Node built-ins"]]);
   });
 });
 
