@@ -2543,15 +2543,15 @@ export function expressions(ctx: Context) {
   }
 
   // Refuses a value that can't be cloned, for `clone()` and for the array methods that give
-  // clones of elements, named by `by`.
-  function clonable(type: Type, at: Span, by?: string) {
+  // clones of elements, named by `by`; `dyns` copies Dyns one by one, as those methods do.
+  function clonable(type: Type, at: Span, by?: string, dyns = by !== undefined) {
     const stored = lower(type);
     const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
     const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
     if (permit) throw say("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead");
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
-    if (!by && (typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
+    if (!dyns && (typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
     const inner = holdsInterior(stored);
     if (inner) throw say(`can't clone ${inner === stored ? "" : "a value holding "}${article(inner.which)}, which is changed in place wherever it is shared; make a new one from what it holds`);
     if (holdsHandle(stored)) throw say("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself");
@@ -3744,7 +3744,7 @@ export function expressions(ctx: Context) {
       }
       if (holdsRef(held)) throw unsupported("spreads of values holding references", p);
       const parts = held.kind === "class" ? allFields(held).filter((f) => (f.access ?? "public") === "public") : held.fields;
-      const place = ["ident", "member", "index", "this"].includes(p.value.kind);
+      const place = copiesPlace(p.value);
       for (const f of parts) {
         merged.delete(f.name);
         merged.set(f.name, { name: f.name, type: f.type });
@@ -3752,9 +3752,20 @@ export function expressions(ctx: Context) {
         else copied.delete(f.name);
       }
     }
-    // A spread of a place copies the fields it gives, which must be ones a clone may copy.
-    for (const [name, p] of copied) clonable(merged.get(name)!.type, p);
+    // A spread of a place copies the fields it gives, which must be ones a clone may copy; its
+    // Dyns copy one by one, as an array method's elements do.
+    for (const [name, p] of copied) clonable(merged.get(name)!.type, p, undefined, true);
     return objectType([...merged.values()]);
+  }
+
+  // Whether a value may be a place's, which taking it copies: a place, or any branch of `!`,
+  // `?:`, `??` or a `match` giving one. A match arm's block is taken to.
+  function copiesPlace(e: Expr): boolean {
+    if (e.kind === "nonNull") return copiesPlace(e.expr);
+    if (e.kind === "conditional") return copiesPlace(e.then) || copiesPlace(e.else);
+    if (e.kind === "binary" && e.op === "??") return copiesPlace(e.left) || copiesPlace(e.right);
+    if (e.kind === "match") return e.arms.some((a) => a.body.kind === "block" || copiesPlace(a.body as Expr));
+    return place(e);
   }
 
   function property(p: ObjectProp): Field {

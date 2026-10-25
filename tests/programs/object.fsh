@@ -353,3 +353,30 @@ function main() { const o = { c: new Cell<i64>(1), n: 1 }; const p = { ...o, n: 
 // A field the literal gives itself isn't copied from the spread.
 async function work(s: string): Promise<string> { return s + "!"; }
 async function main() { const o = { h: spawn(work("x")), n: 1 }; const q = { ...{ n: 0 }, h: spawn(work("a")), n: 2 }; const v = await q.h; const w = await o.h; console.log(v, q.n); }
+// case: object_spread_through_branches
+// error: can't clone a JoinHandle, or a value holding one
+async function work(s: string): Promise<string> { return s + "!"; }
+type O = { h: JoinHandle<string>; n: i64 };
+async function main() { let m: O | null = { h: spawn(work("a")), n: 1 }; let q = { ...m!, n: 2 }; const v = await q.h; }
+// case: object_spread_through_conditional
+// error: can't clone a JoinHandle, or a value holding one
+async function work(s: string): Promise<string> { return s + "!"; }
+async function main() { const b = true; let o = { h: spawn(work("a")), n: 1 }; let p = { h: spawn(work("b")), n: 1 }; let q = { ...(b ? o : p), n: 2 }; const v = await q.h; }
+// case: object_spread_dyns_and_getters
+// expect: 9 1
+// expect: 3 2
+// Dyns copy one by one, as an array method's elements do, and a getter's result is taken over.
+interface Shape { area(): i64; }
+class Sq implements Shape { s: i64; constructor(s: i64) { this.s = s; } area(): i64 { return this.s * this.s; } }
+type P = { ds: Dyn<Shape>[]; n: i64 };
+type O = { c: Cell<i64>; n: i64 };
+class C { get view(): O { return { c: new Cell<i64>(3), n: 3 }; } }
+function main() {
+  const ds: Dyn<Shape>[] = [new Sq(3)];
+  const p: P = { ds, n: 1 };
+  const r = { ...p, n: 2 };
+  console.log(r.ds[0].area(), p.ds.length);
+  const c = new C();
+  const q = { ...c.view, n: 2 };
+  console.log(q.c.get(), q.n);
+}
