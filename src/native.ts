@@ -1998,6 +1998,27 @@ const char *fsh_rt_getenv(const char *name) {
   return getenv(name);
 }
 
+// Date.now(): the wall clock's milliseconds since the Unix epoch.
+int64_t fsh_rt_date_now(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+// performance.now(): milliseconds, with fractions, since the program started, from a clock that
+// only goes forward.
+static struct timespec fsh_started;
+
+__attribute__((constructor)) static void fsh_start_clock(void) {
+  clock_gettime(CLOCK_MONOTONIC, &fsh_started);
+}
+
+double fsh_rt_performance_now(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)(t.tv_sec - fsh_started.tv_sec) * 1e3 + (double)(t.tv_nsec - fsh_started.tv_nsec) / 1e6;
+}
+
 // process.exit: output flushed and the process ended at once, as Node ends it, so what is still
 // alive isn't reported as leaked.
 void fsh_rt_exit(int64_t code) {

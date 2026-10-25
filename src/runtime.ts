@@ -176,6 +176,8 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_insp_variant(ptr)",
   "declare ptr @fsh_rt_insp_done(ptr)",
   "declare void @fsh_rt_args(i32, ptr)",
+  "declare i64 @fsh_rt_date_now()",
+  "declare double @fsh_rt_performance_now()",
   "",
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',
   '@.false = private unnamed_addr constant [6 x i8] c"false\\00"',
@@ -185,10 +187,10 @@ export const RUNTIME = [
 // literals and literal values are folded into the printf format at compile time. A union is
 // printed by branching on its tag, so the format is flushed before it and each branch prints
 // its member.
-export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf: (e: Expr) => Type, convert: Convert) {
+export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf: (e: Expr) => Type, convert: Convert, stream: 1 | 2 = 1) {
   // Every argument runs before anything prints, as in JavaScript.
   const evaluated = args.map((a) => (a.kind === "string" ? "" : value(a)));
-  write(1, args.map((a, i) => (a.kind === "string" ? a.value : [evaluated[i]!, typeOf(a)])), b, convert);
+  write(stream, args.map((a, i) => (a.kind === "string" ? a.value : [evaluated[i]!, typeOf(a)])), b, convert);
 }
 
 // Writes text and values, joined by spaces and ending in a newline, to stdout (1) or stderr (2).

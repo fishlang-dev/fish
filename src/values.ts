@@ -33,9 +33,12 @@ const BITWISE_OPERATORS = new Set<string>(["&", "|", "^", "<<", ">>", ">>>"]);
 
 export function isPrint(callee: Expr): boolean {
   if (callee.kind === "ident") return callee.name === "print";
-  return callee.kind === "member" && callee.name === "log" &&
+  return callee.kind === "member" && (callee.name === "log" || callee.name === "error" || callee.name === "warn") &&
     callee.object.kind === "ident" && callee.object.name === "console";
 }
+
+// Where a print writes: stdout, or stderr for `console.error` and `console.warn`.
+export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" && callee.name !== "log" ? 2 : 1);
 
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
@@ -164,6 +167,8 @@ export const lengthChecks = new WeakSet<Expr>();
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
+// The `Date.now()` and `performance.now()` calls, by which each is.
+export const clocks = new WeakMap<Expr, "Date.now" | "performance.now">();
 // The `JSON.stringify` and `JSON.parse` calls, by which each is.
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
@@ -808,6 +813,12 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return mathCall(e, callee.name);
+    }
+    const clock = clockOf(callee);
+    if (clock) {
+      if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError(`'${clock}' takes no arguments`, e.start, e.end);
+      clocks.set(e, clock);
+      return { type: clock === "Date.now" ? "i64" : "f64", what: `'${clock}'` };
     }
     const json = jsonOf(callee);
     if (json && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError("'JSON' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -1597,6 +1608,16 @@ export function expressions(ctx: Context) {
     if (e.name in REGEX_FLAGS) return "boolean";
     if (e.name === "lastIndex") throw new CompileError("a Fish regex keeps no state, so it has no 'lastIndex'; use 'matchAll' to go through every match", e.start, e.end);
     throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+  }
+
+  // `Date.now()` and `performance.now()`, unless a name of the program's hides `Date` or
+  // `performance`; their other members aren't there yet.
+  function clockOf(callee: Expr): "Date.now" | "performance.now" | undefined {
+    if (callee.kind !== "member" || callee.object.kind !== "ident") return undefined;
+    const owner = callee.object.name;
+    if ((owner !== "Date" && owner !== "performance") || lookup(owner) || classes.has(owner) || byName.has(owner) || byName.has(`const ${owner}`) || enums.has(owner)) return undefined;
+    if (callee.name !== "now") throw new CompileError(`'${owner}.${callee.name}' isn't supported yet; '${owner}.now()' is`, callee.start, callee.end);
+    return `${owner}.now` as "Date.now" | "performance.now";
   }
 
   // `JSON.stringify` and `JSON.parse`, unless a name of the program's hides `JSON`.

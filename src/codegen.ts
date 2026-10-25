@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, isPrint, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, isPrint, printStream, clocks, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -4840,7 +4840,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(e);
     if (!target) {
       if (isPrint(e.callee)) {
-        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert);
+        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert, printStream(e.callee));
         return undefined;
       }
       // `Shape.Circle(1.5)`: a variant built from its payload, each value handed to it. Used as a
@@ -4862,6 +4862,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
       if (kindTests.has(e)) return test(e, value, valueType)!;
+      if (clocks.has(e)) {
+        const now = temp();
+        emit(clocks.get(e) === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_performance_now()`);
+        return now;
+      }
       if (jsonCalls.get(e) === "stringify") return stringifyCall(e);
       if (jsonCalls.get(e) === "parse") return parseJsonCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
