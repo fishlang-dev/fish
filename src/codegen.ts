@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -2485,7 +2485,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (type.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release" }[type.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release" }[type.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -4862,6 +4862,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
       if (kindTests.has(e)) return test(e, value, valueType)!;
+      // A file's future: the path, and a write's bytes, in its frame for the pool to take.
+      if (fileCalls.has(e)) {
+        const future = types.get(e) as FutureType;
+        let frame = temp();
+        emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${owned(e.args[0]!)}, 1`);
+        if (e.args[1]) {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${ARRAY} ${owned(e.args[1])}, 2`);
+          frame = next;
+        }
+        return frame;
+      }
       if (clocks.has(e)) {
         const now = temp();
         emit(clocks.get(e) === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_performance_now()`);
@@ -5527,7 +5539,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A socket's poll gives its result through `made`, and on failure the system's reason
       // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
       const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
-      if (socket) {
+      const file = leaf.method === "readFile" || leaf.method === "writeFile";
+      if (socket || file) {
         reason = alloca("[4 x ptr]");
         emit(`store [4 x ptr] zeroinitializer, ptr ${reason}`);
       }
@@ -5580,6 +5593,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (leaf.method !== "write") {
           given = temp();
           emit(`${given} = load ${leaf.method === "read" ? ARRAY : "ptr"}, ptr ${made}`);
+        }
+      } else if (file) {
+        // A file's job runs on the runtime's blocking pool, its frame the path, a write's bytes,
+        // and the job once handed over.
+        const reading = leaf.method === "readFile";
+        const [made, jobAt] = [alloca(ARRAY), temp()];
+        emit(`store ${ARRAY} zeroinitializer, ptr ${made}`);
+        emit(`${jobAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${reading ? 2 : 3}`);
+        let bytesAt = "null";
+        if (!reading) {
+          bytesAt = temp();
+          emit(`${bytesAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+        }
+        emit(`${outcome} = call i32 @fsh_rt_file_poll(ptr ${handle}, ptr ${bytesAt}, ptr ${jobAt}, i32 ${reading ? 0 : 1}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        if (reading) {
+          given = temp();
+          emit(`${given} = load ${ARRAY}, ptr ${made}`);
         }
       } else if (leaf.method === "sleep") {
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);

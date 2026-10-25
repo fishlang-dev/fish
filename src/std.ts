@@ -953,6 +953,23 @@ export function extname(path: string): string {
   return path.slice(startDot, end);
 }
 `,
+  // Files read and written on the runtime's blocking pool. A call naming an encoding, as
+  // readFile(path, "utf8"), is linked to readFileText, which gives a string.
+  "fs/promises": String.raw`
+export async function readFile(path: string): Promise<u8[]> throws IoError {
+  return await fileRead(path);
+}
+
+export async function readFileText(path: string): Promise<string> throws IoError {
+  const bytes = await fileRead(path);
+  return new TextDecoder().decode(bytes);
+}
+
+export async function writeFile(path: string, data: string | u8[]): Promise<void> throws IoError {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  await fileWrite(path, bytes);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;

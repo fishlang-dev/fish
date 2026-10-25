@@ -1,3 +1,4 @@
+import { fileAt } from "./modules.ts";
 import { inherited, upcasts, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -164,6 +165,8 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The `fileRead` and `fileWrite` calls of the std's file module.
+export const fileCalls = new WeakSet<Expr>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
 export const printCalls = new WeakSet<Expr>();
 // The values printed as Node's util.inspect prints them, whose types as written say how their
@@ -981,6 +984,20 @@ export function expressions(ctx: Context) {
       if (e.args.length === 1) return { type: SLEEP, what: "'sleep'" };
       signalArgument(e.args[1]!, "'sleep'");
       return { type: leafFuture("sleep", "void", abortError(), true), what: "'sleep'" };
+    }
+    // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
+    // each a job on the runtime's blocking pool.
+    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && fileAt(e.start).startsWith("node:")) {
+      const reading = callee.name === "fileRead";
+      if (e.args.length !== (reading ? 1 : 2)) throw new CompileError(`'${callee.name}' takes ${reading ? "a path" : "a path and the bytes"}`, e.start, e.end);
+      const path = value(e.args[0]!);
+      coerce(e.args[0]!, path, "string", `a path is a 'string', not '${show(path)}'`);
+      if (!reading) {
+        const bytes = value(e.args[1]!);
+        coerce(e.args[1]!, bytes, arrayType("u8"), `the bytes are a 'u8[]', not '${show(bytes)}'`);
+      }
+      fileCalls.add(e);
+      return { type: leafFuture(reading ? "readFile" : "writeFile", "void", ioError()), what: `'${callee.name}'` };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && (!byName.has("yieldNow") || inStd)) {

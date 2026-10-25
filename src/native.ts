@@ -3624,16 +3624,178 @@ static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *sys
   return fsh_io_parts(error, message, code, syscall, NULL);
 }
 
-// A file call's failure, in Node's words: "ENOENT: no such file or directory, open 'x'".
+// A file call's failure, in Node's words: "ENOENT: no such file or directory, open 'x'". A call
+// on an open file, as read, names no path, as Node's doesn't.
 static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, const char *path) {
   char code[32], text[200];
   fsh_errno_words(number, code, sizeof code, text, sizeof text);
-  size_t size = strlen(code) + strlen(text) + strlen(syscall) + strlen(path) + 16;
+  size_t size = strlen(code) + strlen(text) + strlen(syscall) + (path ? strlen(path) : 0) + 16;
   char *message = fsh_rt_alloc(size);
-  snprintf(message, size, "%s: %s, %s '%s'", code, text, syscall, path);
+  if (path) snprintf(message, size, "%s: %s, %s '%s'", code, text, syscall, path);
+  else snprintf(message, size, "%s: %s, %s", code, text, syscall);
   int32_t failed = fsh_io_parts(error, message, code, syscall, path);
   fsh_rt_free(message);
   return failed;
+}
+
+// A file read or write on the blocking pool: threads of their own, apart from the executor's
+// workers, so a slow disk never stalls other tasks. A job is counted by the future polling it and
+// by the thread working on it; the thread wakes the task when done, and a future dropped first
+// leaves the job to the thread to free.
+typedef struct fsh_file_job {
+  int64_t refs;
+  int32_t op;
+  int32_t done;
+  int error;
+  const char *syscall;
+  char *path;
+  fsh_array data;
+  fsh_task *task;
+  struct fsh_file_job *next;
+} fsh_file_job;
+
+static pthread_mutex_t fsh_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_pool_ready = PTHREAD_COND_INITIALIZER;
+static fsh_file_job *fsh_pool_head = NULL, *fsh_pool_tail = NULL;
+static int fsh_pool_started = 0;
+
+// ponytail: four threads, however many jobs wait; size it from the load if disks are slow
+#define FSH_POOL_THREADS 4
+
+void fsh_rt_file_job_release(fsh_file_job *job) {
+  if (!job || __atomic_sub_fetch(&job->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+  fsh_rt_free(job->path);
+  fsh_rt_free(job->data.data);
+  fsh_rt_free(job);
+}
+
+// Reads a whole file, as Node's readFile does: open, read until the end, close.
+static void fsh_file_read(fsh_file_job *job) {
+  int fd = open(job->path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    job->error = errno;
+    job->syscall = "open";
+    return;
+  }
+  int64_t room = 4096;
+  job->data.data = fsh_rt_alloc(room);
+  job->data.length = 0;
+  for (;;) {
+    if (job->data.length == room) {
+      char *grown = fsh_rt_alloc(room * 2);
+      memcpy(grown, job->data.data, job->data.length);
+      fsh_rt_free(job->data.data);
+      job->data.data = grown;
+      room *= 2;
+    }
+    ssize_t n = read(fd, job->data.data + job->data.length, room - job->data.length);
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0) {
+      job->error = errno;
+      job->syscall = "read";
+      break;
+    }
+    if (n == 0) break;
+    job->data.length += n;
+  }
+  job->data.capacity = room;
+  close(fd);
+}
+
+// Writes a whole file, creating it or emptying it first, as Node's writeFile does.
+static void fsh_file_write(fsh_file_job *job) {
+  int fd = open(job->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+  if (fd < 0) {
+    job->error = errno;
+    job->syscall = "open";
+    return;
+  }
+  for (int64_t at = 0; at < job->data.length;) {
+    ssize_t n = write(fd, job->data.data + at, job->data.length - at);
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0) {
+      job->error = errno;
+      job->syscall = "write";
+      break;
+    }
+    at += n;
+  }
+  if (close(fd) < 0 && !job->error) {
+    job->error = errno;
+    job->syscall = "close";
+  }
+}
+
+static void *fsh_pool_work(void *arg) {
+  (void)arg;
+  for (;;) {
+    pthread_mutex_lock(&fsh_pool_lock);
+    while (!fsh_pool_head) pthread_cond_wait(&fsh_pool_ready, &fsh_pool_lock);
+    fsh_file_job *job = fsh_pool_head;
+    fsh_pool_head = job->next;
+    if (!fsh_pool_head) fsh_pool_tail = NULL;
+    pthread_mutex_unlock(&fsh_pool_lock);
+    if (job->op == 0) fsh_file_read(job);
+    else fsh_file_write(job);
+    fsh_task *task = job->task;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    fsh_rt_wake(task);
+    fsh_task_release(task);
+    fsh_rt_file_job_release(job);
+  }
+  return NULL;
+}
+
+static void fsh_pool_submit(fsh_file_job *job) {
+  pthread_mutex_lock(&fsh_pool_lock);
+  if (!fsh_pool_started) {
+    fsh_pool_started = 1;
+    for (int i = 0; i < FSH_POOL_THREADS; i++) {
+      pthread_t thread;
+      pthread_create(&thread, NULL, fsh_pool_work, NULL);
+      pthread_detach(thread);
+    }
+  }
+  job->next = NULL;
+  if (fsh_pool_tail) fsh_pool_tail->next = job;
+  else fsh_pool_head = job;
+  fsh_pool_tail = job;
+  pthread_cond_signal(&fsh_pool_ready);
+  pthread_mutex_unlock(&fsh_pool_lock);
+}
+
+// Polls a readFile (op 0) or writeFile (op 1): its first poll hands the job to the pool and waits;
+// once the thread is done, 1 with what a read gave in out, or 5 with the IoError's parts.
+int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at, int32_t op, fsh_task *task, fsh_array *out, fsh_str **error) {
+  fsh_file_job *job = *job_at;
+  if (!job) {
+    // A path holding a NUL names no file C can open.
+    char *c = fsh_rt_str_cstring(path);
+    if (!c) return fsh_fs_failed(error, EINVAL, "open", "");
+    job = fsh_rt_alloc(sizeof(fsh_file_job));
+    memset(job, 0, sizeof *job);
+    job->refs = 2;
+    job->op = op;
+    job->path = c;
+    if (op == 1 && bytes->length > 0) {
+      job->data.data = fsh_rt_alloc(bytes->length);
+      memcpy(job->data.data, bytes->data, bytes->length);
+      job->data.length = job->data.capacity = bytes->length;
+    }
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    job->task = task;
+    *job_at = job;
+    fsh_pool_submit(job);
+    return 0;
+  }
+  if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+  if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
+  if (op == 0) {
+    *out = job->data;
+    job->data.data = NULL;
+    job->data.length = job->data.capacity = 0;
+  }
+  return 1;
 }
 
 // An IPv4 address and port from a string and a number, or 0 with the message saying why not.

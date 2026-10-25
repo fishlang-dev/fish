@@ -177,6 +177,8 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_insp_done(ptr)",
   "declare void @fsh_rt_args(i32, ptr)",
   "declare i64 @fsh_rt_date_now()",
+  "declare i32 @fsh_rt_file_poll(ptr, ptr, ptr, i32, ptr, ptr, ptr)",
+  "declare void @fsh_rt_file_job_release(ptr)",
   "declare double @fsh_rt_performance_now()",
   "",
   '@.true = private unnamed_addr constant [5 x i8] c"true\\00"',

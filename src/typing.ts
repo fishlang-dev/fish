@@ -301,7 +301,8 @@ export function stored(t: Type): Type {
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
-export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream"; of: Type; fields: Field[] };
+// A FileJob is a file read or write handed to the runtime's blocking pool.
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob"; of: Type; fields: Field[] };
 
 const blocks = new Map<string, BlockType>();
 
@@ -321,7 +322,7 @@ export function blockType(which: BlockType["which"], of: Type = "void"): BlockTy
 // `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
-export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write";
+export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile";
 const leaves = new Map<string, FutureType>();
 export const leafOf = new WeakMap<FutureType, { method: Leaf; of: Type; signal: boolean }>();
 
@@ -336,6 +337,8 @@ const LEAF_FRAMES: Record<Leaf, (of: Type) => Field[]> = {
   accept: () => [{ name: "block", type: blockType("TcpListener") }],
   read: () => [{ name: "block", type: blockType("TcpStream") }, { name: "max", type: "i64" }],
   write: () => [{ name: "block", type: blockType("TcpStream") }, { name: "bytes", type: arrayType("u8") }, { name: "written", type: "i64" }],
+  readFile: () => [{ name: "path", type: "string" }, { name: "job", type: blockType("FileJob") }],
+  writeFile: () => [{ name: "path", type: "string" }, { name: "bytes", type: arrayType("u8") }, { name: "job", type: blockType("FileJob") }],
 };
 
 // A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
@@ -347,7 +350,7 @@ export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false
     const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
     if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
     const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
-      : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" ? arrayType("u8") : "void";
+      : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : "void";
     t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
     leaves.set(key, t);
     leafOf.set(t, { method, of, signal });
