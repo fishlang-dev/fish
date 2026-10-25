@@ -1,5 +1,5 @@
 import { fileAt } from "./modules.ts";
-import { inherited, upcasts, type Body, type ClassInfo } from "./classes.ts";
+import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
@@ -176,6 +176,8 @@ export const fixedFills = new WeakSet<Expr>();
 // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
 // gathered into one array.
 export const stringBuilds = new WeakMap<Expr, "units" | "points">();
+// The parameters of the closures declared functions named as values became, by function name.
+const namedParams = new WeakMap<Param, string>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -1198,6 +1200,33 @@ export function expressions(ctx: Context) {
     throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${given}`, at.start, at.end);
   }
 
+  // A callback given as a declared function's name becomes the closure calling it.
+  function namedFunction(callback: Expr) {
+    const declared = callback.kind === "ident" && !lookup(callback.name) ? byName.get(callback.name) : undefined;
+    if (declared && !declared.comptime) functionValue(callback as Extract<Expr, { kind: "ident" }>, declared);
+  }
+
+  // `double` named where a value is wanted becomes `(x) => double(x)`, its parameters and their
+  // types its declaration's, capturing nothing, so it passes, stores and boxes as any closure.
+  function functionValue(e: Extract<Expr, { kind: "ident" }>, f: Body) {
+    const name = `'${f.name}'`;
+    if (f.typeParams?.some((p) => !isLifetime(p))) throw new CompileError(`${name} is generic, a family of functions made one per call, so it can only be called here; using one instance as a value, as '${f.name}<T>', isn't supported yet`, e.start, e.end);
+    if (f.foreign) throw unsupported("C functions used as values", e);
+    if (f.throws) throw unsupported("functions that throw used as values", e);
+    const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
+    if (odd) throw unsupported(odd.comptime ? "functions with comptime parameters used as values" : odd.rest ? "functions with rest parameters used as values" : "functions with defaulted parameters used as values", e);
+    const at = { start: e.start, end: e.end };
+    const params: Param[] = f.params.map((p, i) => ({ ...at, pattern: { kind: "ident", name: `${f.name}-arg${i}`, ...at }, type: p.type, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    for (const p of params) namedParams.set(p, f.name);
+    const args: Expr[] = params.map((p) => {
+      const arg: Expr = { kind: "ident", name: (p.pattern as Extract<Pattern, { kind: "ident" }>).name, ...at };
+      return arg;
+    });
+    const call: Expr = { kind: "call", callee: { kind: "ident", name: f.name, ...at }, typeArgs: [], args, optional: false, ...at };
+    delete (e as { name?: string }).name;
+    Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
+  }
+
   // The nested function a name calls, unless it is async, whose future holds what it uses. A
   // closure owning what it captures, async or `move`, takes the function as made where it is.
   function nestedFunction(name: string): Local | undefined {
@@ -1422,7 +1451,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
     }
     const [callback, init] = e.args as [Expr, Expr | undefined];
-    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place; passing a function by name isn't supported yet`, callback.start, callback.end);
+    namedFunction(callback);
+    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place, or a function by name`, callback.start, callback.end);
     const element = isCopy(array.element) ? array.element : refType(array.element, false);
     const acc = !reducing ? undefined : init ? widenLet(value(init)) : array.element;
     const params = acc ? [acc, element, "i64" as const] : [element, "i64" as const];
@@ -1473,7 +1503,8 @@ export function expressions(ctx: Context) {
       }
       return { type: "void", what };
     }
-    if (compare.kind !== "arrow") throw new CompileError("'sort' takes a comparator written in place, like '(a, b) => a - b'; passing a function by name isn't supported yet", compare.start, compare.end);
+    namedFunction(compare);
+    if (compare.kind !== "arrow") throw new CompileError("'sort' takes a comparator written in place, like '(a, b) => a - b', or a function by name", compare.start, compare.end);
     if (compare.params.length > 2) throw new CompileError("'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
     const element = isCopy(array.element) ? array.element : refType(array.element, false);
     expect(compare, functionType(["a", "b"], [element, element], "void"));
@@ -1930,6 +1961,11 @@ export function expressions(ctx: Context) {
     if (p && (p.optional || defaulted.has(p)) && !sameLowered(given, written)) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     if (sameLowered(given, written) || (converted && !isRefType(given) && fits(given, written))) return;
     if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
+    // A declared function given by name takes its own value, which a lent element isn't.
+    const fn = p && namedParams.get(p);
+    if (fn && isRefType(given) && sameLowered(given.to, written)) {
+      throw new CompileError(`'${name}' lends its callback each element as ${article(show(given))}, and '${fn}' takes its own '${show(written)}'; write '(x) => ${fn}(x.clone())', or have '${fn}' take a '${show(given)}'`, at.start, at.end);
+    }
     throw new CompileError(`'${name}' passes its callback ${article(show(given))} here, not ${article(show(written))}`, at.start, at.end);
   }
 
@@ -2218,7 +2254,8 @@ export function expressions(ctx: Context) {
     // `update(k, f)` and `forEach(f)` call an arrow written in place: `update`'s gets the value
     // to change, once, and `forEach`'s each value and its key in turn, borrowed or copied.
     const callback = e.args[name === "update" ? 1 : 0]!;
-    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place; passing a function by name isn't supported yet`, callback.start, callback.end);
+    namedFunction(callback);
+    if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place, or a function by name`, callback.start, callback.end);
     const lend = (u: Type) => (isCopy(u) ? u : refType(u, false));
     // A Set's forEach passes each member twice, as JavaScript's does.
     const params = name === "update" ? [refType(t.value, true)] : t.set ? [lend(t.key), lend(t.key)] : [lend(t.value), lend(t.key)];
@@ -2843,6 +2880,12 @@ export function expressions(ctx: Context) {
           calls.set(e, instance);
           const type = ctx.returnOf(instance, e);
           return isCopy(type) || type === "string" ? type : refType(type, false);
+        }
+        // A declared function named as a value is a closure calling it.
+        const declared = local ? undefined : byName.get(e.name);
+        if (declared && !declared.comptime) {
+          functionValue(e, declared);
+          return typeOf(e);
         }
         if (!local) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
