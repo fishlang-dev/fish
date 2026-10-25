@@ -245,6 +245,8 @@ export type Func = Span & {
   // Undefined for an overload signature or a `declare function`. `throws` is the error type.
   typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined;
   decorators?: Expr[];
+  // A package's function, declared in its `.d.ts`: the package and the name it exports it by.
+  js?: { module: string; name: string };
 };
 
 export type BinaryOp =

@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { CompileError, locate, type Source } from "./diag.ts";
+import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
-import { exportsOf, findTypings } from "./typings.ts";
+import { jsDeclaration } from "./js.ts";
+import { exportsOf, findTypings, type Exports } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
@@ -60,11 +61,46 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         module.targets.set(s, std(named));
         continue;
       }
-      if (!/^\.\.?(\/|$)/.test(specifier)) packageImport(path, specifier, s, entry);
+      if (!/^\.\.?(\/|$)/.test(specifier)) {
+        module.targets.set(s, packageModule(path, specifier, s));
+        continue;
+      }
       const target = resolveSpecifier(path, specifier, s);
       module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));
+    return module;
+  };
+  // A declaration file a package's declarations come from: given its own place in the program's
+  // offsets, so a message about a declaration shows its line.
+  const declarationFile = (file: string): number => {
+    const key = `dts:${file}`;
+    const known = byPath.get(key);
+    if (known) return known.base;
+    const base = modules.length * FILE_SPAN;
+    const text = readFileSync(file, "utf8");
+    sources.push({ base, src: text, file: relative(dirname(entry), file) });
+    const holder: Module = { path: key, file: relative(dirname(entry), file), base, src: text, statements: [], targets: new Map(), globals: new Map() };
+    modules.push(holder);
+    byPath.set(key, holder);
+    return base;
+  };
+  // What an import from a package names, as a module of its own: the declarations of the names it
+  // imports, each where the package declares it, as JS declarations.
+  const packageModule = (from: string, specifier: string, s: Stmt): Module => {
+    const exports = packageExports(from, specifier, s, entry);
+    const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
+    if (s.kind === "import" && (s.default !== undefined || s.namespace !== undefined)) throw unsupported("default and namespace imports of packages", s);
+    if (s.kind === "exportAll") throw unsupported("re-exporting all of a package", s);
+    const statements = named.map((sp) => {
+      const declared = exports.names.get(sp.name)!;
+      const made = jsDeclaration(declared, sp.name, specifier, sp);
+      shiftSpans(made, declarationFile(declared.file));
+      return { kind: "export", body: made, start: made.start, end: made.end } as Stmt;
+    });
+    const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new Map(), globals: new Map() };
+    modules.push(module);
+    byPath.set(module.path, module);
     return module;
   };
   try {
@@ -77,10 +113,9 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   return { modules, sources };
 }
 
-// An import of a package: its declarations are found and each name it imports looked for there.
-// Fish doesn't use a package's declarations yet, so a name found is refused saying where it is
-// declared, and one not found saying what the package exports.
-function packageImport(from: string, specifier: string, s: Stmt, entry: string): never {
+// The exports of the package an import names, once each name it imports is found among them;
+// a name not found is refused saying what the package exports.
+function packageExports(from: string, specifier: string, s: Stmt, entry: string): Exports {
   const shown = (file: string) => relative(dirname(entry), file);
   // A name a Node module has is that module, unless an npm package of that name is installed, as
   // a bundler takes it.
@@ -103,14 +138,7 @@ function packageImport(from: string, specifier: string, s: Stmt, entry: string):
     const at = (s.kind === "import" ? s.named : s.kind === "exportNamed" ? s.specifiers : undefined)?.find((sp) => sp.name === missing) ?? s;
     throw new CompileError(`'${specifier}' has no export ${what}; its declarations in '${shown(found.file)}' export ${listed}${unread}`, at.start, at.end);
   }
-  const first = names[0];
-  const where = first === undefined ? shown(found.file) : (() => {
-    const d = exports.names.get(first)!;
-    const { line, col } = locate(d.src, d.at.start);
-    return `${shown(d.file)}:${line}:${col}`;
-  })();
-  const what = first === undefined ? `'${specifier}'` : first === "default" ? `the default export of '${specifier}'` : `'${first}' from '${specifier}'`;
-  throw new CompileError(`${what} is declared at ${where}, but using npm packages isn't supported yet`, s.start, s.end);
+  return exports;
 }
 
 // The std modules a file uses as globals: a member of a std module's name, as `os.hostname`,

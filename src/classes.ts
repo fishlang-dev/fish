@@ -21,6 +21,8 @@ export type Body = Span & {
   async?: boolean;
   // Whether it is a C function a `declare function` names, which has no body here.
   foreign?: boolean;
+  // A package's function, typed from its declaration: the package and its export there.
+  js?: { module: string; name: string };
   // Whether an `export` names it, so a library builds it into a C function too.
   exported?: boolean;
   // A top-level `const`, as a function giving its value, or a `comptime { }` block, as one giving

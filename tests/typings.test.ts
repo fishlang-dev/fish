@@ -167,14 +167,12 @@ test("export = a namespace, and a types package's declare module", () => {
   });
 });
 
-test("an import from a package is refused naming where its name is declared, or what it exports", () => {
+test("an import from a package that doesn't have the name is refused saying what it exports", () => {
   project({
     "node_modules/p/index.d.ts": DECLARATIONS,
     "node_modules/p/more.d.ts": "export declare function fromMore(): void;\n",
-    "a.fsh": "import { camelCase } from \"p\";\nfunction main() {}\n",
     "b.fsh": "import { nope } from \"p\";\nfunction main() {}\n",
     "c.fsh": "import { x } from \"absent\";\nfunction main() {}\n",
-    "d.fsh": "import p from \"p\";\nfunction main() {}\n",
   }, (dir) => {
     const error = (file: string) => {
       try {
@@ -184,10 +182,8 @@ test("an import from a package is refused naming where its name is declared, or 
       }
       return "loaded";
     };
-    expect(error("a.fsh")).toBe("'camelCase' from 'p' is declared at node_modules/p/index.d.ts:1:1, but using npm packages isn't supported yet");
     expect(error("b.fsh")).toBe("'p' has no export 'nope'; its declarations in 'node_modules/p/index.d.ts' export 'Box', 'Kind', 'Mode', 'OTHER', 'Options', 'VERSION', 'camelCase', 'default', 'fromMore', 'ns', 'plain', 'renamed', and 1 more");
     expect(error("c.fsh")).toStartWith("can't find the package 'absent'");
-    expect(error("d.fsh")).toBe("the default export of 'p' is declared at node_modules/p/index.d.ts:1:1, but using npm packages isn't supported yet");
   });
 });
 

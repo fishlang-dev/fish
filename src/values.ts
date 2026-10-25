@@ -8,7 +8,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -336,6 +336,10 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
 // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
+// The uses of a package's declarations, which a program can't run until Fish has a JS engine.
+export const jsUses: Expr[] = [];
+// Where each of a package's functions is first called, noted on a refusal of its declaration.
+export const jsCalledAt = new WeakMap<object, Expr>();
 // The std's timer calls, by which one each is.
 export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerClear">();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
@@ -1254,6 +1258,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
     if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
+    if (target.js) jsUses.push(e);
     if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
     else refuseSpread(e.args);
     expectFrom(target, e.args);
@@ -1274,6 +1279,7 @@ export function expressions(ctx: Context) {
       const array = lower(isRefType(argTypes[0]) ? argTypes[0].to : argTypes[0]);
       if (isArray(array)) clonable(array.element, e, target.name.slice("array ".length));
     }
+    if (target.js && !jsCalledAt.has(target)) jsCalledAt.set(target, e);
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
@@ -4126,6 +4132,11 @@ export function expressions(ctx: Context) {
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
+    // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything.
+    if (typeof to !== "string" && to.kind === "block" && to.which === "JsValue" && uncrossable(type) === undefined) {
+      coercions.set(e, to);
+      return;
+    }
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
     if (type === to) return;

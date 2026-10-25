@@ -16,13 +16,13 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsonCalls, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { jsCalledAt, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -367,6 +367,7 @@ function macroShape(f: Func) {
 
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 export function check(written: Stmt[], library = false, macros = false): Checked {
+  jsUses.length = 0;
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
@@ -461,6 +462,10 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    if (s.js) {
+      funcs.push({ ...s, body: [] });
+      continue;
+    }
     if (!hasBody(s)) throw unsupported("functions without a body", s);
     if (s.macro) macroShape(s);
     funcs.push(s);
@@ -656,6 +661,10 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
+  // A program that type-checks with a package's declarations is stopped at its first use of
+  // one, as nothing can run them yet.
+  const used = jsUses.reduce<Expr | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
+  if (used) throw new CompileError("running a package's code needs a JS engine, which Fish doesn't have yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body)), ...closures.filter((i) => i.concrete)] };
 
   // What a function's returned reference borrows from: the parameters with its written
@@ -837,6 +846,30 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     done.add(instance);
   }
 
+  // A package's function's signature, from its declaration: what it takes and gives must cross
+  // between Fish and JS, as strings, booleans, numbers, Options, unions and literals of them,
+  // arrays of them copied across, and opaque JS values.
+  function jsSignature(instance: Instance) {
+    const f = instance.body;
+    const named = `'${f.js!.name}' from '${f.js!.module}'`;
+    // A declaration Fish can't type is refused where it is declared, noting the call that reached it.
+    const at = jsCalledAt.get(f);
+    const refuse = (message: string, where: Span) => new CompileError(message, where.start, where.end, at && { message: `'${f.js!.name}' is called here`, start: at.start, end: at.end });
+    if (f.typeParams?.length) throw unsupported(`generic functions of a package, as ${named},`, f);
+    const params = paramTypes(instance, scopeOf(instance));
+    f.params.forEach((p, i) => {
+      if (p.rest) throw unsupported(`rest parameters on a package's functions, as ${named} takes,`, p);
+      const why = uncrossable(params[i]!);
+      if (why) throw refuse(`${named} takes a '${show(params[i]!)}', which can't cross between Fish and JS yet: ${why}`, p.type ?? p);
+    });
+    instance.signature = params;
+    const returns = f.returnType ? resolveType(f.returnType) : blockType("JsValue");
+    const why = returns === "void" ? undefined : uncrossable(returns);
+    if (why) throw refuse(`${named} gives a '${show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!);
+    instance.returns = returns;
+    done.add(instance);
+  }
+
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
   function resultOf(instance: Instance, at: Span): Type {
@@ -924,6 +957,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     if (fixedParam && f.foreign) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
     if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
+    if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
     inProgress.add(instance);

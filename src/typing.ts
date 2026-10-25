@@ -277,6 +277,41 @@ export function dynType(of: InterfaceType): DynType {
 const callables = new Map<string, InterfaceType>();
 export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 
+// Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
+// booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
+// copied across, and opaque JS values.
+export function uncrossable(t: Type): string | undefined {
+  if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return undefined;
+  if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
+  switch (t.kind) {
+    case "literal":
+      return undefined;
+    case "param":
+      if (t.bound?.kind === "function") return "functions crossing between Fish and JS aren't supported yet";
+      return t.concrete === undefined ? "a type parameter's value isn't known here" : uncrossable(t.concrete);
+    case "union":
+      return t.members.map(uncrossable).find((w) => w !== undefined);
+    case "array":
+    case "fixed":
+      return uncrossable(t.element);
+    case "object":
+      return t.tuple ? elementsOf(t).map(uncrossable).find((w) => w !== undefined) : "objects crossing to JS aren't supported yet";
+    case "block":
+      return t.which === "JsValue" ? undefined : `a '${t.which}' is Fish's own`;
+    case "function":
+    case "closure":
+      return "functions crossing between Fish and JS aren't supported yet";
+    case "future":
+    case "handle":
+      return "Promises crossing between Fish and JS aren't supported yet";
+    case "interface":
+    case "dyn":
+      return promiseElement(t.kind === "dyn" ? t.of : t) !== undefined ? "Promises crossing between Fish and JS aren't supported yet" : "Fish has no JS form for it";
+    default:
+      return "Fish has no JS form for it";
+  }
+}
+
 // What the timer task runs: each timer's callback, wrapped as an async function.
 export const timerCallback = (): DynType => callableType(functionType([], [], promiseInterface("void")));
 
@@ -319,7 +354,8 @@ export function stored(t: Type): Type {
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
-export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob"; of: Type; fields: Field[] };
+// A JsValue is a value of the JS engine, which Fish holds without knowing its type.
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
 
 const blocks = new Map<string, BlockType>();
 
