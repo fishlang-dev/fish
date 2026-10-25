@@ -75,7 +75,6 @@ const RULES: Rule[] = [
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
   { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
-  { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
@@ -182,7 +181,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
-  ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
+  ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", STD("the setTimeout and setInterval globals")],
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
@@ -502,7 +501,6 @@ function callRules(n: Node, push: (id: string) => void) {
   if (named(callee, "isNaN") || memberOf(callee, "Number", ["isNaN"])) push("G8");
   if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
-  if (["setTimeout", "setInterval", "clearTimeout", "clearInterval"].some((name) => named(callee, name))) push("timers");
   if (isNode(callee) && callee.kind === "member" && named(callee.object, "console") && !["log", "error", "warn"].includes(callee.name as string)) push("console");
   // Fish's parse takes no reviver, and its stringify one value.
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");
