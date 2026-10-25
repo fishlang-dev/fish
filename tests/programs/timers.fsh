@@ -61,3 +61,32 @@ async function main(): Promise<void> {
   clearTimeout(t);
   console.log("done");
 }
+// case: interval_cleared_inside
+// expect: set
+// expect: tick 1
+// expect: tick 2
+// expect: timeout 25
+// expect: tick 3
+// An interval runs until its own callback clears it, its state shared.
+async function main(): Promise<void> {
+  const state = shared({ count: new Atomic<i64>(0), id: new Atomic<i64>(0) });
+  const s = state.clone();
+  state.id.store(setInterval(() => {
+    const n = s.count.add(1) + 1;
+    console.log("tick", n);
+    if (n === 3) clearInterval(s.id.load());
+  }, 10));
+  setTimeout(() => { console.log("timeout 25"); }, 25);
+  console.log("set");
+}
+// case: interval_cleared_outside
+// expect: every
+// expect: every
+// expect: stop
+async function main(): Promise<void> {
+  const id = setInterval(() => { console.log("every"); }, 10);
+  setTimeout(() => {
+    clearInterval(id);
+    console.log("stop");
+  }, 25);
+}

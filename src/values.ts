@@ -218,7 +218,7 @@ const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
 const timerSets = new WeakSet<Expr>();
 export const timerWrappers = new WeakSet<Expr>();
 // The timer globals, Node's and the browser's.
-const TIMER_CALLS = new Set(["setTimeout", "clearTimeout"]);
+const TIMER_CALLS = new Set(["setTimeout", "setInterval", "clearTimeout", "clearInterval"]);
 // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
 export const combinedCalls = new WeakSet<Expr>();
 // The operands of an `await`, while they are checked.
@@ -2761,13 +2761,13 @@ export function expressions(ctx: Context) {
     return made;
   }
 
-  // `setTimeout(callback, ms)` and `clearTimeout(id)`, rewritten as the prelude's timers.
+  // `setTimeout(callback, ms)`, `setInterval` and their clears, rewritten as the std's timers.
   function timerCall(e: Call, name: string) {
     const at = { start: e.start, end: e.end };
     const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     if (e.args.some((a) => a.kind === "spread")) throw new CompileError(`'${name}' takes its arguments written out, not spread`, e.start, e.end);
-    if (name === "clearTimeout") {
+    if (name === "clearTimeout" || name === "clearInterval") {
       if (e.args.length > 1) throw new CompileError(`'${name}' takes the timer to clear`, e.start, e.end);
       return helper("timeout clear", [e.args[0] ?? { kind: "null", ...at }]);
     }
@@ -2784,7 +2784,7 @@ export function expressions(ctx: Context) {
     timerWrappers.add(wrapper);
     const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
     const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
-    helper("timerSet", [wrapper, ms, { kind: "bool", value: false, ...at }, loop]);
+    helper("timerSet", [wrapper, ms, { kind: "bool", value: name === "setInterval", ...at }, loop]);
     timerSets.add(e);
   }
 
