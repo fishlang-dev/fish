@@ -297,7 +297,17 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     }
     if (typeof v !== "object" || v === null) return;
     const n = v as Record<string, unknown>;
-    const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...(n.kind === "try" && n.param ? bindings(n.param) : []), ...(n.kind === "forOf" || n.kind === "forIn" ? bindings((n.left as { declarations?: { target: unknown }[] })?.declarations?.[0]?.target) : [])];
+    // A catch clause's name reaches only its handler, so the try's own blocks are walked first.
+    if (n.kind === "try" && n.param) {
+      const caught = bindings(n.param);
+      walk(n.block, hidden);
+      walk(n.handler, caught.some((d) => spaces.has(d)) ? new Set([...hidden, ...caught]) : hidden);
+      if (n.finalizer) walk(n.finalizer, hidden);
+      return;
+    }
+    const head = n.kind === "forOf" || n.kind === "forIn" ? n.left : n.kind === "for" ? n.init : undefined;
+    const declared = head && (head as { kind?: string }).kind === "let" ? (head as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : [];
+    const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
     if (own.some((d) => spaces.has(d))) hidden = new Set([...hidden, ...own]);
     const object = n.object as { kind?: string; name?: string } | undefined;
     const space = n.kind === "member" && object?.kind === "ident" && !hidden.has(object.name!) ? spaces.get(object.name!) : undefined;

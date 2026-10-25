@@ -50,3 +50,24 @@ import { nope } from "os";
 function main() {
   console.log(nope());
 }
+// case: os_with_macro
+// expect: 1 true
+macro function keep(input: Ast): Ast { return input; }
+@keep function one(): i64 { return 1; }
+function main() {
+  console.log(one(), os.platform().length > 0);
+}
+// case: os_catch_and_for_scopes
+// expect: true caught
+// expect: local
+type Box = { platform: string };
+class Oops { message: string = "caught"; }
+function fail(): i64 throws Oops { throw new Oops(); }
+function main() {
+  try {
+    console.log(os.platform().length > 0, fail());
+  } catch (os) {
+    console.log(true, os.message);
+  }
+  for (let os: Box = { platform: "local" }; os.platform === "local"; os = { platform: "done" }) console.log(os.platform);
+}

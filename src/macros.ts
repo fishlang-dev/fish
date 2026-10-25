@@ -180,6 +180,7 @@ function copied(loaded: Loaded): { loaded: Loaded; of: Map<Stmt, Stmt> } {
       const target = m.targets.get(s);
       if (target) copy.targets.set(copy.statements[i]!, copies.get(target)!);
     });
+    copy.globals = new Map([...m.globals].map(([name, g]) => [name, copies.get(g)!]));
   }
   return { loaded: { ...loaded, modules: loaded.modules.map((m) => copies.get(m)!) }, of };
 }
