@@ -13,7 +13,7 @@ import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { unusedDefaults } from "./check.ts";
-import { STD_BASE } from "./std.ts";
+import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
@@ -1617,7 +1617,7 @@ export function expressions(ctx: Context) {
   // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
   function jsonParse(e: Call): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
-    const [written = { kind: "ref", name: "Json", args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
+    const [written = { kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
     if (others.length > 0) throw new CompileError("'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
     const text = e.args[0];

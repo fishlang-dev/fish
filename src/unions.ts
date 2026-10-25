@@ -114,6 +114,9 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
   const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
   // `Map`, `Set` and `Array` aren't classes in Fish; testing for one picks a union's member.
   if (!c && e.right.kind === "ident" && ["Map", "Set", "Array"].includes(e.right.name)) {
+    if (typeof held === "string" || held.kind === "literal" || held.kind === "pattern") {
+      throw new CompileError(`'instanceof' tests an object, and a '${show(held)}' is never a ${e.right.name}`, e.start, e.end);
+    }
     kindTests.set(e, e.right.name as Kind);
     return "boolean";
   }
@@ -190,7 +193,7 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
   let [left, right] = [value(e.left), value(e.right)];
   // A literal compared with a union holding one number type takes that type.
-  const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members.filter(isNumeric) : []);
+  const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? opened(t).filter(isNumeric) : []);
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   // A union of strings and patterns is a string once lowered, compared as one.
@@ -212,10 +215,18 @@ export function objectsMeet(a: Type, b: Type): boolean {
   return members(a).some(object) && members(b).some(object);
 }
 
+// A type's members, a member that holds itself standing for the members it holds.
+function opened(t: Type): Type[] {
+  return (typeof t !== "string" && t.kind === "union" ? t.members : [t]).flatMap((m) => {
+    const inner = unfold(m);
+    return inner !== m && typeof inner !== "string" && inner.kind === "union" ? inner.members : [m];
+  });
+}
+
 // Whether a value of `a` might equal one of `b`: the same primitive, a literal and its base,
 // or two literals of one value, for any members of either when it is a union.
 export function comparable(a: Type, b: Type): boolean {
-  const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+  const members = opened;
   const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : typeof t !== "string" && t.kind === "pattern" ? "string" : t);
   return members(a).some((x) => members(b).some((y) => {
     if (typeof x !== "string" && x.kind === "literal" && typeof y !== "string" && y.kind === "literal") return x.value === y.value;

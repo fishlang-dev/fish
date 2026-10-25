@@ -552,3 +552,58 @@ function main() {
   for (const v of vs) console.log(describe(v));
   console.log(owned(["p", "q"]), owned(null), owned(2));
 }
+// case: json_dynamic_scalars_and_compare
+// expect: 4
+// expect: true false true true false false false
+function main() {
+  try {
+    const v = JSON.parse("{\"n\": 3}");
+    if (v instanceof Map) {
+      const n = v.get("n");
+      if (typeof n === "number") console.log(n + 1);
+    }
+  } catch (e) {
+    console.log(e.message);
+  }
+  try {
+    const v = JSON.parse("{\"s\": \"x\", \"t\": true, \"n\": 2, \"a\": [1]}");
+    if (v instanceof Map) {
+      const s = v.get("s");
+      const t = v.get("t");
+      const n = v.get("n");
+      const a = v.get("a");
+      console.log(s === "x", s === "y", t === true, n === 2, n === null, a === null, s !== "x");
+    }
+  } catch (e) { console.log(e.message); }
+}
+// case: json_dynamic_map_annotations
+// expect: 1 {"a":1} 1 false
+function size(m: Ref<Map<string, Json>>): usize { return m.size; }
+function show(n: Ref<Json | null>): string { return JSON.stringify(n); }
+function main() {
+  try {
+    const v = JSON.parse("{\"a\": 1}");
+    if (v instanceof Map) {
+      const a = v.get("a");
+      const made: Json = new Map<string, Json>();
+      console.log(size(v), JSON.stringify(v), show(a), made === null);
+    }
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// case: json_untyped_parse_own_json
+// error: property 'v' does not exist on type 'Json'
+type Json = { v: i64 };
+function main() {
+  try {
+    const x = JSON.parse("{\"v\": 3}");
+    console.log(x.v);
+  } catch (e) {}
+}
+// case: json_instanceof_primitive
+// error: 'instanceof' tests an object, and a 'i64' is never a Map
+function main() {
+  const n: i64 = 5;
+  console.log(n instanceof Map);
+}

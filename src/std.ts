@@ -647,12 +647,19 @@ function ident(name: string): AstExpr {
 }
 `;
 
-// A JSON value of no particular shape, as untyped `JSON.parse` gives one.
+// A JSON value of no particular shape, as untyped `JSON.parse` gives one. The alias the parse
+// reads takes a name no program can write, so a program's own `Json` can't change it; `Json`
+// names it unless the program declares a `Json` of its own.
 const JSON_VALUE = String.raw`
-type Json = null | boolean | number | string | Json[] | Map<string, Json>;
+type JsonValue = null | boolean | number | string | JsonValue[] | Map<string, JsonValue>;
 `;
+const JSON_NAME = String.raw`
+type Json = JsonValue;
+`;
+// The name untyped `JSON.parse` reads into.
+export const JSON_VALUE_NAME = "json value";
 
-export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + AST + AST_HELPERS;
+export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + JSON_NAME + AST + AST_HELPERS;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -664,11 +671,26 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const at = (s: Stmt) => s.start - STD_BASE;
   const prelude = all.filter((s) => at(s) < PRELUDE.length);
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
-  const json = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length && at(s) < PRELUDE.length + HTTP.length + JSON_VALUE.length);
-  const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length + JSON_VALUE.length);
+  const jsonAt = PRELUDE.length + HTTP.length;
+  const json = all.filter((s) => at(s) >= jsonAt && at(s) < jsonAt + JSON_VALUE.length);
+  const jsonName = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length && at(s) < jsonAt + JSON_VALUE.length + JSON_NAME.length);
+  renameValue([...json, ...jsonName]);
+  const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [ast, [...astNames, "quote", "quoteType"]]] as const;
+  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]]] as const;
   return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) ? part : []))];
+}
+
+// Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.
+function renameValue(nodes: unknown) {
+  if (Array.isArray(nodes)) return nodes.forEach(renameValue);
+  if (typeof nodes !== "object" || nodes === null) return;
+  const node = nodes as Record<string, unknown>;
+  if ((node.kind === "ref" || node.kind === "typeAlias") && node.name === "JsonValue") {
+    node.name = JSON_VALUE_NAME;
+    if (node.kind === "typeAlias") node.shown = "Json";
+  }
+  Object.values(node).forEach(renameValue);
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the

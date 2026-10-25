@@ -118,6 +118,13 @@ export function conversions(b: Slots) {
   // by the member it holds, so only that member's payload is read; literals compare by value,
   // so two enum members that share a value are equal.
   function equals(a: string, aType: Type, b: string, bType: Type): string {
+    // A member that holds itself is compared as what its block holds, unless both sides are it.
+    if (typeof aType !== "string" && aType.kind === "recursive" && aType !== bType) {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(aType.of)}, ptr ${a}`);
+      return equals(loaded, aType.of, b, bType);
+    }
+    if (typeof bType !== "string" && bType.kind === "recursive" && aType !== bType) return equals(b, bType, a, aType);
     if (typeof aType !== "string" && aType.kind === "union") {
       return eachMember(a, aType, "boolean", (part, m) => equals(part, m, b, bType));
     }
@@ -271,8 +278,10 @@ export function conversions(b: Slots) {
       return typeof from !== "string" && from.kind === "union" ? retag(v, from, to) : inject(v, from, to);
     }
     if (typeof from !== "string" && from.kind === "union") {
-      // A scalar member can't hold an aggregate, so where narrowing has left it out, it isn't there.
-      const absent = (member: Type) => typeof member === "string" && member !== to && typeof to !== "string";
+      // A member of another kind than the narrowed type, an empty one or a scalar where an
+      // aggregate is wanted, is one narrowing has left out, so it isn't there.
+      const absent = (member: Type) => typeof member === "string" && member !== to
+        && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
       return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
     }
     if (typeof from === "string" || typeof to === "string" || from.kind === "closure" || to.kind === "closure") return v;

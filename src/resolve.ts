@@ -534,7 +534,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (resolving.has(key)) {
       let back = recursives.get(key);
-      if (!back) recursives.set(key, back = recursiveType(args.length > 0 ? `${a.name}<${args.map(show).join(", ")}>` : a.name, args));
+      // A std alias may be shown by another name than the one it is linked under.
+      const name = (a as { shown?: string }).shown ?? a.name;
+      if (!back) recursives.set(key, back = recursiveType(args.length > 0 ? `${name}<${args.map(show).join(", ")}>` : name, args));
       return back;
     }
     // A type that branches as it recurses grows exponentially, so the whole program's type

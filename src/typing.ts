@@ -815,6 +815,16 @@ const arrays = new Map<string, ArrayType>();
 // over types stop at by the recursive type kept for it.
 export function standsFor(back: RecursiveType, of: Type) {
   back.of = of;
+  // A Map that leads back holds the type inline too, as an array does, so a Map written with
+  // the type is the one the type holds.
+  if (typeof of !== "string" && of.kind !== "map") {
+    for (const map of [...maps.values()]) {
+      if (map.value !== back) continue;
+      map.value = of;
+      maps.set(`${map.set ? "Set" : "Map"}<${keyOf(map.key)},${keyOf(of)}>`, map);
+      ties.set(of, back);
+    }
+  }
   const array = arrays.get(`[${keyOf(back)}]`);
   // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
   // elements stay blocks.
