@@ -1508,7 +1508,9 @@ export function expressions(ctx: Context) {
     const required = fixed.findIndex((n) => n.optional);
     const elements = fixed.map((n, i): Type => (i >= given.length ? "null" : n.optional ? unionType([given[i]!, "null"]) : given[i]!));
     if (!node.elements.some((n) => n.rest)) return given.length > fixed.length ? tupleType(given) : tupleType(elements, required < 0 ? undefined : required);
-    const rest = again ? (parts.at(-1) as ArrayType).element : unionType(given.slice(fixed.length));
+    // No parts past the fixed ones say nothing about the rest, as an empty array literal doesn't.
+    const extra = given.slice(fixed.length);
+    const rest = again ? (parts.at(-1) as ArrayType).element : extra.length === 0 ? "never" : unionType(extra);
     return tupleType(elements, undefined, rest);
   }
 
@@ -3220,10 +3222,14 @@ export function expressions(ctx: Context) {
       }
     }
     if (!changed) return type;
-    const remade = objectType((type as ObjectType).fields.map((f) => {
+    const fields = (type as ObjectType).fields.map((f) => {
       const p = winners.find((q) => q.key === f.name);
       return p ? { ...f, type: coercions.get(p.value) ?? types.get(p.value)! } : f;
-    }));
+    });
+    // A tuple stays one, its rest taken from its adapted array.
+    const tuple = type as ObjectType;
+    const many = fields.find((f) => f.name === "...")?.type as ArrayType | undefined;
+    const remade = isTuple(tuple) && !tuple.match ? tupleType(elementsOf({ ...tuple, fields }), tuple.required, many?.element) : objectType(fields);
     types.set(e, remade);
     return remade;
   }

@@ -404,16 +404,25 @@ function main() {
 function main() { const xs: [string, ...i64[]][] = [["a", 1]]; const m = new Map(xs); }
 // case: tuple_rest_default
 // expect: a 5
-// expect: 1 9
-class C { constructor(public n: i64) {} }
+// expect: b 1 2 []
 function main() {
   const t: [string, ...i64[]] = ["a"];
   const [a, b = 5] = t;
   console.log(a, b);
-  const u: [i64, ...C[]] = [1];
-  const [x, y = new C(9)] = u;
-  console.log(x, y.n);
+  const u: [string, ...i64[]] = ["b", 1, 2];
+  const [p, q = 0, r = 3, ...more] = u;
+  console.log(p, q, r, more);
 }
+// case: tuple_rest_default_moves
+// error: a default past a tuple's fixed elements reads 't[i]' when it is there, and a 'C' would be moved out of the tuple's rest, leaving a hole; destructure without the default, or index it and clone
+class C { constructor(public n: i64) {} }
+function main() { const u: [i64, ...C[]] = [1]; const [x, y = new C(9)] = u; }
+// case: tuple_rest_generic_empty
+// expect: [ 'a' ]
+// expect: [ 'b', 1 ]
+// expect: 1 2
+function f<T>(t: [string, ...T[]]): usize { console.log(t); return t.length; }
+function main() { console.log(f<i64>(["a"]), f(["b", 1])); }
 // case: tuple_length_after_part_moved
 // error: 't' can't be used as a whole here because 't[1]' was moved out of it
 class C { constructor(public n: i64) {} }

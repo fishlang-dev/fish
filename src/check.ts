@@ -1433,6 +1433,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           // With a default, an element past the fixed ones may be missing, so it is read as
           // `.at(i)` on the rest, which an array pattern's default reads too.
           if (i >= elements.length && p.kind === "default") {
+            // Read with `.at(i)`, a value that doesn't copy would be copied where `t[i]` moves it.
+            if (!isCopy(many!)) throw new CompileError(`a default past a tuple's fixed elements reads 't[i]' when it is there, and a '${show(many!)}' would be moved out of the tuple's rest, leaving a hole; destructure without the default, or index it and clone`, p.start, p.end);
             const array: Expr = { kind: "member", object: from(p), name: "...", optional: false, ...at };
             restStarts.set(array, elements.length);
             const read: Expr = { kind: "call", callee: { kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
