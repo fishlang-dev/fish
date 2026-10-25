@@ -132,6 +132,27 @@ async function __promiseAwaitResolveVoid(cell: Channel<boolean>): Promise<void> 
     if (got !== null) return;
   }
 }
+// Promise.withResolvers(): the cell, the promise awaiting it and the closures settling it.
+function __promiseWithResolvers<T, E>() {
+  const cell = new Channel<{ ok: true; value: T } | { ok: false; reason: E }>(1);
+  const resolved = cell.clone();
+  const rejected = cell.clone();
+  return {
+    promise: __promiseAwait<T, E>(cell),
+    resolve: (value: T) => { resolved.settle({ ok: true, value }); },
+    reject: (reason: E) => { rejected.settle({ ok: false, reason }); },
+  };
+}
+function __promiseWithResolversVoid<E>() {
+  const cell = new Channel<{ ok: true } | { ok: false; reason: E }>(1);
+  const resolved = cell.clone();
+  const rejected = cell.clone();
+  return {
+    promise: __promiseAwaitVoid<E>(cell),
+    resolve: () => { resolved.settle({ ok: true }); },
+    reject: (reason: E) => { rejected.settle({ ok: false, reason }); },
+  };
+}
 // Promise.resolve(v) and Promise.reject(e).
 async function __promiseResolve<T>(value: T): Promise<T> { return value; }
 async function __promiseResolveVoid(): Promise<void> {}
@@ -1388,7 +1409,7 @@ export function stdFor(written: Stmt[]): Stmt[] {
   shiftSpans(all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
-  for (const s of all) if (s.kind === "function" && /^__(array|promise)/.test(s.name)) s.name = s.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
+  hideHelpers(all);
   const at = (s: Stmt) => s.start - STD_BASE;
   const prelude = all.filter((s) => at(s) < PRELUDE.length);
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
@@ -1400,6 +1421,18 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
   const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]]] as const;
   return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) ? part : []))];
+}
+
+// The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
+// no program can write.
+function hideHelpers(nodes: unknown) {
+  if (Array.isArray(nodes)) return nodes.forEach(hideHelpers);
+  if (typeof nodes !== "object" || nodes === null) return;
+  const node = nodes as Record<string, unknown>;
+  if ((node.kind === "function" || node.kind === "ident") && typeof node.name === "string" && /^__(array|promise)/.test(node.name)) {
+    node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
+  }
+  Object.values(node).forEach(hideHelpers);
 }
 
 // Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.

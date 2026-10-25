@@ -909,6 +909,10 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && !lookup("Promise") && !classes.has("Promise")) {
       return combined(e, callee.name as Combiner);
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && callee.name === "withResolvers" && !lookup("Promise") && !classes.has("Promise")) {
+      promiseResolvers(e);
+      return call(e);
+    }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && (callee.name === "resolve" || callee.name === "reject") && !lookup("Promise") && !classes.has("Promise")) {
       promiseSettled(e, callee.name);
       return call(e);
@@ -2711,6 +2715,17 @@ export function expressions(ctx: Context) {
     const made: TypeNode = { kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
     presetTypes.set(made, t);
     return made;
+  }
+
+  // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
+  // closures settling it; reject's error is what the function declares it throws, or `Error`.
+  function promiseResolvers(e: Call) {
+    if (e.args.length > 0) throw new CompileError("'Promise.withResolvers' takes no arguments", e.start, e.end);
+    if (e.typeArgs.length !== 1) throw new CompileError("can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()', since Fish has no 'unknown'", e.start, e.end);
+    const gives = resolveType(e.typeArgs[0]!);
+    const error = ctx.throwsDeclared() ?? classes.get("Error")!.type;
+    const at = { start: e.start, end: e.end };
+    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions

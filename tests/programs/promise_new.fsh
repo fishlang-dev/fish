@@ -236,3 +236,56 @@ function main() {
   const g: (s: string) => void = f;
   g("b");
 }
+// case: promise_with_resolvers
+// expect: 1
+// expect: failed
+// expect: later
+// expect: void
+// expect: 5 s
+// The first settle wins; a resolve passed on and called later wakes the awaiting task.
+async function later(resolve: (value: string) => void): Promise<void> {
+  await sleep(5);
+  resolve("later");
+}
+async function wrap<T>(v: T): Promise<T> throws Error {
+  const { promise, resolve } = Promise.withResolvers<T>();
+  resolve(v);
+  return await promise;
+}
+async function main(): Promise<void> throws Error {
+  const { promise, resolve, reject } = Promise.withResolvers<i64>();
+  resolve(1);
+  resolve(2);
+  reject(new Error("ignored"));
+  const a = await promise;
+  console.log(a);
+  const r = Promise.withResolvers<string>();
+  r.reject(new Error("failed"));
+  try {
+    await r.promise;
+  } catch (e) {
+    console.log(e.message);
+  }
+  const l = Promise.withResolvers<string>();
+  const both = await Promise.all([l.promise, later(l.resolve)]);
+  console.log(both[0]);
+  const v = Promise.withResolvers<void>();
+  v.resolve();
+  await v.promise;
+  console.log("void");
+  const x = await wrap(5);
+  const y = await wrap("s");
+  console.log(x, y);
+}
+// case: promise_with_resolvers_no_type
+// error: can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()'
+async function main() { const { promise } = Promise.withResolvers(); }
+// case: promise_with_resolvers_arguments
+// error: 'Promise.withResolvers' takes no arguments
+async function main() { const { promise } = Promise.withResolvers<i64>(1); }
+// case: promise_with_resolvers_resolve_type
+// error: argument of type '"s"' is not assignable to parameter of type 'i64'
+async function main() { const { resolve } = Promise.withResolvers<i64>(); resolve("s"); }
+// case: promise_with_resolvers_throws
+// error: 'main' must declare 'throws Error' after its return type since this Promise can throw 'Error'
+async function main() { const r = Promise.withResolvers<i64>(); r.resolve(1); const v = await r.promise; }
