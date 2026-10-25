@@ -178,7 +178,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `http` is a client as well as a server, and Fish has only the server so far.
   ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")],
-  ["fs", PLANNED("Async file I/O")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
+  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
