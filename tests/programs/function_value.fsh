@@ -78,9 +78,29 @@ function main(): void { const f = abs; }
 function seven(): i64 { return 0; }
 function main(): void { const seven = (): i64 => 7; const f = seven; console.log(f()); }
 // case: function_value_takes_function
-// error: functions taking functions used as values are not supported yet
+// expect: 6
+// The function it takes is a stored callable, as a function type's parameters are.
 function apply(f: (x: i64) => i64, v: i64): i64 { return f(v); }
-function main() { const a = apply; }
+function main() { const a = apply; console.log(a((x) => x * 2, 3)); }
+// case: function_value_given_callbacks
+// expect: t res 5
+// expect: t rej no
+// expect: t res 1
+// expect: t res 7
+// expect: t res 8
+// expect: t res 9
+function run(executor: (resolve: (value: i64) => void, reject: (reason: string) => void) => void): void {
+  const tag = "t";
+  executor((v) => { console.log(tag, "res", v); }, (e) => { console.log(tag, "rej", e); });
+}
+function ex(resolve: (value: i64) => void, reject: (reason: string) => void): void { resolve(7); }
+function main() {
+  run((resolve, reject) => { resolve(5); });
+  run((resolve, reject) => { reject("no"); resolve(1); });
+  run(ex);
+  const f = (resolve: (value: i64) => void, reject: (reason: string) => void) => { resolve(8); resolve(9); };
+  run(f);
+}
 // case: function_value_declared_types
 // expect: 8
 // Its parameters are typed where it is declared, whatever the names mean where it is used.

@@ -1449,8 +1449,12 @@ export function expressions(ctx: Context) {
     const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
     if (odd) throw unsupported(odd.comptime ? "functions with comptime parameters used as values" : odd.rest ? "functions with rest parameters used as values" : "functions with defaulted parameters used as values", e);
     // Typed where it is declared, so a type name means what it means there.
-    const types = paramTypes(instanceOf(f));
-    if (types.some((t) => typeof t !== "string" && (t.kind === "function" || t.kind === "closure" || t.kind === "dyn"))) throw unsupported("functions taking functions used as values", e);
+    // A function it takes is a stored callable, as a function type's parameters are.
+    const types = paramTypes(instanceOf(f)).map((t) => {
+      const fn = typeof t !== "string" && t.kind === "param" && t.bound?.kind === "function" ? t.bound : t;
+      return typeof fn !== "string" && fn.kind === "function" && !fn.generic ? storedType(fn) : t;
+    });
+    if (types.some((t) => typeof t !== "string" && (t.kind === "function" || t.kind === "closure" || (t.kind === "param" && t.bound?.kind === "function")))) throw unsupported("functions taking functions used as values", e);
     const at = { start: e.start, end: e.end };
     // A parameter keeps its name unless it would hide the function, or has none of its own.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== written && p.pattern.name !== f.name ? p.pattern.name : `${written}-arg${i}`));
@@ -1516,7 +1520,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     }
     e.args.forEach((a, i) => {
-      if (a.kind !== "arrow") expect(a, type.params[i]!);
+      if (a.kind !== "arrow" || isCallable(type.params[i]!)) expect(a, type.params[i]!);
       const t = value(a);
       const shown = (written?.[i] && defaultedArg(a, t, written[i]!)) ?? type.params[i]!;
       coerce(a, t, type.params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(shown)}'`);

@@ -1694,7 +1694,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       if (p.rest) throw unsupported("rest parameters on arrow functions", p);
       const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && paramName(p) !== "this";
       // A declared function's parameter, named as a value, is typed where the function is declared.
-      const type = presetParams.get(p) ?? (!p.type && given && plain ? given : paramType(p));
+      // A closure is one compiled function, so a function it takes is a stored callable.
+      const written = presetParams.get(p) ?? (!p.type && given && plain ? given : paramType(p));
+      const type = typeof written !== "string" && written.kind === "function" && !written.generic ? stored(written) : written;
       const to = isRef(type) ? type.to : type;
       if (typeof to !== "string" && to.kind === "interface") throw unsupported("closure parameters of interface types", p);
       return type;

@@ -226,6 +226,13 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return type;
   }
 
+  // A function value is one compiled function, so a function it is given is a stored callable,
+  // as in `(resolve: (value: T) => void) => void`.
+  function callbackParam(p: Param): Type {
+    const t = paramType(p);
+    return typeof t !== "string" && t.kind === "function" && !t.generic ? stored(t) : t;
+  }
+
   // An array of an element type. Arrays of references, and of functions, which would need their
   // calls boxed, aren't supported yet.
   function array(element: Type, at: TypeNode): Type {
@@ -278,12 +285,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       if (t.typeParams.length > 0) {
         const around = new Map(scope);
         const own = placeholders(t.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n)));
-        const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns)));
+        const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map(callbackParam), resolveType(t.returns)));
         fn.name = `<${t.typeParams.map((p) => p.name).join(", ")}>${fn.name}`;
         fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
         return fn;
       }
-      const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
+      const fn = functionType(t.params.map(paramName), t.params.map(callbackParam), resolveType(t.returns));
       if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
       return fn;
     }
