@@ -44,6 +44,18 @@ export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" &&
 
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
+// Whether a value of the type can hold a float anywhere inside it.
+function holdsFloat(t: Type, seen = new Set<Type>()): boolean {
+  if (typeof t === "string") return isFloat(t);
+  if (seen.has(t)) return false;
+  seen.add(t);
+  const x = t as unknown as Record<string, unknown>;
+  const parts = ["to", "of", "concrete", "element", "key", "value", "base"].flatMap((k) => ((typeof x[k] === "object" && x[k] !== null) || typeof x[k] === "string" ? [x[k] as Type] : []));
+  if (Array.isArray(x.members)) parts.push(...(x.members as Type[]));
+  if (Array.isArray(x.fields)) parts.push(...(x.fields as Field[]).map((f) => f.type));
+  return parts.some((p) => holdsFloat(p, seen));
+}
+
 const printable = (t: Type): boolean =>
   typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || (t.kind === "union" && t.members.every(printable));
 
@@ -1146,6 +1158,11 @@ export function expressions(ctx: Context) {
       if (e.args.length !== 2) throw new CompileError("'isDeepStrictEqual' takes 2 arguments", e.start, e.end);
       refuseSpread(e.args);
       const [left, right] = e.args as [Expr, Expr];
+      for (const a of [left, right]) {
+        const t = value(a);
+        once.add(a);
+        if (holdsFloat(t)) throw new CompileError("'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
+      }
       const node = e as unknown as Record<string, unknown>;
       delete node.callee;
       delete node.args;
@@ -3595,7 +3612,6 @@ export function expressions(ctx: Context) {
     return "string";
   }
 
-  // A value written into a string: text, or a number or boolean written as JavaScript would.
   // Values printed, or formatted as util.format does: what isn't a scalar is shown as Node's
   // util.inspect shows it.
   function shown(args: Expr[]) {
@@ -3616,6 +3632,7 @@ export function expressions(ctx: Context) {
     throw new CompileError("'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead", first.start, first.end);
   }
 
+  // A value written into a string: text, or a number or boolean written as JavaScript would.
   function joined(e: Expr, type: Type, into: string) {
     if (stringLike(type)) {
       if (type !== "string") coerce(e, type, "string", "");

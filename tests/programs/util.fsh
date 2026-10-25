@@ -149,3 +149,54 @@ import { parseArgs } from "node:util";
 function main(): void throws ParseArgsError {
   parseArgs({ options: { n: { type: "string", multiple: true, default: "a" } } });
 }
+// case: util_parse_args_defaults
+// expect: mine 0 [] true
+import { parseArgs } from "node:util";
+function main(): void throws ParseArgsError {
+  const p = "mine";
+  const { values } = parseArgs({ args: [], options: { a: { type: "string", default: p }, t: { type: "string", multiple: true, default: [] }, f: { type: "boolean", multiple: true, default: [] }, q: { type: "boolean", default: true } } });
+  console.log(values.a, values.t.length, values.f, values.q);
+}
+// case: util_parse_args_default_undefined
+// error: the option 'a' gives a string, so its default is a string too
+import { parseArgs } from "node:util";
+function main(): void throws ParseArgsError {
+  parseArgs({ options: { a: { type: "string", default: undefined } } });
+}
+// case: util_parse_args_twice
+// error: the option 'a' is given twice
+import { parseArgs } from "node:util";
+function main(): void throws ParseArgsError {
+  parseArgs({ options: { a: { type: "string" }, a: { type: "boolean" } } });
+}
+// case: util_parse_args_internal
+// error: has no export named 'ParsedArgs'
+import { ParsedArgs } from "node:util";
+function main() {}
+// case: util_format_f32
+// expect: v 0.1
+// expect: 0.1|0.1|0.1|0.1
+// expect: 0.1
+import { format } from "node:util";
+function main() {
+  const f: f32 = 0.1;
+  const s: string = "v";
+  console.log(s, f);
+  console.log(format("%s|%d|%f|%o", f, f, f, f));
+  const fs: f32[] = [0.1, 2.5];
+  console.log(format("%f", fs));
+}
+// case: util_format_json_at_run_time
+// panic: '%j' in a format isn't supported yet
+import { format } from "node:util";
+function main() {
+  const fmt: string = "%s %j %d";
+  console.log(format(fmt, 1, 2, 3));
+}
+// case: util_equal_floats
+// error: 'isDeepStrictEqual' over floats isn't supported yet
+import { isDeepStrictEqual } from "node:util";
+function main() {
+  const a = [0.5];
+  console.log(isDeepStrictEqual(a, [0.5]));
+}

@@ -720,11 +720,11 @@ declare function fsh_rt_arg(i: i64): Ptr<u8>;
 
 // An option of the call's literal, as the checker gives it: its long name, its short one or "",
 // whether it takes a string, and whether it may be given more than once.
-export type ParseArgsSpec = { name: string; short: string; text: boolean; multiple: boolean };
+type ParseArgsSpec = { name: string; short: string; text: boolean; multiple: boolean };
 
 // What the arguments gave each option, by its place among the specs, for the checker's builder
 // of the typed values to read.
-export class ParsedArgs {
+class ParsedArgs {
   strings: string[][] = [];
   flags: boolean[][] = [];
   positionals: string[] = [];
@@ -745,6 +745,22 @@ export class ParsedArgs {
 
   flagList(i: i64): boolean[] | null {
     return this.flags[i as usize].length === 0 ? null : this.flags[i as usize].clone();
+  }
+
+  textOr(i: i64, fallback: string): string {
+    return this.text(i) ?? fallback;
+  }
+
+  textsOr(i: i64, fallback: string[]): string[] {
+    return this.texts(i) ?? fallback;
+  }
+
+  flagOr(i: i64, fallback: boolean): boolean {
+    return this.flag(i) ?? fallback;
+  }
+
+  flagListOr(i: i64, fallback: boolean[]): boolean[] {
+    return this.flagList(i) ?? fallback;
   }
 }
 

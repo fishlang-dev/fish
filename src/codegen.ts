@@ -2885,7 +2885,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       describe(at, v, printedType(a), needs[i]!);
     });
     const result = temp();
-    emit(`${result} = call ptr @fsh_rt_format(ptr ${slots}, i64 ${n})`);
+    unwinding(`call ptr @fsh_rt_format(ptr ${slots}, i64 ${n}, ptr ${panicAt(e)})`, result);
     if (!types.has(e)) pending.push({ v: result, type: "string" });
     return result;
   }
@@ -2974,7 +2974,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         x = temp();
         emit(`${x} = fpext float ${v} to double`);
       }
-      put(0, "i32", String(FARG_KINDS.float));
+      whole(FARG_KINDS.float, t === "f32" ? "1" : "0");
       put(2, "double", x);
     } else if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
@@ -3012,14 +3012,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
       return emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${word})`);
     }
-    if (isFloat(t)) {
-      let x = v;
-      if (t === "f32") {
-        x = temp();
-        emit(`${x} = fpext float ${v} to double`);
-      }
-      return emit(`call void @fsh_rt_text_f64(ptr ${b}, double ${x})`);
-    }
+    if (isFloat(t)) return emit(`call void @fsh_rt_text_${t}(ptr ${b}, ${llvm(t)} ${v})`);
     if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
       let x = v;

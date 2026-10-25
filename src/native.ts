@@ -2704,13 +2704,14 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     snprintf(text, sizeof text, "... %lld more item%s", (long long)rest, rest > 1 ? "s" : "");
     output[n++] = fsh_insp_copy(text);
   }
-  // A hidden key comes after the elements and is no number, so the columns pad as text; as in
-  // Node, only an entry past the 100th is kept out of them.
+  // A hidden key comes after the elements; as Node reads the array at each entry's index, the
+  // columns pad as text unless there are elements past the entries shown. As in Node, only an
+  // entry past the 100th is kept out of them.
   if (hidden) {
     char text[64];
     snprintf(text, sizeof text, "[length]: %lld", (long long)size);
     output[n++] = fsh_insp_copy(text);
-    numeric = 0;
+    if (size < n) numeric = 0;
   }
   char *result = fsh_insp_reduce(c, output, n, open, close, v->kind == FSH_INSP_ARRAY, n > 100, numeric, recurse);
   for (int64_t i = 0; i < n; i++) fsh_rt_free(output[i]);
@@ -2768,6 +2769,11 @@ void fsh_rt_text_f64(fsh_sb *b, double x) {
   fsh_sb_str(b, fsh_format(x, 0, t));
 }
 
+void fsh_rt_text_f32(fsh_sb *b, float x) {
+  char t[32];
+  fsh_sb_str(b, fsh_format(x, 1, t));
+}
+
 fsh_str *fsh_rt_text_done(fsh_sb *b) {
   fsh_str *s = fsh_str_of(b->p ? b->p : "", b->n);
   fsh_rt_free(b->p);
@@ -2777,7 +2783,7 @@ fsh_str *fsh_rt_text_done(fsh_sb *b) {
 
 // util.format's arguments as codegen describes them: a scalar's value, a string, or for a value
 // with parts its String(x), as JavaScript writes it, and its inspect tree, each built only when a
-// specifier may ask for it. A string is lent; the text and tree of a value with parts are the
+// specifier may ask for it. A float's whole is 1 when it is an f32, written as one. A string is lent; the text and tree of a value with parts are the
 // routine's to free.
 enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS };
 
@@ -2801,7 +2807,10 @@ static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
     case FSH_FARG_STRING: fsh_sb_put(b, a->text->bytes, a->text->length); break;
     case FSH_FARG_INT: snprintf(t, sizeof t, "%lld", (long long)a->whole); fsh_sb_str(b, t); break;
     case FSH_FARG_UINT: snprintf(t, sizeof t, "%llu", (unsigned long long)a->whole); fsh_sb_str(b, t); break;
-    case FSH_FARG_FLOAT: fsh_farg_number(b, a->number); break;
+    case FSH_FARG_FLOAT:
+      if (a->whole) fsh_sb_str(b, fsh_rt_format_f32((float)a->number, t));
+      else fsh_farg_number(b, a->number);
+      break;
     case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
     default: fsh_sb_str(b, "null"); break;
   }
@@ -2829,7 +2838,7 @@ static fsh_str *fsh_farg_string(fsh_farg *a) {
   fsh_sb b = {0};
   if (a->kind == FSH_FARG_FLOAT) {
     char t[32];
-    fsh_sb_str(&b, fsh_format(a->number, 0, t));
+    fsh_sb_str(&b, fsh_format(a->number, (int)a->whole, t));
   } else fsh_farg_plain(&b, a);
   fsh_str *s = fsh_str_of(b.p, b.n);
   fsh_rt_free(b.p);
@@ -2864,9 +2873,13 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
     fsh_farg_plain(b, a);
     return;
   }
+  if (spec == 'd' && a->kind == FSH_FARG_FLOAT) {
+    fsh_farg_plain(b, a);
+    return;
+  }
   double x = NAN;
   if (spec == 'd' && a->kind != FSH_FARG_STRING && a->kind != FSH_FARG_PARTS) {
-    x = a->kind == FSH_FARG_FLOAT ? a->number : a->kind == FSH_FARG_BOOL ? (double)a->whole : 0;
+    x = a->kind == FSH_FARG_BOOL ? (double)a->whole : 0;
   } else {
     fsh_str *text = fsh_farg_string(a);
     double read;
@@ -2878,14 +2891,20 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
   fsh_farg_number(b, x);
 }
 
+// The texts and trees described arguments hold.
+static void fsh_fargs_free(fsh_farg *args, int64_t n) {
+  for (int64_t i = 0; i < n; i++) {
+    if (args[i].kind != FSH_FARG_PARTS) continue;
+    if (args[i].text) fsh_rt_str_release(args[i].text);
+    if (args[i].tree) fsh_insp_free(args[i].tree);
+  }
+}
+
 // util.inspect: what %O writes.
 fsh_str *fsh_rt_inspect(fsh_farg *a) {
   fsh_sb b = {0};
   fsh_farg_inspect(&b, a, 2, 0);
-  if (a->kind == FSH_FARG_PARTS) {
-    if (a->text) fsh_rt_str_release(a->text);
-    if (a->tree) fsh_insp_free(a->tree);
-  }
+  fsh_fargs_free(a, 1);
   fsh_str *s = fsh_str_of(b.p ? b.p : "", b.n);
   fsh_rt_free(b.p);
   return s;
@@ -2894,7 +2913,9 @@ fsh_str *fsh_rt_inspect(fsh_farg *a) {
 // A port of Node's formatWithOptionsInternal: with a string first and more after it, each
 // specifier takes the next argument while one is left, %% is a percent sign, and any other letter stays as written; the
 // arguments left are appended after spaces, strings as they are and anything else inspected.
-fsh_str *fsh_rt_format(fsh_farg *args, int64_t n) {
+// %j, JSON, isn't written yet, so it panics where the format was called rather than leave the
+// arguments after it out of line.
+fsh_str *fsh_rt_format(fsh_farg *args, int64_t n, const char *where) {
   fsh_sb b = {0};
   int64_t a = 0;
   const char *join = "";
@@ -2909,7 +2930,14 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n) {
         last = i + 1;
         continue;
       }
-      if (a + 1 == n || next == 0 || !strchr("sdifoOc", next)) continue;
+      if (a + 1 == n || next == 0 || !strchr("sdifoOcj", next)) continue;
+      if (next == 'j') {
+        fsh_rt_free(b.p);
+        fsh_fargs_free(args, n);
+        fflush(NULL);
+        fputs(where, stderr);
+        fsh_rt_panic("'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead\n");
+      }
       fsh_farg *x = &args[++a];
       if (last != i - 1) fsh_sb_put(&b, f + last, i - 1 - last);
       if (next == 's') {
@@ -2932,11 +2960,7 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n) {
     if (args[a].kind == FSH_FARG_STRING) fsh_farg_plain(&b, &args[a]);
     else fsh_farg_inspect(&b, &args[a], 2, 0);
   }
-  for (int64_t i = 0; i < n; i++) {
-    if (args[i].kind != FSH_FARG_PARTS) continue;
-    if (args[i].text) fsh_rt_str_release(args[i].text);
-    if (args[i].tree) fsh_insp_free(args[i].tree);
-  }
+  fsh_fargs_free(args, n);
   fsh_str *s = fsh_str_of(b.p ? b.p : "", b.n);
   fsh_rt_free(b.p);
   return s;

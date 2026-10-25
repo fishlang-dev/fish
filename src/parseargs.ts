@@ -33,8 +33,11 @@ export function parseArgsArgs(e: Call): Expr[] {
   const specs: string[] = [];
   const fields: string[] = [];
   const reads: string[] = [];
+  const names = new Set<string>();
   (options?.props ?? []).forEach((p, i) => {
     const name = keyOf(p, "'options'");
+    if (names.has(name)) throw new CompileError(`the option '${name}' is given twice`, p.start, p.end);
+    names.add(name);
     const option = p.kind === "property" ? p.value : undefined;
     if (option?.kind !== "object") throw literalOnly(option ?? p, `the option '${name}'`);
     const set = new Map<string, Expr>();
@@ -46,7 +49,7 @@ export function parseArgsArgs(e: Call): Expr[] {
     const type = set.get("type");
     if (type?.kind !== "string" || (type.value !== "string" && type.value !== "boolean")) throw new CompileError(`the option '${name}' needs 'type: "string"' or 'type: "boolean"'`, (type ?? p).start, (type ?? p).end);
     const short = set.get("short");
-    if (short !== undefined && (short.kind !== "string" || [...short.value].length !== 1 || short.value === "-")) {
+    if (short !== undefined && (short.kind !== "string" || short.value.length !== 1 || short.value === "-")) {
       throw new CompileError(`the option '${name}' takes 'short' as one character written in the call, like short: "v"`, short.start, short.end);
     }
     const multiple = set.get("multiple");
@@ -60,13 +63,17 @@ export function parseArgsArgs(e: Call): Expr[] {
     specs.push(`{ name: ${JSON.stringify(name)}, short: ${JSON.stringify(short?.kind === "string" ? short.value : "")}, text: ${text}, multiple: ${many} }`);
     const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
     fields.push(`${key}${fallback ? "" : "?"}: ${type.value}${many ? "[]" : ""}`);
-    const read = `p.${text ? "text" : "flag"}${many ? (text ? "s" : "List") : ""}(${i})`;
+    // A default is an argument of the read, typed by its parameter, so `[]` is a string[].
+    const read = `${text ? "text" : "flag"}${many ? (text ? "s" : "List") : ""}`;
     if (fallback) defaults.push(fallback);
-    reads.push(`${key}: ${fallback ? `${read} ?? fsh_default_${defaults.length - 1}` : read}`);
+    reads.push(`${key}: p.${read}${fallback ? `Or(${i}, fsh_default_${defaults.length - 1})` : `(${i})`}`);
   });
   const built = parseExpression(`[[${specs.join(", ")}], (p): { ${fields.join("; ")} } => ({ ${reads.join(", ")} })]`) as Extract<Expr, { kind: "array" }>;
   respan(built, e);
   const [list, builder] = built.elements as [Expr, Expr];
+  // The builder's parameter takes a name a program can't write, so a default naming its own
+  // `p` reads the program's.
+  renamed(builder, "p", "parsed-args");
   placed(builder, defaults);
   const bool = (value: boolean): Expr => ({ kind: "bool", value, start: e.start, end: e.end });
   return [settings.get("args") ?? { kind: "null", start: e.start, end: e.end }, list, bool(flag("allowPositionals", false)), bool(flag("allowNegative", false)), builder];
@@ -74,6 +81,7 @@ export function parseArgsArgs(e: Call): Expr[] {
 
 // A literal default that isn't what the option gives; anything else is checked as a value.
 function wrongDefault(v: Expr, type: string, many: boolean): boolean {
+  if (v.kind === "ident" && v.name === "undefined") return true;
   const literal = (x: Expr) => x.kind === "string" || x.kind === "bool" || x.kind === "int" || x.kind === "float" || x.kind === "null" || x.kind === "object";
   const wrong = (x: Expr | undefined) => x !== undefined && (x.kind === "array" || (literal(x) && x.kind !== (type === "string" ? "string" : "bool")));
   if (many) return v.kind === "array" ? v.elements.some(wrong) : literal(v);
@@ -101,6 +109,13 @@ function respan(v: unknown, at: Span, seen = new Set<unknown>()) {
     node.end = at.end;
   }
   for (const child of Object.values(node)) respan(child, at, seen);
+}
+
+function renamed(v: unknown, from: string, to: string) {
+  if (typeof v !== "object" || v === null) return;
+  const node = v as Record<string, unknown>;
+  if (node.kind === "ident" && node.name === from) node.name = to;
+  for (const child of Object.values(node)) renamed(child, from, to);
 }
 
 // The written defaults in place of their placeholders.

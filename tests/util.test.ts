@@ -39,6 +39,10 @@ const CASES = `
   const w: i64 | string = "w";
   for (const s of [util.format("%s %d %s %s", u, w, "x"), format(1, "a", { b: "c" }), format("x", "y", 3), format("100%%"), format("%s")]) console.log(s);
   for (const s of [format("%s:%s", "only"), format("%d", 1.5), format("%i", 1e21), format("%s", 0.1 + 0.2), format("a%", 1), format("%%%s%%", "p")]) console.log(s);
+  let big: i64[] = [];
+  for (let i = 0; i < 150; i++) big.push(i);
+  const hundred: i64[] = big.slice(0, 120);
+  console.log(format("%o|%o", big, hundred));
   for (const s of [format("%o", "multi\\nline string that is long enough to break across lines when inspected"), format("%s", "€%s"), format("€%sé", 1)]) console.log(s);`;
 
 test("format with a format string read at run time gives what node's gives", () => {
