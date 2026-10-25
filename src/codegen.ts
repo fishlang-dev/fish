@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -4883,8 +4883,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // optional chain runs only when the chain isn't empty.
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     if (fixedFills.has(e)) return fixedFilled(e, types.get(e) as FixedType);
+    if (stringBuilds.has(e)) return stringBuilt(e, stringBuilds.get(e)!);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
+  }
+
+  // `String.fromCharCode` and `String.fromCodePoint` over their gathered array, a temporary the
+  // statement releases.
+  function stringBuilt(e: Extract<Expr, { kind: "call" }>, kind: "units" | "points"): string {
+    const array = value(e.args[0]!);
+    const [data, length, result] = [temp(), temp(), temp()];
+    emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+    emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+    if (kind === "units") emit(`${result} = call ptr @fsh_rt_str_from_units(ptr ${data}, i64 ${length})`);
+    else unwinding(`call ptr @fsh_rt_str_from_points(ptr ${data}, i64 ${length}, ptr ${panicAt(e)})`, result);
+    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    return result;
   }
 
   function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
@@ -5187,8 +5201,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return given(result, arrayType("string"));
       }
       case "replace":
-        emit(`${result} = call ptr @fsh_rt_str_replace(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
+      case "replaceAll":
+        emit(`${result} = call ptr @fsh_rt_str_${callee.name === "replace" ? "replace" : "replace_all"}(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
         return given(result, "string");
+      // Each join makes a new string, the one before it released.
+      case "concat": {
+        if (args.length === 0) {
+          emit(`call void @fsh_rt_str_retain(ptr ${s})`);
+          return given(s, "string");
+        }
+        let joined = concat(s, args[0]!);
+        for (const a of args.slice(1)) {
+          const next = concat(joined, a);
+          emit(`call void @fsh_rt_str_release(ptr ${joined})`);
+          joined = next;
+        }
+        return given(joined, "string");
+      }
       case "padStart":
       case "padEnd":
         // These two may panic, so a panic in them drops what is live here.

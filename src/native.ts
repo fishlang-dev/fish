@@ -892,9 +892,49 @@ static fsh_str *fsh_join_parts(fsh_str **parts, int64_t n) {
   return joined;
 }
 
-// JavaScript's replace with a string pattern: the first match is replaced, and in the
-// replacement $$ is $, $& the match, $ and a backtick (0x60) what comes before it, and $' what
-// comes after.
+// Parts of a string being built, joined and released once all are in.
+typedef struct {
+  fsh_str **items;
+  int64_t count, room;
+} fsh_parts;
+
+static void fsh_parts_add(fsh_parts *p, fsh_str *part) {
+  if (p->count == p->room) {
+    int64_t room = p->room ? p->room * 2 : 8;
+    fsh_str **items = fsh_rt_alloc(room * sizeof(fsh_str *));
+    if (p->count) memcpy(items, p->items, p->count * sizeof(fsh_str *));
+    fsh_rt_free(p->items);
+    p->items = items;
+    p->room = room;
+  }
+  p->items[p->count++] = part;
+}
+
+static fsh_str *fsh_parts_join(fsh_parts *p) {
+  fsh_str *joined = fsh_join_parts(p->items, p->count);
+  fsh_rt_free(p->items);
+  return joined;
+}
+
+// A string replacement for the match of s from unit at to end, n units long: in it $$ is $,
+// $& the match, $ and a backtick (0x60) what comes before it, and $' what comes after, as
+// JavaScript's replace and replaceAll with a string pattern read it.
+static void fsh_replacement(fsh_parts *p, fsh_str *s, fsh_str *replacement, int64_t at, int64_t end, int64_t n) {
+  const char *r = replacement->bytes;
+  int64_t from = 0;
+  for (int64_t i = 0; i + 1 < replacement->length; i++) {
+    if (r[i] != '$' || (r[i + 1] != '$' && r[i + 1] != '&' && r[i + 1] != 0x60 && r[i + 1] != '\'')) continue;
+    fsh_parts_add(p, fsh_share(replacement, from, r[i + 1] == '$' ? i + 1 : i));
+    if (r[i + 1] == '&') fsh_parts_add(p, fsh_sub(s, at, end));
+    else if (r[i + 1] == 0x60) fsh_parts_add(p, fsh_sub(s, 0, at));
+    else if (r[i + 1] == '\'') fsh_parts_add(p, fsh_sub(s, end, n));
+    from = i + 2;
+    i++;
+  }
+  fsh_parts_add(p, fsh_share(replacement, from, replacement->length));
+}
+
+// JavaScript's replace with a string pattern: the first match is replaced.
 fsh_str *fsh_rt_str_replace(fsh_str *s, fsh_str *pattern, fsh_str *replacement) {
   int64_t at = fsh_rt_str_index_of(s, pattern, 0);
   if (at < 0) {
@@ -902,25 +942,78 @@ fsh_str *fsh_rt_str_replace(fsh_str *s, fsh_str *pattern, fsh_str *replacement) 
     return s;
   }
   int64_t n = fsh_rt_str_units(s), end = at + fsh_rt_str_units(pattern);
-  // At most: before, after, and a part per byte of the replacement.
-  fsh_str **parts = fsh_rt_alloc((replacement->length + 3) * sizeof(fsh_str *));
-  int64_t count = 0, from = 0;
-  parts[count++] = fsh_sub(s, 0, at);
-  const char *r = replacement->bytes;
-  for (int64_t i = 0; i + 1 < replacement->length; i++) {
-    if (r[i] != '$' || (r[i + 1] != '$' && r[i + 1] != '&' && r[i + 1] != 0x60 && r[i + 1] != '\'')) continue;
-    parts[count++] = fsh_share(replacement, from, r[i + 1] == '$' ? i + 1 : i);
-    if (r[i + 1] == '&') parts[count++] = fsh_sub(s, at, end);
-    else if (r[i + 1] == 0x60) parts[count++] = fsh_sub(s, 0, at);
-    else if (r[i + 1] == '\'') parts[count++] = fsh_sub(s, end, n);
-    from = i + 2;
-    i++;
+  fsh_parts p = { 0 };
+  fsh_parts_add(&p, fsh_sub(s, 0, at));
+  fsh_replacement(&p, s, replacement, at, end, n);
+  fsh_parts_add(&p, fsh_sub(s, end, n));
+  return fsh_parts_join(&p);
+}
+
+// JavaScript's replaceAll with a string pattern: every match, left to right and not
+// overlapping; an empty pattern matches before every unit and at the end.
+fsh_str *fsh_rt_str_replace_all(fsh_str *s, fsh_str *pattern, fsh_str *replacement) {
+  int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(pattern);
+  fsh_parts p = { 0 };
+  int64_t last = 0;
+  for (int64_t at = fsh_rt_str_index_of(s, pattern, 0); at >= 0 && at <= n;) {
+    fsh_parts_add(&p, fsh_sub(s, last, at));
+    fsh_replacement(&p, s, replacement, at, at + m, n);
+    last = at + m;
+    if (m == 0 && at == n) break;
+    at = fsh_rt_str_index_of(s, pattern, m == 0 ? at + 1 : at + m);
   }
-  parts[count++] = fsh_share(replacement, from, replacement->length);
-  parts[count++] = fsh_sub(s, end, n);
-  fsh_str *result = fsh_join_parts(parts, count);
-  fsh_rt_free(parts);
-  return result;
+  fsh_parts_add(&p, fsh_sub(s, last, n));
+  return fsh_parts_join(&p);
+}
+
+// One code point's UTF-8, a surrogate's as the 3-byte form Fish keeps a lone one in.
+static int fsh_put_point(char *out, uint32_t c) {
+  if (c < 0x80) { out[0] = c; return 1; }
+  if (c < 0x800) { out[0] = 0xC0 | c >> 6; out[1] = 0x80 | (c & 0x3F); return 2; }
+  if (c < 0x10000) { out[0] = 0xE0 | c >> 12; out[1] = 0x80 | (c >> 6 & 0x3F); out[2] = 0x80 | (c & 0x3F); return 3; }
+  out[0] = 0xF0 | c >> 18; out[1] = 0x80 | (c >> 12 & 0x3F); out[2] = 0x80 | (c >> 6 & 0x3F); out[3] = 0x80 | (c & 0x3F);
+  return 4;
+}
+
+// Code points as UTF-8, a high and a low surrogate side by side joining into their
+// character, as they do in JavaScript's UTF-16; the units they make are counted.
+static fsh_str *fsh_from_points(const uint32_t *points, int64_t n) {
+  fsh_str *s = fsh_str_new(n * 4);
+  char *at = (char *)s->own;
+  int64_t units = 0;
+  for (int64_t i = 0; i < n; i++) {
+    uint32_t c = points[i];
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n && points[i + 1] >= 0xDC00 && points[i + 1] <= 0xDFFF) {
+      c = 0x10000 + ((c - 0xD800) << 10) + (points[++i] - 0xDC00);
+    }
+    units += c >= 0x10000 ? 2 : 1;
+    at += fsh_put_point(at, c);
+  }
+  s->length = at - (char *)s->own;
+  s->units = units;
+  return s;
+}
+
+// String.fromCharCode: UTF-16 units.
+fsh_str *fsh_rt_str_from_units(const uint16_t *units, int64_t n) {
+  uint32_t *points = fsh_rt_alloc((n + 1) * sizeof(uint32_t));
+  for (int64_t i = 0; i < n; i++) points[i] = units[i];
+  fsh_str *s = fsh_from_points(points, n);
+  fsh_rt_free(points);
+  return s;
+}
+
+// String.fromCodePoint: one past 0x10FFFF is a panic, as JavaScript throws a RangeError for it.
+fsh_str *fsh_rt_str_from_points(const uint32_t *points, int64_t n, const char *where) {
+  for (int64_t i = 0; i < n; i++) {
+    if (points[i] <= 0x10FFFF) continue;
+    fflush(NULL);
+    fputs(where, stderr);
+    char reason[64];
+    snprintf(reason, sizeof reason, "invalid code point %u\n", points[i]);
+    fsh_rt_panic(reason);
+  }
+  return fsh_from_points(points, n);
 }
 
 // The most bytes a string made by repeating may hold. Past it, making one panics, as

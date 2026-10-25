@@ -2,7 +2,7 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes, restStarts } from "./values.ts";
+import { equalities, quotes, restStarts, stringBuilds } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, elementsOf, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -649,6 +649,15 @@ function interpreter() {
     }
     if (target) return call(target, args(f, target, e.args), undefined, e);
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(expr(f, e.args[0]!), typeOf(f, e.args[0]!));
+    // `String.fromCharCode` and `String.fromCodePoint`, their arguments gathered into one array.
+    const built = stringBuilds.get(e);
+    if (built) {
+      const items = (unwrap(expr(f, e.args[0]!)) as { items: Value[] }).items.map((x) => Number(unwrap(x) as bigint));
+      if (built === "units") return String.fromCharCode(...items);
+      const bad = items.find((x) => x > 0x10ffff);
+      if (bad !== undefined) panic(`invalid code point ${bad}`, e);
+      return String.fromCodePoint(...items);
+    }
     // A static call on something that isn't a value, like `TcpListener.bind`, is std's own.
     if (callee.kind === "member" && !f.instance.types.has(callee.object)) return refuse(`'${callee.name}'`, e);
     if (callee.kind === "member") {
@@ -677,6 +686,10 @@ function interpreter() {
       }
       case "indexOf":
         return BigInt(s.indexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
+      case "replaceAll":
+        return s.replaceAll(args[0] as string, args[1] as string);
+      case "concat":
+        return s.concat(...(args as string[]));
       case "lastIndexOf":
         return BigInt(s.lastIndexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
       case "at":

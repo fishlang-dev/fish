@@ -173,6 +173,9 @@ const pairs = new WeakSet<Expr>();
 
 // The `FixedArray.filled` calls, by the fixed array each makes.
 export const fixedFills = new WeakSet<Expr>();
+// `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
+// gathered into one array.
+export const stringBuilds = new WeakMap<Expr, "units" | "points">();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -841,6 +844,7 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !lookup("String") && !classes.has("String")) return stringStatic(e, callee);
     if (callee.kind === "member" && isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return mathCall(e, callee.name);
@@ -1255,6 +1259,24 @@ export function expressions(ctx: Context) {
     return { type: returns, what: name };
   }
 
+  // `String.fromCharCode(...units)` and `String.fromCodePoint(...points)`: the arguments, spreads
+  // of arrays among them, become one array of `u16` or `u32`.
+  function stringStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const kinds: Record<string, ["units" | "points", Type]> = { fromCharCode: ["units", "u16"], fromCodePoint: ["points", "u32"] };
+    const kind = kinds[callee.name];
+    if (!kind) throw new CompileError(`'String' has no '${callee.name}' yet; it has 'fromCharCode' and 'fromCodePoint'`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError(`'String.${callee.name}' takes no type arguments`, e.start, e.end);
+    const at = { start: e.args[0]?.start ?? e.end, end: e.args.at(-1)?.end ?? e.end };
+    const gathered: Expr = e.args.length === 1 && stringBuilds.has(e) ? e.args[0]! : { kind: "array", elements: e.args, ...at };
+    const many = arrayType(kind[1]);
+    expect(gathered, many);
+    const t = value(gathered);
+    coerce(gathered, t, many, `'String.${callee.name}' takes ${kind[1]} values, and these are '${show(t)}'`);
+    e.args = [gathered];
+    stringBuilds.set(e, kind[0]);
+    return { type: "string", what: `'String.${callee.name}'` };
+  }
+
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
   function stringCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     text(callee.object, receiver, linked(callee));
@@ -1263,6 +1285,16 @@ export function expressions(ctx: Context) {
     const rx = first === undefined ? undefined : asRegex(first);
     if (rx) return regexStringCall(e, callee, rx, lower(first!) !== rx);
     if (first !== undefined && !STRING_METHODS[callee.name]) throw new CompileError(`'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
+    // `concat` takes any number of strings, as `+` joins them.
+    if (callee.name === "concat") {
+      for (const a of e.args) {
+        if (a.kind === "spread") throw new CompileError("a spread into 'concat' isn't supported yet; join the array instead, as in 's + parts.join(\"\")'", a.start, a.end);
+        const t = value(a);
+        if (!stringLike(lower(t))) throw new CompileError(`'concat' takes strings, and this is '${show(t)}'; convert it with 'String(x)'`, a.start, a.end);
+        coerce(a, t, "string", "");
+      }
+      return { type: "string", what: "'concat'" };
+    }
     const method = STRING_METHODS[callee.name];
     if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
     const [params, returns, required] = method;
@@ -4322,6 +4354,7 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   toUpperCase: [[], "string", 0],
   toLowerCase: [[], "string", 0],
   replace: [["string", "string"], "string", 2],
+  replaceAll: [["string", "string"], "string", 2],
   padStart: [["usize", "string"], "string", 1],
   padEnd: [["usize", "string"], "string", 1],
   repeat: [["usize"], "string", 1],

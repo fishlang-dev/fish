@@ -1148,3 +1148,43 @@ function read(): string {
 }
 const R = comptime read();
 function main(): void { console.log(R); }
+// case: string_building_methods
+// expect: a+b+c _a_-_b_-_c_ x ba a-b-c
+// expect: .a.�.�.b. x[-]y xx|yy x$y a$
+// expect: abcdef x 😀�
+// expect: Hi  😀 1
+// expect: fish AfishB
+// expect: 😀A 😀 2 0
+// `replaceAll` with a string, `concat`, `String.fromCharCode` and `String.fromCodePoint` as node gives them.
+function main(): void {
+  const s = "a-b-c";
+  console.log(s.replaceAll("-", "+"), s.replaceAll("", "_"), "".replaceAll("", "x"), "aaa".replaceAll("aa", "b"), s.replaceAll("z", "q"));
+  console.log("a😀b".replaceAll("", "."), "x-y".replaceAll("-", "[$&]"), "x-y".replaceAll("-", "$`|$'"), "x-y".replaceAll("-", "$$"), "ab".replaceAll("b", "$"));
+  console.log("ab".concat("cd", "", "ef"), "x".concat(), "😀".concat("\uDE00"));
+  console.log(String.fromCharCode(72, 105), String.fromCharCode(), String.fromCharCode(0xD83D, 0xDE00), String.fromCharCode(0xD83D).length);
+  const units: u16[] = [102, 105, 115, 104];
+  console.log(String.fromCharCode(...units), String.fromCharCode(65, ...units, 66));
+  console.log(String.fromCodePoint(128512, 65), String.fromCodePoint(0xD83D, 0xDE00), String.fromCodePoint(0x10FFFF).length, String.fromCodePoint().length);
+}
+// case: string_building_methods_comptime
+// expect: a+b+c _x_ abc Hi 😀
+function build(): string {
+  return `${"a-b-c".replaceAll("-", "+")} ${"x".replaceAll("", "_")} ${"a".concat("b", "c")} ${String.fromCharCode(72, 105)} ${String.fromCodePoint(128512)}`;
+}
+const B = comptime build();
+function main(): void { console.log(B); }
+// case: string_from_code_point_invalid
+// panic: invalid code point 1114112
+function main(): void { const p: u32 = 1114112; console.log(String.fromCodePoint(65, p)); }
+// case: string_concat_not_string
+// error: 'concat' takes strings, and this is 'i64'; convert it with 'String(x)'
+function main(): void { console.log("a".concat(5)); }
+// case: string_concat_spread
+// error: a spread into 'concat' isn't supported yet; join the array instead
+function main(): void { const xs = ["a", "b"]; console.log("".concat(...xs)); }
+// case: string_from_char_code_type
+// error: type '"a"' is not assignable to type 'u16'
+function main(): void { console.log(String.fromCharCode("a")); }
+// case: string_static_unknown
+// error: 'String' has no 'raw' yet; it has 'fromCharCode' and 'fromCodePoint'
+function main(): void { console.log(String.raw("a")); }
