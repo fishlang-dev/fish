@@ -184,7 +184,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
-  ["process", STD("process, for argv, env and exit")],
+  ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
   // console.log prints as util.inspect does, but no plan gives util itself, as inspect or format.
 ]);

@@ -28,3 +28,20 @@ class Date { static now(): string { return "mine"; } }
 function main() {
   console.log(Date.now());
 }
+// case: console_own_object
+// expect: mine y
+// expect: mine z
+class Logger {
+  error(s: string): void { print("mine " + s); }
+  log(s: string): void { print("mine " + s); }
+}
+function main() {
+  const console = new Logger();
+  console.error("y");
+  console.log("z");
+}
+// case: clock_optional_call
+// error: 'Date' is always there, so 'Date.now()' is called without '?.'
+function main() {
+  const t = Date?.now();
+}

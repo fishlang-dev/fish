@@ -3021,7 +3021,13 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
 
 // One printed line is several writes; holding the stream's lock across them keeps lines from
 // tasks on other threads whole.
+// A line for stderr waits for what stdout holds, so the two keep their order in one pipe or file.
 void fsh_rt_print_begin(int32_t stream) {
+  if (stream == 2) {
+    flockfile(stdout);
+    fflush(stdout);
+    funlockfile(stdout);
+  }
   flockfile(stream == 2 ? stderr : stdout);
 }
 

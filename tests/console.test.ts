@@ -21,6 +21,21 @@ test("console.error and console.warn write to stderr as node does", () => {
   expect([fish.stdout.toString(), fish.stderr.toString()]).toEqual([node.stdout.toString(), node.stderr.toString()]);
 });
 
+test("stdout and stderr keep their order in one pipe, as node keeps them", () => {
+  const program = join(tmp, "order.fsh");
+  const source = `console.log("out 1");
+  console.error("err 1");
+  console.log("out 2", { a: 1 });
+  console.warn("warn", { b: [1] });
+  console.log("out 3");`;
+  writeFileSync(program, `function main() {\n  ${source}\n}\n`);
+  const out = join(tmp, "order");
+  Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  const fish = Bun.spawnSync(["sh", "-c", `"${out}" 2>&1 | cat`]).stdout.toString();
+  const node = Bun.spawnSync(["sh", "-c", `node -e '${source}' 2>&1 | cat`]).stdout.toString();
+  expect(fish).toBe(node);
+});
+
 test("Date.now() is node's wall clock, and performance.now() counts from the start", () => {
   const program = join(tmp, "clock.fsh");
   writeFileSync(program, `async function main(): Promise<void> {

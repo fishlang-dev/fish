@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, isPrint, printStream, clocks, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -4839,7 +4839,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
-      if (isPrint(e.callee)) {
+      if (printCalls.has(e)) {
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert, printStream(e.callee));
         return undefined;
       }

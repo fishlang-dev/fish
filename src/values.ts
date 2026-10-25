@@ -164,6 +164,8 @@ const pairs = new WeakSet<Expr>();
 export const fixedFills = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
+// The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
+export const printCalls = new WeakSet<Expr>();
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
@@ -790,7 +792,11 @@ export function expressions(ctx: Context) {
       calls.set(e, instance);
       return { type: "void", what: "'super'" };
     }
-    if (isPrint(callee)) {
+    // A program's own `console` or `print` keeps its meaning.
+    const printer = callee.kind === "ident" ? callee.name : callee.kind === "member" && callee.object.kind === "ident" ? callee.object.name : "";
+    if (isPrint(callee) && !lookup(printer) && !classes.has(printer) && !byName.has(printer) && !byName.has(`const ${printer}`) && !enums.has(printer)) {
+      if (e.optional || (callee.kind === "member" && callee.optional)) throw new CompileError(`'${printer}' is always there, so it is called without '?.'`, e.start, e.end);
+      printCalls.add(e);
       for (const a of e.args) {
         const type = a.kind === "string" ? "void" : read(a);
         if (printable(type)) continue;
@@ -816,7 +822,9 @@ export function expressions(ctx: Context) {
     }
     const clock = clockOf(callee);
     if (clock) {
-      if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError(`'${clock}' takes no arguments`, e.start, e.end);
+      if (e.optional || (callee.kind === "member" && callee.optional)) throw new CompileError(`'${clock.split(".")[0]}' is always there, so '${clock}()' is called without '?.'`, e.start, e.end);
+      if (e.typeArgs.length > 0) throw new CompileError(`'${clock}' takes no type arguments`, e.start, e.end);
+      if (e.args.length > 0) throw new CompileError(`'${clock}' takes no arguments`, e.start, e.end);
       clocks.set(e, clock);
       return { type: clock === "Date.now" ? "i64" : "f64", what: `'${clock}'` };
     }
