@@ -2783,8 +2783,8 @@ fsh_str *fsh_rt_text_done(fsh_sb *b) {
 
 // util.format's arguments as codegen describes them: a scalar's value, a string, or for a value
 // with parts its String(x), as JavaScript writes it, and its inspect tree, each built only when a
-// specifier may ask for it. A float's whole is 1 when it is an f32, written as one. A string is lent; the text and tree of a value with parts are the
-// routine's to free.
+// specifier may ask for it. A float's whole is 1 when it is an f32, written as one. A string is
+// lent; the text and tree of a value with parts are the routine's to free.
 enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS };
 
 typedef struct {

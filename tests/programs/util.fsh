@@ -170,7 +170,7 @@ function main(): void throws ParseArgsError {
   parseArgs({ options: { a: { type: "string" }, a: { type: "boolean" } } });
 }
 // case: util_parse_args_internal
-// error: has no export named 'ParsedArgs'
+// error: 'node:util' has no export named 'ParsedArgs'
 import { ParsedArgs } from "node:util";
 function main() {}
 // case: util_format_f32
@@ -199,4 +199,14 @@ import { isDeepStrictEqual } from "node:util";
 function main() {
   const a = [0.5];
   console.log(isDeepStrictEqual(a, [0.5]));
+}
+// case: util_equal_floats_generic
+// error: 'isDeepStrictEqual' over floats isn't supported yet
+import { isDeepStrictEqual } from "node:util";
+function same<T>(a: T, b: T): boolean {
+  return isDeepStrictEqual(a, b);
+}
+function main() {
+  console.log(same(1, 1));
+  console.log(same([-0.0], [0.0]));
 }

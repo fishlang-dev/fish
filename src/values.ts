@@ -206,6 +206,8 @@ export const printCalls = new WeakSet<Expr>();
 export const formatCalls = new WeakSet<Expr>();
 // node:util's `inspect` calls.
 export const inspectCalls = new WeakSet<Expr>();
+// The `isDeepStrictEqual` calls checked as the `===` they were turned into.
+const deepEqualities = new WeakSet<Expr>();
 // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
 const parsedArgs = new WeakSet<Expr>();
 
@@ -1158,15 +1160,11 @@ export function expressions(ctx: Context) {
       if (e.args.length !== 2) throw new CompileError("'isDeepStrictEqual' takes 2 arguments", e.start, e.end);
       refuseSpread(e.args);
       const [left, right] = e.args as [Expr, Expr];
-      for (const a of [left, right]) {
-        const t = value(a);
-        once.add(a);
-        if (holdsFloat(t)) throw new CompileError("'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
-      }
       const node = e as unknown as Record<string, unknown>;
       delete node.callee;
       delete node.args;
       Object.assign(node, { kind: "binary", op: "===", left, right });
+      deepEqualities.add(e);
       return { type: value(e), what: "'isDeepStrictEqual'" };
     }
     if (target && (target as { macro?: boolean }).macro) throw new CompileError(`'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
@@ -3384,6 +3382,14 @@ export function expressions(ctx: Context) {
         return bothSides(e, then, otherwise, coerce);
       }
       case "binary":
+        // Each instance of an isDeepStrictEqual checks its own operands' types.
+        if (deepEqualities.has(e)) {
+          for (const a of [e.left, e.right]) {
+            const t = value(a);
+            once.add(a);
+            if (holdsFloat(t)) throw new CompileError("'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
+          }
+        }
         // The migration lint rewrites loose equality to strict, so native code never uses it.
         if (e.op === "==" || e.op === "!=") throw new CompileError(`'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
         if (e.op === "&&" || e.op === "||") {

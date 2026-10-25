@@ -162,7 +162,8 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
     for (const [alias, { from, name, at }] of l.imports) {
       if (l.own.has(alias)) throw new CompileError(`'${alias}' is both imported and declared in this file; rename the import, as in 'import { ${name} as other${alias[0]!.toUpperCase()}${alias.slice(1)} }'`, at.start, at.end);
       if (exported(from, name) || lenient) continue;
-      const hidden = linked.get(from)!.own.has(name) ? `; it declares '${name}' without exporting it, so add 'export' before that declaration` : "";
+      // A std module's own declarations aren't for a program to export.
+      const hidden = linked.get(from)!.own.has(name) && !from.path.startsWith("std:") ? `; it declares '${name}' without exporting it, so add 'export' before that declaration` : "";
       throw new CompileError(name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
     }
   }
