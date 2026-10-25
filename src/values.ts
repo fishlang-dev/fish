@@ -1616,8 +1616,8 @@ export function expressions(ctx: Context) {
 
   // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
   function jsonParse(e: Call): { type: Type; what: string } {
-    const [written, ...others] = e.typeArgs;
-    if (!written) throw new CompileError("'JSON.parse' reads into the type it's given, as in 'JSON.parse<User>(s)'; the dynamic Json value, for data without a type, isn't supported yet", e.start, e.end);
+    // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
+    const [written = { kind: "ref", name: "Json", args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
     if (others.length > 0) throw new CompileError("'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
     const text = e.args[0];

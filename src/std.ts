@@ -647,7 +647,12 @@ function ident(name: string): AstExpr {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + AST + AST_HELPERS;
+// A JSON value of no particular shape, as untyped `JSON.parse` gives one.
+const JSON_VALUE = String.raw`
+type Json = null | boolean | number | string | Json[] | Map<string, Json>;
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + AST + AST_HELPERS;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -659,9 +664,11 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const at = (s: Stmt) => s.start - STD_BASE;
   const prelude = all.filter((s) => at(s) < PRELUDE.length);
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
-  const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length);
+  const json = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length && at(s) < PRELUDE.length + HTTP.length + JSON_VALUE.length);
+  const ast = all.filter((s) => at(s) >= PRELUDE.length + HTTP.length + JSON_VALUE.length);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  return [...prelude, ...(uses(written, http, HTTP_NAMES) ? http : []), ...(uses(written, ast, [...astNames, "quote", "quoteType"]) ? ast : [])];
+  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [ast, [...astNames, "quote", "quoteType"]]] as const;
+  return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) ? part : []))];
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the

@@ -1,7 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, lower, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -86,7 +86,7 @@ export function conversions(b: Slots) {
     if (instance) {
       const tested = e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left;
       const [type, v] = [typeOf(tested), value(tested)];
-      return typeof type !== "string" && type.kind === "union" ? holds(v, type, type.members.filter((m) => ofKind(m, instance))) : String(ofKind(type, instance));
+      return holdsWhere(v, type, (m) => ofKind(m, instance));
     }
     if (e.kind !== "binary") return undefined;
     if (e.op === "instanceof") {
@@ -100,9 +100,7 @@ export function conversions(b: Slots) {
     if (kind) {
       const [v, type] = [value(kind.operand), typeOf(kind.operand)];
       const name = (kind.name as { value: string }).value;
-      result = typeof type !== "string" && type.kind === "union"
-        ? holds(v, type, type.members.filter((m) => category(m) === name))
-        : String(category(type) === name);
+      result = holdsWhere(v, type, (m) => category(m) === name);
     } else {
       const [left, right] = [typeOf(e.left), typeOf(e.right)];
       const unionLeft = typeof left !== "string" && left.kind === "union";
@@ -177,6 +175,43 @@ export function conversions(b: Slots) {
   }
 
   // Whether a union holds one of these members.
+  // Whether `v` holds a member `wanted` says yes to, looking into the block of a member that
+  // holds itself, whose own members may answer differently.
+  function holdsWhere(v: string, type: Type, wanted: (m: Type) => boolean): string {
+    if (typeof type !== "string" && type.kind === "recursive") {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(type.of)}, ptr ${v}`);
+      return holdsWhere(loaded, type.of, wanted);
+    }
+    if (typeof type === "string" || type.kind !== "union") return String(wanted(type));
+    const mixed = (m: Type) => {
+      const inner = unfold(m);
+      return inner !== m && typeof inner !== "string" && inner.kind === "union" && new Set(inner.members.map(wanted)).size > 1;
+    };
+    const nested = type.members.filter(mixed);
+    const direct = holds(v, type, type.members.filter((m) => !mixed(m) && wanted(m)));
+    if (nested.length === 0) return direct;
+    const result = b.alloca("i1");
+    emit(`store i1 ${direct}, ptr ${result}`);
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
+    const done = b.label();
+    for (const m of nested) {
+      const [is, inside, next] = [temp(), b.label(), b.label()];
+      emit(`${is} = icmp eq i32 ${tag}, ${type.members.indexOf(m)}`);
+      emit(`br i1 ${is}, label %${inside}, label %${next}`);
+      b.startBlock(inside);
+      emit(`store i1 ${holdsWhere(payload(v, type, m), m, wanted)}, ptr ${result}`);
+      emit(`br label %${done}`);
+      b.startBlock(next);
+    }
+    emit(`br label %${done}`);
+    b.startBlock(done);
+    const answer = temp();
+    emit(`${answer} = load i1, ptr ${result}`);
+    return answer;
+  }
+
   function holds(v: string, union: UnionType, members: Type[]): string {
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
@@ -236,7 +271,9 @@ export function conversions(b: Slots) {
       return typeof from !== "string" && from.kind === "union" ? retag(v, from, to) : inject(v, from, to);
     }
     if (typeof from !== "string" && from.kind === "union") {
-      return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => convert(part, member, to));
+      // A scalar member can't hold an aggregate, so where narrowing has left it out, it isn't there.
+      const absent = (member: Type) => typeof member === "string" && member !== to && typeof to !== "string";
+      return from.members.includes(to) ? payload(v, from, to) : eachMember(v, from, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
     }
     if (typeof from === "string" || typeof to === "string" || from.kind === "closure" || to.kind === "closure") return v;
     if (from.kind === "interface" || to.kind === "interface" || from.kind === "param" || to.kind === "param" || from.kind === "function" || to.kind === "function") {
@@ -318,13 +355,15 @@ export function conversions(b: Slots) {
     const result = alloca(llvm(to));
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(from)} ${v}, 0`);
-    const held = from.members.filter((m) => membersFor(m, to).length > 0);
+    // A member that holds itself, which narrowing opened up, gives the member its block holds.
+    const opened = (m: Type) => typeof m !== "string" && m.kind === "recursive" && membersFor(m, to).length === 0 && typeof m.of !== "string" && m.of.kind === "union" && m.of.members.some((x) => membersFor(x, to).length > 0);
+    const held = from.members.filter((m) => membersFor(m, to).length > 0 || opened(m));
     const cases = held.map(() => label());
     const end = label();
     emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${from.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
     held.forEach((member, i) => {
       startBlock(cases[i]!);
-      emit(`store ${llvm(to)} ${inject(payload(v, from, member), member, to)}, ptr ${result}`);
+      emit(`store ${llvm(to)} ${opened(member) ? convert(payload(v, from, member), member, to) : inject(payload(v, from, member), member, to)}, ptr ${result}`);
       emit(`br label %${end}`);
     });
     startBlock(end);

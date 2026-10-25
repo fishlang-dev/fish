@@ -6014,17 +6014,31 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (needsDrop(type)) dispose(old, type);
   }
 
+  // Where a value of `want` lives inside a place holding a `whole`: a union narrowed to one
+  // member keeps it in place as its payload, and one narrowed into a member that holds itself
+  // keeps it in that member's block.
+  function narrowedPlace(at: string, whole: Type, want: Type): string {
+    if (whole === want || typeof whole === "string") return at;
+    if (whole.kind === "recursive") {
+      const block = temp();
+      emit(`${block} = load ptr, ptr ${at}`);
+      return narrowedPlace(block, whole.of, want);
+    }
+    if (whole.kind !== "union") return at;
+    const payload = temp();
+    emit(`${payload} = getelementptr ${llvm(whole)}, ptr ${at}, i32 0, i32 1`);
+    if (whole.members.includes(want)) return payload;
+    const holder = whole.members.find((m) => typeof m !== "string" && m.kind === "recursive" && typeof m.of !== "string" && m.of.kind === "union" && m.of.members.includes(want));
+    return holder ? narrowedPlace(payload, holder, want) : payload;
+  }
+
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
     if (target.kind === "this") return "%this";
     if (target.kind === "index") return element(target);
     if (target.kind !== "member") {
-      // A union narrowed to one member keeps it in place as its payload.
       const local = resolved(target);
-      if (types.get(target) === local.type) return slot(local);
-      const payload = temp();
-      emit(`${payload} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
-      return payload;
+      return narrowedPlace(slot(local), local.type, types.get(target)!);
     }
     if (typeof referent(types.get(target.object)!) !== "string" && (referent(types.get(target.object)!) as Exclude<Type, string>).kind === "shared") return sharedField(target)[2];
     const holder = stored(target.object);

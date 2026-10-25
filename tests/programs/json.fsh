@@ -307,10 +307,74 @@ function main() {
   const x = JSON.parse<i64>("1");
   console.log(x);
 }
-// case: json_parse_untyped
-// error: 'JSON.parse' reads into the type it's given, as in 'JSON.parse<User>(s)'; the dynamic Json value, for data without a type, isn't supported yet
+// case: json_dynamic
+// expect: {name='ann' tags=['x' 2 null yes] inner={n=1.5}}
+// expect: {"name":"ann","tags":["x",2,null,true],"inner":{"n":1.5}}
+// expect: 4 x
+// expect: Unexpected token } in JSON at position 6
+function walk(v: Ref<Json>, depth: i64): string {
+  if (v === null) return "null";
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return "'" + v + "'";
+  if (Array.isArray(v)) {
+    let parts: string[] = [];
+    for (const x of v) parts.push(walk(x, depth + 1));
+    return "[" + parts.join(" ") + "]";
+  }
+  let parts: string[] = [];
+  for (const [k, x] of v) parts.push(k + "=" + walk(x, depth + 1));
+  return "{" + parts.join(" ") + "}";
+}
 function main() {
-  const x = JSON.parse("1");
+  const text = "{\"name\": \"ann\", \"tags\": [\"x\", 2, null, true], \"inner\": {\"n\": 1.5}}";
+  try {
+    const v = JSON.parse(text);
+    console.log(walk(v, 0));
+    console.log(JSON.stringify(v));
+    if (v instanceof Map) {
+      const tags = v.get("tags");
+      if (tags !== null && Array.isArray(tags)) {
+        const first = tags.at(0);
+        console.log(tags.length, first !== null && typeof first === "string" ? first : "?");
+      }
+    }
+    JSON.parse("{\"a\": }");
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// case: json_dynamic_narrowed_places
+// expect: ["x",2,"y"]
+// expect: 3
+// expect: ["x",2]
+function main() {
+  try {
+    const v = JSON.parse("{\"tags\": [\"x\", 2]}");
+    if (v instanceof Map) {
+      let t = v.get("tags");
+      if (Array.isArray(t)) t.push("y");
+      console.log(JSON.stringify(t));
+      if (Array.isArray(t)) {
+        const arr = t;
+        console.log(arr.length);
+      }
+      let s = v.get("tags");
+      if (s !== null && typeof s !== "string") {
+        const kept = s;
+        console.log(JSON.stringify(kept));
+      }
+    }
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// case: json_own_json_type
+// expect: 1
+type Json = { v: i64 };
+function main() {
+  const j: Json = { v: 1 };
+  console.log(j.v);
 }
 // case: json_parse_private_fields
 // error: a class with '#private' fields can't be read from JSON, since JSON doesn't hold them

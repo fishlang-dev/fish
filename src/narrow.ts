@@ -104,7 +104,13 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     // member, which it can point to inside the union.
     const ref = typeof type !== "string" && type.kind === "ref" ? type : undefined;
     const held = ref ? ref.to : type;
-    const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
+    // A member that holds itself stands for its own members, which the check may tell apart.
+    const members = (typeof held !== "string" && held.kind === "union" ? held.members : [held]).flatMap((m) => {
+      const inner = unfold(m);
+      if (inner === m || typeof inner === "string" || inner.kind !== "union") return [m];
+      const verdicts = new Set(inner.members.map(check));
+      return verdicts.size > 1 ? inner.members : [m];
+    });
     const facts = (keep: string): Facts => {
       const left = members.filter((m) => check(m) !== keep);
       if (left.length === 0) return new Map();
