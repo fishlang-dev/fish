@@ -34,6 +34,9 @@ export const NATIVE = String.raw`
 #include <limits.h>
 #include <sys/random.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <ftw.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -3915,6 +3918,148 @@ int32_t fsh_rt_fs_exists(fsh_str *path) {
   int found = access(c, F_OK) == 0;
   fsh_rt_free(c);
   return found;
+}
+
+// statSync and lstatSync: size, mode, kind (1 a file, 2 a directory, 3 a symbolic link, 0
+// anything else) and the modification time in milliseconds, as Node's Stats has them.
+int32_t fsh_rt_fs_stat(fsh_str *path, int32_t follow, int64_t *out, double *mtime, fsh_str **error) {
+  const char *syscall = follow ? "stat" : "lstat";
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, syscall, "");
+  struct stat st;
+  if ((follow ? stat(c, &st) : lstat(c, &st)) != 0) {
+    int32_t failed = fsh_fs_failed(error, errno, syscall, c);
+    fsh_rt_free(c);
+    return failed;
+  }
+  fsh_rt_free(c);
+  out[0] = st.st_size;
+  out[1] = st.st_mode;
+  out[2] = S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 0;
+#ifdef __APPLE__
+  struct timespec m = st.st_mtimespec;
+#else
+  struct timespec m = st.st_mtim;
+#endif
+  *mtime = (double)m.tv_sec * 1000 + (double)m.tv_nsec / 1e6;
+  return 1;
+}
+
+static int fsh_by_name(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+// readdirSync: the names in a directory, without . and .., sorted as Node's scandir sorts them.
+int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
+  out->data = NULL;
+  out->length = out->capacity = 0;
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "scandir", "");
+  DIR *dir = opendir(c);
+  if (!dir) {
+    int32_t failed = fsh_fs_failed(error, errno, "scandir", c);
+    fsh_rt_free(c);
+    return failed;
+  }
+  fsh_rt_free(c);
+  int64_t count = 0, room = 16;
+  char **names = fsh_rt_alloc(room * sizeof(char *));
+  for (struct dirent *entry; (entry = readdir(dir));) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    if (count == room) {
+      char **grown = fsh_rt_alloc(room * 2 * sizeof(char *));
+      memcpy(grown, names, count * sizeof(char *));
+      fsh_rt_free(names);
+      names = grown;
+      room *= 2;
+    }
+    size_t n = strlen(entry->d_name);
+    names[count] = fsh_rt_alloc(n + 1);
+    memcpy(names[count++], entry->d_name, n + 1);
+  }
+  closedir(dir);
+  qsort(names, count, sizeof(char *), fsh_by_name);
+  for (int64_t i = 0; i < count; i++) {
+    fsh_add(out, fsh_rt_str_from_cstring(names[i]));
+    fsh_rt_free(names[i]);
+  }
+  fsh_rt_free(names);
+  return 1;
+}
+
+// realpathSync: the resolved path. A failure names, as Node's does, the absolute path up to the
+// first part that can't be found, with lstat as its call.
+int32_t fsh_rt_fs_realpath(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "lstat", "");
+  char resolved[PATH_MAX];
+  if (realpath(c, resolved)) {
+    fsh_rt_free(c);
+    *out = fsh_rt_str_from_cstring(resolved);
+    return 1;
+  }
+  int failure = errno;
+  char whole[PATH_MAX * 2];
+  if (c[0] == '/') snprintf(whole, sizeof whole, "%s", c);
+  else snprintf(whole, sizeof whole, "%s/%s", fsh_rt_cwd(), c);
+  fsh_rt_free(c);
+  struct stat st;
+  for (char *slash = strchr(whole + 1, '/');; slash = strchr(slash + 1, '/')) {
+    if (slash) *slash = 0;
+    int missing = lstat(whole, &st) != 0;
+    if (missing) failure = errno;
+    if (missing || !slash) break;
+    *slash = '/';
+  }
+  return fsh_fs_failed(error, failure, "lstat", whole);
+}
+
+// mkdtempSync: a new directory named by the prefix and six random characters, as Node makes it.
+int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(prefix);
+  if (!c) return fsh_fs_failed(error, EINVAL, "mkdtemp", "");
+  size_t n = strlen(c);
+  char *pattern = fsh_rt_alloc(n + 7);
+  memcpy(pattern, c, n);
+  memcpy(pattern + n, "XXXXXX", 7);
+  fsh_rt_free(c);
+  char *made = fsh_rt_alloc(n + 7);
+  memcpy(made, pattern, n + 7);
+  int32_t result = 1;
+  if (mkdtemp(made)) *out = fsh_rt_str_from_cstring(made);
+  else result = fsh_fs_failed(error, errno, "mkdtemp", pattern);
+  fsh_rt_free(made);
+  fsh_rt_free(pattern);
+  return result;
+}
+
+static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
+  (void)st;
+  (void)kind;
+  (void)walk;
+  return remove(path);
+}
+
+// rmSync: a file, or with recursive a directory and all inside it; force passes over a missing
+// path. Node's own words for a directory given without recursive.
+int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "lstat", "");
+  struct stat st;
+  int32_t result = 1;
+  if (lstat(c, &st) != 0) {
+    if (!(force && errno == ENOENT)) result = fsh_fs_failed(error, errno, "lstat", c);
+  } else if (S_ISDIR(st.st_mode) && !recursive) {
+    size_t size = strlen(c) + 64;
+    char *message = fsh_rt_alloc(size);
+    snprintf(message, size, "Path is a directory: rm returned EISDIR (is a directory) %s", c);
+    result = fsh_io_parts(error, message, "ERR_FS_EISDIR", "rm", c);
+    fsh_rt_free(message);
+  } else if ((S_ISDIR(st.st_mode) ? nftw(c, fsh_remove_one, 16, FTW_DEPTH | FTW_PHYS) : unlink(c)) != 0) {
+    result = fsh_fs_failed(error, errno, "rm", c);
+  }
+  fsh_rt_free(c);
+  return result;
 }
 
 static void *fsh_pool_work(void *arg) {

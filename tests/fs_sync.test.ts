@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,9 +7,12 @@ import { join } from "node:path";
 // own, output compared.
 const tmp = mkdtempSync(join(tmpdir(), "fish-fs-sync-"));
 
-function compare(name: string, imports: string, body: string, nodeBody = body) {
+// `setup` makes the same files in both directories first; absolute paths print as `<dir>`.
+function compare(name: string, imports: string, body: string, setup: (dir: string) => void = () => {}, nodeBody = body) {
   const fishDir = mkdtempSync(join(tmp, `${name}-fish-`));
   const nodeDir = mkdtempSync(join(tmp, `${name}-node-`));
+  setup(fishDir);
+  setup(nodeDir);
   const program = join(tmp, `${name}.fsh`);
   writeFileSync(program, `${imports}\nfunction main(): void throws IoError {${body}\n}\n`);
   const out = join(tmp, name);
@@ -20,7 +23,8 @@ function compare(name: string, imports: string, body: string, nodeBody = body) {
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
-  expect(fish.stdout.toString()).toBe(node.stdout.toString());
+  const shown = (out: Buffer, dir: string) => out.toString().replaceAll(realpathSync(dir), "<dir>");
+  expect(shown(fish.stdout, fishDir)).toBe(shown(node.stdout, nodeDir));
 }
 
 test("readFileSync, writeFileSync and existsSync give what node's give", () => {
@@ -45,4 +49,37 @@ test("readFileSync, writeFileSync and existsSync give what node's give", () => {
   } catch (e) {
     console.log(e.message, e.code, e.syscall);
   }`);
+});
+
+test("statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync give what node's give", () => {
+  const imports = `import { writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync } from "node:fs";`;
+  compare("meta", imports, `
+  const s = statSync("d/f.txt");
+  console.log(s.size, s.mode, s.isFile(), s.isDirectory(), s.isSymbolicLink(), s.mtimeMs > 0);
+  const d = statSync("d");
+  console.log(d.isDirectory(), d.mode, lstatSync("ln").isSymbolicLink(), statSync("ln").isFile(), lstatSync("d/f.txt").isSymbolicLink());
+  console.log(readdirSync("."), readdirSync("d"));
+  console.log(realpathSync("ln"), realpathSync("d/../d/f.txt"));
+  const t = mkdtempSync("tmp-");
+  console.log(t.length, t.startsWith("tmp-"), statSync(t).isDirectory());
+  writeFileSync(t + "/inner.txt", "x");
+  rmSync(t, { recursive: true });
+  rmSync("missing", { force: true });
+  rmSync("d/f.txt");
+  console.log(existsSync(t), existsSync("d/f.txt"), readdirSync("."));
+  for (const p of ["missing", "d/missing/x"]) {
+    try { statSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+    try { lstatSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+    try { readdirSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+    try { realpathSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+    try { rmSync(p); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  }
+  try { readdirSync("ln"); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { mkdtempSync("nope/x-"); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { rmSync("d"); } catch (e) { console.log(e.message, e.code, e.syscall); }`, (dir) => {
+    mkdirSync(join(dir, "d"));
+    writeFileSync(join(dir, "d", "f.txt"), "abc");
+    writeFileSync(join(dir, "d", "b.txt"), "");
+    symlinkSync("d/f.txt", join(dir, "ln"));
+  });
 });

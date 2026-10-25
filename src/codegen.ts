@@ -4888,7 +4888,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return run(e);
   }
 
-  // node:fs's blocking calls: a read's bytes, or a failure raised as the IoError the runtime's
+  // node:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
   // parts make.
   function syncFile(e: Extract<Expr, { kind: "call" }>, name: string): string | undefined {
     const path = operand(e.args[0]!, e.args.slice(1));
@@ -4900,16 +4900,67 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     const parts = alloca("[4 x ptr]");
     const status = temp();
-    let out: string | undefined;
-    if (name === "fileReadSync") {
-      out = alloca(ARRAY);
-      emit(`${status} = call i32 @fsh_rt_fs_read_sync(ptr ${path}, ptr ${out}, ptr ${parts})`);
-    } else {
-      // The bytes are handed over, as to any call, and released once written.
-      const [bytes, given] = [alloca(ARRAY), owned(e.args[1]!)];
-      emit(`store ${ARRAY} ${given}, ptr ${bytes}`);
-      emit(`${status} = call i32 @fsh_rt_fs_write_sync(ptr ${path}, ptr ${bytes}, ptr ${parts})`);
-      dispose(given, arrayType("u8"));
+    // What a call fills in, read once it has succeeded.
+    let read: (() => string) | undefined;
+    const filled = (type: string, slot: string) => () => {
+      const v = temp();
+      emit(`${v} = load ${type}, ptr ${slot}`);
+      return v;
+    };
+    switch (name) {
+      case "fileReadSync":
+      case "dirRead": {
+        const out = alloca(ARRAY);
+        emit(`${status} = call i32 @fsh_rt_fs_${name === "dirRead" ? "readdir" : "read_sync"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        read = filled(ARRAY, out);
+        break;
+      }
+      case "fileWriteSync": {
+        // The bytes are handed over, as to any call, and released once written.
+        const [bytes, given] = [alloca(ARRAY), owned(e.args[1]!)];
+        emit(`store ${ARRAY} ${given}, ptr ${bytes}`);
+        emit(`${status} = call i32 @fsh_rt_fs_write_sync(ptr ${path}, ptr ${bytes}, ptr ${parts})`);
+        dispose(given, arrayType("u8"));
+        break;
+      }
+      case "pathReal":
+      case "dirTemp": {
+        const out = alloca("ptr");
+        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathReal" ? "realpath" : "mkdtemp"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        read = filled("ptr", out);
+        break;
+      }
+      case "pathStat": {
+        const [numbers, mtime, follow] = [alloca("[3 x i64]"), alloca("double"), temp()];
+        emit(`${follow} = zext i1 ${value(e.args[1]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_stat(ptr ${path}, i32 ${follow}, ptr ${numbers}, ptr ${mtime}, ptr ${parts})`);
+        read = () => {
+          const tuple = types.get(e) as ObjectType;
+          const number = (i: number) => {
+            const [at, v] = [temp(), temp()];
+            emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
+            emit(`${v} = load i64, ptr ${at}`);
+            return v;
+          };
+          const time = temp();
+          emit(`${time} = load double, ptr ${mtime}`);
+          let made = "zeroinitializer";
+          for (const [field, v] of [["0", number(0)], ["1", number(1)], ["2", time], ["3", number(2)]] as const) {
+            const next = temp();
+            emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(field === "2" ? "f64" : "i64")} ${v}, ${fieldPath(tuple, field).join(", ")}`);
+            made = next;
+          }
+          return made;
+        };
+        break;
+      }
+      case "pathRemove": {
+        const [recursive, force] = [temp(), temp()];
+        emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
+        emit(`${force} = zext i1 ${value(e.args[2]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_rm(ptr ${path}, i32 ${recursive}, i32 ${force}, ptr ${parts})`);
+        break;
+      }
     }
     const [failed, bad, good] = [temp(), label(), label()];
     emit(`${failed} = icmp ne i32 ${status}, 1`);
@@ -4917,11 +4968,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     startBlock(bad);
     raised(e, ioError(parts, current.raises.get(e)!.from as ClassType));
     startBlock(good);
-    if (!out) return undefined;
-    const bytes = temp();
-    emit(`${bytes} = load ${ARRAY}, ptr ${out}`);
-    if (!types.has(e)) pending.push({ v: bytes, type: arrayType("u8") });
-    return bytes;
+    if (!read) return undefined;
+    const result = read();
+    // Unused, as a statement, what a call gives is released when the statement ends.
+    const gives: Record<string, Type> = { fileReadSync: arrayType("u8"), dirRead: arrayType("string"), pathReal: "string", dirTemp: "string" };
+    if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
+    return result;
   }
 
   // `String.fromCharCode` and `String.fromCodePoint` over their gathered array, a temporary the

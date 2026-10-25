@@ -988,6 +988,53 @@ export function writeFileSync(path: string, data: string | u8[]): void throws Io
 export function existsSync(path: string): boolean {
   return pathExists(path);
 }
+
+export class Stats {
+  size: i64;
+  mode: i64;
+  mtimeMs: f64;
+  kind: i64;
+  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
+    this.size = size;
+    this.mode = mode;
+    this.mtimeMs = mtimeMs;
+    this.kind = kind;
+  }
+  isFile(): boolean { return this.kind === 1; }
+  isDirectory(): boolean { return this.kind === 2; }
+  isSymbolicLink(): boolean { return this.kind === 3; }
+}
+
+function stats(path: string, follow: boolean): Stats throws IoError {
+  const [size, mode, mtimeMs, kind] = pathStat(path, follow);
+  return new Stats(size, mode, mtimeMs, kind);
+}
+
+export function statSync(path: string): Stats throws IoError {
+  return stats(path, true);
+}
+
+export function lstatSync(path: string): Stats throws IoError {
+  return stats(path, false);
+}
+
+export function readdirSync(path: string): string[] throws IoError {
+  return dirRead(path);
+}
+
+export function realpathSync(path: string): string throws IoError {
+  return pathReal(path);
+}
+
+export function mkdtempSync(prefix: string): string throws IoError {
+  return dirTemp(prefix);
+}
+
+export type RmOptions = { recursive?: boolean; force?: boolean };
+
+export function rmSync(path: string, options: RmOptions = {}): void throws IoError {
+  pathRemove(path, options.recursive ?? false, options.force ?? false);
+}
 `,
   process: String.raw`
 declare function fsh_rt_argc(): i64;

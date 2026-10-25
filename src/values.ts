@@ -4422,6 +4422,12 @@ const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
   fileReadSync: [["string"], arrayType("u8"), true],
   fileWriteSync: [["string", arrayType("u8")], "void", true],
   pathExists: [["string"], "boolean", false],
+  // Size, mode, modification time in milliseconds, and kind: 1 a file, 2 a directory, 3 a link.
+  pathStat: [["string", "boolean"], tupleType(["i64", "i64", "f64", "i64"]), true],
+  dirRead: [["string"], arrayType("string"), true],
+  pathReal: [["string"], "string", true],
+  dirTemp: [["string"], "string", true],
+  pathRemove: [["string", "boolean", "boolean"], "void", true],
 };
 
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
