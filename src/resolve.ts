@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -41,6 +41,7 @@ export function typeName(name: string, at: Span, ...namespaces: Map<string, unkn
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
 export function storable(written: Type, at: Span): Type {
+  if (typeof written !== "string" && written.kind === "function" && written.generic) throw new CompileError(familyHeld("a field"), at.start, at.end);
   const type = stored(written);
   if (typeof type !== "string" && type.kind === "interface") {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
@@ -230,6 +231,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   function array(element: Type, at: TypeNode): Type {
     if (holdsRef(element)) throw unsupported("arrays of references", at);
     if (typeof element !== "string" && element.kind === "closure") throw unsupported("arrays of functions", at);
+    if (typeof element !== "string" && element.kind === "function" && element.generic) throw new CompileError(familyHeld("an array"), at.start, at.end);
     if (typeof element !== "string" && element.kind === "function") return arrayType(stored(element));
     if (typeof element !== "string" && element.kind === "interface" && stored(element) !== element) return arrayType(stored(element));
     // An interface describes values of many types, each laid out its own way, so an array of
@@ -434,6 +436,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // A generic alias checked before any use holds its parameters anywhere; each use gives them types.
     if (typeof t !== "string" && t.kind === "param" && deferring === 0) throw unsupported("unions holding a type parameter", node);
     // A union holds a value, so a function type in one is a stored callable.
+    if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
     if (holdsRef(t)) throw unsupported("unions holding references", node);
     return t;

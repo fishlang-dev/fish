@@ -181,3 +181,43 @@ function use(m: Mapper): i64 { return 0; }
 function main() {
   console.log(use(new Box()));
 }
+// case: generic_value_annotated_and_returned
+// expect: 1 a
+// expect: 2 b
+function id<T>(x: T): T { return x; }
+function make(): <T>(x: T) => T {
+  return id;
+}
+function main() {
+  const f: <T>(x: T) => T = id;
+  console.log(f(1), f("a"));
+  const g = make();
+  console.log(g(2), g("b"));
+}
+// case: generic_value_field_refused
+// error: a field can't hold a generic function type: that would box it in a Dyn, whose table holds one function
+function id<T>(x: T): T { return x; }
+class C {
+  f: <T>(x: T) => T = id;
+}
+function main() {}
+// case: generic_value_array_refused
+// error: an array can't hold a generic function type
+function main() {
+  const xs: (<T>(x: T) => T)[] = [];
+}
+// case: generic_value_union_refused
+// error: a union can't hold a generic function type
+function main() {
+  const u: (<T>(x: T) => T) | null = null;
+}
+// case: generic_value_annotated_not_generic
+// error: it takes a generic function, one that works for every type
+function main() {
+  const f: <T>(x: T) => T = (x: i64): i64 => x;
+}
+// case: generic_value_declared_without_value
+// error: 'w' needs its value where it is declared, since a generic function type describes the generic function it holds
+function main() {
+  let w: <T>(x: T) => T;
+}

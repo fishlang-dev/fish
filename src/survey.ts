@@ -69,7 +69,7 @@ const RULES: Rule[] = [
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
-  { id: "genericMethods", action: "unsupported", title: "generic function types, generic arrows not held by a const, and generic methods in interfaces", feature: "Generic function values" },
+  { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
@@ -442,8 +442,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     if (rest >= 0 && (rest < elements.length - 1 || elements.some((e) => e.optional))) push("tuples");
   }
   if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
-  if (n.kind === "arrow" && (n.typeParams as unknown[]).length > 0 && !heldArrows.has(n)) push("genericMethods");
-  if (n.kind === "function" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && Array.isArray(n.params) && "returns" in n) push("genericMethods");
+  if ((n.kind === "array" && genericFunctionType(n.element)) || (n.kind === "union" && (n.types as unknown[]).some(genericFunctionType))) push("genericFunctionsHeld");
   if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
   // A dynamic `import("x")` names its module as its first argument.
   const [first] = Array.isArray(n.args) ? n.args : [];
@@ -541,10 +540,17 @@ function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) =
   if (declarations.some((d) => d.target.kind !== "ident" && !(head ? plainPattern(d.target) : fishPattern(d.target)))) push("destructuring");
 }
 
+// A generic function type, as `<T>(x: T) => T`, seen through parentheses.
+function genericFunctionType(t: unknown): boolean {
+  if (!isNode(t)) return false;
+  if (t.kind === "parenthesized") return genericFunctionType(t.type);
+  return t.kind === "function" && Array.isArray(t.typeParams) && t.typeParams.length > 0 && "returns" in t;
+}
+
 function memberRules(n: Node, push: (id: string) => void) {
   if (n.optional === true) push("A2");
   if (isPrivate(n.name) || (Array.isArray(n.modifiers) && n.modifiers.includes("abstract"))) push("classForms");
-  if (n.kind === "method" && Array.isArray(n.typeParams) && n.typeParams.length > 0 && interfaceMembers.has(n)) push("genericMethods");
+  if (n.kind === "field" && genericFunctionType(n.type)) push("genericFunctionsHeld");
 }
 
 // The report as text: what was read, the grade, the rewrites that cost most, then what Fish

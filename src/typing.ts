@@ -300,6 +300,8 @@ export function sameCallable(a: Type, b: Type): boolean {
 // arrays too.
 export function stored(t: Type): Type {
   if (typeof t === "string") return t;
+  // A generic function type, like an interface, describes a value without being one.
+  if (t.kind === "function" && t.generic) return t;
   if (t.kind === "function") return callableType(t);
   // A `Promise<T>` stored holds a future, boxed.
   if (t.kind === "interface" && promised.has(t)) return dynType(t);
@@ -1255,6 +1257,12 @@ export function matchType(t: RegexType): ObjectType {
     keys.set(found, key);
   }
   return found;
+}
+
+// Why a generic function type can't be held where it is: as `where` it would be boxed, and a box
+// holds one function, where a generic one is a family made one per call.
+export function familyHeld(where: string): string {
+  return `${where} can't hold a generic function type: that would box it in a Dyn, whose table holds one function, and a generic function is a family made one per call; give it one type, as '(x: i64) => i64', or take it as a parameter`;
 }
 
 export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;

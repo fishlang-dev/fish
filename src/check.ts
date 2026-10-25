@@ -822,7 +822,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     if (!site) return returns;
     const f = instance.body;
     const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
-    if (declared && !isInterface(declared)) return declared;
+    if (declared && !describes(declared)) return declared;
     const own = scopeOf(instance);
     return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
   }
@@ -836,7 +836,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
     const declared = returnTypeOf(f, instance.bindings);
-    if (declared && !isInterface(declared)) return declared;
+    if (declared && !describes(declared)) return declared;
     if (inProgress.has(instance)) {
       if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
       if (f.async) throw new CompileError(`an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
@@ -925,7 +925,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     }
     // A function returning an interface returns its one concrete type, which must satisfy it.
     const trait = declared && typeof declared !== "string" && declared.kind === "interface" ? declared : undefined;
-    if (trait) declared = undefined;
+    // A function returning a generic function type returns the one generic function it gives.
+    const family = declared && typeof declared !== "string" && declared.kind === "function" && declared.generic ? declared : undefined;
+    if (trait || family) declared = undefined;
     let inferred: Type | undefined;
     // The awaits written where the state machine can stop at them.
     const awaitable = new Set<Expr>();
@@ -1186,6 +1188,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       const type = stored(resolveType(d.type));
       if (lower(type) === "void") throw new CompileError(`'${name}' can't be of type 'void', which no value has`, d.start, d.end);
       if (isInterface(type)) throw new CompileError(`'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
+      if (typeof type !== "string" && type.kind === "function" && type.generic) throw new CompileError(`'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
       declare(name, type, true, false, s);
       return undefined;
     }
@@ -1742,10 +1745,15 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           if (!d.init) return unassigned(s, d, d.target.name);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.
-          const annotated = (d.type && stored(resolveType(d.type))) || demands.get(s) || partType(s);
+          const declared = (d.type && stored(resolveType(d.type))) || demands.get(s) || partType(s);
+          // A generic function type describes the value, which keeps its own type, as an
+          // interface's does.
+          const family = typeof declared !== "string" && declared?.kind === "function" && declared.generic ? declared : undefined;
+          const annotated = family ? undefined : declared;
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
+          if (family && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to type '${show(family)}': it takes a generic function, one that works for every type`, d.init.start, d.init.end);
           // An interface describes the value, which keeps its own concrete type.
           // A `let` may later hold another member of an enum, so it holds the enum.
           const widened = s.keyword === "let" && !annotated ? widenLet(type) : type;
@@ -2028,6 +2036,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
+          if (family && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(family)}': it takes a generic function, one that works for every type`, (s.value ?? s).start, (s.value ?? s).end);
           const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
           if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;
@@ -2320,6 +2329,9 @@ export function selfOf(f: Body): Body["self"] {
 const SUPER = "super()";
 
 const isInterface = (t: Type) => typeof t !== "string" && t.kind === "interface";
+// A return type describing the value returned, which keeps its own type: an interface, or a
+// generic function type.
+const describes = (t: Type) => isInterface(t) || (typeof t !== "string" && t.kind === "function" && t.generic !== undefined);
 
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
