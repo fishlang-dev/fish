@@ -2439,6 +2439,8 @@ static void fsh_insp_quote(fsh_sb *b, const char *p, int64_t n) {
 
 typedef struct {
   int64_t indent, depth;
+  // Node's showHidden, which util.format's %o turns on: an array also shows its [length].
+  int hidden;
 } fsh_ictx;
 
 static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse);
@@ -2652,7 +2654,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     snprintf(open, sizeof open, "%s(%lld) {", v->kind == FSH_INSP_MAP ? "Map" : "Set", (long long)size);
     strcpy(cut, v->kind == FSH_INSP_MAP ? "[Map]" : "[Set]");
   }
-  if (size == 0) {
+  int hidden = c->hidden && v->kind == FSH_INSP_ARRAY;
+  if (size == 0 && !hidden) {
     fsh_sb b = {0};
     fsh_sb_str(&b, open);
     fsh_sb_str(&b, close);
@@ -2663,7 +2666,7 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   c->depth = recurse;
   int64_t kept = v->kind == FSH_INSP_MAP ? v->count / 2 : v->count;
   int64_t rest = size - kept;
-  char **output = fsh_rt_alloc((kept + 1) * sizeof(char *));
+  char **output = fsh_rt_alloc((kept + 2) * sizeof(char *));
   int64_t n = 0;
   int numeric = 1;
   c->indent += 2;
@@ -2701,7 +2704,15 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     snprintf(text, sizeof text, "... %lld more item%s", (long long)rest, rest > 1 ? "s" : "");
     output[n++] = fsh_insp_copy(text);
   }
-  char *result = fsh_insp_reduce(c, output, n, open, close, v->kind == FSH_INSP_ARRAY, rest > 0, numeric, recurse);
+  // A hidden key comes after the elements and is no number, so the columns pad as text; as in
+  // Node, only an entry past the 100th is kept out of them.
+  if (hidden) {
+    char text[64];
+    snprintf(text, sizeof text, "[length]: %lld", (long long)size);
+    output[n++] = fsh_insp_copy(text);
+    numeric = 0;
+  }
+  char *result = fsh_insp_reduce(c, output, n, open, close, v->kind == FSH_INSP_ARRAY, n > 100, numeric, recurse);
   for (int64_t i = 0; i < n; i++) fsh_rt_free(output[i]);
   fsh_rt_free(output);
   return result;
@@ -2713,12 +2724,208 @@ fsh_str *fsh_rt_insp_done(fsh_insp *v) {
   fsh_str *s;
   if (v->kind == FSH_INSP_STRING) s = fsh_str_of(v->text, v->length);
   else {
-    fsh_ictx c = {0, 0};
+    fsh_ictx c = {0, 0, 0};
     char *text = fsh_insp_value(&c, v, 0);
     s = fsh_str_of(text, strlen(text));
     fsh_rt_free(text);
   }
   fsh_insp_free(v);
+  return s;
+}
+
+// A tree laid out at an inspect depth. Node's default depth 2 starts at 0, so depth d starts
+// at 2 - d, which the trees codegen builds are also cut by.
+static char *fsh_insp_at(fsh_insp *v, int64_t depth, int hidden) {
+  fsh_ictx c = {0, 0, hidden};
+  return fsh_insp_value(&c, v, 2 - depth);
+}
+
+// Text being built for JavaScript's String(x) of a value with parts, which codegen writes in.
+fsh_sb *fsh_rt_text_new(void) {
+  fsh_sb *b = fsh_rt_alloc(sizeof(fsh_sb));
+  memset(b, 0, sizeof *b);
+  return b;
+}
+
+void fsh_rt_text_add(fsh_sb *b, fsh_str *s) { fsh_sb_put(b, s->bytes, s->length); }
+
+void fsh_rt_text_raw(fsh_sb *b, const char *s) { fsh_sb_str(b, s); }
+
+void fsh_rt_text_i64(fsh_sb *b, int64_t x) {
+  char t[32];
+  snprintf(t, sizeof t, "%lld", (long long)x);
+  fsh_sb_str(b, t);
+}
+
+void fsh_rt_text_u64(fsh_sb *b, int64_t x) {
+  char t[32];
+  snprintf(t, sizeof t, "%llu", (unsigned long long)x);
+  fsh_sb_str(b, t);
+}
+
+void fsh_rt_text_f64(fsh_sb *b, double x) {
+  char t[32];
+  fsh_sb_str(b, fsh_format(x, 0, t));
+}
+
+fsh_str *fsh_rt_text_done(fsh_sb *b) {
+  fsh_str *s = fsh_str_of(b->p ? b->p : "", b->n);
+  fsh_rt_free(b->p);
+  fsh_rt_free(b);
+  return s;
+}
+
+// util.format's arguments as codegen describes them: a scalar's value, a string, or for a value
+// with parts its String(x), as JavaScript writes it, and its inspect tree, each built only when a
+// specifier may ask for it. A string is lent; the text and tree of a value with parts are the
+// routine's to free.
+enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS };
+
+typedef struct {
+  int32_t kind;
+  int64_t whole;
+  double number;
+  fsh_str *text;
+  fsh_insp *tree;
+} fsh_farg;
+
+static void fsh_farg_number(fsh_sb *b, double x) {
+  char t[32];
+  fsh_sb_str(b, fsh_rt_format_f64(x, t));
+}
+
+// A scalar as console.log prints it on its own.
+static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
+  char t[32];
+  switch (a->kind) {
+    case FSH_FARG_STRING: fsh_sb_put(b, a->text->bytes, a->text->length); break;
+    case FSH_FARG_INT: snprintf(t, sizeof t, "%lld", (long long)a->whole); fsh_sb_str(b, t); break;
+    case FSH_FARG_UINT: snprintf(t, sizeof t, "%llu", (unsigned long long)a->whole); fsh_sb_str(b, t); break;
+    case FSH_FARG_FLOAT: fsh_farg_number(b, a->number); break;
+    case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
+    default: fsh_sb_str(b, "null"); break;
+  }
+}
+
+// An argument inspected at a depth: a string quoted, a value with parts laid out.
+static void fsh_farg_inspect(fsh_sb *b, fsh_farg *a, int64_t depth, int hidden) {
+  if (a->kind != FSH_FARG_STRING && a->kind != FSH_FARG_PARTS) {
+    fsh_farg_plain(b, a);
+    return;
+  }
+  fsh_insp *quoted = a->kind == FSH_FARG_STRING ? fsh_rt_insp_string(a->text) : NULL;
+  char *text = fsh_insp_at(quoted ? quoted : a->tree, depth, hidden);
+  fsh_sb_str(b, text);
+  fsh_rt_free(text);
+  if (quoted) fsh_insp_free(quoted);
+}
+
+// An argument as String(x) gives it, for parseInt and parseFloat to read.
+static fsh_str *fsh_farg_string(fsh_farg *a) {
+  if (a->kind == FSH_FARG_STRING || a->kind == FSH_FARG_PARTS) {
+    fsh_rt_str_retain(a->text);
+    return a->text;
+  }
+  fsh_sb b = {0};
+  if (a->kind == FSH_FARG_FLOAT) {
+    char t[32];
+    fsh_sb_str(&b, fsh_format(a->number, 0, t));
+  } else fsh_farg_plain(&b, a);
+  fsh_str *s = fsh_str_of(b.p, b.n);
+  fsh_rt_free(b.p);
+  return s;
+}
+
+// JavaScript's parseInt with no radix, as a double: digits after white space, a sign and '0x',
+// NaN when none start the text, -0 for a negative zero.
+static double fsh_js_parse_int(fsh_str *s) {
+  const unsigned char *p = (const unsigned char *)s->bytes;
+  int64_t n = s->length, i = fsh_js_skip(p, n);
+  int negative = i < n && p[i] == '-';
+  if (i < n && (p[i] == '-' || p[i] == '+')) i++;
+  int hex = i + 1 < n && p[i] == '0' && (p[i + 1] == 'x' || p[i + 1] == 'X');
+  if (hex) i += 2;
+  int64_t start = i;
+  double v = 0;
+  if (hex) {
+    for (; i < n && fsh_digit(p[i]) < 16; i++) v = v * 16 + fsh_digit(p[i]);
+  } else {
+    while (i < n && p[i] >= '0' && p[i] <= '9') i++;
+    if (i > start) v = fsh_js_strtod(p + start, i - start);
+  }
+  if (i == start) return NAN;
+  return negative ? -v : v;
+}
+
+// What %d, %i and %f write: Number(x), parseInt(String(x)) and parseFloat(String(x)), an
+// integer written as Fish writes it.
+static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
+  if (a->kind == FSH_FARG_INT || a->kind == FSH_FARG_UINT) {
+    fsh_farg_plain(b, a);
+    return;
+  }
+  double x = NAN;
+  if (spec == 'd' && a->kind != FSH_FARG_STRING && a->kind != FSH_FARG_PARTS) {
+    x = a->kind == FSH_FARG_FLOAT ? a->number : a->kind == FSH_FARG_BOOL ? (double)a->whole : 0;
+  } else {
+    fsh_str *text = fsh_farg_string(a);
+    double read;
+    if (spec == 'd') x = fsh_rt_parse_number(text, &read) ? read : NAN;
+    else if (spec == 'f') x = fsh_rt_parse_float(text, &read) ? read : NAN;
+    else x = fsh_js_parse_int(text);
+    fsh_rt_str_release(text);
+  }
+  fsh_farg_number(b, x);
+}
+
+// A port of Node's formatWithOptionsInternal: with a string first and more after it, each
+// specifier takes the next argument while one is left, %% is a percent sign, and any other letter stays as written; the
+// arguments left are appended after spaces, strings as they are and anything else inspected.
+fsh_str *fsh_rt_format(fsh_farg *args, int64_t n) {
+  fsh_sb b = {0};
+  int64_t a = 0;
+  const char *join = "";
+  if (n > 1 && args[0].kind == FSH_FARG_STRING) {
+    const char *f = args[0].text->bytes;
+    int64_t length = args[0].text->length, last = 0;
+    for (int64_t i = 0; i < length - 1; i++) {
+      if (f[i] != '%') continue;
+      char next = f[++i];
+      if (next == '%') {
+        fsh_sb_put(&b, f + last, i - last);
+        last = i + 1;
+        continue;
+      }
+      if (a + 1 == n || next == 0 || !strchr("sdifoOc", next)) continue;
+      fsh_farg *x = &args[++a];
+      if (last != i - 1) fsh_sb_put(&b, f + last, i - 1 - last);
+      if (next == 's') {
+        if (x->kind == FSH_FARG_PARTS) fsh_farg_inspect(&b, x, 0, 0);
+        else fsh_farg_plain(&b, x);
+      } else if (next == 'o') fsh_farg_inspect(&b, x, 4, 1);
+      else if (next == 'O') fsh_farg_inspect(&b, x, 2, 0);
+      else if (next != 'c') fsh_farg_numeric(&b, x, next);
+      last = i + 1;
+    }
+    if (last != 0) {
+      a++;
+      join = " ";
+      if (last < length) fsh_sb_put(&b, f + last, length - last);
+    }
+  }
+  for (; a < n; a++) {
+    fsh_sb_str(&b, join);
+    join = " ";
+    if (args[a].kind == FSH_FARG_STRING) fsh_farg_plain(&b, &args[a]);
+    else fsh_farg_inspect(&b, &args[a], 2, 0);
+  }
+  for (int64_t i = 0; i < n; i++) {
+    if (args[i].kind != FSH_FARG_PARTS) continue;
+    if (args[i].text) fsh_rt_str_release(args[i].text);
+    if (args[i].tree) fsh_insp_free(args[i].tree);
+  }
+  fsh_str *s = fsh_str_of(b.p ? b.p : "", b.n);
+  fsh_rt_free(b.p);
   return s;
 }
 ` + CASEMAP + String.raw`

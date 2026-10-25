@@ -695,6 +695,13 @@ export function availableParallelism(): i64 {
   return unsafe { fsh_rt_os_parallelism() };
 }
 `,
+  // The checker gives these their meaning, as each takes values of any type; a rest parameter
+  // keeps them from being used as values.
+  util: String.raw`
+export function format(...args: string[]): string {
+  return args.join(" ");
+}
+`,
   // A port of Node's path.posix for the functions Fish has, so each gives what Node gives.
   path: String.raw`
 declare function fsh_rt_cwd(): Ptr<u8>;

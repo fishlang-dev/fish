@@ -189,6 +189,8 @@ export const fileCalls = new WeakSet<Expr>();
 export const syncFileCalls = new WeakMap<Expr, string>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
 export const printCalls = new WeakSet<Expr>();
+// node:util's `format` calls.
+export const formatCalls = new WeakSet<Expr>();
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
@@ -832,15 +834,7 @@ export function expressions(ctx: Context) {
     if (isPrint(callee) && !lookup(printer) && !classes.has(printer) && !byName.has(printer) && !byName.has(`const ${printer}`) && !enums.has(printer)) {
       if (e.optional || (callee.kind === "member" && callee.optional)) throw new CompileError(`'${printer}' is always there, so it is called without '?.'`, e.start, e.end);
       printCalls.add(e);
-      for (const a of e.args) {
-        const type = a.kind === "string" ? "void" : read(a);
-        if (printable(type)) continue;
-        printed.add(a);
-        // Anything else prints as Node's util.inspect prints it.
-        const part = uninspectable(type);
-        if (!part) continue;
-        throw new CompileError(typeof part !== "string" && (part.kind === "function" || part.kind === "closure" || part.kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
-      }
+      shown(e.args);
       return { type: "void", what: "printing" };
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
@@ -1095,6 +1089,15 @@ export function expressions(ctx: Context) {
       return { type: "string", what: "'String'" };
     }
     const target = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
+    // node:util's functions that take any values, as Node's do, given their meaning here.
+    const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    if (util === "format") {
+      if (e.optional) throw new CompileError("'format' is always there, so it is called without '?.'", e.start, e.end);
+      refuseSpread(e.args);
+      shown(e.args);
+      formatCalls.add(e);
+      return { type: "string", what: "'format'" };
+    }
     if (target && (target as { macro?: boolean }).macro) throw new CompileError(`'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
@@ -3539,6 +3542,19 @@ export function expressions(ctx: Context) {
   }
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
+  // Values printed, or formatted as util.format does: what isn't a scalar is shown as Node's
+  // util.inspect shows it.
+  function shown(args: Expr[]) {
+    for (const a of args) {
+      const type = a.kind === "string" ? "void" : read(a);
+      if (printable(type)) continue;
+      printed.add(a);
+      const part = uninspectable(type);
+      if (!part) continue;
+      throw new CompileError(typeof part !== "string" && (part.kind === "function" || part.kind === "closure" || part.kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
+    }
+  }
+
   function joined(e: Expr, type: Type, into: string) {
     if (stringLike(type)) {
       if (type !== "string") coerce(e, type, "string", "");

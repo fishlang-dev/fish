@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { computed, restText, dynCalls, printCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
+import { computed, restText, dynCalls, printCalls, formatCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -472,8 +472,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return during(e, () => handOver(e.args ?? [], name, e));
       }
       case "call": {
-        // Printing, `JSON.stringify` and `Array.isArray` read their arguments.
-        if (printCalls.has(e) || jsonCalls.get(e) === "stringify" || kindTests.has(e)) {
+        // Printing, `format`, `JSON.stringify` and `Array.isArray` read their arguments.
+        if (printCalls.has(e) || formatCalls.has(e) || jsonCalls.get(e) === "stringify" || kindTests.has(e)) {
           for (const a of e.args) expr(a);
           return;
         }

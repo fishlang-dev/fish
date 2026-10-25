@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, syncFileCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -40,6 +40,11 @@ const FLOAT_ARITHMETIC: Partial<Record<BinaryOp, string>> = { "+": "fadd", "-": 
 // Every function has unwind tables, and when panics unwind, the C personality, whose cleanups
 // run a panic's drops.
 const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
+
+// An argument described for the runtime's util.format routine: its kind, an integer's or a
+// boolean's value, a float's, a string or String(x), and an inspect tree.
+const FARG = "{ i32, i64, double, ptr, ptr }";
+const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6 };
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
@@ -132,6 +137,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const jsonWriters = new Map<Type, string>();
   const jsonReaders = new Map<Type, string>();
   const inspectors = new Map<Type, string>();
+  // The functions writing String(x) of a value with parts, by its type.
+  const stringers = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
   // Whether the one thunk copying a Dyn that can't be copied is made.
@@ -2866,6 +2873,227 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return text;
   }
 
+  // util.format's call: each argument described for the runtime's routine, which formats them.
+  function formatted(e: Extract<Expr, { kind: "call" }>): string {
+    const n = e.args.length;
+    const slots = alloca(`[${n} x ${FARG}]`);
+    e.args.forEach((a, i) => {
+      const v = a.kind === "string" ? text(a.value) : operand(a, e.args.slice(i + 1));
+      const at = temp();
+      emit(`${at} = getelementptr [${n} x ${FARG}], ptr ${slots}, i32 0, i32 ${i}`);
+      describe(at, v, a.kind === "string" ? "string" : (current.spelled?.get(a) ?? valueType(a)), { text: true, depth: 4 });
+    });
+    const result = temp();
+    emit(`${result} = call ptr @fsh_rt_format(ptr ${slots}, i64 ${n})`);
+    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    return result;
+  }
+
+  // An argument's description: its kind and value, and for a value with parts its String(x) when
+  // `need.text` and its inspect tree, cut at `need.depth`, when that isn't -1. A union is
+  // described by its member.
+  function describe(at: string, v: string, type: Type, need: { text: boolean; depth: number }) {
+    const t = lower(type);
+    const put = (index: number, of: string, x: string) => {
+      const p = temp();
+      emit(`${p} = getelementptr ${FARG}, ptr ${at}, i32 0, i32 ${index}`);
+      emit(`store ${of} ${x}, ptr ${p}`);
+    };
+    const whole = (kind: number, x: string) => {
+      put(0, "i32", String(kind));
+      put(1, "i64", x);
+    };
+    if (typeof t !== "string" && t.kind === "union") {
+      const members = writtenMembers(type, t);
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
+      const cases = t.members.map(() => label());
+      const end = label();
+      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      t.members.forEach((m, i) => {
+        startBlock(cases[i]!);
+        describe(at, convert(v, t, m), members[i]!, need);
+        emit(`br label %${end}`);
+      });
+      startBlock(end);
+      return;
+    }
+    if (typeof t !== "string" && t.kind === "literal") {
+      const x = t.value;
+      if (typeof x === "string") {
+        put(0, "i32", String(FARG_KINDS.string));
+        put(3, "ptr", text(x));
+      } else if (typeof x === "boolean") whole(FARG_KINDS.boolean, x ? "1" : "0");
+      else whole(FARG_KINDS.int, String(x));
+      return;
+    }
+    if (t === "string") {
+      put(0, "i32", String(FARG_KINDS.string));
+      put(3, "ptr", v);
+    } else if (t === "boolean") {
+      const x = temp();
+      emit(`${x} = zext i1 ${v} to i64`);
+      whole(FARG_KINDS.boolean, x);
+    } else if (t === "null" || t === "void" || t === "never") put(0, "i32", String(FARG_KINDS.null));
+    else if (isFloat(t)) {
+      let x = v;
+      if (t === "f32") {
+        x = temp();
+        emit(`${x} = fpext float ${v} to double`);
+      }
+      put(0, "i32", String(FARG_KINDS.float));
+      put(2, "double", x);
+    } else if (isInteger(t)) {
+      const { bits, signed } = INTEGERS[t];
+      let x = v;
+      if (bits < 64) {
+        x = temp();
+        emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      }
+      whole(signed ? FARG_KINDS.int : FARG_KINDS.uint, x);
+    } else {
+      put(0, "i32", String(FARG_KINDS.parts));
+      put(3, "ptr", need.text ? jsText(v, type) : "null");
+      put(4, "ptr", need.depth >= 0 ? inspectTree(v, type, String(2 - need.depth)) : "null");
+    }
+  }
+
+  // JavaScript's String(x) of a value with parts, a new string: an array's elements joined by
+  // commas, an empty one's as nothing; an object or instance is `[object Object]`.
+  function jsText(v: string, type: Type): string {
+    const [b, s] = [temp(), temp()];
+    emit(`${b} = call ptr @fsh_rt_text_new()`);
+    jsTextInto(b, v, type);
+    emit(`${s} = call ptr @fsh_rt_text_done(ptr ${b})`);
+    return s;
+  }
+
+  function jsTextInto(b: string, v: string, type: Type) {
+    const t = lower(type);
+    const raw = (s: string) => emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(s)})`);
+    if (typeof t !== "string" && t.kind === "literal") return raw(String(t.value));
+    if (t === "string") return emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${v})`);
+    if (t === "null" || t === "void" || t === "never") return;
+    if (t === "boolean") {
+      const word = temp();
+      emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
+      return emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${word})`);
+    }
+    if (isFloat(t)) {
+      let x = v;
+      if (t === "f32") {
+        x = temp();
+        emit(`${x} = fpext float ${v} to double`);
+      }
+      return emit(`call void @fsh_rt_text_f64(ptr ${b}, double ${x})`);
+    }
+    if (isInteger(t)) {
+      const { bits, signed } = INTEGERS[t];
+      let x = v;
+      if (bits < 64) {
+        x = temp();
+        emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      }
+      return emit(`call void @fsh_rt_text_${signed ? "i64" : "u64"}(ptr ${b}, i64 ${x})`);
+    }
+    if (typeof t === "string") return;
+    if (t.kind === "union") {
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
+      const cases = t.members.map(() => label());
+      const end = label();
+      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      t.members.forEach((m, i) => {
+        startBlock(cases[i]!);
+        jsTextInto(b, convert(v, t, m), m);
+        emit(`br label %${end}`);
+      });
+      startBlock(end);
+      return;
+    }
+    if (t.kind === "map") return raw(t.set ? "[object Set]" : "[object Map]");
+    if (t.kind === "regex") return raw(`/${t.source}/${t.flags}`);
+    if (t.kind !== "array" && t.kind !== "fixed" && t.kind !== "ref" && t.kind !== "recursive" && !(t.kind === "object" && isTuple(t))) return raw("[object Object]");
+    let name = stringers.get(t);
+    if (!name) {
+      name = `@"fsh.text.${stringers.size}"`;
+      stringers.set(t, name);
+      const saved = { allocas, body, temps, labels, block, pending, scopes };
+      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      jsTextParts("%b", "%v", t);
+      emit("ret void");
+      out.push(`define internal void ${name}(${llvm(t)} %v, ptr %b) {`, "entry:", ...allocas, ...body, "}", "");
+      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    }
+    emit(`call void ${name}(${llvm(t)} ${v}, ptr ${b})`);
+  }
+
+  // What an array, a tuple or a reference writes for String(x).
+  function jsTextParts(b: string, v: string, t: Exclude<Type, string>) {
+    if (t.kind === "ref" || t.kind === "recursive") {
+      const to = t.kind === "ref" ? t.to : t.of;
+      const held = temp();
+      emit(`${held} = load ${llvm(lower(to))}, ptr ${v}`);
+      return jsTextInto(b, held, to);
+    }
+    const comma = () => emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(",")})`);
+    if (t.kind === "object") {
+      const [order, rest] = tupleOrder(t);
+      const length = t.required === undefined ? undefined : tupleLength(v, t);
+      order.forEach(({ f, i }, n) => present(length, n, () => {
+        if (n > 0) comma();
+        const x = temp();
+        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+        jsTextInto(b, x, f.type);
+      }));
+      if (!rest) return;
+      const many = temp();
+      emit(`${many} = extractvalue ${llvm(t)} ${v}, ${rest.i}`);
+      return jsElements(b, many, rest.f.type as ArrayType, order.length > 0);
+    }
+    if (t.kind === "array" || t.kind === "fixed") return jsElements(b, v, t, false);
+  }
+
+  // An array's elements, each after a comma but the first unless `after` says one came before.
+  function jsElements(b: string, v: string, t: ArrayType | FixedType, after: boolean) {
+    const element = llvm(lower(t.element));
+    const [length, data] = [temp(), temp()];
+    if (t.kind === "array") {
+      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+    } else {
+      const slot = alloca(llvm(t));
+      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
+      emit(`${length} = add i64 0, ${t.size}`);
+      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+    }
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, loop, separate, write, done] = [label(), label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    startBlock(loop);
+    const first = temp();
+    emit(`${first} = icmp eq i64 ${i}, 0`);
+    emit(`br i1 ${after ? "false" : first}, label %${write}, label %${separate}`);
+    startBlock(separate);
+    emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(",")})`);
+    emit(`br label %${write}`);
+    startBlock(write);
+    const [at, x, next] = [temp(), temp(), temp()];
+    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    emit(`${x} = load ${element}, ptr ${at}`);
+    jsTextInto(b, x, t.element);
+    emit(`${next} = add i64 ${i}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
+  }
+
   // A value's tree for the runtime's layout, through the function made for its type when it
   // has parts. The type as written is kept beside the lowered one, for how fields were spelled.
   // `depth` is how deep in the printed value this one sits, as Node counts it.
@@ -4992,6 +5220,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
     if (!target) {
+      if (formatCalls.has(e)) return formatted(e);
       if (printCalls.has(e)) {
         print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert, printStream(e.callee));
         return undefined;
