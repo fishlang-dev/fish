@@ -72,7 +72,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("for (const [k, v] of m) {}\nfor (const { x, y: z } of ps) {}\nfor (const [a = 1] of q) {}\n")).toEqual({ destructuring: 1 });
   expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({});
   expect(counts("function f(n: number) { class C { m() { return n; } } class D { m(k: number) { return k; } } }\n")).toEqual({ localCaptures: 1 });
-  expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\n")).toEqual({ G9: 1, promiseAll: 1 });
+  expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\nconst q = Promise.any([]);\n")).toEqual({ G9: 1, promiseSettled: 1 });
   expect(counts("class A { #x = 1; get #g() { return 1; } m() { return this.#x; } }\n")).toEqual({ classForms: 3 });
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
   expect(counts("function f(a?: string) { return () => class {}; }\n")).toEqual({ A2: 1 });
