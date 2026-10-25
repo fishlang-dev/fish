@@ -591,7 +591,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         if (fields.some((f) => f.name === name)) throw new CompileError(`two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
         const field = t.optional === "+" ? optionalField(name, value)
           : t.optional === "-" ? { name, type: from?.optional === "added" ? withoutNull(value) : value }
-          : from?.optional ? kept(name, value, from.optional)
+          : from?.optional && from.optional !== "undefined" ? kept(name, value, from.optional)
           : { name, type: value };
         fields.push({ ...field, ...(readonly && { readonly: true }) });
       }
@@ -740,9 +740,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
-    // `T | undefined` is optional too, so printing and JSON leave it out while empty.
-    const absent = m.optional ? m.type : withoutUndefined(m.type);
-    const f = absent ? optionalField(m.name, unionMember(absent)) : { name: m.name, type: resolveType(m.type) };
+    // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
+    const f: Field = m.optional ? optionalField(m.name, unionMember(m.type)) : withoutUndefined(m.type) ? { name: m.name, type: resolveType(m.type), optional: "undefined" } : { name: m.name, type: resolveType(m.type) };
     return { ...f, type: storable(f.type, m), ...(m.readonly && { readonly: true }) };
   }
 }

@@ -8,7 +8,9 @@ export type Access = "public" | "private" | "protected";
 // A readonly field can't be written after construction, at any depth.
 // `optional` marks a field written `name?: T`, whose type holds `null` for the value left out:
 // "added" when `?` added it, "held" when T already held it, so `Required` removes only the first.
-export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" };
+// "undefined" marks a field spelled `T | undefined`, which may be left out like an optional one,
+// and which printing and JSON leave out while it is empty.
+export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" | "undefined" };
 
 // Fields are sorted by name, which is also their order in memory.
 // A tuple is an object whose fields are its positions, `0`, `1` and on, marked `tuple`.
@@ -1370,5 +1372,5 @@ export function show(t: Type): string {
   if (t.tuple) return `[${elementsOf(t).map(show).join(", ")}]`;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
-  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
+  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional && f.optional !== "undefined" ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
 }

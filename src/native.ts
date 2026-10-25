@@ -1299,7 +1299,8 @@ int fsh_rt_parse_number(fsh_str *s, double *out) {
   return 1;
 }
 
-char *fsh_rt_format_f64(double x, char *out) { return fsh_format(x, 0, out); }
+// A float as console.log prints one, which, unlike String(x), keeps the sign of -0.
+char *fsh_rt_format_f64(double x, char *out) { return x == 0 && signbit(x) ? strcpy(out, "-0") : fsh_format(x, 0, out); }
 
 fsh_str *fsh_rt_str_from_f64(double x);
 
@@ -1348,7 +1349,7 @@ fsh_str *fsh_rt_int_to_fixed(int64_t v, int32_t is_signed, int64_t f) {
   }
   return s;
 }
-char *fsh_rt_format_f32(float x, char *out) { return fsh_format(x, 1, out); }
+char *fsh_rt_format_f32(float x, char *out) { return x == 0 && signbit(x) ? strcpy(out, "-0") : fsh_format(x, 1, out); }
 
 fsh_str *fsh_rt_str_from_f64(double x) {
   char text[32];

@@ -21,7 +21,7 @@ function main() {
 // error: operator '+' can't mix 'number' and 'f32'
 // case: float_numbers
 // Floats: number and f32, literals typed where they are written, arithmetic, comparisons
-// that NaN fails, and printing as JavaScript's String(x).
+// that NaN fails, and printing as console.log prints a number: String(x), but -0 keeps its sign.
 function area(r: number): number { return 3.14159 * r * r }
 function main() {
   print(0.1 + 0.2, 1.0, 1e21, 1e-7, 123456789012345680000.0)
@@ -40,7 +40,7 @@ function main() {
   console.log("pi is", 3.141592653589793)
 }
 // expect: 0.30000000000000004 1 1e+21 1e-7 123456789012345680000
-// expect: Infinity -Infinity NaN 0
+// expect: Infinity -Infinity NaN -0
 // expect: 2.5 12.56636 -2.5 2
 // expect: 0.1 0.3 16777217
 // expect: 3.5 true false false

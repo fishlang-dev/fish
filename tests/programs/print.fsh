@@ -51,3 +51,34 @@ function main() {
   console.log(p, new C());
   console.log(JSON.stringify(p), show(p), show([p.clone()]), Response.json(p).body);
 }
+// case: print_deep_and_signs
+// expect: { a: { b: { c: [Object], e: [], f: [Array], g: {}, h: [P] } } }
+// expect: -0 [ -0 ] 0 { n: -0 }
+// expect: { b: null }
+class P { constructor(public x: i64) {} }
+type O = { a?: i64 | null; b: i64 | null };
+function main() {
+  console.log({ a: { b: { c: { d: 1 }, e: [], f: [1], g: {}, h: new P(1) } } });
+  const z = -0.0;
+  console.log(z, [z], 0.0, { n: z });
+  const o: O = { b: null };
+  console.log(o);
+}
+// case: print_union_spelling
+// expect: { k: 'x' } Box { v: {} } Box { v: 's' }
+type U = { a?: i64; k: "x" } | { a: i64 | string; k: "y" };
+type A = { a?: i64 };
+class Box<T> { constructor(public v: T) {} }
+function main() {
+  const x: U = { k: "x" };
+  const w: Box<A> | Box<string> = new Box<A>({});
+  const u: Box<A> | Box<string> = new Box<string>("s");
+  console.log(x, w, u);
+}
+// case: required_keeps_undefined
+// expect: true
+type P = { a: i64 | undefined };
+function main() {
+  const p: Required<P> = { a: undefined };
+  console.log(p.a === null);
+}

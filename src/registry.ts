@@ -71,7 +71,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
         const type = storable(withScope(c.scope, () => resolveType(f.type!)), f);
-        const optional = f.written && optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional;
+        const optional = f.written ? optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
         return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
