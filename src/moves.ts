@@ -3,6 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
+import { kindTests } from "./narrow.ts";
 import { computed, dynCalls, isPrint, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type RefType, type Type, type UnionType } from "./typing.ts";
@@ -474,8 +475,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return during(e, () => handOver(e.args ?? [], name, e));
       }
       case "call": {
-        // Printing and `JSON.stringify` read their arguments.
-        if (isPrint(e.callee) || jsonCalls.get(e) === "stringify") {
+        // Printing, `JSON.stringify` and `Array.isArray` read their arguments.
+        if (isPrint(e.callee) || jsonCalls.get(e) === "stringify" || kindTests.has(e)) {
           for (const a of e.args) expr(a);
           return;
         }

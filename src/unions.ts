@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
-import { literalValue, TYPEOF, typeofTest } from "./narrow.ts";
+import { kindTests, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
 import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
@@ -112,6 +112,11 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
     throw new CompileError(`a '${show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
   }
   const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
+  // `Map`, `Set` and `Array` aren't classes in Fish; testing for one picks a union's member.
+  if (!c && e.right.kind === "ident" && ["Map", "Set", "Array"].includes(e.right.name)) {
+    kindTests.set(e, e.right.name as Kind);
+    return "boolean";
+  }
   if (!c) throw new CompileError("the right side of 'instanceof' must be a class", e.right.start, e.right.end);
   types.set(e.right, c);
   return "boolean";

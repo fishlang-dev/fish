@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { isNumeric, refType, unionType, type Type } from "./typing.ts";
+import { isNumeric, refType, unfold, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -18,6 +18,17 @@ export function category(t: Type): string {
   if (t.kind === "literal") return typeof t.value === "bigint" ? "number" : typeof t.value;
   if (t.kind === "pattern") return "string";
   return "object";
+}
+
+// The `instanceof Map`, `instanceof Set` and `instanceof Array` tests and the `Array.isArray`
+// calls, by the kind each tests a value for.
+export const kindTests = new WeakMap<Expr, Kind>();
+export type Kind = "Map" | "Set" | "Array";
+
+export function ofKind(t: Type, kind: Kind): boolean {
+  const held = unfold(t);
+  if (typeof held === "string") return false;
+  return kind === "Array" ? held.kind === "array" : held.kind === "map" && held.set === (kind === "Set");
 }
 
 // The names a `typeof` comparison can check for.
@@ -47,6 +58,8 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const inner = of(e.operand);
     return { yes: inner.no, no: inner.yes };
   }
+  const kind = kindTests.get(e);
+  if (kind) return split(e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left, (m) => (ofKind(m, kind) ? "yes" : "no"), true);
   if (e.kind !== "binary") return nothing;
   if (e.op === "&&" || e.op === "||") {
     const [a, b] = [of(e.left), of(e.right)];

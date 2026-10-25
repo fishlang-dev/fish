@@ -1,5 +1,5 @@
 import type { Builder } from "./arithmetic.ts";
-import { category, typeofTest } from "./narrow.ts";
+import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { baseOf, field, fieldPath, INTEGERS, isInteger, lower, membersFor, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
@@ -78,9 +78,16 @@ export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca, deep } = b;
   return { convert, test, equals, unionField, holds };
 
-  // Lowers `typeof x === "name"`, or `x === v` with x a union, to a check of x's tag, and of
-  // its payload when v isn't a literal. Undefined for any other comparison.
+  // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with
+  // x a union, to a check of x's tag, and of its payload when v isn't a literal. Undefined for
+  // any other comparison.
   function test(e: Expr, value: (e: Expr) => string, typeOf: (e: Expr) => Type): string | undefined {
+    const instance = kindTests.get(e);
+    if (instance) {
+      const tested = e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left;
+      const [type, v] = [typeOf(tested), value(tested)];
+      return typeof type !== "string" && type.kind === "union" ? holds(v, type, type.members.filter((m) => ofKind(m, instance))) : String(ofKind(type, instance));
+    }
     if (e.kind !== "binary") return undefined;
     if (e.op === "instanceof") {
       const [type, c] = [typeOf(e.left), typeOf(e.right)];

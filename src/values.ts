@@ -17,7 +17,7 @@ import { STD_BASE } from "./std.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
-import { literalValue, type Facts, type Guard } from "./narrow.ts";
+import { kindTests, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -1699,6 +1699,13 @@ export function expressions(ctx: Context) {
       if (e.typeArgs[0]) ofElements.set(e, e.typeArgs[0]);
       const literal = Object.assign(e, { kind: "array", elements: e.args }) as unknown as Expr;
       return { type: value(literal), what: "'Array.of'" };
+    }
+    // `Array.isArray(v)`: whether v holds an array, which narrows a union to its array members.
+    if (callee.name === "isArray") {
+      if (e.typeArgs.length > 0 || e.args.length !== 1) throw new CompileError("'Array.isArray' takes the value to test", e.start, e.end);
+      read(e.args[0]!);
+      kindTests.set(e, "Array");
+      return { type: "boolean", what: "'Array.isArray'" };
     }
     if (callee.name !== "from") throw new CompileError(`'Array' has no '${callee.name}'; arrays are made with 'Array.of', 'Array.from' or 'new Array(n).fill(x)'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
