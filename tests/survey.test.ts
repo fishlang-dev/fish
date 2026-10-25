@@ -82,7 +82,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const a = /x+/g.test(s);\nconst i = re.lastIndex;\n")).toEqual({ regexState: 2 });
   expect(counts("function f() { [a, b] = [b, a]; g([c] = [1]); }\n")).toEqual({ destructuringAssignment: 1 });
   expect(counts("const id = <T>(x: T) => x;\nconst g = f(<T>(x: T) => x);\ntype F = <T>(x: T) => T;\ninterface I { m<T>(x: T): T }\nclass C { m<T>(x: T): T { return x; } }\n")).toEqual({ genericMethods: 3 });
-  expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3, replaceAllString: 1 });
+  expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
@@ -174,7 +174,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(52);
+  expect(r.rules.length + r.waiting.length).toBe(51);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {

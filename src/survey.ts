@@ -65,7 +65,6 @@ const RULES: Rule[] = [
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
-  { id: "replaceAllString", action: "unsupported", title: "replaceAll with a string", feature: "More string methods" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
@@ -427,7 +426,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     const name = n.callee.name as string;
     if (literal && ["match", "matchAll", "search"].includes(name)) push("regexStrings");
     if (name === "next" && isNode(n.callee.object) && n.callee.object.kind === "call" && isNode(n.callee.object.callee) && n.callee.object.callee.kind === "member" && n.callee.object.callee.name === "matchAll") push("regexStrings");
-    if (name === "replaceAll" && literal) push("replaceAllString");
   }
   const literal = (a: unknown) => isNode(a) && (a.kind === "string" || (a.kind === "template" && (a.exprs as unknown[]).length === 0));
   if (n.kind === "new" && named(n.callee, "RegExp") && !((n.args as Node[] | undefined) ?? []).every(literal)) push("dynamicRegex");
