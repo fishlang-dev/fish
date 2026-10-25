@@ -480,8 +480,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // `Promise.all` and `Promise.race` take each future in their list as an argument, so what
         // one borrows is lent while the others are made, and two can't conflict.
         if (combinedCalls.has(e)) {
-          const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
-          return during(e, () => handOver(list, `'Promise.${(e.callee as { name: string }).name}'`, e));
+          const [list] = e.args as [Expr];
+          return during(e, () => handOver(list.kind === "array" ? (list.elements as Expr[]) : [list], `'Promise.${(e.callee as { name: string }).name}'`, e));
         }
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.

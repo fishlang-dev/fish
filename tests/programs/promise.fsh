@@ -223,7 +223,7 @@ async function main() {
   const p = Promise.all([f()]);
 }
 // case: promise_all_not_a_list
-// error: 'Promise.all' takes an array of Promises written in the call
+// error: 'Promise.all' takes an array of Promises, as in 'Promise.all([a(), b()])' or a 'Promise<T>[]', not 'Promise<i64>'
 async function f(): Promise<i64> { return 1; }
 async function main() {
   const r = await Promise.all(f());
@@ -245,4 +245,66 @@ async function grow(x: Mut<i64[]>): Promise<i64> { x.push(1); return 0; }
 async function main() {
   let xs = [1];
   const [a, b] = await Promise.all([read(xs), grow(xs)]);
+}
+// case: promise_all_array
+// expect: [ 10, 20, 30, 40 ] true
+// expect: 7
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function main() {
+  let ps: Promise<i64>[] = [];
+  for (let i = 1; i <= 4; i++) ps.push(after(120 - 20 * i, 10 * i));
+  const start = Date.now();
+  const all = await Promise.all(ps);
+  console.log(all, Date.now() - start < 200);
+  let qs: Promise<i64>[] = [];
+  qs.push(after(300, 1));
+  qs.push(after(10, 7));
+  const first = await Promise.race(qs);
+  console.log(first);
+}
+// case: promise_race_array_cancelled
+// expect: listener got 5
+// expect: 0
+async function waiting(ch: Channel<i64>): Promise<i64> {
+  const v = await ch.receive();
+  return v!;
+}
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function main() {
+  const ch = new Channel<i64>(1);
+  let ps: Promise<i64>[] = [];
+  ps.push(waiting(ch.clone()));
+  ps.push(after(20, 0));
+  const r = await Promise.race(ps);
+  const t = spawn(waiting(ch.clone()));
+  await sleep(20);
+  await ch.send(5);
+  const got = await t;
+  console.log("listener got", got);
+  const empty: Promise<i64>[] = [];
+  const none = await Promise.all(empty);
+  console.log(none.length);
+}
+// case: promise_all_mixed_boxed
+// expect: 1 2
+async function after(ms: i64, v: i64): Promise<i64> {
+  await sleep(ms);
+  return v;
+}
+async function main() {
+  const p: Promise<i64> = after(10, 1);
+  const [a, b] = await Promise.all([p, after(5, 2)]);
+  console.log(a, b);
+}
+// case: promise_all_wrong_array
+// error: 'Promise.all' takes an array of Promises, as in 'Promise.all([a(), b()])' or a 'Promise<T>[]', not 'i64[]'
+async function main() {
+  const xs = [1, 2];
+  const r = await Promise.all(xs);
 }

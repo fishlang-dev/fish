@@ -633,6 +633,13 @@ void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
 }
 
+// An array's elements, each all zero bits, as a value not yet set is.
+void *fsh_rt_array_zeroed(int64_t bytes) {
+  void *p = fsh_rt_array_alloc(bytes);
+  if (p) memset(p, 0, bytes);
+  return p;
+}
+
 // A Map or a Set: its entries in insertion order, each a state word (0 never used, 1 live, 2
 // removed), the key's hash, the key's bits, then the key and value as the program lays them out,
 // and an open-addressing index of entry numbers plus one. A key's bits are a sized integer

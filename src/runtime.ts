@@ -192,6 +192,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_insp_variant(ptr)",
   "declare ptr @fsh_rt_insp_done(ptr)",
   "declare void @fsh_rt_sleep_cancel(ptr, i64)",
+  "declare ptr @fsh_rt_array_zeroed(i64)",
   "declare ptr @fsh_rt_text_new()",
   "declare void @fsh_rt_text_add(ptr, ptr)",
   "declare void @fsh_rt_text_raw(ptr, ptr)",

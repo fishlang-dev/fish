@@ -2613,13 +2613,21 @@ export function expressions(ctx: Context) {
     if (e.optional) throw new CompileError(`${name} is always there, so it is called without '?.'`, e.start, e.end);
     if (!awaitedNow.has(e)) throw new CompileError(`${name} is awaited where it is called, as in 'await Promise.${kind}([a(), b()])'`, e.start, e.end);
     const [list] = e.args;
-    if (e.args.length !== 1 || list?.kind !== "array") throw new CompileError(`${name} takes an array of Promises written in the call, as in 'Promise.${kind}([a(), b()])'`, e.start, e.end);
+    if (e.args.length !== 1 || list === undefined || list.kind === "spread") throw new CompileError(`${name} takes an array of Promises, as in 'Promise.${kind}([a(), b()])'`, e.start, e.end);
+    // An array of `Promise<T>` values gives a `T[]`, or for `race` a `T`.
+    if (list.kind !== "array") {
+      const t = value(list);
+      const element = typeof t !== "string" && t.kind === "array" ? t.element : undefined;
+      if (typeof element === "string" || element?.kind !== "dyn" || promiseElement(element.of) === undefined) throw new CompileError(`${name} takes an array of Promises, as in 'Promise.${kind}([a(), b()])' or a 'Promise<T>[]', not '${show(t)}'`, list.start, list.end);
+      combinedCalls.add(e);
+      return { type: combinedFuture({ kind, futures: [], array: t as ArrayType, at: e }), what: name };
+    }
     if (list.elements.length === 0) throw new CompileError(`${name} needs a Promise to wait for${kind === "race" ? "; an empty race never settles" : ""}`, list.start, list.end);
     const futures = list.elements.map((x) => {
       if (x === undefined || x.kind === "spread") throw new CompileError(`${name} takes each Promise written in the list`, (x ?? list).start, (x ?? list).end);
       let t = value(x);
       if (typeof t !== "string" && t.kind === "param" && t.concrete) t = t.concrete;
-      if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) throw unsupported(`Promise values in ${name}`, x);
+      if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) return t;
       if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`${name} takes Promises, like an async function's call, not '${show(t)}'`, x.start, x.end);
       return t;
     });

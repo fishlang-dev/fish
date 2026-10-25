@@ -1310,8 +1310,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A slot per interface member: each method, then each field. A method giving an interface
   // type can't be called through a Dyn, so its slot is null.
   function dynSlots(type: Type, to: DynType, { methods, fields }: DynTable): string[] {
-    // A boxed future's one slot is its poll, which takes its frame as the block.
-    if (promiseElement(to.of) !== undefined) return [symbol(futureOf.get(type as FutureType)!)];
+    // A boxed future's slots are its poll, which takes its frame as the block, and its cancel.
+    if (promiseElement(to.of) !== undefined) {
+      const instance = futureOf.get(type as FutureType)!;
+      cancelled.add(instance);
+      return [symbol(instance), cancelSymbol(instance)];
+    }
     const n = vtables.size;
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
@@ -5304,6 +5308,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // `Promise.all` and `Promise.race`: their futures moved into the combined one's frame.
       if (combinedCalls.has(e)) {
         const t = types.get(e) as FutureType;
+        if (e.args[0]!.kind !== "array") {
+          const made = temp();
+          emit(`${made} = insertvalue ${llvm(t)} zeroinitializer, ${ARRAY} ${owned(e.args[0]!)}, 1`);
+          return made;
+        }
         const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
         const given = list.map((x) => owned(x));
         let frame = "zeroinitializer";
@@ -6129,7 +6138,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (known) return known;
     const name = `@"fsh.combine.${combinePolls.size}"`;
     combinePolls.set(t, name);
-    const { kind, futures, at } = combinedOf.get(t)!;
+    const { kind, futures, at, array } = combinedOf.get(t)!;
+    if (array) return combineArray(t, name, kind, array, at as Expr);
     const saved = { allocas, body, temps, labels, block, pending, scopes };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
     const field = (i: number) => {
@@ -6137,7 +6147,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
       return p;
     };
-    const valueOf = (f: FutureType | HandleType): Type => (f.gives === "void" ? "null" : f.gives);
+    const valueOf = (f: FutureType | HandleType | DynType): Type => {
+      const gives = f.kind === "dyn" ? promiseElement(f.of)! : f.gives;
+      return gives === "void" ? "null" : gives;
+    };
     const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
     const finished = (at: string, f: Type) => {
       const old = temp();
@@ -6171,7 +6184,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`br label %${skip}`);
       }
       startBlock(step.failed);
-      if (f.throws) {
+      if (f.kind !== "dyn" && f.throws) {
         const error = step.error();
         finished(futureAt, f);
         emit(`store i32 2, ptr ${doneAt}`);
@@ -6212,6 +6225,155 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
+  // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
+  // a flag per future, every one zero.
+  function combineArray(t: FutureType, name: string, kind: "all" | "race", array: ArrayType, at: Expr): string {
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const dyn = array.element as DynType;
+    const gives = promiseElement(dyn.of)!;
+    const element = llvm(gives);
+    const field = (i: number) => {
+      const p = temp();
+      emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      return p;
+    };
+    const [futuresAt, valuesAt, flagsAt] = [field(1), field(2), field(3)];
+    const part = (at: string, i: number) => {
+      const p = temp();
+      emit(`${p} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
+      return p;
+    };
+    const [futures, n] = [temp(), temp()];
+    emit(`${futures} = load ptr, ptr ${part(futuresAt, 0)}`);
+    emit(`${n} = load i64, ptr ${part(futuresAt, 1)}`);
+    const [state, fresh, first, go] = [temp(), temp(), label(), label()];
+    emit(`${state} = load i32, ptr %frame`);
+    emit(`${fresh} = icmp eq i32 ${state}, 0`);
+    emit(`br i1 ${fresh}, label %${first}, label %${go}`);
+    startBlock(first);
+    emit("store i32 1, ptr %frame");
+    const [bytes, values, flags] = [temp(), temp(), temp()];
+    emit(`${bytes} = mul i64 ${n}, ${sizeOf(element)}`);
+    emit(`${values} = call ptr @fsh_rt_array_zeroed(i64 ${bytes})`);
+    emit(`${flags} = call ptr @fsh_rt_array_zeroed(i64 ${n})`);
+    for (const [slot, data] of [[valuesAt, values], [flagsAt, flags]] as const) {
+      emit(`store ptr ${data}, ptr ${part(slot, 0)}`);
+      emit(`store i64 ${n}, ptr ${part(slot, 1)}`);
+      emit(`store i64 ${n}, ptr ${part(slot, 2)}`);
+    }
+    emit(`br label %${go}`);
+    startBlock(go);
+    const [valuesData, flagsData] = [temp(), temp()];
+    emit(`${valuesData} = load ptr, ptr ${part(valuesAt, 0)}`);
+    emit(`${flagsData} = load ptr, ptr ${part(flagsAt, 0)}`);
+    const finishWith = (tag: number, v?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v)}`);
+    // Each index below `n`, in a loop of its own.
+    const each = (body: (i: string, next: string) => void) => {
+      const index = alloca("i64");
+      emit(`store i64 0, ptr ${index}`);
+      const [head, loop, next, done] = [label(), label(), label(), label()];
+      emit(`br label %${head}`);
+      startBlock(head);
+      const [i, more] = [temp(), temp()];
+      emit(`${i} = load i64, ptr ${index}`);
+      emit(`${more} = icmp slt i64 ${i}, ${n}`);
+      emit(`br i1 ${more}, label %${loop}, label %${done}`);
+      startBlock(loop);
+      body(i, next);
+      startBlock(next);
+      const step = temp();
+      emit(`${step} = add i64 ${i}, 1`);
+      emit(`store i64 ${step}, ptr ${index}`);
+      emit(`br label %${head}`);
+      startBlock(done);
+    };
+    const flagOf = (i: string) => {
+      const [p, f] = [temp(), temp()];
+      emit(`${p} = getelementptr i8, ptr ${flagsData}, i64 ${i}`);
+      emit(`${f} = load i8, ptr ${p}`);
+      return [p, f] as const;
+    };
+    const futureOf_ = (i: string) => {
+      const p = temp();
+      emit(`${p} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
+      return p;
+    };
+    const cancelOthers = (except: string) => each((j, next) => {
+      const [, f] = flagOf(j);
+      const [waiting, other, both, yes] = [temp(), temp(), temp(), label()];
+      emit(`${waiting} = icmp eq i8 ${f}, 1`);
+      emit(`${other} = icmp ne i64 ${j}, ${except}`);
+      emit(`${both} = and i1 ${waiting}, ${other}`);
+      emit(`br i1 ${both}, label %${yes}, label %${next}`);
+      startBlock(yes);
+      cancelAt(futureOf_(j), dyn);
+      emit(`br label %${next}`);
+    });
+    each((i, next) => {
+      const [flagAt, f] = flagOf(i);
+      const [over, poll] = [temp(), label()];
+      emit(`${over} = icmp eq i8 ${f}, 2`);
+      emit(`br i1 ${over}, label %${next}, label %${poll}`);
+      startBlock(poll);
+      emit(`store i8 1, ptr ${flagAt}`);
+      const slot = futureOf_(i);
+      const step = pollStep(dyn, slot, at);
+      startBlock(step.waiting);
+      emit(`br label %${next}`);
+      startBlock(step.ready);
+      const v = step.value() ?? "zeroinitializer";
+      const old = temp();
+      emit(`${old} = load ${DYN}, ptr ${slot}`);
+      emit(`store ${DYN} zeroinitializer, ptr ${slot}`);
+      dispose(old, dyn);
+      emit(`store i8 2, ptr ${flagAt}`);
+      if (kind === "race") {
+        cancelOthers(i);
+        finishWith(1, v);
+      } else {
+        const p = temp();
+        emit(`${p} = getelementptr ${element}, ptr ${valuesData}, i64 ${i}`);
+        emit(`store ${element} ${v}, ptr ${p}`);
+        emit(`br label %${next}`);
+      }
+      startBlock(step.failed);
+      emit("unreachable");
+    });
+    if (kind === "race") finishWith(0);
+    else {
+      const count = alloca("i64");
+      emit(`store i64 0, ptr ${count}`);
+      each((i, next) => {
+        const [, f] = flagOf(i);
+        const [over, c, added] = [temp(), temp(), temp()];
+        emit(`${over} = icmp eq i8 ${f}, 2`);
+        emit(`${c} = load i64, ptr ${count}`);
+        emit(`${added} = add i64 ${c}, 1`);
+        const [yes] = [label()];
+        emit(`br i1 ${over}, label %${yes}, label %${next}`);
+        startBlock(yes);
+        emit(`store i64 ${added}, ptr ${count}`);
+        emit(`br label %${next}`);
+      });
+      const [c, all, ready, waiting] = [temp(), temp(), label(), label()];
+      emit(`${c} = load i64, ptr ${count}`);
+      emit(`${all} = icmp eq i64 ${c}, ${n}`);
+      emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
+      startBlock(waiting);
+      finishWith(0);
+      startBlock(ready);
+      // The values move out of the frame.
+      const v = temp();
+      emit(`${v} = load ${ARRAY}, ptr ${valuesAt}`);
+      emit(`store ${ARRAY} zeroinitializer, ptr ${valuesAt}`);
+      finishWith(1, v);
+    }
+    out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    return name;
+  }
+
   // `then` where a combined future's flag at `doneAt` says its future is waiting.
   function whileWaiting(doneAt: string, then: () => void) {
     const [d, waiting, yes, after] = [temp(), temp(), label(), label()];
@@ -6228,6 +6390,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // it waits on, as an abort does, passing on a wake it was given, so nothing it waited on wakes
   // the task for it or loses a wake meant for another. Its drop comes after.
   function cancelAt(at: string, t: Type) {
+    // A boxed future through its vtable: the slot after its poll.
+    if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) {
+      const [dyn, data, table, slot, fn] = [temp(), temp(), temp(), temp(), temp()];
+      emit(`${dyn} = load ${DYN}, ptr ${at}`);
+      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      emit(`${slot} = getelementptr ptr, ptr ${table}, i64 4`);
+      emit(`${fn} = load ptr, ptr ${slot}`);
+      emit(`call void ${fn}(ptr ${data}, ptr %cx)`);
+      return;
+    }
     if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW) return;
     const frame = t.frame;
     const load = (i: number, of: string) => {
@@ -6247,6 +6420,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (leaf || t === SLEEP) return;
     const combined = combinedOf.get(t);
+    if (combined?.array) {
+      combinedArrayCancel(at, t, combined.array);
+      return;
+    }
     if (combined) {
       combined.futures.forEach((f, j) => {
         const [doneAt, futureAt] = [temp(), temp()];
@@ -6260,6 +6437,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (!instance) return;
     cancelled.add(instance);
     emit(`call void ${cancelSymbol(instance)}(ptr ${at}, ptr %cx)`);
+  }
+
+  // A combined future over an array cancels each future its flags say is waiting.
+  function combinedArrayCancel(at: string, t: FutureType, array: ArrayType) {
+    const field = (i: number, j: number, of: string) => {
+      const [p, q, v] = [temp(), temp(), temp()];
+      emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+      emit(`${q} = getelementptr ${ARRAY}, ptr ${p}, i32 0, i32 ${j}`);
+      emit(`${v} = load ${of}, ptr ${q}`);
+      return v;
+    };
+    const [futures, flags, n] = [field(1, 0, "ptr"), field(3, 0, "ptr"), field(3, 1, "i64")];
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, loop, yes, next, done] = [label(), label(), label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [i, more] = [temp(), temp()];
+    emit(`${i} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${i}, ${n}`);
+    emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    startBlock(loop);
+    const [flagAt, f, waiting] = [temp(), temp(), temp()];
+    emit(`${flagAt} = getelementptr i8, ptr ${flags}, i64 ${i}`);
+    emit(`${f} = load i8, ptr ${flagAt}`);
+    emit(`${waiting} = icmp eq i8 ${f}, 1`);
+    emit(`br i1 ${waiting}, label %${yes}, label %${next}`);
+    startBlock(yes);
+    const slot = temp();
+    emit(`${slot} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
+    cancelAt(slot, array.element);
+    emit(`br label %${next}`);
+    startBlock(next);
+    const step = temp();
+    emit(`${step} = add i64 ${i}, 1`);
+    emit(`store i64 ${step}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
   }
 
   function cancelSymbol(i: Instance): string {
