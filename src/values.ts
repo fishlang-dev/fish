@@ -1444,9 +1444,13 @@ export function expressions(ctx: Context) {
   function tupleLiteral(e: Expr, tuple: ObjectType): Type {
     const elements = elementsOf(tuple);
     const given = tupleParts(e) as Expr[];
-    if (given.length !== elements.length) {
-      throw new CompileError(`type '${show(tuple)}' has ${elements.length} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
+    const least = tuple.required ?? elements.length;
+    if (given.length < least || given.length > elements.length) {
+      const count = least === elements.length ? `${least}` : `${least} to ${elements.length}`;
+      throw new CompileError(`type '${show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
     }
+    // Optional elements left out are empty.
+    for (let i = given.length; i < elements.length; i++) given.push({ kind: "null", start: e.end, end: e.end } as Expr);
     const spread = given.find((x) => x.kind === "spread");
     if (spread) throw unsupported("spread elements in tuple literals", spread);
     given.forEach((x, i) => {
@@ -2790,6 +2794,12 @@ export function expressions(ctx: Context) {
         if (typeof object !== "string" && object.kind === "map") {
           if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
           if (e.name !== "size") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          load();
+          return linked(e) ? optional("usize", e) : "usize";
+        }
+        // A tuple's one property is its length: the count of its elements, up to the last
+        // optional one there.
+        if (isTuple(object) && !(object as ObjectType).match && e.name === "length") {
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }

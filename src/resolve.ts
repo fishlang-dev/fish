@@ -283,9 +283,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind === "intersection") return intersection(t.types);
     if (t.kind === "array") return array(resolveType(t.element), t);
     if (t.kind === "tuple") {
-      const odd = t.elements.find((e) => e.optional || e.rest);
-      if (odd) throw unsupported(odd.rest ? "rest elements in tuple types" : "optional elements in tuple types", odd);
-      return tupleType(t.elements.map((e) => storable(resolveType(e.type), e)));
+      const rest = t.elements.find((e) => e.rest);
+      if (rest) throw unsupported("rest elements in tuple types", rest);
+      const required = t.elements.findIndex((e) => e.optional);
+      const late = required < 0 ? undefined : t.elements.slice(required).find((e) => !e.optional);
+      if (late) throw new CompileError("a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
+      return tupleType(t.elements.map((e) => (e.optional ? unionType([storable(resolveType(e.type), e), "null"]) : storable(resolveType(e.type), e))), required < 0 ? undefined : required);
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {

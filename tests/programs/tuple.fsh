@@ -173,8 +173,80 @@ function main() { const t: [i64, i64] = { 0: 3, 1: 4 }; console.log(t[0]); }
 function f(o: [i64, i64] | null): i64 { if (o === null) return 0; return o[0] + o[1]; }
 function main() { console.log(f([1, 2]), f(null)); const x: Option<[i64, string]> = [1, "o" + 1]; if (x !== null) console.log(x[1]); }
 // case: tuple_optional
-// error: optional elements in tuple types are not supported yet
-function main() { const t: [i64, i64?] = [1, 2]; }
+// expect: 1 1 null 1 null
+// expect: [ 1 ]
+// expect: [1]
+// expect: 2 2 two 2 two
+// expect: [ 2, 'two' ]
+// expect: [2,"two"]
+// expect: 2 3 three 3 three
+// expect: [ 3, 'three' ]
+// expect: [3,"three"]
+// expect: [ 'x', 5 ] 2 ["x",5]
+// expect: 1 d
+type Pair = [i64, string?];
+function show(t: Pair): void {
+  const [n, s] = t;
+  console.log(t.length, t[0], t[1], n, s);
+  console.log(t);
+  console.log(JSON.stringify(t));
+}
+function main(): void {
+  const a: Pair = [1];
+  show(a);
+  show([2, "two"]);
+  const full: [i64, string] = [3, "three"];
+  show(full);
+  const many: [string, i64?, boolean?] = ["x", 5];
+  console.log(many, many.length, JSON.stringify(many));
+  const [n, s = "d"] = a;
+  console.log(n, s);
+}
+// case: tuple_optional_json
+// expect: [ 7 ] 1
+// expect: [ 7, 's' ] 2
+// expect: expected an array of 1 to 2 at $
+// expect: expected an array of 1 to 2 at $
+function main(): void throws JsonError {
+  const short = JSON.parse<[i64, string?]>("[7]");
+  console.log(short, short.length);
+  const long = JSON.parse<[i64, string?]>("[7, \"s\"]");
+  console.log(long, long.length);
+  for (const text of ["[]", "[1, \"a\", 2]"]) {
+    try {
+      JSON.parse<[i64, string?]>(text);
+    } catch (e) {
+      console.log(e.message);
+    }
+  }
+}
+// case: tuple_optional_write
+// expect: [ 1, 'x' ] 2
+// expect: 1
+// expect: [ [ 1 ], [ 2, 'b' ] ] [ 1, 2 ] 2
+function main(): void {
+  let t: [i64, string?] = [1];
+  t[1] = "x";
+  console.log(t, t.length);
+  t[1] = null;
+  console.log(t.length);
+  const xs: [i64, string?][] = [[1], [2, "b"]];
+  const plain: [i64, i64] = [1, 2];
+  console.log(xs, xs.map((x) => x.length), plain.length);
+}
+// case: tuple_optional_order
+// error: a required element can't follow an optional one; move it before the optional elements
+function main() { const t: [i64, string?, boolean] = [1, "a", true]; }
+// case: tuple_optional_count
+// error: type '[i64, string?]' has 1 to 2 elements, but this literal has 3
+function main() { const t: [i64, string?] = [1, "a", "b"]; }
+// case: tuple_optional_narrow
+// error: type '[i64, string?]' is not assignable to type '[i64, string]'
+function main() { const t: [i64, string?] = [1]; const u: [i64, string] = t; }
+// case: tuple_optional_moved
+// error: 't.length' can't be used here because 't' was moved
+class C { constructor(public n: i64) {} }
+function main() { const t: [i64, C?] = [1, new C(2)]; const u = t; console.log(u.length, t.length); }
 // case: tuple_past
 // error: tuple type '[i64, i64]' of length 2 has no element at index 2
 function main() { const t: [i64, i64] = [1, 2]; console.log(t[2]); }

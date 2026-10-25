@@ -5,7 +5,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { elementsOf, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
+import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -170,6 +170,6 @@ function swapped(t: Type, from: ClassType, to: Type): Type {
   if (t === from) return to;
   if (typeof t === "string") return t;
   if (t.kind === "union") return unionType(t.members.map((m) => swapped(m, from, to)), t.name);
-  if (t.kind === "object" && !t.match) return t.tuple ? tupleType(elementsOf(t).map((e) => swapped(e, from, to))) : objectType(t.fields.map((f) => ({ ...f, type: swapped(f.type, from, to) })));
+  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(f.type, from, to) })));
   return t;
 }

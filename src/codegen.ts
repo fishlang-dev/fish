@@ -2748,12 +2748,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     if (isTuple(object)) {
       const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      const length = object.required === undefined ? undefined : tupleLength(v, object);
       jsonRaw(w, "[");
       order.forEach(({ i }, n) => {
-        if (n > 0) jsonRaw(w, ",");
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        jsonWrite(w, x, as[i]!.type);
+        present(length, n, () => {
+          if (n > 0) jsonRaw(w, ",");
+          const x = temp();
+          emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+          jsonWrite(w, x, as[i]!.type);
+        });
       });
       jsonRaw(w, "]");
       return;
@@ -2978,13 +2981,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
     if (t.kind === "object" && isTuple(object)) {
       const order = object.fields.map((f, i) => ({ f, i })).sort((a, b) => Number(a.f.name) - Number(b.f.name));
+      const length = object.required === undefined ? undefined : tupleLength(v, object);
       const node = temp();
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${order.length})`);
-      for (const { i } of order) {
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, as[i]!.type, next)})`);
-      }
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
+      order.forEach(({ i }, n) => {
+        present(length, n, () => {
+          const x = temp();
+          emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
+          emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, as[i]!.type, next)})`);
+        });
+      });
       return node;
     }
     const fields = t.kind === "class" ? jsonFields((writtenPart(written, t, (x) => x) as ClassType | undefined) ?? t) : object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
@@ -3028,7 +3034,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     const object = t as ObjectType;
     if (t.kind === "object" && isTuple(object)) {
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${object.fields.length})`);
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${object.required === undefined ? object.fields.length : tupleLength(v, object)})`);
       return node;
     }
     const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
@@ -3362,8 +3368,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
     jsonGuard(opened, "i32");
     const read: { v: string; type: Type; i: number }[] = [];
-    const undo = () => read.forEach((x) => dispose(x.v, x.type));
-    const what = `an array of ${order.length}`;
+    // Optional elements are read into slots, empty until read, since the array may end first.
+    const required = t.required ?? order.length;
+    const slots = order.slice(required).map(({ f, i }) => {
+      const slot = alloca(llvm(lower(f.type)));
+      emit(`store ${llvm(lower(f.type))} ${convert("zeroinitializer", "null", f.type)}, ptr ${slot}`);
+      return { slot, type: f.type, i };
+    });
+    const loaded = (x: { slot: string; type: Type }) => {
+      const v = temp();
+      emit(`${v} = load ${llvm(lower(x.type))}, ptr ${x.slot}`);
+      return v;
+    };
+    const undo = () => {
+      read.forEach((x) => dispose(x.v, x.type));
+      slots.forEach((x) => dispose(loaded(x), x.type));
+    };
+    const what = required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
+    const finish = label();
     // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
     const step = (n: number, wanted: 0 | 1) => {
       const [more, readable, right] = [temp(), temp(), temp()];
@@ -3376,17 +3398,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     order.forEach(({ f, i }, n) => {
       const right = step(n, 1);
       const [bad, good] = [label(), label()];
-      emit(`br i1 ${right}, label %${good}, label %${bad}`);
-      startBlock(bad);
-      jsonExpected(r, what, undo);
-      emit(`br label %${good}`);
+      // Where an optional element would be, the array may end instead.
+      emit(`br i1 ${right}, label %${good}, label %${n < required ? bad : finish}`);
+      if (n < required) {
+        startBlock(bad);
+        jsonExpected(r, what, undo);
+        emit(`br label %${good}`);
+      }
       startBlock(good);
       const mark = temp();
       emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${n})`);
       const [ok, v] = jsonRead(r, f.type);
       jsonGuard(ok, "i1", undo);
       emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
-      read.push({ v, type: f.type, i });
+      if (n < required) read.push({ v, type: f.type, i });
+      else emit(`store ${llvm(lower(f.type))} ${v}, ptr ${slots[n - required]!.slot}`);
     });
     const right = step(order.length, 0);
     const [bad, good] = [label(), label()];
@@ -3395,7 +3421,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     jsonExpected(r, what, undo);
     emit(`br label %${good}`);
     startBlock(good);
-    return read.reduce((agg, x) => {
+    emit(`br label %${finish}`);
+    startBlock(finish);
+    return [...read, ...slots.map((x) => ({ v: loaded(x), type: x.type, i: x.i }))].reduce((agg, x) => {
       const next = temp();
       emit(`${next} = insertvalue ${llvm(t)} ${agg}, ${llvm(lower(x.type))} ${x.v}, ${x.i}`);
       return next;
@@ -5240,11 +5268,38 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return convert(length, "usize", types.get(e)!);
     }
     if (typeof shared !== "string" && shared.kind === "union") return unionField(whole(), shared, e.name, types.get(e)!);
+    if (isTuple(shared) && e.name === "length") return convert(tupleLength(whole(), shared as ObjectType), "usize", types.get(e)!);
     const object = shared as ObjectType | ClassType;
     const result = temp();
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares.
     return convert(result, field(object, e.name)!.type, types.get(e)!);
+  }
+
+  // `write`, for a tuple's element `n`, only when it is within `length`, when one is known.
+  function present(length: string | undefined, n: number, write: () => void) {
+    if (length === undefined) return write();
+    const [within, yes, after] = [temp(), label(), label()];
+    emit(`${within} = icmp ult i64 ${n}, ${length}`);
+    emit(`br i1 ${within}, label %${yes}, label %${after}`);
+    startBlock(yes);
+    write();
+    emit(`br label %${after}`);
+    startBlock(after);
+  }
+
+  // A tuple's length: its required elements, then up to the last optional one there.
+  function tupleLength(v: string, t: ObjectType): string {
+    const count = elementsOf(t).length;
+    let length = String(t.required ?? count);
+    for (let i = t.required ?? count; i < count; i++) {
+      const [x, next] = [temp(), temp()];
+      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${fieldPath(t, String(i)).join(", ")}`);
+      const union = field(t, String(i))!.type as UnionType;
+      emit(`${next} = select i1 ${holds(x, union, union.members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
+      length = next;
+    }
+    return length;
   }
 
   // Whether a field read reaches into a shared value's block through its interior-mutable
