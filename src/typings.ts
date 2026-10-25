@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CompileError } from "./diag.ts";
+import { parse, type Stmt } from "./parser.ts";
 
 // A package's declarations, found as TypeScript's `bundler` resolution finds them: the file and
 // the package directory holding it, or why there is none, said in the words of a message.
@@ -102,4 +104,85 @@ function conditioned(target: unknown): string | undefined {
     return conditioned(value);
   }
   return undefined;
+}
+
+// A name a declaration file exports: the statement declaring it, and the file and text it is in.
+export type Declared = { file: string; src: string; at: Stmt };
+
+type Scope = { file: string; src: string; statements: Stmt[] };
+const exportsCache = new Map<string, Map<string, Declared> | string>();
+
+// The names a declaration file exports, each with where it is declared, or why the file can't
+// be read; for a types package written as `declare module "pkg"`, the names that module exports.
+export function exportsOf(file: string, specifier?: string): Map<string, Declared> | string {
+  const key = `${file}\n${specifier ?? ""}`;
+  const cached = exportsCache.get(key);
+  if (cached !== undefined) return cached;
+  // A file reached again through its own re-exports adds nothing more.
+  exportsCache.set(key, new Map());
+  let made: Map<string, Declared> | string;
+  try {
+    const src = readFileSync(file, "utf8");
+    const statements = parse(src);
+    const ambient = specifier === undefined ? undefined : statements.map(unwrap).find((s): s is Extract<Stmt, { kind: "namespace" }> => s.kind === "namespace" && s.quoted && s.name === specifier);
+    made = exportsIn({ file, src, statements: ambient ? ambient.body ?? [] : statements });
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    made = `can't read the declarations in '${file}': ${e.message}`;
+  }
+  exportsCache.set(key, made);
+  return made;
+}
+
+// A statement under `declare` or `export`.
+function unwrap(s: Stmt): Stmt {
+  return s.kind === "declare" || s.kind === "export" ? unwrap(s.body) : s;
+}
+
+// The names a declaration gives.
+function declares(s: Stmt): string[] {
+  const d = unwrap(s);
+  if (d.kind === "let") return d.declarations.flatMap((x) => (x.target.kind === "ident" ? [x.target.name] : []));
+  if (d.kind === "function" || d.kind === "interface" || d.kind === "typeAlias" || d.kind === "enum") return [d.name];
+  if (d.kind === "class" && d.name !== undefined) return [d.name];
+  if (d.kind === "namespace" && !d.quoted) return [d.name];
+  return [];
+}
+
+function exportsIn(scope: Scope): Map<string, Declared> {
+  const declared = (at: Stmt): Declared => ({ file: scope.file, src: scope.src, at });
+  const local = new Map<string, Stmt>();
+  for (const s of scope.statements) for (const n of declares(s)) if (!local.has(n)) local.set(n, s);
+  const out = new Map<string, Declared>();
+  const set = (name: string, d: Declared | undefined) => d && !out.has(name) && out.set(name, d);
+  const from = (module: string): Map<string, Declared> => {
+    const target = /^\.\.?(\/|$)/.test(module) ? declarationFor(join(dirname(scope.file), module)) : (() => {
+      const t = findTypings(scope.file, module);
+      return "file" in t ? t.file : undefined;
+    })();
+    const found = target === undefined ? undefined : exportsOf(target, /^\.\.?(\/|$)/.test(module) ? undefined : module);
+    return found instanceof Map ? found : new Map();
+  };
+  for (const s of scope.statements) {
+    if (s.kind === "export") for (const n of declares(s.body)) set(n, declared(s));
+    else if (s.kind === "exportNamed") {
+      const other = s.module === undefined ? undefined : from(s.module);
+      for (const sp of s.specifiers) set(sp.alias ?? sp.name, other ? other.get(sp.name) : local.has(sp.name) ? declared(local.get(sp.name)!) : undefined);
+    } else if (s.kind === "exportAll") {
+      if (s.alias !== undefined) set(s.alias, declared(s));
+      else for (const [n, d] of from(s.module)) if (n !== "default") set(n, d);
+    } else if (s.kind === "exportDefault") {
+      const named = s.value?.kind === "ident" ? local.get(s.value.name) : undefined;
+      set("default", declared(s.declaration ?? named ?? s));
+    } else if (s.kind === "exportAssign") {
+      // `export = X`: X is the module, its namespace's members what it exports by name.
+      const name = s.value.kind === "ident" ? s.value.name : undefined;
+      for (const t of scope.statements) {
+        const d = unwrap(t);
+        if (d.kind === "namespace" && !d.quoted && d.name === name) for (const m of d.body ?? []) for (const n of declares(m)) set(n, declared(m));
+      }
+      set("default", declared(name !== undefined && local.has(name) ? local.get(name)! : s));
+    }
+  }
+  return out;
 }

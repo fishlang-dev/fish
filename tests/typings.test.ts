@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { findTypings } from "../src/typings.ts";
+import { load } from "../src/modules.ts";
+import { exportsOf, findTypings } from "../src/typings.ts";
 
 // A project directory holding these files, removed after `run`.
 function project(files: Record<string, string>, run: (dir: string) => void) {
@@ -111,5 +112,74 @@ test("each miss says where it looked", () => {
     expect(found(dir, "l")).toBe("missing: 'l' has no TypeScript declarations: its package.json gives no 'types', and it has no index.d.ts, and there is no '@types/l'; Fish types a package from its declarations");
     expect(found(dir, "m")).toContain("'m' names 'gone.d.ts' as its 'types', which isn't there");
     expect(found(dir, "n")).toContain("'n' has a package.json that isn't JSON");
+  });
+});
+
+const DECLARATIONS = `export declare function camelCase(s: string): string;
+export function plain(n: number): number;
+export declare const VERSION: string, OTHER: number;
+export interface Options { deep?: boolean; }
+export type Mode = "a" | "b";
+export declare class Box<T> { get(): T; }
+export declare enum Kind { A, B }
+declare function hidden(): void;
+export { hidden as shown };
+export * from "./more";
+export * as ns from "./more";
+export { fromMore as renamed } from "./more.js";
+export default camelCase;
+`;
+
+test("a declaration file's exports, through its re-exports", () => {
+  project({
+    "node_modules/p/index.d.ts": DECLARATIONS,
+    "node_modules/p/more.d.ts": "export declare function fromMore(): void;\nexport default 1;\n",
+  }, (dir) => {
+    const exports = exportsOf(join(dir, "node_modules/p/index.d.ts"));
+    if (typeof exports === "string") throw new Error(exports);
+    expect([...exports.keys()].sort()).toEqual(["Box", "Kind", "Mode", "OTHER", "Options", "VERSION", "camelCase", "default", "fromMore", "ns", "plain", "renamed", "shown"]);
+    const at = (name: string) => {
+      const d = exports.get(name)!;
+      return `${relative(dir, d.file)}:${d.src.slice(0, d.at.start).split("\n").length}`;
+    };
+    expect([at("shown"), at("fromMore"), at("renamed"), at("default")]).toEqual(["node_modules/p/index.d.ts:8", "node_modules/p/more.d.ts:1", "node_modules/p/more.d.ts:1", "node_modules/p/index.d.ts:1"]);
+  });
+});
+
+test("export = a namespace, and a types package's declare module", () => {
+  project({
+    "node_modules/q/index.d.ts": "declare function q(n: number): string;\ndeclare namespace q {\n  function chunk<T>(xs: T[], n: number): T[][];\n  const version: string;\n}\nexport = q;\n",
+    "node_modules/@types/r/index.d.ts": "declare module \"r\" {\n  export function run(): void;\n}\ndeclare module \"r/other\" {\n  export const x: number;\n}\n",
+    "node_modules/r/index.js": "",
+  }, (dir) => {
+    const q = exportsOf(join(dir, "node_modules/q/index.d.ts"));
+    expect(q instanceof Map ? [...q.keys()].sort() : q).toEqual(["chunk", "default", "version"]);
+    const t = findTypings(join(dir, "main.fsh"), "r");
+    const r = "file" in t ? exportsOf(t.file, "r") : t.missing;
+    expect(r instanceof Map ? [...r.keys()] : r).toEqual(["run"]);
+  });
+});
+
+test("an import from a package is refused naming where its name is declared, or what it exports", () => {
+  project({
+    "node_modules/p/index.d.ts": DECLARATIONS,
+    "node_modules/p/more.d.ts": "export declare function fromMore(): void;\n",
+    "a.fsh": "import { camelCase } from \"p\";\nfunction main() {}\n",
+    "b.fsh": "import { nope } from \"p\";\nfunction main() {}\n",
+    "c.fsh": "import { x } from \"absent\";\nfunction main() {}\n",
+    "d.fsh": "import p from \"p\";\nfunction main() {}\n",
+  }, (dir) => {
+    const error = (file: string) => {
+      try {
+        load(join(dir, file));
+      } catch (e) {
+        return (e as Error).message;
+      }
+      return "loaded";
+    };
+    expect(error("a.fsh")).toBe("'camelCase' from 'p' is declared at node_modules/p/index.d.ts:1:1, but using npm packages isn't supported yet");
+    expect(error("b.fsh")).toBe("'p' has no export 'nope'; its declarations in 'node_modules/p/index.d.ts' export 'Box', 'Kind', 'Mode', 'OTHER', 'Options', 'VERSION', 'camelCase', 'default', 'fromMore', 'ns', 'plain', 'renamed', and 1 more");
+    expect(error("c.fsh")).toStartWith("can't find the package 'absent'");
+    expect(error("d.fsh")).toBe("the default export of 'p' is declared at node_modules/p/index.d.ts:1:1, but using npm packages isn't supported yet");
   });
 });

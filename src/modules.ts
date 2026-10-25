@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { CompileError, type Source } from "./diag.ts";
+import { CompileError, locate, type Source } from "./diag.ts";
+import { exportsOf, findTypings } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
@@ -58,6 +59,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         module.targets.set(s, std(named));
         continue;
       }
+      if (!/^\.\.?(\/|$)/.test(specifier)) packageImport(path, specifier, s, entry);
       const target = resolveSpecifier(path, specifier, s);
       module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
     }
@@ -72,6 +74,34 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
   return { modules, sources };
+}
+
+// An import of a package: its declarations are found and each name it imports looked for there.
+// Fish doesn't use a package's declarations yet, so a name found is refused saying where it is
+// declared, and one not found saying what the package exports.
+function packageImport(from: string, specifier: string, s: Stmt, entry: string): never {
+  const found = findTypings(from, specifier);
+  if ("missing" in found) throw new CompileError(found.missing, s.start, s.end);
+  const exports = exportsOf(found.file, specifier);
+  if (typeof exports === "string") throw new CompileError(exports, s.start, s.end);
+  const names = s.kind === "import" ? [...(s.default ? ["default"] : []), ...(s.named ?? []).map((sp) => sp.name)]
+    : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.name) : [];
+  const missing = names.find((n) => !exports.has(n));
+  if (missing !== undefined) {
+    const known = [...exports.keys()].sort();
+    const listed = known.length === 0 ? "nothing" : known.slice(0, 12).map((n) => `'${n}'`).join(", ") + (known.length > 12 ? `, and ${known.length - 12} more` : "");
+    const what = missing === "default" ? "a default export" : `'${missing}'`;
+    const at = (s.kind === "import" ? s.named : s.kind === "exportNamed" ? s.specifiers : undefined)?.find((sp) => sp.name === missing) ?? s;
+    throw new CompileError(`'${specifier}' has no export ${what}; its declarations in '${relative(dirname(entry), found.file)}' export ${listed}`, at.start, at.end);
+  }
+  const first = names[0];
+  const where = first === undefined ? relative(dirname(entry), found.file) : (() => {
+    const d = exports.get(first)!;
+    const { line, col } = locate(d.src, d.at.start);
+    return `${relative(dirname(entry), d.file)}:${line}:${col}`;
+  })();
+  const what = first === undefined ? `'${specifier}'` : first === "default" ? `the default export of '${specifier}'` : `'${first}' from '${specifier}'`;
+  throw new CompileError(`${what} is declared at ${where}, but using npm packages isn't supported yet`, s.start, s.end);
 }
 
 // The std modules a file uses as globals: a member of a std module's name, as `os.hostname`,
