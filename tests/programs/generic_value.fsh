@@ -134,3 +134,50 @@ function main() {
   const s: { h: (x: string) => string } = { h: id };
   console.log(s.h("z"));
 }
+// case: generic_value_interface_methods
+// expect: 5 n=4 true
+interface Mapper<T> {
+  map<U>(f: (x: T) => U): U;
+}
+class Box {
+  v: i64;
+  constructor(v: i64) { this.v = v; }
+  map<U>(f: (x: i64) => U): U { return f(this.v); }
+}
+function use(m: Mapper<i64>): string {
+  const n = m.map((x: i64): i64 => x + 1);
+  const s = m.map((x: i64): string => "n=" + x);
+  return `${n} ${s}`;
+}
+function bounded<M extends Mapper<i64>>(m: M): boolean {
+  return m.map((x: i64): boolean => x > 3);
+}
+function main() {
+  console.log(use(new Box(4)), bounded(new Box(5)));
+}
+// case: generic_value_interface_method_dyn
+// error: 'map' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn
+interface Mapper {
+  map<U>(f: (x: i64) => U): U;
+}
+class Box {
+  v: i64 = 1;
+  map<U>(f: (x: i64) => U): U { return f(this.v); }
+}
+function main() {
+  const d: Dyn<Mapper> = new Box();
+  console.log(d.map((x: i64): i64 => x));
+}
+// case: generic_value_interface_method_not_generic
+// error: method 'map' must be generic with 1 type parameter and 1 parameter, as 'Mapper' declares it
+interface Mapper {
+  map<U>(f: (x: i64) => U): U;
+}
+class Box {
+  v: i64 = 1;
+  map(f: (x: i64) => i64): i64 { return f(this.v); }
+}
+function use(m: Mapper): i64 { return 0; }
+function main() {
+  console.log(use(new Box()));
+}

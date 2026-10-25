@@ -1,4 +1,4 @@
-import { inherited, type Body, type ClassInfo } from "./classes.ts";
+import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
 import { field, fits, generatorElement, keyOf, promiseElement, refType, shapeKey, show, type ClassType, type InterfaceType, type Type } from "./typing.ts";
 
@@ -72,6 +72,11 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   for (const m of trait.methods) {
     const found = typeof type !== "string" && type.kind === "interface" ? type.methods.find((x) => x.name === m.name) : undefined;
     if (found) {
+      // Generic methods are compared by their shape, their signatures holding their own types.
+      if (m.generic || found.generic) {
+        if (found.generic?.names.length !== m.generic?.names.length || found.params.length !== m.params.length) return `types of method '${m.name}' are incompatible`;
+        continue;
+      }
       if (found.params.some((p, i) => !same(p, m.params[i]!)) || found.params.length !== m.params.length || !returns(found.returns, m.returns)) {
         return `types of method '${m.name}' are incompatible`;
       }
@@ -82,6 +87,13 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     // An interface's methods can't declare what they throw yet, so a throwing one can't
     // stand in for one.
     if (method.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
+    // A generic method stands in for one with as many type parameters and parameters; its calls
+    // are checked as the class's method is when each is instantiated.
+    if (m.generic) {
+      const own = (method.typeParams ?? []).filter((p) => !isLifetime(p));
+      if (own.length !== m.generic.names.length || method.params.length !== m.params.length) return `method '${m.name}' must be generic with ${m.generic.names.length} type parameter${m.generic.names.length === 1 ? "" : "s"} and ${m.params.length} parameter${m.params.length === 1 ? "" : "s"}, as '${trait.name}' declares it`;
+      continue;
+    }
     const params = members.paramTypesOf(method);
     const result = members.returnOf(method, at);
     if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(result, m.returns)) {

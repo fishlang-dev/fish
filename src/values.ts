@@ -320,7 +320,7 @@ export const dynMembers = new Map<string, DynTable>();
 // What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
-export type DynTable = { methods: Instance[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
+export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -1330,7 +1330,7 @@ export function expressions(ctx: Context) {
   // type parameters are inferred from the arguments, or written, and its signature resolved
   // with them.
   function familyCall(e: Call, type: FunctionType, name: string): { type: Type; what: string } {
-    const { names, node } = type.generic!;
+    const { names, node, scope } = type.generic!;
     const written = node as Extract<TypeNode, { kind: "function" }>;
     if (e.args.length !== written.params.length) throw new CompileError(`expected ${written.params.length} argument${written.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     const argTypes = e.args.map((a) => value(a));
@@ -1344,16 +1344,16 @@ export function expressions(ctx: Context) {
       if (!bound) throw new CompileError(`can't infer a type for '${n}' in this call of ${name}; pass it, as in '${(e.callee as { name?: string }).name ?? "f"}<i64>(...)'`, e.start, e.end);
       const constraint = written.typeParams[i]!.constraint;
       if (constraint) {
-        const limit = ctx.resolveWith(constraint, bindings);
+        const limit = ctx.resolveWith(constraint, new Map([...scope, ...bindings]));
         const reason = typeof limit !== "string" && limit.kind === "interface" ? unsatisfied(bound, limit, members, e) : fits(bound, limit) ? undefined : `'${show(bound)}' is not a '${show(limit)}'`;
         if (reason) throw new CompileError(`type '${show(bound)}' does not satisfy the constraint '${show(limit)}' of '${n}' in ${name}: ${reason}`, e.start, e.end);
       }
     }
     e.args.forEach((a, i) => {
-      const want = ctx.resolveWith(written.params[i]!.type!, bindings);
+      const want = ctx.resolveWith(written.params[i]!.type!, new Map([...scope, ...bindings]));
       coerce(a, argTypes[i]!, want, `argument of type '${show(argTypes[i]!)}' is not assignable to parameter of type '${show(want)}'`);
     });
-    return { type: ctx.resolveWith(written.returns, bindings), what: name };
+    return { type: ctx.resolveWith(written.returns, new Map([...scope, ...bindings])), what: name };
   }
 
   // A generic function value, or a generic arrow, rewritten as an arrow calling it with its
@@ -2932,6 +2932,13 @@ export function expressions(ctx: Context) {
     const trait = receiver.kind === "param" ? receiver.bound : receiver;
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
     if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
+    const stored = receiver.kind === "param" ? receiver.concrete : undefined;
+    // A generic method's call infers its types, then in an instance runs the concrete method's.
+    if (found.generic) {
+      const { type } = familyCall(e, { kind: "function", name: found.name, names: [], params: found.params, returns: found.returns, fields: [], generic: found.generic }, `'${callee.name}'`);
+      if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, type), what: `'${callee.name}'` };
+      return { type, what: `'${callee.name}'` };
+    }
     if (e.typeArgs.length > 0) throw new CompileError("expected 0 type arguments", e.start, e.end);
     if (e.args.length !== found.params.length) {
       throw new CompileError(`expected ${found.params.length} argument${found.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -2944,7 +2951,6 @@ export function expressions(ctx: Context) {
     // `Promise<T>` describes, which in the definition is checked as one borrowing it.
     const promised = promiseElement(found.returns);
     if (holdsRef(found.returns) || promised !== undefined) borrowsFrom.set(e, [callee.object, ...e.args.filter(lends)]);
-    const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, found.returns), what: `'${callee.name}'` };
     return { type: promised !== undefined ? lentPromise(promised) : found.returns, what: `'${callee.name}'` };
   }
@@ -2955,7 +2961,7 @@ export function expressions(ctx: Context) {
     const target = inherited(classOf(c), "methods", callee.name)!;
     if (target.self!.owned) takesOver(callee.object, callee.name);
     else if (target.self!.mutable) mutates(callee.object, callee.name);
-    const instance = instantiate(target, [], e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
+    const instance = instantiate(target, e.typeArgs, e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
     calls.set(e, instance);
     if (typeof returns === "string" || returns.kind !== "interface") return returns;
     return wrapped(returns.name, returns, lower(returnOf(instance, e)));
@@ -4440,6 +4446,8 @@ export function expressions(ctx: Context) {
     }
     const methods = to.of.methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
+      // A generic method has no one function for the table; calls of it through a Dyn are refused.
+      if (m.generic) return undefined;
       if (body.params.some((p) => p.comptime)) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
       const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
       if (body.self?.owned && !m.owned) throw refuse("takes its object over", "this: Own<this>");
@@ -4479,6 +4487,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`property '${callee.name}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
+    if (m.generic) throw new CompileError(`'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${t.of.name}' instead`, callee.start, callee.end);
     const async = promiseElement(m.returns);
     if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);
     if (typeof m.returns !== "string" && m.returns.kind === "interface" && async === undefined) {

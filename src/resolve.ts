@@ -274,10 +274,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       if (rest) throw unsupported("rest parameters in function types", rest);
       // A generic one is shown and compared with its own parameters standing for themselves.
       if (t.typeParams.length > 0) {
-        const scope = placeholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n)));
-        const fn = withScope(scope, () => functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns)));
+        const around = new Map(scope);
+        const own = placeholders(t.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n)));
+        const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns)));
         fn.name = `<${t.typeParams.map((p) => p.name).join(", ")}>${fn.name}`;
-        fn.generic = { names: t.typeParams.map((p) => p.name), node: t };
+        fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around };
         return fn;
       }
       const fn = functionType(t.params.map(paramName), t.params.map((p) => paramType(p)), resolveType(t.returns));
@@ -509,15 +510,19 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
         if (m.optional) throw unsupported("optional methods", m);
-        if (m.typeParams.length > 0) throw unsupported("generic methods", m);
         if (!m.returns) throw new CompileError(`method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
         const first = m.params[0];
         const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
         const rest = m.params.find((p) => p.rest);
         if (rest) throw unsupported("rest parameters in interface methods", rest);
-        const params = (self ? m.params.slice(1) : m.params).map((p) => paramType(p));
-        const method: Method = { name: m.name, params, returns: resolveType(m.returns), mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
+        // A generic method's own type parameters stand for themselves in its signature.
+        const around = new Map(scope);
+        const own = m.typeParams.length > 0 ? placeholders(m.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n))) : new Map<string, Type>();
+        const returns = m.returns;
+        const [params, result] = withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => paramType(p)), resolveType(returns)] as const);
+        const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
+        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, params: self ? m.params.slice(1) : m.params }, scope: around };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);
       } else {

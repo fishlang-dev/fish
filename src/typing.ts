@@ -30,7 +30,9 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // are filled in once resolved.
 // An interface's method; `mutable` and `owned` when it declares `this: Mut<this>` or
 // `this: Own<this>`, which a call through a Dyn must allow for.
-export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean };
+// A generic method, `map<U>(f: (x: T) => U): U`, keeps its type parameters' names and the node it
+// was written as, as a generic function type does, each call resolving it.
+export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean; generic?: Family };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 
@@ -91,7 +93,9 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 // interface, it describes values without being one, so it never reaches codegen.
 // A generic one, `<T>(x: T) => T`, is a family: `generic` holds its type parameters' names and
 // the node it was written as, each call resolving it for that call's types.
-export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: { names: string[]; node: unknown } };
+// The type parameters around it, `scope`, are those it was written among.
+export type Family = { names: string[]; node: unknown; scope: Map<string, Type> };
+export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: Family };
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
