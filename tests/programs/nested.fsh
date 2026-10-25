@@ -324,3 +324,22 @@ function main() {
   a();
   console.log(n);
 }
+// case: nested_in_async_and_generator
+// expect: 6
+// expect: 2
+// expect: 3
+// A nested function's loops and awaits are its own, not those of the async function or
+// generator around it.
+async function work(): Promise<i64> { return 2; }
+function* gen(): Generator<i64> {
+  function helper(xs: i64[]): i64 { let s = 0; for (const x of xs) s += x; return s; }
+  yield helper([1, 2]);
+}
+async function main() {
+  function sum(xs: i64[]): i64 { let s = 0; for (const x of xs) s += x; return s; }
+  console.log(sum([1, 2, 3]));
+  async function put() { const v = await work(); return v; }
+  const got = await put();
+  console.log(got);
+  for (const x of gen()) console.log(x);
+}

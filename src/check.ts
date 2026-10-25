@@ -1780,6 +1780,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, body: s.body, ...at };
           nestedFunctions.set(arrow, s.name);
           Object.assign(s, { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
+          // The body is the arrow's now; left here too, walks over the statement would find it twice,
+          // as an async function's frame did, taking the function's loops and awaits for its own.
+          for (const key of ["body", "params", "returnType", "typeParams"] as const) delete (s as Partial<Func>)[key];
           const done = statement(s);
           nestedBindings.add(locals.get(s)!);
           return done;
