@@ -301,6 +301,36 @@ test("a Node built-in Fish lacks is named as one, and a re-export that can't be 
       return "loaded";
     };
     expect(error("a.fsh")).toBe("'node:crypto' is a Node module Fish's std doesn't have yet");
-    expect(error("b.fsh")).toStartWith("'p' has no export 'x'; its declarations in 'node_modules/p/index.d.ts' export nothing; it couldn't read 'gone', which it re-exports from: can't find the package 'gone'");
+    expect(error("b.fsh")).toStartWith("'p' has no export 'x'; its declarations in 'node_modules/p/index.d.ts' export nothing; re-exporting from 'gone' failed: can't find the package 'gone'");
+  });
+});
+
+test("a declaration file of globals isn't a module, and a cycle of re-exports stays quick", () => {
+  expect(names({ "node_modules/g/index.d.ts": "declare function $(s: string): void;\ndeclare const jq: number;\n" }, "g")).toEndWith("index.d.ts' declares globals, not a module");
+  // Each file re-exports the next two, round a ring of 30.
+  const ring: Record<string, string> = { "node_modules/a/index.d.ts": "export * from './f0';\n" };
+  for (let i = 0; i < 30; i++) ring[`node_modules/a/f${i}.d.ts`] = `export * from './f${(i + 1) % 30}';\nexport * from './f${(i + 2) % 30}';\nexport declare const v${i}: number;\n`;
+  const started = performance.now();
+  expect((names(ring) as string[]).length).toBe(30);
+  expect(performance.now() - started).toBeLessThan(2000);
+});
+
+test("a subpath's file comes before its directory, whose package.json exports don't count", () => {
+  project({
+    "node_modules/a/ops.d.ts": "",
+    "node_modules/a/ops/package.json": json({ types: "other.d.ts" }),
+    "node_modules/a/ops/other.d.ts": "",
+    "node_modules/b/ops/package.json": json({ exports: "./e.js" }),
+    "node_modules/b/ops/e.d.ts": "",
+    "node_modules/b/ops/index.d.ts": "",
+    "node_modules/c/ops/package.json": "{ not json",
+    "node_modules/c/ops/index.d.ts": "",
+    "node_modules/d/package.json": json({ exports: { ".": [null, "./d.js"] } }),
+    "node_modules/d/d.d.ts": "",
+  }, (dir) => {
+    expect(found(dir, "a/ops")).toBe("node_modules/a/ops.d.ts");
+    expect(found(dir, "b/ops")).toBe("node_modules/b/ops/index.d.ts");
+    expect(found(dir, "c/ops")).toBe("node_modules/c/ops/index.d.ts");
+    expect(found(dir, "d")).toContain("doesn't export '.'");
   });
 });

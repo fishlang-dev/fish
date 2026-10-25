@@ -81,11 +81,13 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
 // Fish doesn't use a package's declarations yet, so a name found is refused saying where it is
 // declared, and one not found saying what the package exports.
 function packageImport(from: string, specifier: string, s: Stmt, entry: string): never {
-  if (specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!)) {
+  const shown = (file: string) => relative(dirname(entry), file);
+  // A name a Node module has is that module, unless an npm package of that name is installed, as
+  // a bundler takes it.
+  const found = specifier.startsWith("node:") ? undefined : findTypings(from, specifier);
+  if (found === undefined || ("missing" in found && NODE_MODULES.has(specifier.split("/")[0]!))) {
     throw new CompileError(`'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
   }
-  const shown = (file: string) => relative(dirname(entry), file);
-  const found = findTypings(from, specifier);
   if ("missing" in found) throw new CompileError(found.missing, s.start, s.end);
   const exports = exportsOf(found.file, specifier);
   if (typeof exports === "string") throw new CompileError(exports, s.start, s.end);
@@ -97,7 +99,7 @@ function packageImport(from: string, specifier: string, s: Stmt, entry: string):
     const listed = known.length === 0 ? "nothing" : known.slice(0, 12).map((n) => `'${n}'`).join(", ") + (known.length > 12 ? `, and ${known.length - 12} more` : "");
     const what = missing === "default" ? "a default export" : `'${missing}'`;
     // What a re-export couldn't reach may be where the name is.
-    const unread = exports.problems.length > 0 ? `; it couldn't read ${exports.problems[0]}` : "";
+    const unread = exports.problems.length > 0 ? `; ${exports.problems[0]}` : "";
     const at = (s.kind === "import" ? s.named : s.kind === "exportNamed" ? s.specifiers : undefined)?.find((sp) => sp.name === missing) ?? s;
     throw new CompileError(`'${specifier}' has no export ${what}; its declarations in '${shown(found.file)}' export ${listed}${unread}`, at.start, at.end);
   }

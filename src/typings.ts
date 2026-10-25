@@ -72,17 +72,33 @@ function fromPackage(root: string, sub: string, shown: string): Typings {
     if (!target.matched) return { missing: `'${shown}' doesn't export '${key}' in its package.json 'exports'` };
     return at(target.file) ?? { missing: `'${shown}' exports '${key}', but none of what it maps it to has a declaration file` };
   }
-  if (sub !== "") {
-    // A subpath directory may be a package of its own, with a package.json saying where.
-    const path = join(root, sub);
-    if (isDirectory(path) && isFile(join(path, "package.json"))) return fromPackage(path, "", shown);
-    return at(declarationFor(path)) ?? { missing: `'${shown}' has no declaration for '${sub}'` };
-  }
+  if (sub !== "") return at(subpath(join(root, sub))) ?? { missing: `'${shown}' has no declaration for '${sub}'` };
   // `typings` is read first, and a file it names that isn't there leaves index.d.ts, as tsc does.
   const named = ["typings", "types"].find((f) => typeof pkg[f] === "string");
   if (named) return at(declarationFor(join(root, pkg[named] as string)) ?? declarationFor(join(root, "index"))) ?? { missing: `'${shown}' names '${pkg[named]}' as its '${named}', which isn't there` };
   const main = typeof pkg.main === "string" ? declarationFor(join(root, pkg.main)) : undefined;
   return at(main ?? declarationFor(join(root, "index"))) ?? { missing: `'${shown}' has no TypeScript declarations: its package.json gives no 'types', and it has no index.d.ts` };
+}
+
+// A subpath's declaration, as tsc looks: the file first, then a directory's package.json, whose
+// `typings`, `types` or `main` say where and whose `exports` counts only at a package's root,
+// then its index.
+function subpath(path: string): string | undefined {
+  const file = /\.[a-z]+$/i.test(path) ? declarationFor(path) : [`${path}.d.ts`].find(isFile);
+  if (file !== undefined) return file;
+  if (isDirectory(path)) {
+    let pkg: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(path, "package.json"), "utf8"));
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) pkg = parsed as Record<string, unknown>;
+    } catch {
+      // No package.json, or one that isn't JSON, says nothing here.
+    }
+    const field = ["typings", "types", "main"].find((f) => typeof pkg[f] === "string");
+    const named = field === undefined ? undefined : declarationFor(join(path, pkg[field] as string));
+    if (named !== undefined) return named;
+  }
+  return declarationFor(path);
 }
 
 // The declaration file for a path as a package or a re-export names it: itself when it is one,
@@ -138,7 +154,7 @@ function conditioned(t: unknown, resolve: (target: string) => string | undefined
   if (Array.isArray(t)) {
     for (const entry of t) {
       const found = conditioned(entry, resolve);
-      if (typeof found === "string") return found;
+      if (found !== undefined) return found;
     }
     return undefined;
   }
@@ -157,42 +173,74 @@ export type Declared = { file: string; src: string; at: Stmt };
 export type Exports = { names: Map<string, Declared>; problems: string[] };
 
 type Scope = { file: string; src: string; statements: Stmt[] };
-// One lookup's files: those finished, and those being read, whose exports aren't known yet.
-type Lookup = { done: Map<string, Exports>; reading: Set<string> };
-type Read = Exports & { partial: boolean };
+// One pass of a lookup: the files it has finished, those it is reading, and what the previous
+// pass found, given where a file is reached again through its own re-exports. Files are parsed
+// once for the whole lookup.
+type Parsed = { src: string; statements: Stmt[] } | string;
+type Lookup = { done: Map<string, Exports>; reading: Set<string>; before: Map<string, Exports>; parsed: Map<string, Parsed>; cyclic: boolean };
 
 // The names a declaration file exports, each with where it is declared, or why the file can't
 // be read; for a types package written as `declare module "pkg"`, the names that module exports.
+// Where re-exports go round in a cycle, passes repeat, each starting the cycle from what the last
+// found, until no file's exports grow: `export *` only adds names, so this ends.
 export function exportsOf(file: string, specifier?: string): Exports | string {
-  return read(file, specifier, { done: new Map(), reading: new Set() });
+  const parsed = new Map<string, Parsed>();
+  const size = (m: Map<string, Exports>) => [...m.values()].reduce((n, x) => n + x.names.size, 0);
+  let before = new Map<string, Exports>();
+  for (;;) {
+    const lookup: Lookup = { done: new Map(), reading: new Set(), before, parsed, cyclic: false };
+    const made = read(file, specifier, lookup);
+    if (typeof made === "string" || !lookup.cyclic || (before.size > 0 && size(lookup.done) === size(before))) return made;
+    before = lookup.done;
+  }
 }
 
-function read(file: string, specifier: string | undefined, lookup: Lookup): Read | string {
+// Why a file couldn't be read, in a message's words.
+const REASONS: Record<string, string> = { EACCES: "permission denied", ENOENT: "it isn't there", EISDIR: "it is a directory" };
+
+function parsedFile(file: string, lookup: Lookup): Parsed {
+  const known = lookup.parsed.get(file);
+  if (known !== undefined) return known;
+  let made: Parsed;
+  try {
+    const src = readFileSync(file, "utf8");
+    try {
+      made = { src, statements: parse(src) };
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      const { line, col } = locate(src, e.start);
+      made = `can't read the declarations in '${file}:${line}:${col}': ${e.message}`;
+    }
+  } catch (e) {
+    if (e instanceof CompileError) throw e;
+    const code = (e as { code?: string }).code;
+    made = `can't read the declarations in '${file}': ${code ? REASONS[code] ?? code : (e as Error).message}`;
+  }
+  lookup.parsed.set(file, made);
+  return made;
+}
+
+// Whether a declaration file is a module, as one with a top-level import or export is; one
+// without declares globals.
+const isModule = (statements: Stmt[]) => statements.some((s) => ["import", "importEquals", "export", "exportNamed", "exportAll", "exportDefault", "exportAssign"].includes(s.kind));
+
+function read(file: string, specifier: string | undefined, lookup: Lookup): Exports | string {
   const key = `${file}\n${specifier ?? ""}`;
   const done = lookup.done.get(key);
-  if (done) return { ...done, partial: false };
-  // A file reached again through its own re-exports adds nothing more on that path, and what is
-  // read meanwhile isn't kept, as it may lack what the file would have given it.
-  if (lookup.reading.has(key)) return { names: new Map(), problems: [], partial: true };
-  let src: string;
-  try {
-    src = readFileSync(file, "utf8");
-  } catch (e) {
-    return `can't read the declarations in '${file}': ${(e as { code?: string }).code ?? (e as Error).message}`;
+  if (done) return done;
+  if (lookup.reading.has(key)) {
+    lookup.cyclic = true;
+    return lookup.before.get(key) ?? { names: new Map(), problems: [] };
   }
-  let statements: Stmt[];
-  try {
-    statements = parse(src);
-  } catch (e) {
-    if (!(e instanceof CompileError)) throw e;
-    const { line, col } = locate(src, e.start);
-    return `can't read the declarations in '${file}:${line}:${col}': ${e.message}`;
-  }
+  const parsed = parsedFile(file, lookup);
+  if (typeof parsed === "string") return parsed;
+  const { src, statements } = parsed;
   const ambient = specifier === undefined ? undefined : statements.map(unwrap).find((s): s is Extract<Stmt, { kind: "namespace" }> => s.kind === "namespace" && s.quoted && s.name === specifier);
+  if (!ambient && !isModule(statements)) return `'${file}' declares globals, not a module`;
   lookup.reading.add(key);
   const made = exportsIn({ file, src, statements: ambient ? ambient.body ?? [] : statements }, lookup);
   lookup.reading.delete(key);
-  if (!made.partial) lookup.done.set(key, { names: made.names, problems: made.problems });
+  lookup.done.set(key, made);
   return made;
 }
 
@@ -216,7 +264,7 @@ function declares(s: Stmt): string[] {
 type Binding = { kind: "own"; at: Stmt } | { kind: "import"; module: string; name: string; at: Stmt } | { kind: "namespace"; module: string; at: Stmt };
 
 // A namespace's body sees the names around it, which `outer` gives.
-function exportsIn(scope: Scope, lookup: Lookup, outer?: (name: string) => Declared | undefined): Read {
+function exportsIn(scope: Scope, lookup: Lookup, outer?: (name: string) => Declared | undefined): Exports {
   const declared = (at: Stmt): Declared => ({ file: scope.file, src: scope.src, at });
   const local = new Map<string, Binding>();
   for (const s of scope.statements) {
@@ -231,25 +279,23 @@ function exportsIn(scope: Scope, lookup: Lookup, outer?: (name: string) => Decla
   }
   const names = new Map<string, Declared>();
   const problems: string[] = [];
-  let partial = false;
   const set = (name: string, d: Declared | undefined) => d && !names.has(name) && names.set(name, d);
   const from = (module: string): Map<string, Declared> => {
     const found = relativeSpecifier(module) ? declarationFor(join(dirname(scope.file), module)) : (() => {
       const t = findTypings(scope.file, module);
-      if ("missing" in t) problems.push(`'${module}', which it re-exports from: ${t.missing}`);
+      if ("missing" in t) problems.push(`re-exporting from '${module}' failed: ${t.missing}`);
       return "file" in t ? t.file : undefined;
     })();
     if (found === undefined) {
-      if (relativeSpecifier(module)) problems.push(`'${module}', which it re-exports from, has no declaration file`);
+      if (relativeSpecifier(module)) problems.push(`re-exporting from '${module}' failed: it has no declaration file`);
       return new Map();
     }
     const exports = read(found, relativeSpecifier(module) ? undefined : module, lookup);
     if (typeof exports === "string") {
-      problems.push(exports);
+      problems.push(`re-exporting from '${module}' failed: ${exports}`);
       return new Map();
     }
-    partial ||= exports.partial;
-    problems.push(...exports.problems);
+    for (const p of exports.problems) if (!problems.includes(p)) problems.push(p);
     return exports.names;
   };
   const binding = (name: string): Declared | undefined => {
@@ -276,15 +322,15 @@ function exportsIn(scope: Scope, lookup: Lookup, outer?: (name: string) => Decla
     } else if (s.kind === "exportDefault") {
       set("default", s.declaration ? declared(s.declaration) : (s.value?.kind === "ident" ? binding(s.value.name) : undefined) ?? declared(s));
     } else if (s.kind === "exportAssign") {
-      exportAssigned(s, scope, local, set, from, declared, lookup, (p) => (partial ||= p), binding);
+      exportAssigned(s, scope, local, set, from, declared, lookup, binding);
     }
   }
-  return { names, problems, partial };
+  return { names, problems };
 }
 
 // `export = X`: X is the module. Its members are what it exports by name: a namespace's own
 // exports, those of a module it was imported as, or the properties of an object type it has.
-function exportAssigned(s: Extract<Stmt, { kind: "exportAssign" }>, scope: Scope, local: Map<string, Binding>, set: (name: string, d: Declared | undefined) => void, from: (module: string) => Map<string, Declared>, declared: (at: Stmt) => Declared, lookup: Lookup, partly: (p: boolean) => void, around: (name: string) => Declared | undefined) {
+function exportAssigned(s: Extract<Stmt, { kind: "exportAssign" }>, scope: Scope, local: Map<string, Binding>, set: (name: string, d: Declared | undefined) => void, from: (module: string) => Map<string, Declared>, declared: (at: Stmt) => Declared, lookup: Lookup, around: (name: string) => Declared | undefined) {
   const name = s.value.kind === "ident" ? s.value.name : undefined;
   const b = name === undefined ? undefined : local.get(name);
   if (b?.kind === "namespace") {
@@ -294,7 +340,6 @@ function exportAssigned(s: Extract<Stmt, { kind: "exportAssign" }>, scope: Scope
     const d = unwrap(t);
     if (d.kind === "namespace" && !d.quoted && d.name === name) {
       const inner = exportsIn({ file: scope.file, src: scope.src, statements: d.body ?? [] }, lookup, around);
-      partly(inner.partial);
       for (const [n, x] of inner.names) set(n, x);
     }
     if (d.kind === "let") {
