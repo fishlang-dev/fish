@@ -4,7 +4,7 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { computed, restText, dynCalls, printCalls, formatCalls, inspectCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
+import { computed, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -477,6 +477,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
+        // `Promise.all` and `Promise.race` take each future in their list as an argument, so what
+        // one borrows is lent while the others are made, and two can't conflict.
+        if (combinedCalls.has(e)) {
+          const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
+          return during(e, () => handOver(list, `'Promise.${(e.callee as { name: string }).name}'`, e));
+        }
         const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
@@ -793,9 +799,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (e.kind === "arrow" || instance.envs?.has(e)) {
       return captured(e).filter(([, , from, , held]) => !held || reborrows(from!)).map(([place, use, , mutable, held]) => [place, use as Expr, mutable || held]);
     }
-    // A call's returned reference lends again what it borrows from, a receiver included.
+    // A call's returned reference lends again what it borrows from, a receiver included; a
+    // future lends it mutably when it holds a mutable reference.
     const from = borrowsFrom.get(e);
-    if (from) return from.flatMap((s) => source(s, (coercions.get(e) ?? types.get(e)!) as RefType));
+    if (from) {
+      const result = coercions.get(e) ?? types.get(e)!;
+      return from.flatMap((s) => source(s, isRef(result) ? result : ({ mutable: holdsMut(result) } as RefType)));
+    }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
     const place = key(e);

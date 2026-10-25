@@ -393,6 +393,26 @@ export function futureType(name: string, concrete: boolean): FutureType {
 // `sleep(ms)`'s future: its state, then the delay, then the deadline the runtime sets.
 export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
 
+// A future awaiting several at once in its task, made for one `Promise.all` or `Promise.race`
+// call: `all` gives each one's value as a tuple, `race` the first to settle's. Its frame is its
+// state, then for each future the future, its value, and how far it got: 0 not yet polled, 1
+// waiting, 2 done. A future giving nothing gives null here.
+export type Combined = { kind: "all" | "race"; futures: (FutureType | HandleType)[]; at: { start: number; end: number } };
+export const combinedOf = new WeakMap<FutureType, Combined>();
+
+export function combinedFuture(combined: Combined): FutureType {
+  const values = combined.futures.map((f) => (f.gives === "void" ? "null" : f.gives));
+  const thrown = combined.futures.flatMap((f) => (f.throws ? [f.throws] : []));
+  const frame: Field[] = [{ name: "state", type: "i32" }];
+  combined.futures.forEach((f, i) => frame.push({ name: `future${i}`, type: f }, { name: `value${i}`, type: values[i]! }, { name: `done${i}`, type: "i32" }));
+  const params = combined.futures.flatMap((f) => (f.kind === "future" ? f.params : []));
+  const gives = combined.kind === "all" ? tupleType(values) : unionType(values);
+  const t: FutureType = { kind: "future", name: `Promise.${combined.kind}`, gives, throws: thrown.length > 0 ? unionType(thrown) : undefined, fields: [], params, frame, concrete: true };
+  keys.set(t, `future ${declared++}`);
+  combinedOf.set(t, combined);
+  return t;
+}
+
 // `yieldNow()`'s future, which is pending once, then done.
 export const YIELD_NOW: FutureType = { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
 

@@ -3342,14 +3342,8 @@ static fsh_timer fsh_timer_take(void) {
   return taken;
 }
 
-// An aborted sleep takes its timer off the heap, so it neither waits out its deadline holding the
-// task nor wakes it later.
-// ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
-void fsh_rt_sleep_leave(fsh_task *task) {
-  pthread_mutex_lock(&fsh_timer_lock);
-  int64_t at = 0;
-  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal)) at++;
-  if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
+// Takes the timer at a place in the heap out of it, under the timers' lock.
+static void fsh_timer_remove(int64_t at) {
   fsh_timers[at] = fsh_timers[--fsh_timer_count];
   while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
     fsh_timer_swap(at, (at - 1) / 2);
@@ -3363,6 +3357,29 @@ void fsh_rt_sleep_leave(fsh_task *task) {
     fsh_timer_swap(at, least);
     at = least;
   }
+}
+
+// An aborted sleep takes its timer off the heap, so it neither waits out its deadline holding the
+// task nor wakes it later.
+// ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
+void fsh_rt_sleep_leave(fsh_task *task) {
+  pthread_mutex_lock(&fsh_timer_lock);
+  int64_t at = 0;
+  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal)) at++;
+  if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
+  fsh_timer_remove(at);
+  pthread_mutex_unlock(&fsh_timer_lock);
+  fsh_task_release(task);
+}
+
+// A sleep cancelled where it waits takes one of its timers off the heap: one for its task at its
+// deadline, which another sleep of the task waiting as long would wake it for just the same.
+void fsh_rt_sleep_cancel(fsh_task *task, int64_t deadline) {
+  pthread_mutex_lock(&fsh_timer_lock);
+  int64_t at = 0;
+  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].signal || fsh_timers[at].deadline != deadline)) at++;
+  if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
+  fsh_timer_remove(at);
   pthread_mutex_unlock(&fsh_timer_lock);
   fsh_task_release(task);
 }

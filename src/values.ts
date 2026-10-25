@@ -8,7 +8,7 @@ import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./p
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -204,6 +204,10 @@ export const syncFileCalls = new WeakMap<Expr, string>();
 export const printCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
+// `Promise.all` and `Promise.race` calls, each its own combined future.
+export const combinedCalls = new WeakSet<Expr>();
+// The operands of an `await`, while they are checked.
+const awaitedNow = new WeakSet<Expr>();
 // node:util's `inspect` calls.
 export const inspectCalls = new WeakSet<Expr>();
 // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
@@ -879,6 +883,9 @@ export function expressions(ctx: Context) {
       shown(e.args);
       unformattable(e.args);
       return { type: "void", what: "printing" };
+    }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && (callee.name === "all" || callee.name === "race") && !lookup("Promise") && !classes.has("Promise")) {
+      return combined(e, callee.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalTimeout(e, callee);
@@ -2584,6 +2591,7 @@ export function expressions(ctx: Context) {
     if (ctx.locked) throw new CompileError("'update' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the update, then await", e.start, e.end);
     if (!ctx.async) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
+    awaitedNow.add(e.operand);
     let t = value(e.operand);
     // Through a bound: in an instance, the concrete method's own future; in the definition, what
     // the bound's `Promise<T>` gives.
@@ -2596,6 +2604,28 @@ export function expressions(ctx: Context) {
     if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
     if (t.throws) raise(e, t.throws, "this Promise");
     return t.gives;
+  }
+
+  // `Promise.all([...])` and `Promise.race([...])`: one future awaiting those in the list at once,
+  // in this task. It is awaited where it is made, so the futures' borrows end with the await.
+  function combined(e: Call, kind: "all" | "race"): { type: Type; what: string } {
+    const name = `'Promise.${kind}'`;
+    if (e.optional) throw new CompileError(`${name} is always there, so it is called without '?.'`, e.start, e.end);
+    if (!awaitedNow.has(e)) throw new CompileError(`${name} is awaited where it is called, as in 'await Promise.${kind}([a(), b()])'`, e.start, e.end);
+    const [list] = e.args;
+    if (e.args.length !== 1 || list?.kind !== "array") throw new CompileError(`${name} takes an array of Promises written in the call, as in 'Promise.${kind}([a(), b()])'`, e.start, e.end);
+    if (list.elements.length === 0) throw new CompileError(`${name} needs a Promise to wait for${kind === "race" ? "; an empty race never settles" : ""}`, list.start, list.end);
+    const futures = list.elements.map((x) => {
+      if (x === undefined || x.kind === "spread") throw new CompileError(`${name} takes each Promise written in the list`, (x ?? list).start, (x ?? list).end);
+      let t = value(x);
+      if (typeof t !== "string" && t.kind === "param" && t.concrete) t = t.concrete;
+      if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) throw unsupported(`Promise values in ${name}`, x);
+      if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`${name} takes Promises, like an async function's call, not '${show(t)}'`, x.start, x.end);
+      return t;
+    });
+    const type = combinedFuture({ kind, futures, at: e });
+    combinedCalls.add(e);
+    return { type, what: name };
   }
 
   // What keeps a value from moving to another thread: a reference, which borrows from the

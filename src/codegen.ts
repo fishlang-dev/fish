@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./p
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -137,6 +137,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const jsonWriters = new Map<Type, string>();
   const jsonReaders = new Map<Type, string>();
   const inspectors = new Map<Type, string>();
+  // Each async instance's awaits, by the state it is paused in at each: the frame field the
+  // awaited future is in, and its type, for cancelling it there.
+  const awaitsOf = new Map<Instance, { state: number; field: number; type: Type }[]>();
+  // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
+  // cancel function is wanted for.
+  const combinePolls = new Map<FutureType, string>();
+  const cancelled = new Set<Instance>();
   // The functions writing String(x) of a value with parts, by its type.
   const stringers = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
@@ -271,6 +278,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     // Fish's own functions stay inside this module, so two libraries never clash over them.
     out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+  }
+  // A cancel function wanted while making one may want another.
+  for (const done = new Set<Instance>(); done.size < cancelled.size;) {
+    for (const i of [...cancelled]) {
+      if (done.has(i)) continue;
+      done.add(i);
+      cancelFunction(i);
+    }
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
@@ -5286,6 +5301,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (maths.has(e)) return mathCall(e);
       if (kindTests.has(e)) return test(e, value, valueType)!;
       if (syncFileCalls.has(e)) return syncFile(e, syncFileCalls.get(e)!);
+      // `Promise.all` and `Promise.race`: their futures moved into the combined one's frame.
+      if (combinedCalls.has(e)) {
+        const t = types.get(e) as FutureType;
+        const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
+        const given = list.map((x) => owned(x));
+        let frame = "zeroinitializer";
+        given.forEach((v, i) => {
+          const next = temp();
+          emit(`${next} = insertvalue ${llvm(t)} ${frame}, ${llvm(valueType(list[i]!))} ${v}, ${1 + 3 * i}`);
+          frame = next;
+        });
+        return frame;
+      }
       // A file's future: the path, and a write's bytes, in its frame for the pool to take.
       if (fileCalls.has(e)) {
         const future = types.get(e) as FutureType;
@@ -6061,8 +6089,209 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const poll = label();
     g.resumes.push(poll);
     const resumed = g.resumes.length;
+    if (!awaitsOf.has(current)) awaitsOf.set(current, []);
+    awaitsOf.get(current)!.push({ state: resumed, field: current.frame!.awaits.get(e)!, type: inner });
     emit(`br label %${poll}`);
     startBlock(poll);
+    const step = pollStep(inner, at, e);
+    startBlock(step.waiting);
+    // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
+    if (inner === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
+    emit(`store i32 ${resumed}, ptr %state`);
+    emit(`ret ${resultType(current)} ${polled(current.future!, 0)}`);
+    const finish = () => {
+      const old = temp();
+      emit(`${old} = load ${llvm(inner)}, ptr ${at}`);
+      emit(`store ${llvm(inner)} zeroinitializer, ptr ${at}`);
+      dispose(old, inner);
+    };
+    if (shape.throws) {
+      startBlock(step.failed);
+      const error = step.error();
+      finish();
+      raised(e, error);
+    } else if (inner !== YIELD_NOW && inner !== SLEEP) {
+      startBlock(step.failed);
+      emit("unreachable");
+    }
+    startBlock(step.ready);
+    const v = step.value();
+    finish();
+    return v;
+  }
+
+  // A `Promise.all` or `Promise.race` future's poll: each future not yet done is polled in turn,
+  // and one done keeps its value. `race` is done with the first to settle, `all` with the last,
+  // or with the first error; then the ones still waiting are cancelled where they wait, and the
+  // awaiter's drop of this frame drops them.
+  function combinePoll(t: FutureType): string {
+    const known = combinePolls.get(t);
+    if (known) return known;
+    const name = `@"fsh.combine.${combinePolls.size}"`;
+    combinePolls.set(t, name);
+    const { kind, futures, at } = combinedOf.get(t)!;
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const field = (i: number) => {
+      const p = temp();
+      emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      return p;
+    };
+    const valueOf = (f: FutureType | HandleType): Type => (f.gives === "void" ? "null" : f.gives);
+    const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
+    const finished = (at: string, f: Type) => {
+      const old = temp();
+      emit(`${old} = load ${llvm(f)}, ptr ${at}`);
+      emit(`store ${llvm(f)} zeroinitializer, ptr ${at}`);
+      dispose(old, f);
+    };
+    const cancelOthers = (except: number) => futures.forEach((f, j) => {
+      if (j !== except) whileWaiting(field(3 + 3 * j), () => cancelAt(field(1 + 3 * j), f));
+    });
+    futures.forEach((f, i) => {
+      const [futureAt, valueAt, doneAt] = [field(1 + 3 * i), field(2 + 3 * i), field(3 + 3 * i)];
+      const [d, over, skip, go] = [temp(), temp(), label(), label()];
+      emit(`${d} = load i32, ptr ${doneAt}`);
+      emit(`${over} = icmp eq i32 ${d}, 2`);
+      emit(`br i1 ${over}, label %${skip}, label %${go}`);
+      startBlock(go);
+      emit(`store i32 1, ptr ${doneAt}`);
+      const step = pollStep(f, futureAt, at as Expr);
+      startBlock(step.waiting);
+      emit(`br label %${skip}`);
+      startBlock(step.ready);
+      const v = step.value() ?? "zeroinitializer";
+      finished(futureAt, f);
+      emit(`store i32 2, ptr ${doneAt}`);
+      if (kind === "race") {
+        cancelOthers(i);
+        finishWith(1, convert(v, valueOf(f), t.gives));
+      } else {
+        emit(`store ${llvm(valueOf(f))} ${v}, ptr ${valueAt}`);
+        emit(`br label %${skip}`);
+      }
+      startBlock(step.failed);
+      if (f.throws) {
+        const error = step.error();
+        finished(futureAt, f);
+        emit(`store i32 2, ptr ${doneAt}`);
+        cancelOthers(i);
+        finishWith(2, undefined, convert(error, f.throws, t.throws!));
+      } else emit("unreachable");
+      startBlock(skip);
+    });
+    if (kind === "race") finishWith(0);
+    else {
+      let all = "true";
+      futures.forEach((_, i) => {
+        const [d, over, both] = [temp(), temp(), temp()];
+        emit(`${d} = load i32, ptr ${field(3 + 3 * i)}`);
+        emit(`${over} = icmp eq i32 ${d}, 2`);
+        emit(`${both} = and i1 ${all}, ${over}`);
+        all = both;
+      });
+      const [waiting, ready] = [label(), label()];
+      emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
+      startBlock(waiting);
+      finishWith(0);
+      startBlock(ready);
+      // The values move out of the frame into the tuple.
+      const tuple = t.gives as ObjectType;
+      let made = "zeroinitializer";
+      futures.forEach((f, i) => {
+        const [valueAt, v, next] = [field(2 + 3 * i), temp(), temp()];
+        emit(`${v} = load ${llvm(valueOf(f))}, ptr ${valueAt}`);
+        emit(`store ${llvm(valueOf(f))} zeroinitializer, ptr ${valueAt}`);
+        emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(valueOf(f))} ${v}, ${fieldPath(tuple, String(i)).join(", ")}`);
+        made = next;
+      });
+      finishWith(1, made);
+    }
+    out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    return name;
+  }
+
+  // `then` where a combined future's flag at `doneAt` says its future is waiting.
+  function whileWaiting(doneAt: string, then: () => void) {
+    const [d, waiting, yes, after] = [temp(), temp(), label(), label()];
+    emit(`${d} = load i32, ptr ${doneAt}`);
+    emit(`${waiting} = icmp eq i32 ${d}, 1`);
+    emit(`br i1 ${waiting}, label %${yes}, label %${after}`);
+    startBlock(yes);
+    then();
+    emit(`br label %${after}`);
+    startBlock(after);
+  }
+
+  // Cancels the future of type `t` at `at`, paused where it waits: it leaves the waiters of what
+  // it waits on, as an abort does, passing on a wake it was given, so nothing it waited on wakes
+  // the task for it or loses a wake meant for another. Its drop comes after.
+  function cancelAt(at: string, t: Type) {
+    if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW) return;
+    const frame = t.frame;
+    const load = (i: number, of: string) => {
+      const [p, v] = [temp(), temp()];
+      emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+      emit(`${v} = load ${of}, ptr ${p}`);
+      return [p, v] as const;
+    };
+    const leaf = leafOf.get(t);
+    if (t === SLEEP || leaf?.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, i64 ${load(1, "i64")[1]})`);
+    else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    else if (leaf && ["connect", "accept", "read", "write"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    if (leaf?.signal) {
+      const [flag] = load(frame.length - 1, "i32");
+      emit(`call void @fsh_rt_signal_leave(ptr ${load(frame.length - 2, "ptr")[1]}, ptr ${flag}, ptr %cx)`);
+    }
+    if (leaf || t === SLEEP) return;
+    const combined = combinedOf.get(t);
+    if (combined) {
+      combined.futures.forEach((f, j) => {
+        const [doneAt, futureAt] = [temp(), temp()];
+        emit(`${doneAt} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${3 + 3 * j}`);
+        emit(`${futureAt} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
+        whileWaiting(doneAt, () => cancelAt(futureAt, f));
+      });
+      return;
+    }
+    const instance = futureOf.get(t);
+    if (!instance) return;
+    cancelled.add(instance);
+    emit(`call void ${cancelSymbol(instance)}(ptr ${at}, ptr %cx)`);
+  }
+
+  function cancelSymbol(i: Instance): string {
+    return symbol(i).replace(/^@"fsh\./, '@"fsh.cancel.');
+  }
+
+  // An async instance's cancel: the future it awaits in the state it is paused in is cancelled.
+  function cancelFunction(i: Instance) {
+    const saved = { allocas, body, temps, labels, block, pending, scopes };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const awaits = awaitsOf.get(i) ?? [];
+    const [state, done] = [temp(), label()];
+    const cases = awaits.map(() => label());
+    emit(`${state} = load i32, ptr %frame`);
+    emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]}`).join(" ")} ]`);
+    awaits.forEach((a, n) => {
+      startBlock(cases[n]!);
+      const p = temp();
+      emit(`${p} = getelementptr ${llvm(i.future!)}, ptr %frame, i32 0, i32 ${a.field}`);
+      cancelAt(p, a.type);
+      emit(`br label %${done}`);
+    });
+    startBlock(done);
+    emit("ret void");
+    out.push(`define internal void ${cancelSymbol(i)}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+  }
+
+  // One poll of the future in slot `at`: the blocks it goes on to, waiting, ready or failed,
+  // and, called in those blocks, the value it gave and the error it threw. `e` places a panic.
+  function pollStep(inner: FutureType | HandleType | DynType, at: string, e: Expr): { waiting: string; ready: string; failed: string; value: () => string | undefined; error: () => string } {
+    const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
     const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
     const leaf = inner.kind === "future" ? leafOf.get(inner) : undefined;
     let given: string | undefined;
@@ -6216,66 +6445,51 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else {
-      unwinding(`call ${pollType(shape)} ${symbol(futureOf.get(inner)!)}(ptr ${at}, ptr %cx)`, result);
+      const fn = combinedOf.has(inner as FutureType) ? combinePoll(inner as FutureType) : symbol(futureOf.get(inner)!);
+      unwinding(`call ${pollType(shape)} ${fn}(ptr ${at}, ptr %cx)`, result);
       emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     }
-    startBlock(waiting);
-    // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
-    if (inner === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
-    emit(`store i32 ${resumed}, ptr %state`);
-    emit(`ret ${resultType(current)} ${polled(current.future!, 0)}`);
-    const finish = () => {
-      const old = temp();
-      emit(`${old} = load ${llvm(inner)}, ptr ${at}`);
-      emit(`store ${llvm(inner)} zeroinitializer, ptr ${at}`);
-      dispose(old, inner);
-    };
-    if (shape.throws) {
-      startBlock(failed);
-      // An aborted wait throws a new AbortError; any other future gives its own error.
-      // A socket's failure is an IoError with the system's reason; any other leaf's, an abort.
+    const error = () => {
+      const thrown = shape.throws!;
       let error = "";
       if (leaf && reason && !leaf.signal) {
-        error = ioError(reason, shape.throws as ClassType);
+        error = ioError(reason, thrown as ClassType);
       } else if (leaf && reason) {
         // Given a signal, it throws either: an AbortError when it was aborted, leaving no reason.
-        const members = (shape.throws as UnionType).members as ClassType[];
+        const members = (thrown as UnionType).members as ClassType[];
         const [io, aborted] = [members.find((m) => m.name === "IoError")!, members.find((m) => m.name === "AbortError")!];
         const [text, none, ioAt, abortAt, join, made] = [temp(), temp(), label(), label(), label(), temp()];
         emit(`${text} = load ptr, ptr ${reason}`);
         emit(`${none} = icmp eq ptr ${text}, null`);
         emit(`br i1 ${none}, label %${abortAt}, label %${ioAt}`);
         startBlock(ioAt);
-        const asIo = convert(ioError(reason, io), io, shape.throws);
+        const asIo = convert(ioError(reason, io), io, thrown);
         const fromIo = block;
         emit(`br label %${join}`);
         startBlock(abortAt);
-        const asAbort = convert(abortError(aborted), aborted, shape.throws);
+        const asAbort = convert(abortError(aborted), aborted, thrown);
         const fromAbort = block;
         emit(`br label %${join}`);
         startBlock(join);
-        emit(`${made} = phi ${llvm(shape.throws)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
+        emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
-      } else if (leaf) error = abortError(shape.throws);
+      } else if (leaf) error = abortError(thrown);
       else {
         error = temp();
         emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
       }
-      finish();
-      raised(e, error);
-    } else if (inner !== YIELD_NOW && inner !== SLEEP) {
-      startBlock(failed);
-      emit("unreachable");
-    }
-    startBlock(ready);
-    let v: string | undefined = given;
-    if (shape.gives !== "void" && !leaf) {
-      v = temp();
-      emit(`${v} = extractvalue ${pollType(shape)} ${result}, 1`);
-    }
-    finish();
-    return v;
+      return error;
+    };
+    const value = () => {
+      let v: string | undefined = given;
+      if (shape.gives !== "void" && !leaf) {
+        v = temp();
+        emit(`${v} = extractvalue ${pollType(shape)} ${result}, 1`);
+      }
+      return v;
+    };
+    return { waiting, ready, failed, value, error };
   }
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
