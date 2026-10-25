@@ -177,7 +177,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["timers/promises", STD("sleep")],
   // `http` is a client as well as a server, and Fish has only the server so far.
   ["http", PLANNED("HTTP client")], ["console", PLANNED("Logging to stderr and clocks")],
-  ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")], ["sys", PLANNED("Printing objects and instances")],
+  ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")],
   ["fs", PLANNED("Async file I/O")], ["path", PLANNED("Path utilities")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
@@ -186,7 +186,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
   ["process", PLANNED("Process environment")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
-  ["util", PLANNED("Printing objects and instances")],
+  // console.log prints as util.inspect does, but no plan gives util itself, as inspect or format.
 ]);
 const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
 
