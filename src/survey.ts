@@ -78,7 +78,6 @@ const RULES: Rule[] = [
   { id: "timers", action: "unsupported", title: "setTimeout and setInterval", feature: "setTimeout and setInterval" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
-  { id: "promiseSettled", action: "unsupported", title: "Promise.allSettled and Promise.any", feature: "Promise.allSettled and Promise.any" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
 ];
 
@@ -508,7 +507,6 @@ function callRules(n: Node, push: (id: string) => void) {
   if (isNode(callee) && callee.kind === "member" && named(callee.object, "console") && !["log", "error", "warn"].includes(callee.name as string)) push("console");
   // Fish's parse takes no reviver, and its stringify one value.
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");
-  if (memberOf(callee, "Promise", ["allSettled", "any"])) push("promiseSettled");
   if (!isNode(callee) || callee.kind !== "member") return;
   const name = callee.name as string;
   if (["call", "apply", "bind"].includes(name)) push("G9");
