@@ -323,6 +323,9 @@ export const dynMembers = new Map<string, DynTable>();
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
 export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
+// A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
+// instance: its name and type arguments for a T that isn't, the void helper taking the rest.
+const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -873,6 +876,12 @@ export function expressions(ctx: Context) {
   // Checks a call: what it returns, and how a message names what it calls. A method called in
   // an optional chain gives an Option.
   function call(e: Call): { type: Type; what: string } {
+    const variant = promiseVariants.get(e);
+    if (variant) {
+      const nothing = lower(resolveType(variant.typeArgs[0]!)) === "void";
+      (e.callee as Extract<Expr, { kind: "ident" }>).name = nothing ? `${variant.name} void` : variant.name;
+      e.typeArgs = nothing ? variant.typeArgs.slice(1) : variant.typeArgs;
+    }
     const result = callee(e);
     // A call checked as another form, as `isDeepStrictEqual` is, has its own type already.
     if ((e as Expr).kind !== "call") return result;
@@ -2701,6 +2710,11 @@ export function expressions(ctx: Context) {
     const at = { start: e.start, end: e.end };
     const cell: Expr = { kind: "call", callee: { kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
     Object.assign(e, { kind: "call", callee: { kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
+    if (gives !== "void") {
+      const resolves = rejects ? "" : " resolve";
+      promiseVariants.set(cell, { name: `promise cell${resolves}`, typeArgs });
+      promiseVariants.set(e, { name: `promise await${resolves}`, typeArgs });
+    }
   }
 
   // The T of a `Promise<T>` a value meets, stored or taken by a parameter.
@@ -2721,11 +2735,13 @@ export function expressions(ctx: Context) {
   // closures settling it; reject's error is what the function declares it throws, or `Error`.
   function promiseResolvers(e: Call) {
     if (e.args.length > 0) throw new CompileError("'Promise.withResolvers' takes no arguments", e.start, e.end);
-    if (e.typeArgs.length !== 1) throw new CompileError("can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()', since Fish has no 'unknown'", e.start, e.end);
+    if (e.typeArgs.length > 1) throw new CompileError("'Promise.withResolvers' takes one type argument, what its Promise gives", e.start, e.end);
+    if (e.typeArgs.length === 0) throw new CompileError("can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()', since Fish has no 'unknown'", e.start, e.end);
     const gives = resolveType(e.typeArgs[0]!);
     const error = ctx.throwsDeclared() ?? classes.get("Error")!.type;
     const at = { start: e.start, end: e.end };
     Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
+    if (gives !== "void") promiseVariants.set(e, { name: "promise with resolvers", typeArgs: e.typeArgs });
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
@@ -2753,6 +2769,7 @@ export function expressions(ctx: Context) {
     const gives = written ?? met ?? "void";
     const reason = value(e.args[0]!);
     Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
+    if (gives !== "void") promiseVariants.set(e, { name: "promise reject", typeArgs: e.typeArgs });
   }
 
   // The std `AbortError` class, which aborted work throws.

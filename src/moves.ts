@@ -6,7 +6,7 @@ import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { computed, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
-import { field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { callableOf, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -520,7 +520,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // Through a Dyn, the receiver its interface declares; a stored callable called as a name,
           // an element or any other value is itself what is lent to the call.
           const dyn = dynCalls.get(e);
-          const object = e.callee.kind === "member" ? e.callee.object : dyn?.callable;
+          // A function held in a field is what its call lends, not the object holding it.
+          const held = e.callee.kind === "member" ? lower(types.get(e.callee) ?? "void") : undefined;
+          const fieldCall = typeof held !== "string" && (held?.kind === "closure" || (held?.kind === "dyn" && callableOf.has(held.of)));
+          const object = e.callee.kind === "member" ? (fieldCall ? e.callee : e.callee.object) : dyn?.callable;
           const place = object && key(object);
           const self: { mutable: boolean; owned?: boolean } | undefined = calls.get(e)?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
@@ -865,7 +868,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
   function hinted(type: Type, message: string): string {
-    const counted = holdsPart(type, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"), true);
+    // A Promise isn't cloned either: its future runs once.
+    const counted = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "future"), true);
     return holdsHandle(type, true) || counted ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
   }
 

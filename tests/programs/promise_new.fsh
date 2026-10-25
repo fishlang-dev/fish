@@ -289,3 +289,45 @@ async function main() { const { resolve } = Promise.withResolvers<i64>(); resolv
 // case: promise_with_resolvers_throws
 // error: 'main' must declare 'throws Error' after its return type since this Promise can throw 'Error'
 async function main() { const r = Promise.withResolvers<i64>(); r.resolve(1); const v = await r.promise; }
+// case: promise_with_resolvers_kept_whole
+// expect: 1
+// Calling a resolver held in a field lends that field, not the object holding it.
+async function main(): Promise<void> throws Error {
+  const r = Promise.withResolvers<i64>();
+  const p = r.promise;
+  r.resolve(1);
+  const v = await p;
+  console.log(v);
+}
+// case: promise_generic_void
+// expect: np generic void
+// expect: 1
+async function make<T>(): Promise<i64> throws Error {
+  const p = new Promise<T>((resolve, reject) => { reject(new Error("np generic void")); });
+  try { await p; } catch (e) { console.log(e.message); }
+  return 1;
+}
+async function main(): Promise<void> throws Error {
+  const n = await make<void>();
+  console.log(n);
+}
+// case: promise_with_resolvers_generic_void
+// expect: 1
+function make<T>(): i64 {
+  const r = Promise.withResolvers<T>();
+  return 1;
+}
+function main() {
+  const n = make<void>();
+  console.log(n);
+}
+// case: promise_with_resolvers_two_types
+// error: 'Promise.withResolvers' takes one type argument, what its Promise gives
+async function main() { const r = Promise.withResolvers<i64, string>(); }
+// case: promise_moved_no_clone_hint
+// error: 'r' can't be used as a whole here because 'r.promise' was moved out of it
+async function main(): Promise<void> throws Error {
+  const r = Promise.withResolvers<i64>();
+  const p = r.promise;
+  const s = r;
+}
