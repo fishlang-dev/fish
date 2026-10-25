@@ -484,11 +484,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // A nested function called by name, itself included, uses what it captures for the
           // call: lent shared while its arguments run, so they may read it, then mutably for the
           // call where it changes it, so nothing borrowed from those may be live across it. Keys
-          // below zero, one per capture, so no argument's loan can replace these.
+          // below zero and between whole numbers, one per capture, so no other loan can replace
+          // these.
           const built = instance.envs?.get(e);
           const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias, changes: instance.changed?.has(alias) === true }))
             : built ? built.env.map((alias, i) => ({ alias, changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
-          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start * 512 + i) - 1, at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
               usable(c.at, String(c.alias.id));
@@ -602,7 +603,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const nested = instance.envs !== undefined && holdsNode(e.value, (n) => instance.envs!.has(n as Expr));
         const root = nested && (e.target.kind === "member" || e.target.kind === "index") ? rootOf(e.target) : undefined;
         const held = root && key(root);
-        const hold = -(e.target.start * 512 + 511) - 1;
+        const hold = -(e.target.start + 0.75);
         if (held !== undefined) lend(held, false, root!, undefined, `the assignment to '${text(e.target)}'`, e, root!.start, hold);
         expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
         if (held !== undefined) state?.loans.delete(hold);
@@ -908,9 +909,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A loan's key for the `i`th place a value lends, apart from the others it lends at the same
   // spot, as a closure's variables are when its environment is made from a call's or a name's.
-  // Keys below zero, never a source offset; a call's own captures take the lower half.
+  // Other loans are keyed by whole numbers, or a temporary's by a half, so these keys and a
+  // call's captures and an assignment's hold below take other fractions of an offset, which
+  // never equal those.
   function partKey(part: Named, i: number): number {
-    return -(part.start * 512 + 256 + i) - 1;
+    return part.start + (i + 1) / 8192;
   }
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
