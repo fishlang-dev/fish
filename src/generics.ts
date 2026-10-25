@@ -278,7 +278,10 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       const names = new Set(params.map((p) => p.name));
       f.params.forEach((p, k) => p.type && argTypes[k] !== undefined && k !== i && infer(p.type, argTypes[k]!, names, bindings, at));
     }
-    const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, widenLet(lower(t))])]);
+    // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
+    // instance has it, so a callable the arrow is given fits the instance's own.
+    const explicit = typeArgs.length === params.length;
+    const scope = new Map([...(f.scope ?? []), ...explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, explicit ? lower(t) : widenLet(lower(t))])]);
     const t = withScope(scope, () => resolveType(written));
     if (typeof t === "string" || t.kind !== "function") return undefined;
     // A parameter only the callback itself could decide is left for the call to report.

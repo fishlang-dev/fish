@@ -294,9 +294,7 @@ export function callableType(fn: FunctionType): DynType {
 // Whether two stored callables take and give the same types, so either holds the other's value.
 export function sameCallable(a: Type, b: Type): boolean {
   const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
-  // A type parameter bound to a literal, as `wrap("s")` binds it, stands for its base type here.
-  const same = (a: Type, b: Type) => lower(a) === lower(b) || widenLet(lower(a)) === widenLet(lower(b));
-  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => same(p, g.params[i]!)) && same(f.returns, g.returns);
+  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
 }
 
 // A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside

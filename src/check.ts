@@ -1,6 +1,6 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import { stdFor } from "./std.ts";
+import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
@@ -1739,6 +1739,13 @@ export function check(written: Stmt[], library = false, macros = false): Checked
           const made = pausing ? YIELD_NOW : types.get(s.expr) ?? calls.get(s.expr)?.returns;
           const boxed = typeof made !== "string" && made?.kind === "dyn" && promiseElement(made.of) !== undefined;
           if (s.expr.kind !== "assign" && s.expr.kind !== "destructure" && typeof made !== "string" && (made?.kind === "future" || boxed)) {
+            // The prelude's call of a promise's executor: the executor written gives a Promise.
+            const callee = s.start >= STD_BASE && s.expr.kind === "call" ? types.get(s.expr.callee) : undefined;
+            const executor = callee === undefined ? undefined : lower(callee);
+            if (typeof executor !== "string" && executor?.kind === "closure") {
+              const written = closureBodies.get(executor)!.body;
+              throw new CompileError("an executor runs at once and what it gives is dropped, so the Promise it gives would never run; keep 'resolve' and await that call beside this Promise, as in 'Promise.all([promise, later(resolve)])'", written.start, written.end);
+            }
             throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", s.expr.start, s.expr.end);
           }
           return;

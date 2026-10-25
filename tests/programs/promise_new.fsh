@@ -207,7 +207,7 @@ async function main() { const x = await new Promise<i64>(async (resolve) => { re
 // error: 'Promise.resolve' of a Promise would hold one Promise inside another
 async function main() { const x = await Promise.resolve(Promise.resolve(3)); }
 // case: promise_resolve_missing_value
-// error: 'Promise.resolve' takes the value it gives, a 'i64'
+// error: 'Promise.resolve' takes the value it gives, of type 'i64'
 async function main() { const x = await Promise.resolve<i64>(); }
 // case: generic_callback_given_callbacks
 // expect: got 5
@@ -215,3 +215,24 @@ async function main() { const x = await Promise.resolve<i64>(); }
 function run<T>(executor: (resolve: (value: T) => void) => void): void { executor((value) => { console.log("got", value); }); }
 function wrap<T>(v: T): void { run<T>((resolve) => { resolve(v); }); }
 function main() { wrap(5); wrap("s"); }
+// case: promise_new_executor_gives_promise
+// error: an executor runs at once and what it gives is dropped, so the Promise it gives would never run
+async function later(resolve: (value: i64) => void): Promise<void> { await sleep(1); resolve(42); }
+async function main(): Promise<void> {
+  const v = await new Promise<i64>((resolve) => later(resolve));
+  console.log(v);
+}
+// case: callable_literal_not_base
+// error: type '() => "a"' is not assignable to type '() => string'
+function main() {
+  const f: () => "a" = () => "a";
+  const g: () => string = f;
+  console.log(g());
+}
+// case: callable_base_not_literal
+// error: type '(d: "a") => void' is not assignable to type '(s: string) => void'
+function main() {
+  const f: (d: "a") => void = (d) => { console.log("got", d); };
+  const g: (s: string) => void = f;
+  g("b");
+}

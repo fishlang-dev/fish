@@ -2726,7 +2726,7 @@ export function expressions(ctx: Context) {
     if (name === "resolve") {
       const gives = written ?? (e.args.length === 0 ? "void" : met);
       if (gives === "void" && e.args.length > 0) throw new CompileError("a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
-      if (gives !== "void" && e.args.length === 0) throw new CompileError(`'Promise.resolve' takes the value it gives, a '${show(gives!)}'`, e.start, e.end);
+      if (gives !== "void" && e.args.length === 0) throw new CompileError(`'Promise.resolve' takes the value it gives, of type '${show(gives!)}'`, e.start, e.end);
       const given = e.args.length > 0 ? value(e.args[0]!) : undefined;
       if (typeof given !== "string" && (given?.kind === "future" || given?.kind === "handle" || (given?.kind === "dyn" && promiseElement(given.of) !== undefined))) {
         throw new CompileError("'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
