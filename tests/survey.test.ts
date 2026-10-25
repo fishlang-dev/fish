@@ -59,6 +59,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const a = JSON.parse(s, revive) as User;\n")).toEqual({ A8: 1, json: 1 });
   expect(counts("import os from \"node:os\";\nimport { hostname } from \"os\";\nimport { cpus } from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("export { hostname } from \"node:os\";\nexport * from \"os\";\n")).toEqual({});
+  expect(counts("export * as system from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});

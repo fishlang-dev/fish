@@ -445,7 +445,7 @@ function moduleRule(n: Node, specifier: unknown): string | undefined {
 // only names it has.
 function stdHas(n: Node, specifier: string): boolean {
   const name = stdModule(specifier);
-  if (!name || (n.kind !== "import" && n.kind !== "exportNamed" && n.kind !== "exportAll")) return false;
+  if (!name || (n.kind !== "import" && n.kind !== "exportNamed" && n.kind !== "exportAll") || (n.kind === "exportAll" && n.alias !== undefined)) return false;
   const has = new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind === "export" && s.body.kind === "function" ? [s.body.name] : [])));
   const names = (n.kind === "exportNamed" ? n.specifiers : n.named) as { name: string }[] | undefined;
   return (names ?? []).every((sp) => has.has(sp.name));
