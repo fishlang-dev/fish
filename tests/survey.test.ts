@@ -239,8 +239,8 @@ test("unread files are left out of the steps but not the shares, and the self cu
 });
 
 test("imports wait on other files, npm packages or Node built-ins by how they are written", () => {
-  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import fs from \"node:fs\";\nimport path = require(\"path\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["npm interop"], ["Async file I/O", "Path utilities"]]);
+  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import fs from \"node:fs\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["npm interop"], ["Async file I/O", "Hashing"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["npm interop"], ["Path aliases"], ["npm interop"]]);
@@ -425,44 +425,44 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
 
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
-    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
+    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport crypto from \"crypto\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
     "c.ts": "import vm from \"vm\";\nimport fs = require(\"fs\");\n",
-    "plan.md": "- [ ] 1. **Async file I/O**\n- [ ] 2. **Path utilities**\n",
+    "plan.md": "- [ ] 1. **Async file I/O**\n- [ ] 2. **Hashing**\n",
   }, (dir) => {
     // `timers/promises` is std's sleep, so b.ts waits on nothing.
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], [], ["Async file I/O", "Node built-ins"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Async file I/O", "Hashing"], [], ["Async file I/O", "Node built-ins"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
       ["Async file I/O", ["nodeBuiltins"], { item: "1", done: false }],
       // Each frees one 2-line file, so the tie goes by name.
+      ["Hashing", ["nodeBuiltins"], { item: "2", done: false }],
       ["Node built-ins", ["nodeBuiltins"], null],
-      ["Path utilities", ["nodeBuiltins"], { item: "2", done: false }],
     ]);
-    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "path", "timers/promises"]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["fs", "crypto", "timers/promises"]);
   });
   project({
-    "a.ts": "export * from \"path/posix\";\nexport { readFile } from \"node:fs/promises\";\n",
+    "a.ts": "export * from \"crypto\";\nexport { readFile } from \"node:fs/promises\";\n",
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Async file I/O", "Path utilities"], ["HTTP client", "Test runner", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Async file I/O", "Hashing"], ["HTTP client", "Test runner", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
 });
 
 test("the report lists each Node built-in with its files and what replaces it", () => {
   project({
-    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport path from \"path\";\n",
+    "a.ts": "import { readFile } from \"node:fs/promises\";\nimport crypto from \"crypto\";\n",
     "b.ts": "import fs from \"node:fs\";\nimport http from \"node:http\";\n",
     "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\n",
   }, (dir) => {
     const r = survey(dir);
     expect(r.builtins).toEqual([
       { module: "fs", files: 2, equivalent: { name: "Async file I/O", planned: true } },
+      { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
       { module: "http", files: 1, equivalent: { name: "HTTP client", planned: true } },
       { module: "net", files: 1, equivalent: { name: "TcpListener and TcpStream", planned: false } },
-      { module: "path", files: 1, equivalent: { name: "Path utilities", planned: true } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
