@@ -191,6 +191,8 @@ export const syncFileCalls = new WeakMap<Expr, string>();
 export const printCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
+// node:util's `inspect` calls.
+export const inspectCalls = new WeakSet<Expr>();
 
 // What a literal format does with the arguments after it, as the runtime's routine reads it:
 // the specifier each one it takes is given to, and where those left, appended, start.
@@ -829,6 +831,8 @@ export function expressions(ctx: Context) {
   // an optional chain gives an Option.
   function call(e: Call): { type: Type; what: string } {
     const result = callee(e);
+    // A call checked as another form, as `isDeepStrictEqual` is, has its own type already.
+    if ((e as Expr).kind !== "call") return result;
     return e.callee.kind === "member" && linked(e.callee) && result.type !== "void" ? { ...result, type: optional(result.type, e) } : result;
   }
 
@@ -1120,6 +1124,23 @@ export function expressions(ctx: Context) {
       unformattable(e.args);
       formatCalls.add(e);
       return { type: "string", what: "'format'" };
+    }
+    if (util === "inspect") {
+      if (e.args.length !== 1 || e.args[0]!.kind === "spread") throw new CompileError(e.args.length > 1 ? "'inspect' takes the value alone; its options aren't supported yet" : "'inspect' takes 1 argument", e.start, e.end);
+      shown(e.args);
+      inspectCalls.add(e);
+      return { type: "string", what: "'inspect'" };
+    }
+    // Fish's value equality, which `===` already is.
+    if (util === "isDeepStrictEqual") {
+      if (e.args.length !== 2) throw new CompileError("'isDeepStrictEqual' takes 2 arguments", e.start, e.end);
+      refuseSpread(e.args);
+      const [left, right] = e.args as [Expr, Expr];
+      const node = e as unknown as Record<string, unknown>;
+      delete node.callee;
+      delete node.args;
+      Object.assign(node, { kind: "binary", op: "===", left, right });
+      return { type: value(e), what: "'isDeepStrictEqual'" };
     }
     if (target && (target as { macro?: boolean }).macro) throw new CompileError(`'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     if (!target) {

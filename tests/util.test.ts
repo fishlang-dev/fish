@@ -64,3 +64,13 @@ test("console.log, console.error and print format their first argument as node's
   console.error("%s to stderr %i", "written", 4.7);
   console.log(xs.length);`);
 });
+
+test("inspect and isDeepStrictEqual give what node's give", () => {
+  compare("inspect", `import { inspect, isDeepStrictEqual } from "node:util";`, P, `
+  for (const s of [inspect("a'b"), inspect(1), inspect(-0.0), inspect(true), inspect(null), inspect([1, "a"]), inspect({ a: { b: { c: { d: 1 } } } }), inspect(new P()), inspect(new Map([["k", [1]]])), inspect(new Set(["x"]))]) console.log(s);
+  const u: i64 | string = "u";
+  console.log(inspect(u));
+  const a: string = "a";
+  console.log(isDeepStrictEqual(1, 1), isDeepStrictEqual(a, "b"), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 3] }));
+  console.log(isDeepStrictEqual([[1], [2]], [[1], [2]]), isDeepStrictEqual(u, "u"), isDeepStrictEqual([1, 2], [1, 2, 3]));`);
+});

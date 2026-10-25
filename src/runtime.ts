@@ -199,6 +199,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_text_f64(ptr, double)",
   "declare ptr @fsh_rt_text_done(ptr)",
   "declare ptr @fsh_rt_format(ptr, i64)",
+  "declare ptr @fsh_rt_inspect(ptr)",
   "declare void @fsh_rt_args(i32, ptr)",
   "declare i64 @fsh_rt_date_now()",
   "declare i32 @fsh_rt_file_poll(ptr, ptr, ptr, i32, ptr, ptr, ptr)",

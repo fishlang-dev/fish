@@ -701,6 +701,14 @@ export function availableParallelism(): i64 {
 export function format(...args: string[]): string {
   return args.join(" ");
 }
+
+export function inspect(...args: string[]): string {
+  return args.join(" ");
+}
+
+export function isDeepStrictEqual(...args: string[]): boolean {
+  return args.length === 0;
+}
 `,
   // A port of Node's path.posix for the functions Fish has, so each gives what Node gives.
   path: String.raw`

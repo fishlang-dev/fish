@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, formatPlan, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, syncFileCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -5254,6 +5254,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(e);
     if (!target) {
       if (formatCalls.has(e)) return formatted(e);
+      if (inspectCalls.has(e)) {
+        const [a] = e.args as [Expr];
+        const [slot, result] = [alloca(FARG), temp()];
+        describe(slot, a.kind === "string" ? text(a.value) : operand(a, []), printedType(a), { text: false, depth: 2 });
+        emit(`${result} = call ptr @fsh_rt_inspect(ptr ${slot})`);
+        if (!types.has(e)) pending.push({ v: result, type: "string" });
+        return result;
+      }
       // A print whose first argument may be a format prints what format gives.
       if (printCalls.has(e) && formats(e.args)) {
         const line = formatted(e);

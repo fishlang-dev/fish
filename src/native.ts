@@ -2878,6 +2878,19 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
   fsh_farg_number(b, x);
 }
 
+// util.inspect: what %O writes.
+fsh_str *fsh_rt_inspect(fsh_farg *a) {
+  fsh_sb b = {0};
+  fsh_farg_inspect(&b, a, 2, 0);
+  if (a->kind == FSH_FARG_PARTS) {
+    if (a->text) fsh_rt_str_release(a->text);
+    if (a->tree) fsh_insp_free(a->tree);
+  }
+  fsh_str *s = fsh_str_of(b.p ? b.p : "", b.n);
+  fsh_rt_free(b.p);
+  return s;
+}
+
 // A port of Node's formatWithOptionsInternal: with a string first and more after it, each
 // specifier takes the next argument while one is left, %% is a percent sign, and any other letter stays as written; the
 // arguments left are appended after spaces, strings as they are and anything else inspected.

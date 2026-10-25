@@ -38,3 +38,24 @@ function format(a: string, b: i64): string {
 function main() {
   console.log(format("%d", 2));
 }
+// case: util_inspect_options
+// error: 'inspect' takes the value alone; its options aren't supported yet
+import { inspect } from "node:util";
+function main() {
+  console.log(inspect([1], { depth: 0 }));
+}
+// case: util_equal_unrelated
+// error: have no overlap
+import { isDeepStrictEqual } from "node:util";
+function main() {
+  const a: i64 = 1;
+  console.log(isDeepStrictEqual(a, "1"));
+}
+// case: util_equal_moves_nothing
+// expect: true 2
+import { isDeepStrictEqual } from "node:util";
+function main() {
+  const xs = [1, 2];
+  const same = isDeepStrictEqual(xs, [1, 2]);
+  console.log(same, xs.length);
+}
