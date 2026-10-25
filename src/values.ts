@@ -2609,7 +2609,7 @@ export function expressions(ctx: Context) {
     return t.gives;
   }
 
-  // `Promise.all([...])` and `Promise.race([...])`: one future awaiting those in the list at once,
+  // `Promise.all`, `race`, `allSettled` and `any`: one future awaiting those in the list at once,
   // in this task. It is awaited where it is made, so the futures' borrows end with the await.
   function combined(e: Call, kind: Combiner): { type: Type; what: string } {
     const name = `'Promise.${kind}'`;

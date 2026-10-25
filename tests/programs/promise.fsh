@@ -578,3 +578,25 @@ async function main() {
 async function main() {
   const r = await Promise.any([]);
 }
+// case: promise_any_instanceof
+// expect: agg [ 'a?', 'b?' ]
+class Boom {
+  message: string;
+  constructor(m: string) { this.message = m; }
+}
+async function fail(ms: i64, m: string): Promise<string> throws Boom {
+  await sleep(ms);
+  throw new Boom(m + "?");
+}
+async function both(): Promise<void> throws AggregateError<Boom> | Boom {
+  const s = await Promise.any([fail(2, "a"), fail(1, "b")]);
+  const t = await fail(1, "c");
+}
+async function main() {
+  try {
+    await both();
+  } catch (e) {
+    if (e instanceof AggregateError) console.log("agg", e.errors.map((x) => x.message));
+    else console.log("boom", e.message);
+  }
+}

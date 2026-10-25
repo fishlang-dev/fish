@@ -6129,10 +6129,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return v;
   }
 
-  // A `Promise.all` or `Promise.race` future's poll: each future not yet done is polled in turn,
-  // and one done keeps its value. `race` is done with the first to settle, `all` with the last,
-  // or with the first error; then the ones still waiting are cancelled where they wait, and the
-  // awaiter's drop of this frame drops them.
+  // A combined future's poll: each future not yet done is polled in turn, and one done keeps its
+  // value, its outcome for `allSettled`, or its error for `any`. `race` is done with the first to
+  // settle, `any` with the first success or the last error, `all` with the last or the first
+  // error, `allSettled` with the last; then the ones still waiting are cancelled where they wait,
+  // and the awaiter's drop of this frame drops them.
   function combinePoll(t: FutureType): string {
     const known = combinePolls.get(t);
     if (known) return known;
