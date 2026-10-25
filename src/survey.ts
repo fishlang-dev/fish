@@ -4,6 +4,7 @@ import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
 import { parse, type Stmt } from "./parser.ts";
+import { STD_MODULES, stdModule } from "./std.ts";
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
 // The grade counts the work a person does, the migration lint's rejected constructs and guided
@@ -180,7 +181,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["fs", PLANNED("Async file I/O")], ["path", PLANNED("Path utilities")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
-  ["os", PLANNED("OS information")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
+  ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", PLANNED("setTimeout and setInterval")],
   ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
   ["process", PLANNED("Process environment")], ["perf_hooks", PLANNED("Logging to stderr and clocks")],
@@ -436,7 +437,17 @@ function moduleRule(n: Node, specifier: unknown): string | undefined {
   if (typeof specifier !== "string") return form ? "moduleForms" : undefined;
   if (/^[#~]|^@\//.test(specifier)) return "pathAliases";
   if (specifier.startsWith(".")) return form ? "moduleForms" : undefined;
+  if (stdHas(n, specifier)) return undefined;
   return specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
+}
+
+// Whether an import of a Node built-in is one Fish's std module answers: the module whole, or
+// only names it has.
+function stdHas(n: Node, specifier: string): boolean {
+  const name = stdModule(specifier);
+  if (!name || n.kind !== "import") return false;
+  const has = new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind === "export" && s.body.kind === "function" ? [s.body.name] : [])));
+  return ((n.named as { name: string }[] | undefined) ?? []).every((sp) => has.has(sp.name));
 }
 
 // The built-in an import names: its subpath when that has its own equivalent, else its module.
