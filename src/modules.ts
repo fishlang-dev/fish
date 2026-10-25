@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
-import { parse, shiftSpans, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
 
@@ -284,6 +284,8 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     return kind ? [[alias, kind]] : [];
   }));
   if (spaces.size > 0 || valued.size > 0) throughSpaces(l.body, spaces, bind, valued);
+  // A file module's call naming an encoding, linked to the function giving a string.
+  if ([...l.imports.values()].some(({ from }) => from.path === "std:fs/promises")) byEncoding(l.body, l.imports, bind);
   renameIn(l.body, (name) => void l.used.add(name));
   return l;
 }
@@ -392,6 +394,43 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     return true;
   };
   walk(body, new Set());
+}
+
+// `readFile(path, "utf8")` and `readFile(path, { encoding: "utf8" })` give a string, which
+// `readFileText` gives; without an encoding, bytes. A write's "utf8" is what it writes anyway.
+// The encoding is read while compiling, so it must be a literal, and UTF-8 is the one known.
+function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: string, from: Module, name: string, at: Span) => void) {
+  const walk = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v !== "object" || v === null) return;
+    const n = v as Record<string, unknown>;
+    Object.values(n).forEach(walk);
+    const callee = n.callee as { kind?: string; name?: string } | undefined;
+    const target = n.kind === "call" && callee?.kind === "ident" ? imports.get(callee.name!) : undefined;
+    if (!target || target.from.path !== "std:fs/promises" || (target.name !== "readFile" && target.name !== "writeFile")) return;
+    const args = n.args as Expr[];
+    const at = target.name === "readFile" ? 1 : 2;
+    const given = args[at];
+    if (!given) return;
+    const encoding = given.kind === "string" ? given.value : given.kind === "object" ? encodingOf(given) : undefined;
+    if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like "utf8" or { encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
+    if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
+    args.splice(at, 1);
+    if (target.name === "writeFile" || encoding === null) return;
+    const alias = `${callee!.name}:text`;
+    if (!imports.has(alias)) bind(alias, target.from, "readFileText", given);
+    callee!.name = alias;
+  };
+  walk(body);
+}
+
+// The encoding an options object names: its text, null for `encoding: null`, or undefined when
+// it isn't a literal or the object holds anything else.
+function encodingOf(o: Extract<Expr, { kind: "object" }>): string | null | undefined {
+  const [prop, ...rest] = o.props;
+  if (!prop || rest.length > 0 || prop.kind !== "property" || prop.key !== "encoding") return undefined;
+  if (prop.value.kind === "null") return null;
+  return prop.value.kind === "string" ? prop.value.value : undefined;
 }
 
 // What a std module's members are read as, by name.
