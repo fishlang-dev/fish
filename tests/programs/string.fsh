@@ -1099,3 +1099,52 @@ function main() {
 // expect: Rex
 // expect: again
 // expect: y
+// case: string_reading_methods
+// expect: h o e null null
+// expect: h l   |
+// expect: 104 101 108 null
+// expect: -1 -1 5 2 -1 -1 -1 -1
+// expect: null null null null null
+// expect:     |
+// expect: null null null null
+// expect: -1 -1 0 0 -1 -1 -1 -1
+// expect: h d é é null
+// expect: h l   |
+// expect: 104 233 108 null
+// expect: -1 -1 11 2 -1 -1 -1 -1
+// expect: a � � null null
+// expect: a �   |
+// expect: 97 128512 56832 null
+// expect: 3 -1 6 2 3 -1 4 -1
+// expect: � � � null null
+// expect: �    |
+// expect: 128512 56832 null null
+// expect: -1 -1 2 2 -1 -1 0 -1
+// expect: � � null null null
+// expect: �    |
+// expect: 55357 null null null
+// expect: -1 -1 1 1 -1 -1 -1 -1
+// expect: a c b null null
+// expect: a c   |
+// expect: 97 98 99 null
+// expect: 4 3 6 2 1 -1 -1 -1
+// `at`, `charAt`, `codePointAt` and `lastIndexOf` as node gives them, null for undefined.
+function main(): void {
+  const words = ["hello", "", "héllo wörld", "a😀b😀", "😀", "\uD83D", "abcabc"];
+  for (const w of words) {
+    console.log(w.at(0), w.at(-1), w.at(1), w.at(-10), w.at(99));
+    console.log(w.charAt(0), w.charAt(2), w.charAt(-1), w.charAt(99), "|");
+    console.log(w.codePointAt(0), w.codePointAt(1), w.codePointAt(2), w.codePointAt(99));
+    console.log(w.lastIndexOf("b"), w.lastIndexOf("abc"), w.lastIndexOf(""), w.lastIndexOf("", 2), w.lastIndexOf("b", 3), w.lastIndexOf("b", -5), w.lastIndexOf("😀"), w.lastIndexOf("zz"));
+  }
+}
+// case: string_reading_methods_comptime
+// expect: d none o 104 7 128512 empty 2 -1
+// The same methods while compiling.
+function read(): string {
+  const s = "héllo wörld";
+  const e = "😀";
+  return `${s.at(-1) ?? ""} ${s.at(99) ?? "none"} ${s.charAt(4)} ${s.codePointAt(0) ?? 0} ${s.codePointAt(99) ?? 7} ${e.codePointAt(0) ?? 0} ${"".at(0) ?? "empty"} ${"abcab".lastIndexOf("c")} ${s.lastIndexOf("z")}`;
+}
+const R = comptime read();
+function main(): void { console.log(R); }

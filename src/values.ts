@@ -4307,6 +4307,10 @@ export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.
 // Each string method: its parameters, what it returns, and how many arguments it needs.
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   charCodeAt: [["usize"], "u16", 1],
+  at: [["i64"], unionType(["string", "null"]), 1],
+  charAt: [["i64"], "string", 1],
+  codePointAt: [["usize"], unionType(["u32", "null"]), 1],
+  lastIndexOf: [["string", "i64"], "i64", 1],
   indexOf: [["string", "i64"], "i64", 1],
   includes: [["string", "i64"], "boolean", 1],
   startsWith: [["string", "i64"], "boolean", 1],

@@ -677,6 +677,16 @@ function interpreter() {
       }
       case "indexOf":
         return BigInt(s.indexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
+      case "lastIndexOf":
+        return BigInt(s.lastIndexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
+      case "at":
+        return s.at(n(0)) ?? null;
+      case "charAt":
+        return s.charAt(n(0));
+      case "codePointAt": {
+        const point = s.codePointAt(n(0));
+        return point === undefined ? null : BigInt(point);
+      }
       case "includes":
         return s.includes(args[0] as string, args.length > 1 ? n(1) : undefined);
       case "startsWith":

@@ -276,6 +276,31 @@ fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
   return one;
 }
 
+// s.at(i): the one-unit string, a negative i counting from the end, or NULL past either end.
+fsh_str *fsh_rt_str_at_or_null(fsh_str *s, int64_t i) {
+  int64_t n = fsh_rt_str_units(s);
+  if (i < 0) i += n;
+  return i < 0 || i >= n ? NULL : fsh_rt_str_at(s, i);
+}
+
+// s.charAt(i): the one-unit string, or an empty one out of range.
+fsh_str *fsh_rt_str_char_at(fsh_str *s, int64_t i) {
+  if (i < 0 || i >= fsh_rt_str_units(s)) return fsh_str_of("", 0);
+  return fsh_rt_str_at(s, i);
+}
+
+// s.codePointAt(i): the code point a pair starting at i makes, or the unit there, or -1 past
+// the end.
+int64_t fsh_rt_str_code_point_at(fsh_str *s, int64_t i) {
+  int64_t n = fsh_rt_str_units(s);
+  if (i < 0 || i >= n) return -1;
+  uint16_t high = fsh_rt_str_unit(s, i);
+  if (high < 0xD800 || high > 0xDBFF || i + 1 >= n) return high;
+  uint16_t low = fsh_rt_str_unit(s, i + 1);
+  if (low < 0xDC00 || low > 0xDFFF) return high;
+  return 0x10000 + ((int64_t)(high - 0xD800) << 10) + (low - 0xDC00);
+}
+
 // Searching. A search with no lone surrogate matches whole characters, so it compares bytes;
 // one holding a lone surrogate may match half of a pair, so it compares UTF-16 units.
 static int fsh_has_lone(fsh_str *s) {
@@ -338,6 +363,22 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
     return unit;
   }
   return -1;
+}
+
+// Where needle last occurs in s starting at or before unit from, by units, or -1.
+int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
+  from = fsh_clamp(from, n);
+  if (m > n) return -1;
+  if (from > n - m) from = n - m;
+  uint16_t *a = fsh_utf16(s), *b = fsh_utf16(needle);
+  int64_t found = -1;
+  for (int64_t i = from; found < 0 && i >= 0; i--) {
+    if (memcmp(a + i, b, m * sizeof(uint16_t)) == 0) found = i;
+  }
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return found;
 }
 
 int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {

@@ -5144,6 +5144,31 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "substring":
         emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
         return given(result, "string");
+      // Past either end, an Option's empty value: the runtime says so with NULL or -1.
+      case "at": {
+        const [raw, none] = [temp(), temp()];
+        emit(`${raw} = call ptr @fsh_rt_str_at_or_null(ptr ${s}, i64 ${args[0]})`);
+        emit(`${none} = icmp eq ptr ${raw}, null`);
+        const option = unionType(["string", "null"]);
+        emit(`${result} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(raw, "string", option)}`);
+        return given(result, option);
+      }
+      case "codePointAt": {
+        const [raw, none, point] = [temp(), temp(), temp()];
+        emit(`${raw} = call i64 @fsh_rt_str_code_point_at(ptr ${s}, i64 ${args[0]})`);
+        emit(`${none} = icmp slt i64 ${raw}, 0`);
+        emit(`${point} = trunc i64 ${raw} to i32`);
+        const option = unionType(["u32", "null"]);
+        emit(`${result} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(point, "u32", option)}`);
+        return given(result, option);
+      }
+      case "charAt":
+        emit(`${result} = call ptr @fsh_rt_str_char_at(ptr ${s}, i64 ${args[0]})`);
+        return given(result, "string");
+      // A missing position is the end, which the runtime clamps to.
+      case "lastIndexOf":
+        emit(`${result} = call i64 @fsh_rt_str_last_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? "9223372036854775807"})`);
+        return given(result, "i64");
       // A missing position is the start, or for endsWith, the end, which the runtime clamps to.
       case "indexOf":
         emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
