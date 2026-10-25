@@ -414,7 +414,7 @@ function main() {
   console.log(p, q, r, more);
 }
 // case: tuple_rest_default_moves
-// error: a default past a tuple's fixed elements reads 't[i]' when it is there, and a 'C' would be moved out of the tuple's rest, leaving a hole; destructure without the default, or index it and clone
+// error: a default past a tuple's fixed elements would take a 'C' out of the tuple's rest when it is there, leaving a hole; destructure without the default, or index it and clone
 class C { constructor(public n: i64) {} }
 function main() { const u: [i64, ...C[]] = [1]; const [x, y = new C(9)] = u; }
 // case: tuple_rest_generic_empty
