@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { load } from "../src/modules.ts";
@@ -7,7 +7,8 @@ import { exportsOf, findTypings } from "../src/typings.ts";
 
 // A project directory holding these files, removed after `run`.
 function project(files: Record<string, string>, run: (dir: string) => void) {
-  const dir = mkdtempSync(join(tmpdir(), "fish-typings-"));
+  // Its real path, as found files are given by theirs.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fish-typings-")));
   try {
     for (const [path, text] of Object.entries(files)) {
       mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -27,10 +28,13 @@ function found(dir: string, specifier: string): string {
 
 const json = (v: unknown) => JSON.stringify(v);
 
-test("types, typings, main and index.d.ts, in that order", () => {
+test("typings, types, main and index.d.ts, in that order", () => {
   project({
-    "node_modules/a/package.json": json({ types: "lib/a.d.ts", typings: "no.d.ts" }),
+    "node_modules/a/package.json": json({ types: "no.d.ts", typings: "lib/a.d.ts" }),
     "node_modules/a/lib/a.d.ts": "",
+    "node_modules/a2/package.json": json({ types: "gone.d.ts", main: "main.js" }),
+    "node_modules/a2/main.d.ts": "",
+    "node_modules/a2/index.d.ts": "",
     "node_modules/b/package.json": json({ typings: "b.d.ts" }),
     "node_modules/b/b.d.ts": "",
     "node_modules/c/package.json": json({ main: "dist/c.js" }),
@@ -38,6 +42,8 @@ test("types, typings, main and index.d.ts, in that order", () => {
     "node_modules/d/index.d.ts": "",
   }, (dir) => {
     expect(found(dir, "a")).toBe("node_modules/a/lib/a.d.ts");
+    // A missing `types` file leaves index.d.ts, passing over `main`, as tsc does.
+    expect(found(dir, "a2")).toBe("node_modules/a2/index.d.ts");
     expect(found(dir, "b")).toBe("node_modules/b/b.d.ts");
     expect(found(dir, "c")).toBe("node_modules/c/dist/c.d.ts");
     expect(found(dir, "d")).toBe("node_modules/d/index.d.ts");
@@ -135,8 +141,9 @@ test("a declaration file's exports, through its re-exports", () => {
     "node_modules/p/index.d.ts": DECLARATIONS,
     "node_modules/p/more.d.ts": "export declare function fromMore(): void;\nexport default 1;\n",
   }, (dir) => {
-    const exports = exportsOf(join(dir, "node_modules/p/index.d.ts"));
-    if (typeof exports === "string") throw new Error(exports);
+    const read = exportsOf(join(dir, "node_modules/p/index.d.ts"));
+    if (typeof read === "string") throw new Error(read);
+    const exports = read.names;
     expect([...exports.keys()].sort()).toEqual(["Box", "Kind", "Mode", "OTHER", "Options", "VERSION", "camelCase", "default", "fromMore", "ns", "plain", "renamed", "shown"]);
     const at = (name: string) => {
       const d = exports.get(name)!;
@@ -153,10 +160,10 @@ test("export = a namespace, and a types package's declare module", () => {
     "node_modules/r/index.js": "",
   }, (dir) => {
     const q = exportsOf(join(dir, "node_modules/q/index.d.ts"));
-    expect(q instanceof Map ? [...q.keys()].sort() : q).toEqual(["chunk", "default", "version"]);
+    expect(typeof q === "string" ? q : [...q.names.keys()].sort()).toEqual(["chunk", "default", "version"]);
     const t = findTypings(join(dir, "main.fsh"), "r");
     const r = "file" in t ? exportsOf(t.file, "r") : t.missing;
-    expect(r instanceof Map ? [...r.keys()] : r).toEqual(["run"]);
+    expect(typeof r === "string" ? r : [...r.names.keys()]).toEqual(["run"]);
   });
 });
 
@@ -181,5 +188,119 @@ test("an import from a package is refused naming where its name is declared, or 
     expect(error("b.fsh")).toBe("'p' has no export 'nope'; its declarations in 'node_modules/p/index.d.ts' export 'Box', 'Kind', 'Mode', 'OTHER', 'Options', 'VERSION', 'camelCase', 'default', 'fromMore', 'ns', 'plain', 'renamed', and 1 more");
     expect(error("c.fsh")).toStartWith("can't find the package 'absent'");
     expect(error("d.fsh")).toBe("the default export of 'p' is declared at node_modules/p/index.d.ts:1:1, but using npm packages isn't supported yet");
+  });
+});
+
+test("a relative entry path searches from its directory up", () => {
+  project({ "node_modules/p/index.d.ts": "", "src/main.fsh": "" }, (dir) => {
+    const cwd = process.cwd();
+    process.chdir(join(dir, "src"));
+    try {
+      const t = findTypings("main.fsh", "p");
+      expect("file" in t ? relative(dir, t.file) : t.missing).toBe("node_modules/p/index.d.ts");
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+});
+
+test("conditions and arrays fall through to one with a declaration, and null ends the search", () => {
+  project({
+    "node_modules/a/package.json": json({ exports: { ".": { import: "./esm/index.mjs", require: "./index.js", default: "./index.js" } } }),
+    "node_modules/a/index.d.ts": "",
+    "node_modules/b/package.json": json({ exports: { types: "./missing.d.ts", default: "./b.js" } }),
+    "node_modules/b/b.d.ts": "",
+    "node_modules/c/package.json": json({ exports: { ".": ["./nope.js", "./c.js"] } }),
+    "node_modules/c/c.d.ts": "",
+    "node_modules/d/package.json": json({ exports: { types: null, default: "./d.js" } }),
+    "node_modules/d/d.d.ts": "",
+    "node_modules/e/package.json": json({ exports: { "./*": "./one/*.js", "./*.js": "./two/*.js", "./x": "dist/x.js", "./y": "./../y.js", "./z": "./z" } }),
+    "node_modules/e/two/f.d.ts": "",
+    "node_modules/e/dist/x.d.ts": "",
+    "node_modules/e/z.d.ts": "",
+  }, (dir) => {
+    expect(found(dir, "a")).toBe("node_modules/a/index.d.ts");
+    expect(found(dir, "b")).toBe("node_modules/b/b.d.ts");
+    expect(found(dir, "c")).toBe("node_modules/c/c.d.ts");
+    expect(found(dir, "d")).toContain("doesn't export '.'");
+    // The longer pattern wins a tie; a target must be written from './', stay inside, and name a file.
+    expect(found(dir, "e/f.js")).toBe("node_modules/e/two/f.d.ts");
+    for (const sub of ["x", "y", "z"]) expect(found(dir, `e/${sub}`)).toContain(`exports './${sub}', but none of what it maps it to has a declaration file`);
+  });
+});
+
+test("a symlinked package resolves to its real path, and its own dependencies beside it", () => {
+  project({
+    "node_modules/.pnpm/a@1/node_modules/a/index.d.ts": "export * from 'dep';\n",
+    "node_modules/.pnpm/a@1/node_modules/dep/index.d.ts": "export declare const fromDep: number;\n",
+  }, (dir) => {
+    symlinkSync(join(dir, "node_modules/.pnpm/a@1/node_modules/a"), join(dir, "node_modules/a"));
+    const t = findTypings(join(dir, "src/main.fsh"), "a");
+    if (!("file" in t)) throw new Error(t.missing);
+    expect(relative(dir, t.file)).toBe("node_modules/.pnpm/a@1/node_modules/a/index.d.ts");
+    const e = exportsOf(t.file, "a");
+    expect(typeof e === "string" ? e : [...e.names.keys()]).toEqual(["fromDep"]);
+  });
+});
+
+test("a subpath directory's own package.json, and package.json shapes that aren't one", () => {
+  project({
+    "node_modules/a/ops/package.json": json({ types: "../dist/ops.d.ts" }),
+    "node_modules/a/dist/ops.d.ts": "",
+    "node_modules/n/package.json": "null",
+  }, (dir) => {
+    expect(found(dir, "a/ops")).toBe("node_modules/a/dist/ops.d.ts");
+    expect(found(dir, "n")).toContain("'n' has a package.json that isn't an object");
+  });
+});
+
+// The names a declaration file's index exports, after writing the files.
+function names(files: Record<string, string>, spec = "a"): string[] | string {
+  let out: string[] | string = "";
+  project(files, (dir) => {
+    const t = findTypings(join(dir, "src/main.fsh"), spec);
+    if (!("file" in t)) return void (out = t.missing);
+    const e = exportsOf(t.file, spec);
+    out = typeof e === "string" ? e : [...e.names.keys()].sort();
+  });
+  return out;
+}
+
+test("names imported and exported again, implicit exports, and cycles", () => {
+  expect(names({
+    "node_modules/a/index.d.ts": "import { A } from './x';\nimport * as ns from './x';\nimport D from './x';\nexport { A, ns, D };\nexport import z = require('./x');\n",
+    "node_modules/a/x.d.ts": "export declare const A: number;\nexport default 1;\n",
+  })).toEqual(["A", "D", "ns", "z"]);
+  expect(names({ "node_modules/a/index.d.ts": "import { Y } from './y';\ndeclare const a: number;\nexport declare const b: Y;\n", "node_modules/a/y.d.ts": "export type Y = number;\n" })).toEqual(["a", "b"]);
+  expect(names({ "node_modules/@types/r/index.d.ts": "declare module 'r' { function run(): void; const v: number; interface I {} }\n", "node_modules/r/index.js": "" }, "r")).toEqual(["I", "run", "v"]);
+  expect(names({
+    "node_modules/a/index.d.ts": "export * from './a';\nexport { a as viaB } from './b';\n",
+    "node_modules/a/a.d.ts": "export * from './b';\nexport declare const a: number;\n",
+    "node_modules/a/b.d.ts": "export * from './a';\nexport declare const b: number;\n",
+  })).toEqual(["a", "b", "viaB"]);
+});
+
+test("export = an imported module, an object's members, and a namespace's own exports", () => {
+  expect(names({ "node_modules/a/index.d.ts": "import X = require('./x');\nexport = X;\n", "node_modules/a/x.d.ts": "export declare const A: number;\n" })).toEqual(["A", "default"]);
+  expect(names({ "node_modules/a/index.d.ts": "declare const o: { p: number; m(): void };\nexport = o;\n" })).toEqual(["default", "m", "p"]);
+  expect(names({ "node_modules/a/index.d.ts": "declare namespace q { export { y }; const x: number; }\ndeclare const y: number;\nexport = q;\n" })).toEqual(["default", "y"]);
+});
+
+test("a Node built-in Fish lacks is named as one, and a re-export that can't be read is said", () => {
+  project({
+    "a.fsh": "import { createHash } from \"node:crypto\";\nfunction main() {}\n",
+    "b.fsh": "import { x } from \"p\";\nfunction main() {}\n",
+    "node_modules/p/index.d.ts": "export * from 'gone';\nexport * from './missing';\n",
+  }, (dir) => {
+    const error = (file: string) => {
+      try {
+        load(join(dir, file));
+      } catch (e) {
+        return (e as Error).message;
+      }
+      return "loaded";
+    };
+    expect(error("a.fsh")).toBe("'node:crypto' is a Node module Fish's std doesn't have yet");
+    expect(error("b.fsh")).toStartWith("'p' has no export 'x'; its declarations in 'node_modules/p/index.d.ts' export nothing; it couldn't read 'gone', which it re-exports from: can't find the package 'gone'");
   });
 });
