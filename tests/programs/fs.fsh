@@ -54,3 +54,15 @@ function load(readFile: (p: string, e: string) => string): string {
 async function main(): Promise<void> {
   console.log(load((p: string, e: string): string => `${p}:${e}`));
 }
+// case: fs_sync_in_async
+// expect: true fish
+// The blocking calls work inside async functions, as Node lets them.
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+async function main(): Promise<void> throws IoError {
+  writeFileSync("/tmp/fish-sync-in-async.txt", "fish");
+  console.log(existsSync("/tmp/fish-sync-in-async.txt"), readFileSync("/tmp/fish-sync-in-async.txt", "utf8"));
+}
+// case: fs_sync_unknown_member
+// error: 'node:fs' has no export named 'openSync'
+import * as fs from "node:fs";
+function main(): void { fs.openSync("x"); }

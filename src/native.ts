@@ -3814,61 +3814,107 @@ void fsh_rt_file_job_release(fsh_file_job *job) {
   fsh_rt_free(job);
 }
 
-// Reads a whole file, as Node's readFile does: open, read until the end, close.
-static void fsh_file_read(fsh_file_job *job) {
-  int fd = open(job->path, O_RDONLY | O_CLOEXEC);
+// Reads a whole file, as Node's readFile does: open, read until the end, close. A failure
+// leaves its errno and system call.
+static void fsh_read_whole(const char *path, fsh_array *data, int *error, const char **syscall) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
-    job->error = errno;
-    job->syscall = "open";
+    *error = errno;
+    *syscall = "open";
     return;
   }
   int64_t room = 4096;
-  job->data.data = fsh_rt_alloc(room);
-  job->data.length = 0;
+  data->data = fsh_rt_alloc(room);
+  data->length = 0;
   for (;;) {
-    if (job->data.length == room) {
+    if (data->length == room) {
       char *grown = fsh_rt_alloc(room * 2);
-      memcpy(grown, job->data.data, job->data.length);
-      fsh_rt_free(job->data.data);
-      job->data.data = grown;
+      memcpy(grown, data->data, data->length);
+      fsh_rt_free(data->data);
+      data->data = grown;
       room *= 2;
     }
-    ssize_t n = read(fd, job->data.data + job->data.length, room - job->data.length);
+    ssize_t n = read(fd, data->data + data->length, room - data->length);
     if (n < 0 && errno == EINTR) continue;
     if (n < 0) {
-      job->error = errno;
-      job->syscall = "read";
+      *error = errno;
+      *syscall = "read";
       break;
     }
     if (n == 0) break;
-    job->data.length += n;
+    data->length += n;
   }
-  job->data.capacity = room;
+  data->capacity = room;
   close(fd);
 }
 
 // Writes a whole file, creating it or emptying it first, as Node's writeFile does.
-static void fsh_file_write(fsh_file_job *job) {
-  int fd = open(job->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+static void fsh_write_whole(const char *path, const fsh_array *data, int *error, const char **syscall) {
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
   if (fd < 0) {
-    job->error = errno;
-    job->syscall = "open";
+    *error = errno;
+    *syscall = "open";
     return;
   }
-  for (int64_t at = 0; at < job->data.length;) {
-    ssize_t n = write(fd, job->data.data + at, job->data.length - at);
+  for (int64_t at = 0; at < data->length;) {
+    ssize_t n = write(fd, data->data + at, data->length - at);
     if (n < 0 && errno == EINTR) continue;
     if (n < 0) {
-      job->error = errno;
-      job->syscall = "write";
+      *error = errno;
+      *syscall = "write";
       break;
     }
     at += n;
   }
-  if (close(fd) < 0 && !job->error) {
-    job->error = errno;
-    job->syscall = "close";
+  if (close(fd) < 0 && !*error) {
+    *error = errno;
+    *syscall = "close";
   }
+}
+
+static void fsh_file_read(fsh_file_job *job) {
+  fsh_read_whole(job->path, &job->data, &job->error, &job->syscall);
+}
+
+static void fsh_file_write(fsh_file_job *job) {
+  fsh_write_whole(job->path, &job->data, &job->error, &job->syscall);
+}
+
+// readFileSync, writeFileSync and existsSync: the same reads and writes, on the calling thread.
+// Each gives 1, or 5 with the IoError's parts, as a file future's poll does.
+int32_t fsh_rt_fs_read_sync(fsh_str *path, fsh_array *out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "open", "");
+  fsh_array data = { 0 };
+  int failure = 0;
+  const char *syscall = NULL;
+  fsh_read_whole(c, &data, &failure, &syscall);
+  int32_t result = 1;
+  if (failure) {
+    fsh_rt_free(data.data);
+    result = fsh_fs_failed(error, failure, syscall, strcmp(syscall, "open") == 0 ? c : NULL);
+  } else *out = data;
+  fsh_rt_free(c);
+  return result;
+}
+
+int32_t fsh_rt_fs_write_sync(fsh_str *path, const fsh_array *bytes, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "open", "");
+  int failure = 0;
+  const char *syscall = NULL;
+  fsh_write_whole(c, bytes, &failure, &syscall);
+  int32_t result = failure ? fsh_fs_failed(error, failure, syscall, strcmp(syscall, "open") == 0 ? c : NULL) : 1;
+  fsh_rt_free(c);
+  return result;
+}
+
+int32_t fsh_rt_fs_exists(fsh_str *path) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return 0;
+  int found = access(c, F_OK) == 0;
+  fsh_rt_free(c);
+  return found;
 }
 
 static void *fsh_pool_work(void *arg) {

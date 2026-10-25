@@ -185,6 +185,8 @@ export const presetParams = new WeakMap<Param, Type>();
 export const lengthChecks = new WeakSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
 export const fileCalls = new WeakSet<Expr>();
+// The blocking calls the std's sync file module is written over, by their name.
+export const syncFileCalls = new WeakMap<Expr, string>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
 export const printCalls = new WeakSet<Expr>();
 // The values printed as Node's util.inspect prints them, whose types as written say how their
@@ -1031,6 +1033,21 @@ export function expressions(ctx: Context) {
       }
       fileCalls.add(e);
       return { type: leafFuture(reading ? "readFile" : "writeFile", "void", ioError()), what: `'${callee.name}'` };
+    }
+    // `fileReadSync(path)`, `fileWriteSync(path, bytes)` and `pathExists(path)`: node:fs's calls,
+    // run on the calling thread.
+    const sync = callee.kind === "ident" && fileAt(e.start).startsWith("node:") ? SYNC_FILE_CALLS[callee.name] : undefined;
+    if (sync) {
+      const [params, returns, throws] = sync;
+      const name = (callee as Extract<Expr, { kind: "ident" }>).name;
+      if (e.args.length !== params.length) throw new CompileError(`'${name}' takes ${params.length} argument${params.length === 1 ? "" : "s"}`, e.start, e.end);
+      e.args.forEach((a, i) => {
+        const t = value(a);
+        coerce(a, t, params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(params[i]!)}'`);
+      });
+      if (throws) raise(e, ioError(), `'${name}'`);
+      syncFileCalls.set(e, name);
+      return { type: returns, what: `'${name}'` };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && (!byName.has("yieldNow") || inStd)) {
@@ -4399,6 +4416,14 @@ const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind 
 export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.
+// The blocking file calls std's node:fs is written over: their parameters, what each gives, and
+// whether it throws an IoError.
+const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
+  fileReadSync: [["string"], arrayType("u8"), true],
+  fileWriteSync: [["string", arrayType("u8")], "void", true],
+  pathExists: [["string"], "boolean", false],
+};
+
 const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   charCodeAt: [["usize"], "u16", 1],
   at: [["i64"], unionType(["string", "null"]), 1],

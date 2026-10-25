@@ -970,6 +970,25 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
   await fileWrite(path, bytes);
 }
 `,
+  fs: String.raw`
+export function readFileSync(path: string): u8[] throws IoError {
+  return fileReadSync(path);
+}
+
+export function readFileSyncText(path: string): string throws IoError {
+  const bytes = fileReadSync(path);
+  return new TextDecoder().decode(bytes);
+}
+
+export function writeFileSync(path: string, data: string | u8[]): void throws IoError {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  fileWriteSync(path, bytes);
+}
+
+export function existsSync(path: string): boolean {
+  return pathExists(path);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;

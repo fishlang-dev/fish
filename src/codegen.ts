@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, restStarts, stringBuilds, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, restStarts, stringBuilds, syncFileCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -4888,6 +4888,42 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return run(e);
   }
 
+  // node:fs's blocking calls: a read's bytes, or a failure raised as the IoError the runtime's
+  // parts make.
+  function syncFile(e: Extract<Expr, { kind: "call" }>, name: string): string | undefined {
+    const path = operand(e.args[0]!, e.args.slice(1));
+    if (name === "pathExists") {
+      const [found, result] = [temp(), temp()];
+      emit(`${found} = call i32 @fsh_rt_fs_exists(ptr ${path})`);
+      emit(`${result} = icmp ne i32 ${found}, 0`);
+      return result;
+    }
+    const parts = alloca("[4 x ptr]");
+    const status = temp();
+    let out: string | undefined;
+    if (name === "fileReadSync") {
+      out = alloca(ARRAY);
+      emit(`${status} = call i32 @fsh_rt_fs_read_sync(ptr ${path}, ptr ${out}, ptr ${parts})`);
+    } else {
+      // The bytes are handed over, as to any call, and released once written.
+      const [bytes, given] = [alloca(ARRAY), owned(e.args[1]!)];
+      emit(`store ${ARRAY} ${given}, ptr ${bytes}`);
+      emit(`${status} = call i32 @fsh_rt_fs_write_sync(ptr ${path}, ptr ${bytes}, ptr ${parts})`);
+      dispose(given, arrayType("u8"));
+    }
+    const [failed, bad, good] = [temp(), label(), label()];
+    emit(`${failed} = icmp ne i32 ${status}, 1`);
+    emit(`br i1 ${failed}, label %${bad}, label %${good}`);
+    startBlock(bad);
+    raised(e, ioError(parts, current.raises.get(e)!.from as ClassType));
+    startBlock(good);
+    if (!out) return undefined;
+    const bytes = temp();
+    emit(`${bytes} = load ${ARRAY}, ptr ${out}`);
+    if (!types.has(e)) pending.push({ v: bytes, type: arrayType("u8") });
+    return bytes;
+  }
+
   // `String.fromCharCode` and `String.fromCodePoint` over their gathered array, a temporary the
   // statement releases.
   function stringBuilt(e: Extract<Expr, { kind: "call" }>, kind: "units" | "points"): string {
@@ -4927,6 +4963,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (maths.has(e)) return mathCall(e);
       if (kindTests.has(e)) return test(e, value, valueType)!;
+      if (syncFileCalls.has(e)) return syncFile(e, syncFileCalls.get(e)!);
       // A file's future: the path, and a write's bytes, in its frame for the pool to take.
       if (fileCalls.has(e)) {
         const future = types.get(e) as FutureType;

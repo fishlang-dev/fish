@@ -285,7 +285,7 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
   }));
   if (spaces.size > 0 || valued.size > 0) throughSpaces(l.body, spaces, bind, valued);
   // A file module's call naming an encoding, linked to the function giving a string.
-  if ([...l.imports.values()].some(({ from }) => from.path === "std:fs/promises")) byEncoding(l.body, l.imports, bind);
+  if ([...l.imports.values()].some(({ from }) => Object.hasOwn(ENCODED, from.path))) byEncoding(l.body, l.imports, bind);
   renameIn(l.body, (name) => void l.used.add(name));
   return l;
 }
@@ -417,28 +417,35 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
 function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: string, from: Module, name: string, at: Span) => void) {
   const file = (name: string) => {
     const t = imports.get(name);
-    return t && t.from.path === "std:fs/promises" && (t.name === "readFile" || t.name === "writeFile") ? t : undefined;
+    return t && Object.hasOwn(ENCODED, t.from.path) && ENCODED[t.from.path]![t.name] !== undefined ? t : undefined;
   };
   const walk = scoped((name) => file(name) !== undefined, (n, hidden) => {
     const callee = n.callee as { kind?: string; name?: string } | undefined;
     const target = n.kind === "call" && callee?.kind === "ident" && !hidden.has(callee.name!) ? file(callee.name!) : undefined;
     if (!target) return false;
     const args = n.args as Expr[];
-    const at = target.name === "readFile" ? 1 : 2;
+    const role = ENCODED[target.from.path]![target.name]!;
+    const at = role === "read" ? 1 : 2;
     const given = args[at];
     if (!given) return false;
     const encoding = given.kind === "string" ? given.value : given.kind === "object" ? encodingOf(given) : undefined;
     if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like "utf8" or { encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
     if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
     args.splice(at, 1);
-    if (target.name === "writeFile" || encoding === null) return false;
+    if (role === "write" || encoding === null) return false;
     const alias = `${callee!.name}:text`;
-    if (!imports.has(alias)) bind(alias, target.from, "readFileText", given);
+    if (!imports.has(alias)) bind(alias, target.from, `${target.name}Text`, given);
     callee!.name = alias;
     return false;
   });
   walk(body, new Set());
 }
+
+// The std file calls typed by their encoding, by module: which read and which write.
+const ENCODED: Record<string, Record<string, "read" | "write">> = {
+  "std:fs/promises": { readFile: "read", writeFile: "write" },
+  "std:fs": { readFileSync: "read", writeFileSync: "write" },
+};
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
 // it isn't a literal or the object holds anything else.

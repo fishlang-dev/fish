@@ -489,9 +489,9 @@ test("optional and trailing rest tuple elements are portable; a leading rest, or
   });
 });
 
-test("node:fs and node:util wait on their plan items, while fs/promises is std", () => {
+test("node:fs and fs/promises are std, while node:util waits on its plan item", () => {
   project({ "a.ts": "import { readFileSync } from \"node:fs\";\n", "b.ts": "import { readFile } from \"node:fs/promises\";\nreadFile(\"x\");\n", "c.ts": "import { parseArgs } from \"node:util\";\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Synchronous file system"], [], ["The util module"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["The util module"]]);
   });
 });
 
