@@ -2633,7 +2633,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const v = operand(x, []);
     const w = temp();
     emit(`${w} = call ptr @fsh_rt_json_new()`);
-    jsonWrite(w, v, coercions.get(x) ?? types.get(x)!);
+    jsonWrite(w, v, current.spelled?.get(x) ?? coercions.get(x) ?? types.get(x)!);
     const result = temp();
     emit(`${result} = call ptr @fsh_rt_json_done(ptr ${w})`);
     if (!types.has(e)) pending.push({ v: result, type: "string" });
@@ -2641,16 +2641,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // Writes a value as JSON, through the function made for its type when it has parts.
+  // The type as written is kept beside the lowered one, which forgets how a field was
+  // spelled: an empty `x?: T` is left out, as JavaScript leaves out an undefined field.
   function jsonWrite(w: string, v: string, type: Type) {
     const t = lower(type);
     if (typeof t === "string" || t.kind === "literal") return jsonScalar(w, v, t);
-    let name = jsonWriters.get(t);
+    const written = asWritten(type);
+    let name = jsonWriters.get(written);
     if (!name) {
       name = `@"fsh.json.${jsonWriters.size}"`;
-      jsonWriters.set(t, name);
+      jsonWriters.set(written, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      jsonParts("%w", "%v", t);
+      jsonParts("%w", "%v", t, written);
       emit("ret void");
       out.push(`define internal void ${name}(ptr %w, ${llvm(t)} %v) {`, "entry:", ...allocas, ...body, "}", "");
       ({ allocas, body, temps, labels, block, pending, scopes } = saved);
@@ -2698,16 +2701,29 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The parts of a value with them: an array's elements, an object's fields by name, an
   // instance's fields as declared, a base's first, a union's member, an enum's member tagged by
   // its name as serde writes it.
-  function jsonParts(w: string, v: string, t: Exclude<Type, string>) {
+  // A type parameter's type as written, or the type itself.
+  function asWritten(t: Type): Type {
+    return typeof t !== "string" && t.kind === "param" && t.concrete ? asWritten(t.concrete) : t;
+  }
+
+  // A part of `written` where `lowered` has the same shape, so its spelling can be read.
+  function writtenPart(written: Type, lowered: Exclude<Type, string>, part: (t: Exclude<Type, string>) => Type | undefined): Type | undefined {
+    return typeof written !== "string" && written.kind === lowered.kind ? part(written) : undefined;
+  }
+
+  function jsonParts(w: string, v: string, t: Exclude<Type, string>, written: Type = t) {
     if (t.kind === "ref" || t.kind === "recursive") {
       const to = t.kind === "ref" ? t.to : t.of;
       const held = temp();
       emit(`${held} = load ${llvm(lower(to))}, ptr ${v}`);
-      return jsonWrite(w, held, to);
+      return jsonWrite(w, held, writtenPart(written, t, (x) => (x.kind === "ref" ? x.to : undefined)) ?? to);
     }
-    if (t.kind === "array" || t.kind === "fixed") return jsonElements(w, v, t);
+    if (t.kind === "array" || t.kind === "fixed") return jsonElements(w, v, t, writtenPart(written, t, (x) => (x as ArrayType).element) ?? t.element);
     if (t.kind === "map") return jsonEntries(w, v, t);
-    if (t.kind === "union") return jsonMember(w, v, t);
+    if (t.kind === "union") {
+      const members = writtenPart(written, t, (x) => x) as UnionType | undefined;
+      return jsonMember(w, v, t, members?.members.length === t.members.length ? members.members : t.members);
+    }
     if (t.kind === "variant") {
       if (t.fields.length === 0) return jsonRaw(w, JSON.stringify(t.member));
       jsonRaw(w, `{${JSON.stringify(t.member)}:`);
@@ -2735,7 +2751,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       jsonRaw(w, "]");
       return;
     }
-    jsonObject(w, v, t, object.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] })));
+    const spelled = writtenPart(written, t, (x) => x) as ObjectType | undefined;
+    const as = spelled?.fields.length === object.fields.length ? spelled.fields : object.fields;
+    jsonObject(w, v, t, object.fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional === "added" })));
   }
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
@@ -2744,21 +2762,46 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function ownJsonFields(c: ClassType, offset: number) {
-    return c.fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i] }]));
+    return c.fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional === "added" }]));
   }
 
-  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: number[] }[]) {
+  // An object's fields; one spelled `x?: T` is left out while empty, so whether a comma is
+  // needed is known only as the fields are written.
+  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: number[]; omit?: boolean }[]) {
     jsonRaw(w, "{");
+    const dynamic = fields.some((f) => f.omit);
+    const wrote = dynamic ? alloca("i1") : "";
+    if (dynamic) emit(`store i1 false, ptr ${wrote}`);
     fields.forEach((f, n) => {
-      jsonRaw(w, `${n > 0 ? "," : ""}${JSON.stringify(f.name)}:`);
       const x = temp();
       emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const after = label();
+      if (f.omit) {
+        const [present, write] = [holds(x, lower(f.type) as UnionType, (lower(f.type) as UnionType).members.filter((m) => m !== "null")), label()];
+        emit(`br i1 ${present}, label %${write}, label %${after}`);
+        startBlock(write);
+      }
+      const key = `${JSON.stringify(f.name)}:`;
+      if (!dynamic) jsonRaw(w, `${n > 0 ? "," : ""}${key}`);
+      else {
+        const [was, comma, bare] = [temp(), label(), label()];
+        emit(`${was} = load i1, ptr ${wrote}`);
+        emit(`br i1 ${was}, label %${comma}, label %${bare}`);
+        startBlock(comma);
+        jsonRaw(w, ",");
+        emit(`br label %${bare}`);
+        startBlock(bare);
+        jsonRaw(w, key);
+        emit(`store i1 true, ptr ${wrote}`);
+      }
       jsonWrite(w, x, f.type);
+      emit(`br label %${after}`);
+      startBlock(after);
     });
     jsonRaw(w, "}");
   }
 
-  function jsonElements(w: string, v: string, t: ArrayType | FixedType) {
+  function jsonElements(w: string, v: string, t: ArrayType | FixedType, written: Type) {
     const element = llvm(lower(t.element));
     const [length, data] = [temp(), temp()];
     if (t.kind === "array") {
@@ -2791,7 +2834,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [at, x, next] = [temp(), temp(), temp()];
     emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
     emit(`${x} = load ${element}, ptr ${at}`);
-    jsonWrite(w, x, t.element);
+    jsonWrite(w, x, written);
     emit(`${next} = add i64 ${i}, 1`);
     emit(`store i64 ${next}, ptr ${index}`);
     emit(`br label %${head}`);
@@ -3370,7 +3413,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A union's value, written as the member its tag says it holds.
-  function jsonMember(w: string, v: string, t: UnionType) {
+  function jsonMember(w: string, v: string, t: UnionType, written: Type[]) {
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
     const done = label();
@@ -3387,7 +3430,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const [at, x] = [temp(), temp()];
         emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
         emit(`${x} = load ${llvm(member)}, ptr ${at}`);
-        jsonWrite(w, x, member);
+        jsonWrite(w, x, written[i]!);
       }
       emit(`br label %${done}`);
     });

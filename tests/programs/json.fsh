@@ -607,3 +607,24 @@ function main() {
   const n: i64 = 5;
   console.log(n instanceof Map);
 }
+// case: json_optional_spelling
+// expect: {"b":null,"d":1} {"a":2,"b":3,"c":"s","d":4} {"b":null,"c":"only","d":0}
+// expect: [{"b":1,"d":2},{"a":1,"b":null,"d":3}]
+// expect: {} {"y":null} {"x":1,"y":"y"}
+type U = { a?: i64; b: i64 | null; c?: string; d: i64 };
+@derive(Json)
+class C {
+  x?: i64;
+  y: string | null;
+  constructor(x: i64 | null, y: string | null) { this.x = x; this.y = y; }
+}
+function main() {
+  const u1: U = { b: null, d: 1 };
+  const u2: U = { a: 2, b: 3, c: "s", d: 4 };
+  const u3: U = { c: "only", b: null, d: 0 };
+  console.log(JSON.stringify(u1), JSON.stringify(u2), JSON.stringify(u3));
+  const list: U[] = [{ b: 1, d: 2 }, { a: 1, b: null, d: 3 }];
+  console.log(JSON.stringify(list));
+  const first: { a?: i64 } = {};
+  console.log(JSON.stringify(first), JSON.stringify(new C(null, null)), JSON.stringify(new C(1, "y")));
+}
