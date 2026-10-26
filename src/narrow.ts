@@ -80,11 +80,12 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const local = test.operand.kind === "ident" ? locals.get(test.operand) : undefined;
     // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
     const read = name && JS_READS[name];
-    if (local && read && holdsPlainJs(local.type) && narrowable(local)) {
+    const tested = types.get(test.operand);
+    if (local && read && tested && holdsPlainJs(tested) && narrowable(local)) {
       const facts: Guard = { yes: new Map([[local, read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
-    if (local && holdsPlainJs(local.type)) return nothing;
+    if (local && tested && holdsPlainJs(tested)) return nothing;
     return name ? split(test.operand, (m) => (category(m) === name ? "yes" : "no"), e.op === "===") : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {

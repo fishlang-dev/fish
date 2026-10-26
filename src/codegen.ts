@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./p
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isPlainJs, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -7335,10 +7335,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const t = temp();
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
         if (current.copiesOut.has(e)) {
-          if (!isRef(local.type)) return jsRead(t, types.get(e)!);
-          const box = temp();
-          emit(`${box} = load ptr, ptr ${t}`);
-          return jsRead(box, types.get(e)!);
+          // The box, through a reference and out of a union holding it.
+          let [held, type] = [t, local.type];
+          if (isRef(type)) {
+            const through = temp();
+            emit(`${through} = load ${llvm(type.to)}, ptr ${held}`);
+            [held, type] = [through, type.to];
+          }
+          if (typeof type !== "string" && type.kind === "union") held = convert(held, type, type.members.find(isPlainJs)!);
+          return jsRead(held, types.get(e)!);
         }
         // Where a check narrowed the variable, its value comes out of the union.
         return convert(t, local.type, types.get(e)!);

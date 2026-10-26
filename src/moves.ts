@@ -1035,6 +1035,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A borrow kept past its statement can't point at a temporary, which is gone once the
   // statement ends.
   function outlived(s: Expr, holder: string): CompileError {
+    if (instance.copiesOut.has(s) && s.kind === "ident") return new CompileError(`${holder} would keep borrowing what '${s.name}' gives here, which is read out of JS anew at each use and gone once its statement ends; keep it in a 'const' first and borrow that`, s.start, s.end);
     return new CompileError(`${holder} would keep borrowing this temporary, which is gone once its statement ends; give it a name first, as in 'const xs = ...;'`, s.start, s.end);
   }
 

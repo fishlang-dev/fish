@@ -392,6 +392,19 @@ export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block
 // The same, or a reference to one.
 export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
+// What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to
+// `read`: one kind of value, read out of JS, or several, which leave it the JsValue.
+export function jsRead(declared: Type, read: Type | undefined): "one" | "several" | undefined {
+  if (read === undefined) return undefined;
+  const held = typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
+  const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
+  if (!members.some(isPlainJs)) return undefined;
+  const kinds = (u: Type) => (u === "string" || u === "f64" || u === "boolean") && !members.includes(u);
+  const reads = (typeof read !== "string" && read.kind === "union" ? read.members : [read]).filter(kinds);
+  if (reads.length === 0) return undefined;
+  return reads.length === 1 && kinds(read) ? "one" : "several";
+}
+
 export function blockType(which: BlockType["which"], of: Type = "void"): BlockType {
   const key = `${which} ${keyOf(of)}`;
   let t = blocks.get(key);

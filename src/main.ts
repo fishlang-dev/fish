@@ -143,10 +143,11 @@ export async function buildAsync(file: string, out: string, release = false, pan
 export const ENGINE = join(import.meta.dir, "..", "vendor", "quickjs-ng");
 export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"].map((f) => join(ENGINE, f));
 
-// Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
-// the engine's glue and sources with it when the program's IR calls the engine.
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
+
+// Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
+// the engine's glue and sources with it when the program's IR calls the engine.
 
 function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
   const native = join(dir, "native.c");

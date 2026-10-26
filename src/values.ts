@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, holdsPlainJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsRead, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -376,6 +376,8 @@ export function expressions(ctx: Context) {
   // Those passed where the tuple has optional or rest elements take its shape, by its type node.
   const shapedBy = new WeakMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
   const fixedLiterals = new Map<Expr, FixedType>();
+  // The place an assignment is checking as its target, while it does.
+  let writing: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
   const once = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
@@ -3052,6 +3054,7 @@ export function expressions(ctx: Context) {
   // A JS handle's property, as its shape declares it, read from JS.
   function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     if (t.of === "void") {
+      if (writing === e) throw new CompileError("writing a JS value's properties isn't supported yet; a 'JsValue' is read with 'get'", e.start, e.end);
       if (["get", "at", "has"].includes(e.name)) throw new CompileError(`'${e.name}' is a method of a 'JsValue'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
       throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so it has no property '${e.name}' to use; read one with '${placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
     }
@@ -3750,10 +3753,9 @@ export function expressions(ctx: Context) {
         const read = narrowed(local);
         // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
         // each time; one narrowed to several stays a JsValue.
-        if (holdsPlainJs(local.type)) {
-          if (read !== "string" && read !== "f64" && read !== "boolean") return local.type;
-          ctx.copiesOut.add(e);
-        }
+        const js = jsRead(local.type, read);
+        if (js === "one") ctx.copiesOut.add(e);
+        if (js === "several") return isRefType(local.type) ? local.type : unfoldedMembers(local.type).find(isPlainJs)!;
         return read ?? local.type;
       }
       // Its literal type, which a string takes it as.
@@ -4851,11 +4853,14 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
     locals.set(p, local);
-    if (holdsPlainJs(local.type)) {
-      if (["string", "f64", "boolean"].includes(narrowed(local) as string)) throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
-      return { name: p.name, type: local.type };
-    }
+    const js = jsRead(local.type, narrowed(local));
+    if (js === "one") throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
+    if (js === "several") throw new CompileError(`'${p.name}' could be several kinds of JS value here; write '${p.name}: ${p.name}'`, p.start, p.end);
     return { name: p.name, type: widenEnum(narrowed(local) ?? local.type) };
+  }
+
+  function unfoldedMembers(t: Type): Type[] {
+    return typeof t !== "string" && t.kind === "union" ? t.members : [t];
   }
 
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
@@ -4863,13 +4868,25 @@ export function expressions(ctx: Context) {
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
   function assignable(target: Expr, reads: boolean): Type {
+    const outer = writing;
+    writing = target;
+    try {
+      return assignableTo(target, reads);
+    } finally {
+      writing = outer;
+    }
+  }
+
+  function assignableTo(target: Expr, reads: boolean): Type {
     untuple(target);
     if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(target, types);
-    if (target.kind === "index" && stringLike(read(target.object))) {
+    const indexed = target.kind === "index" ? read(target.object) : undefined;
+    if (indexed !== undefined && stringLike(indexed)) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
     }
+    if (indexed !== undefined && isPlainJs(indexed)) throw new CompileError("writing a JS value's elements isn't supported yet; a 'JsValue' is read with 'at'", target.start, target.end);
     const holder = target.kind === "member" ? types.get(target.object) : undefined;
     if (holder && isArray(isRefType(holder) ? holder.to : holder)) {
       const capacity = (target as { name: string }).name === "capacity";

@@ -137,6 +137,11 @@ function main() {
   console.log(kept + read(), { s: s }.s, length(s));
   const parts = [o.get("n"), o.get("ok"), o.get("name"), list];
   for (const part of parts) console.log(lent(part));
+  // A JsValue taken out of an Option narrows as one held on its own does.
+  const found: JsValue | null = o.get("name");
+  if (found !== null && typeof found === "string") console.log(found.length);
+  const shaped: { a: JsValue; b?: JsValue } = { a: o.get("n") };
+  console.log(shaped.b === null);
 }
 `;
 
@@ -144,7 +149,7 @@ function main() {
 // objects and arrays, each value read freed.
 test("JsValues are narrowed and read", () => {
   expect(sanitized("narrowing", NARROWING)).toEqual({
-    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish 4\n4\nfalse\nfish\nother\n",
+    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish 4\n4\nfalse\nfish\nother\n4\ntrue\n",
     stderr: "",
     exitCode: 0,
   });
@@ -171,7 +176,9 @@ test.each([
   ["const v = evaluate(''); if (typeof v === 'string') { const o = { v }; }", "'v' is read out of JS as a 'string' here; write 'v: v'"],
   ["const v = evaluate(''); const u: JsValue | string = v; const s = typeof u === 'string';", "'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own"],
   ["const v = evaluate(''); const xs: (JsValue | string)[] = [v, 's']; const ys: JsValue[] = xs;", "turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS"],
-  ["const v = evaluate(''); if (typeof v === 'string') { const r: Ref<string> = v; }", "'r' would keep borrowing this temporary"],
+  ["const v = evaluate(''); if (typeof v === 'string') { const r: Ref<string> = v; }", "'r' would keep borrowing what 'v' gives here, which is read out of JS anew at each use"],
+  ["const v = evaluate(''); v.x = 1;", "writing a JS value's properties isn't supported yet; a 'JsValue' is read with 'get'"],
+  ["const v = evaluate(''); v[0] = 1;", "writing a JS value's elements isn't supported yet; a 'JsValue' is read with 'at'"],
   ["const v = evaluate(''); const g = v.get;", "'get' is a method of a 'JsValue'; call it, as in 'v.get(...)'"],
 ])("refused: %s", (body, message) => {
   const [file, src] = [join(dir, `refused-${Bun.hash(body)}.fsh`), `import { evaluate } from "fish:engine";\nfunction main() { ${body} }\n`];
