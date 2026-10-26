@@ -16,7 +16,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -675,22 +675,39 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
   // A program that type-checks with a package's declarations is stopped at its first use of
   // one, as nothing can run them yet.
-  // So is one holding a package's handle anywhere, or turning a Fish value into a JS one, though
-  // nothing was called. A plain JsValue the engine gave back runs.
-  const holdsJs = (plain: boolean) => (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue" && (plain || u.of !== "void"), true);
-  const typed = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)].flatMap((i): Span[] => [
-    ...[...i.types].filter(([, t]) => holdsJs(false)(t)).map(([x]) => x),
-    // ponytail: a source already holding a JsValue is taken as lent or moved, not crossing; a
-    // source mixing a JsValue with a Fish value meant to become JS slips past; check conversions
-    // into JS part by part once Fish values cross
-    ...[...i.coercions].filter(([x, t]) => holdsJs(true)(t) && !holdsJs(true)(i.types.get(x as Expr) ?? "void")).map(([x]) => x),
-    ...[...i.locals].filter(([, l]) => holdsJs(false)(l.type)).map(([x]) => x),
+  // So is one holding a package's handle anywhere, though nothing was called. A plain JsValue
+  // the engine gave back runs.
+  const holdsHandle = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue" && u.of !== "void", true);
+  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)];
+  const typed = compiledInstances.flatMap((i): Span[] => [
+    ...[...i.types].filter(([, t]) => holdsHandle(t)).map(([x]) => x),
+    ...[...i.locals].filter(([, l]) => holdsHandle(l.type)).map(([x]) => x),
   ]);
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses) ?? earliest(typed);
-  if (used) throw new CompileError("running a package's code needs a JS engine, which Fish doesn't have yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
+  if (used) throw new CompileError("running a package's code isn't supported yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
+  const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
+  if (crossing) throw new CompileError("turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
+
+  // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
+  // part that isn't a JsValue where `to` takes only one.
+  function intoJs(from: Type, to: Type): boolean {
+    const held = (t: Type) => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
+    [from, to] = [held(from), held(to)];
+    if (from === to || typeof to === "string" || !holdsPart(to, isPlainJs, true)) return false;
+    if (isPlainJs(to)) return !isPlainJs(from);
+    if (to.kind === "union") {
+      const others = to.members.filter((m) => !isPlainJs(m));
+      const members = typeof from !== "string" && from.kind === "union" ? from.members : [from];
+      return members.some((m) => !to.members.includes(m) && !isPlainJs(m) && !others.some((o) => fits(m, o) && !intoJs(m, o)));
+    }
+    if (typeof from === "string") return false;
+    if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return intoJs(from.element, to.element);
+    if (to.kind === "object" && (from.kind === "object" || from.kind === "class")) return to.fields.some((f) => intoJs(from.fields.find((g) => g.name === f.name)?.type ?? "void", f.type));
+    return false;
+  }
 
   // What a function's returned reference borrows from: the parameters with its written
   // lifetime, or by elision `this` for a method, or the only reference parameter.

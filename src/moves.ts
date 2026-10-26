@@ -1028,7 +1028,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     let at = s;
     while (at.kind === "nonNull") at = at.expr;
     if (s.kind === "string" && !across && !f.generator && !f.async) return false;
-    return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && key(at) === undefined;
+    // A JsValue read out of JS is made for the statement, though it names a variable.
+    return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && (key(at) === undefined || instance.copiesOut.has(at));
   }
 
   // A borrow kept past its statement can't point at a temporary, which is gone once the

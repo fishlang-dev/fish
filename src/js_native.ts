@@ -55,6 +55,10 @@ static void fsh_js_throw(JSContext *cx, const char *where) {
   const char *shown = text ? text : "a value that can't be shown";
   size_t size = strlen(where) + strlen(shown) + 32;
   char *message = malloc(size);
+  if (!message) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
   snprintf(message, size, "%suncaught exception in JS: %s\n", where, shown);
   JS_FreeCString(cx, text);
   JS_FreeValue(cx, exception);
@@ -81,6 +85,7 @@ fsh_str *fsh_rt_js_string(fsh_js *b) {
   JSContext *cx = fsh_js_enter();
   size_t length;
   const char *bytes = JS_ToCStringLen(cx, &length, b->value);
+  if (!bytes) fsh_js_throw(cx, "panicked while reading a string out of JS:\n");
   fsh_str *s = fsh_str_of(bytes, length);
   JS_FreeCString(cx, bytes);
   fsh_js_leave();
@@ -138,12 +143,12 @@ int32_t fsh_rt_js_has(fsh_js *b, fsh_str *key, const char *where) {
 
 // Runs a module's source to its end, its top-level awaits included, and gives its default export.
 fsh_js *fsh_rt_js_evaluate(fsh_str *source, const char *where) {
-  char *text = malloc(source->length + 1);
+  char *text = fsh_rt_alloc(source->length + 1);
   memcpy(text, source->bytes, source->length);
   text[source->length] = 0;
   JSContext *cx = fsh_js_enter();
   JSValue compiled = JS_Eval(cx, text, source->length, "<module>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  free(text);
+  fsh_rt_free(text);
   if (JS_IsException(compiled)) fsh_js_throw(cx, where);
   JSModuleDef *module = JS_VALUE_GET_PTR(compiled);
   JSValue finished = JS_EvalFunction(cx, compiled);

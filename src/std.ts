@@ -1406,7 +1406,6 @@ export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
   process: { argv: "value", env: "table" },
 };
 
-// The std module a specifier names, if any: `node:os` and `os` both name `os`.
 // The compiler's own tests run JS through this module, which no program may import: Fish has no
 // way to run JS source, only packages.
 export const ENGINE_HOOK = String.raw`
@@ -1415,6 +1414,7 @@ export function evaluate(module: string): JsValue {
 }
 `;
 
+// The std module a specifier names, if any: `node:os` and `os` both name `os`.
 export function stdModule(specifier: string): string | undefined {
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
   // "path/posix" is "path", which is POSIX's here.

@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { isNumeric, isPlainJs, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
+import { holdsPlainJs, isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -80,11 +80,11 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
     const local = test.operand.kind === "ident" ? locals.get(test.operand) : undefined;
     // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
     const read = name && JS_READS[name];
-    if (local && read && isPlainJs(local.type) && narrowable(local)) {
+    if (local && read && holdsPlainJs(local.type) && narrowable(local)) {
       const facts: Guard = { yes: new Map([[local, read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
-    if (local && isPlainJs(local.type)) return nothing;
+    if (local && holdsPlainJs(local.type)) return nothing;
     return name ? split(test.operand, (m) => (category(m) === name ? "yes" : "no"), e.op === "===") : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {

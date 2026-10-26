@@ -7334,7 +7334,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const local = resolved(e);
         const t = temp();
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-        if (current.copiesOut.has(e)) return jsRead(t, types.get(e)!);
+        if (current.copiesOut.has(e)) {
+          if (!isRef(local.type)) return jsRead(t, types.get(e)!);
+          const box = temp();
+          emit(`${box} = load ptr, ptr ${t}`);
+          return jsRead(box, types.get(e)!);
+        }
         // Where a check narrowed the variable, its value comes out of the union.
         return convert(t, local.type, types.get(e)!);
       }
@@ -7699,6 +7704,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (e.kind === "this") return true;
     // An array's element lives in its buffer, wherever the array itself is.
     if (e.kind === "index") return indexes(valueType(e.object));
+    // A JsValue read out of JS lives nowhere until the read makes it.
+    if (current.copiesOut.has(e)) return false;
     const local = e.kind === "ident" ? locals.get(e) : undefined;
     const type = types.get(e);
     return local !== undefined && (type === local.type || typeof type === "string" || type?.kind !== "union");

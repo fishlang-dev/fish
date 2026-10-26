@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, holdsPlainJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -3051,7 +3051,10 @@ export function expressions(ctx: Context) {
 
   // A JS handle's property, as its shape declares it, read from JS.
   function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
-    if (t.of === "void") throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so its properties are read with 'get': '${placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
+    if (t.of === "void") {
+      if (["get", "at", "has"].includes(e.name)) throw new CompileError(`'${e.name}' is a method of a 'JsValue'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
+      throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so it has no property '${e.name}' to use; read one with '${placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
+    }
     const shape = jsShape(t);
     const found = shape?.fields.find((f) => f.name === e.name);
     if (found) {
@@ -3747,7 +3750,7 @@ export function expressions(ctx: Context) {
         const read = narrowed(local);
         // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
         // each time; one narrowed to several stays a JsValue.
-        if (isPlainJs(local.type)) {
+        if (holdsPlainJs(local.type)) {
           if (read !== "string" && read !== "f64" && read !== "boolean") return local.type;
           ctx.copiesOut.add(e);
         }
@@ -4315,9 +4318,6 @@ export function expressions(ctx: Context) {
     return true;
   }
 
-  // `===` between values holding objects, arrays or instances compares them by value, as Fish's
-  // Eq does, where TypeScript compares objects by identity: every part has to compare, and the
-  // wider value is compared as the narrower.
   // `v === null` and `v === undefined` test a JsValue for JS's two empty values, which Fish's one
   // empty value can't tell apart.
   function jsEmpty(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
@@ -4334,6 +4334,9 @@ export function expressions(ctx: Context) {
     return undefined;
   }
 
+  // `===` between values holding objects, arrays or instances compares them by value, as Fish's
+  // Eq does, where TypeScript compares objects by identity: every part has to compare, and the
+  // wider value is compared as the narrower.
   function equality(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     const [left, right] = [value(e.left), value(e.right)];
     once.add(e.left);
@@ -4848,7 +4851,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
     locals.set(p, local);
-    if (isPlainJs(local.type)) {
+    if (holdsPlainJs(local.type)) {
       if (["string", "f64", "boolean"].includes(narrowed(local) as string)) throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
       return { name: p.name, type: local.type };
     }

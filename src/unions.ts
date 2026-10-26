@@ -188,7 +188,9 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
   const test = typeofTest(e);
   if (!test) return undefined;
   const tested = value(test.operand);
-  const names = isPlainJs(typeof tested !== "string" && tested.kind === "ref" ? tested.to : tested) ? JS_TYPEOF : TYPEOF;
+  const held = typeof tested !== "string" && tested.kind === "ref" ? tested.to : tested;
+  if (typeof held !== "string" && held.kind === "union" && held.members.some(isPlainJs)) throw new CompileError(`'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
+  const names = isPlainJs(held) ? JS_TYPEOF : TYPEOF;
   if (test.name.kind !== "string" || !names.has(test.name.value)) {
     throw new CompileError(`'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
   }

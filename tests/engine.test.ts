@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
 import { JS_NATIVE } from "../src/js_native.ts";
-import { buildAsync, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
+import { buildAsync, callsEngine, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
 import { allowEngineHook } from "../src/modules.ts";
 import { NATIVE } from "../src/native.ts";
 
@@ -104,6 +104,26 @@ function empty(v: Ref<JsValue>): boolean {
   return v === null || v === undefined;
 }
 
+function length(s: Ref<string>): usize {
+  return s.length;
+}
+
+function twice(x: Ref<f64>): f64 {
+  return x * 2;
+}
+
+function not(b: Ref<boolean>): boolean {
+  return !b;
+}
+
+// A borrowed JsValue narrows too, read through the reference.
+function lent(v: Ref<JsValue>): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number") return \`\${twice(v)}\`;
+  if (typeof v === "boolean") return \`\${not(v)}\`;
+  return "other";
+}
+
 function main() {
   const o = evaluate("export default { name: 'fish', n: 2, ok: true, list: [10, 'x'], f() {}, none: null, big: 1n };");
   for (const key of ["name", "n", "ok", "f", "missing", "none", "big"]) console.log(describe(o.get(key)));
@@ -114,7 +134,9 @@ function main() {
   if (typeof s !== "string") return;
   const kept = s;
   const read = () => s;
-  console.log(kept + read(), { s: s }.s);
+  console.log(kept + read(), { s: s }.s, length(s));
+  const parts = [o.get("n"), o.get("ok"), o.get("name"), list];
+  for (const part of parts) console.log(lent(part));
 }
 `;
 
@@ -122,7 +144,7 @@ function main() {
 // objects and arrays, each value read freed.
 test("JsValues are narrowed and read", () => {
   expect(sanitized("narrowing", NARROWING)).toEqual({
-    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish\n",
+    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish 4\n4\nfalse\nfish\nother\n",
     stderr: "",
     exitCode: 0,
   });
@@ -140,13 +162,17 @@ test("reading a property of undefined panics", async () => {
 
 // What a JsValue refuses, each naming what to write instead.
 test.each([
-  ["const v = evaluate(''); console.log(v.a);", "a 'JsValue' could be anything, as an 'unknown' could, so its properties are read with 'get': 'v.get(\"a\")'"],
+  ["const v = evaluate(''); console.log(v.a);", "a 'JsValue' could be anything, as an 'unknown' could, so it has no property 'a' to use; read one with 'v.get(\"a\")'"],
   ["const v = evaluate(''); const x = v[0];", "a 'JsValue' could be anything, as an 'unknown' could, so its elements are read with 'at': 'v.at(i)'"],
   ["const v = evaluate(''); v.push(1);", "a 'JsValue' has no method 'push': its own are 'get', 'at' and 'has', and it is narrowed with 'typeof' to read it"],
   ["const v = evaluate(''); const x = v.get(1);", "'get' takes a key, as a 'string', not 'i64'"],
   ["const v = evaluate(''); const x = v.at();", "'at' takes an index, as an 'i64'"],
   ["const v = evaluate(''); const x = typeof v === 'nope';", "'typeof' can only be compared with \"number\", \"boolean\", \"string\", \"object\", \"undefined\", \"function\", \"bigint\", \"symbol\" here"],
   ["const v = evaluate(''); if (typeof v === 'string') { const o = { v }; }", "'v' is read out of JS as a 'string' here; write 'v: v'"],
+  ["const v = evaluate(''); const u: JsValue | string = v; const s = typeof u === 'string';", "'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own"],
+  ["const v = evaluate(''); const xs: (JsValue | string)[] = [v, 's']; const ys: JsValue[] = xs;", "turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS"],
+  ["const v = evaluate(''); if (typeof v === 'string') { const r: Ref<string> = v; }", "'r' would keep borrowing this temporary"],
+  ["const v = evaluate(''); const g = v.get;", "'get' is a method of a 'JsValue'; call it, as in 'v.get(...)'"],
 ])("refused: %s", (body, message) => {
   const [file, src] = [join(dir, `refused-${Bun.hash(body)}.fsh`), `import { evaluate } from "fish:engine";\nfunction main() { ${body} }\n`];
   writeFileSync(file, src);
@@ -183,7 +209,7 @@ test("a program can't import the test hook", () => {
 });
 
 test("a program with no JS doesn't build the engine in", () => {
-  const [file, src] = [join(dir, "plain.fsh"), "function main() { console.log(1); }\n"];
+  const [file, src] = [join(dir, "plain.fsh"), 'function main() { console.log("  call void @fsh_rt_js_release(ptr %v)"); }\n'];
   writeFileSync(file, src);
-  expect(/call [^\n]*@fsh_rt_js_/.test(compile(src, file))).toBe(false);
+  expect(callsEngine(compile(src, file))).toBe(false);
 });

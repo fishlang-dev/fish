@@ -54,7 +54,9 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   const at = (f: string) => join(dirname(out), f);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   const [native, fish, runtime] = [join(dir, "native.c"), join(dir, "fish.o"), join(dir, "native.o")];
-  writeFileSync(native, NATIVE);
+  const js = callsEngine(ir);
+  writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
+  const engine = js ? ENGINE_SOURCES : [];
   const optimize = release ? "-O2" : "-O0";
   const run = (args: string[], stdin?: string) => {
     const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
@@ -63,11 +65,13 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   try {
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
+      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
     } else {
       run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
-      run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", native, "-o", runtime, optimize]);
-      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime]);
+      run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", ...(js ? ["-I", ENGINE] : []), native, "-o", runtime, optimize]);
+      const objects = engine.map((source, i) => join(dir, `engine${i}.o`));
+      engine.forEach((source, i) => run(["clang", "-c", "-fPIC", "-I", ENGINE, source, "-o", objects[i]!, optimize]));
+      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime, ...objects]);
     }
     writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
   } finally {
@@ -141,9 +145,12 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 
 // Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
 // the engine's glue and sources with it when the program's IR calls the engine.
+// Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
+export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
+
 function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
   const native = join(dir, "native.c");
-  const js = /call [^\n]*@fsh_rt_js_/.test(ir);
+  const js = callsEngine(ir);
   writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
   const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
   return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
