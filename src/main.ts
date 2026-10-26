@@ -13,14 +13,22 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { serveLsp } from "./lsp.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
-import type { Instance } from "./check.ts";
+import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
 export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
+
+// Checks the program whose entry is `file`, with text `src`, without building it. The file may be
+// one another imports, so it needs no `main`. `read` reads the files it imports.
+export function analyze(src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
+  const loaded = load(file, src, read);
+  return withSources(loaded.sources, () => ({ checked: check(expanded(loaded, false), false, false, true), sources: loaded.sources }));
+}
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
@@ -186,7 +194,8 @@ function checkProject(dir: string) {
   if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
 }
 
-if (import.meta.main) {
+if (import.meta.main && Bun.argv.length === 3 && Bun.argv[2] === "lsp") serveLsp();
+else if (import.meta.main) {
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {
@@ -254,7 +263,7 @@ if (import.meta.main) {
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
   if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {

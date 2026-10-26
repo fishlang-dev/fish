@@ -39,8 +39,9 @@ export function fileAt(offset: number): string {
   return loadedFiles.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
-// Loads `entry`, given as `src` when it is already read, and every file it imports.
-export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
+// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
+// `read`: an editor's unsaved text is newer than the disk's.
+export function load(entry: string, src = readFileSync(entry, "utf8"), read = (path: string) => readFileSync(path, "utf8")): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
@@ -82,7 +83,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         continue;
       }
       const target = resolveSpecifier(path, specifier, s);
-      module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
+      module.targets.set(s, visit(target, read(target), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));
     return module;
