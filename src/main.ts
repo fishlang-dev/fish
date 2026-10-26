@@ -9,6 +9,7 @@ import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
+import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
@@ -114,7 +115,7 @@ export function build(file: string, out: string, release = false, panic: Panic =
   const ir = compile(readFileSync(file, "utf8"), file, release, panic);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawnSync(clangArgs(dir, out, release, links), { stdin: new TextEncoder().encode(ir) });
+    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir), { stdin: new TextEncoder().encode(ir) });
     if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -126,7 +127,7 @@ export async function buildAsync(file: string, out: string, release = false, pan
   const ir = compile(readFileSync(file, "utf8"), file, release, panic);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawn(clangArgs(dir, out, release, links), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
     const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
     if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   } finally {
@@ -134,11 +135,18 @@ export async function buildAsync(file: string, out: string, release = false, pan
   }
 }
 
-// Clang's command line for a program read from stdin, with the runtime's source written to `dir`.
-function clangArgs(dir: string, out: string, release: boolean, links: string[]): string[] {
+// The vendored JS engine, compiled into a program only when it calls the engine.
+export const ENGINE = join(import.meta.dir, "..", "vendor", "quickjs-ng");
+export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"].map((f) => join(ENGINE, f));
+
+// Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
+// the engine's glue and sources with it when the program's IR calls the engine.
+function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
   const native = join(dir, "native.c");
-  writeFileSync(native, NATIVE);
-  return ["clang", "-x", "ir", "-", "-x", "c", native, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
+  const js = ir.includes("@fsh_rt_js_");
+  writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
+  const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
+  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
 }
 
 function fail(message: string): never {

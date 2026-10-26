@@ -1,0 +1,4 @@
+QuickJS-ng v0.17.0, the engine Fish embeds for npm packages, unmodified.
+Source: https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.17.0.tar.gz
+SHA-256 of that archive: 559bc4c420475e55c7ab4510adbc562f55d7524d75e8e89d79ce4bb02f5687d9
+Kept: the engine's own sources and headers, and its LICENSE; the shell, libc and tests are left out.
