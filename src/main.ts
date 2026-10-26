@@ -8,6 +8,7 @@ import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { locking, resolvePackages } from "./dependencies.ts";
+import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
 import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
@@ -210,6 +211,11 @@ if (import.meta.main) {
           plan: { type: "string" },
           compare: { type: "string" },
           locked: { type: "boolean" },
+          "dry-run": { type: "boolean" },
+          "allow-dirty": { type: "boolean" },
+          submit: { type: "boolean" },
+          fork: { type: "string" },
+          yes: { type: "boolean" },
         },
       });
     } catch (e) {
@@ -256,6 +262,40 @@ if (import.meta.main) {
     }
     process.exit(0);
   }
+  if (command === "publish") {
+    const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
+    const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
+    if (positionals.length > 1 || Object.keys(values).some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes) && !values.submit) || (values.submit && values["dry-run"])) fail(usage);
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
+    try {
+      const packed = pack(found, values["allow-dirty"] === true);
+      console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil(packed.bytes.length / 1024)} KiB, sha256 ${packed.sha256}`);
+      for (const f of packed.files) console.log(`  ${f}`);
+      console.log(`wrote ${relative(process.cwd(), packed.file)}`);
+      const deps = unsafeDependencies(packed.manifest);
+      if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
+      for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
+      for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
+      if (!values["dry-run"]) {
+        const prepared = prepare(packed);
+        console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
+        if (!values.submit) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
+        else {
+          // Pushing and opening a pull request reach outside this machine, so they're asked for.
+          const confirm = (question: string) => values.yes === true || /^y(es)?$/i.test((prompt(question) ?? "").trim());
+          console.log(`opened ${submit(prepared, packed.manifest, values.fork, confirm)}`);
+        }
+      }
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        process.exit(1);
+      }
+      fail(`fishc publish: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exit(0);
+  }
   if (command === "add" || command === "update") {
     const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
     if (positionals.length > 2 || (command === "add" && !file) || Object.keys(values).some((k) => k !== "panic")) fail(usage);
@@ -268,8 +308,8 @@ if (import.meta.main) {
         if (!validName(name)) fail(`fishc add: '${name}' isn't a package name: ${NAME_RULE}`);
         if (manifest.dependencies.some((d) => d.name === name)) fail(`fishc add: '${name}' is already a dependency in ${MANIFEST}`);
         if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || !parseRange(range))) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
-        const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked).map((e) => e.version);
-        const latest = maxSatisfying(released, parseRange(range ?? "*")!);
+        const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked);
+        const latest = maxSatisfying(released.map((e) => e.version), parseRange(range ?? "*")!);
         if (!latest) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
         const written = range ?? `^${formatVersion(latest)}`;
         const edited = withDependency(readFileSync(found, "utf8"), `${name} = { version = "${written}" }`);
@@ -277,6 +317,8 @@ if (import.meta.main) {
         if (!readManifest(edited, manifest.dir).dependencies.some((d) => d.name === name)) fail(`fishc add: couldn't add '${name}' to ${MANIFEST}; add it by hand`);
         writeFileSync(found, edited);
         console.log(`added ${name} ${written}`);
+        const chosen = released.find((e) => e.version === latest);
+        if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
         if (file && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
         locking.update = file ? new Set([file]) : "all";
@@ -328,7 +370,7 @@ if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {

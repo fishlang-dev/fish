@@ -5,7 +5,7 @@
 export type TarFile = { path: string; data: Uint8Array };
 
 // More entries than any package needs, so a flood of tiny files is refused.
-const MAX_ENTRIES = 10_000;
+export const MAX_ENTRIES = 10_000;
 
 export function untar(bytes: Uint8Array, limit: number): TarFile[] {
   const files: TarFile[] = [];
@@ -73,4 +73,52 @@ function paxRecords(records: Uint8Array): { path?: string; size?: number } {
     at += length;
   }
   return found;
+}
+
+// A tar archive of `files` in ustar form, the same bytes for the same files: entries sorted, owner
+// 0, times 0, and a pax header only for a path too long for the ustar fields.
+export function tar(files: { path: string; data: Uint8Array; executable: boolean }[]): Uint8Array {
+  const blocks: Uint8Array[] = [];
+  const encoder = new TextEncoder();
+  const header = (name: string, size: number, mode: number, type: string): Uint8Array => {
+    const h = new Uint8Array(512);
+    const put = (at: number, value: string) => h.set(encoder.encode(value), at);
+    const octal = (at: number, length: number, n: number) => put(at, n.toString(8).padStart(length - 1, "0") + "\0");
+    put(0, name);
+    octal(100, 8, mode);
+    octal(108, 8, 0);
+    octal(116, 8, 0);
+    octal(124, 12, size);
+    octal(136, 12, 0);
+    put(148, "        ");
+    put(156, type);
+    put(257, "ustar\0");
+    put(263, "00");
+    const sum = h.reduce((a, b) => a + b, 0);
+    put(148, sum.toString(8).padStart(6, "0") + "\0 ");
+    return h;
+  };
+  const padded = (data: Uint8Array) => {
+    const out = new Uint8Array(Math.ceil(data.length / 512) * 512);
+    out.set(data);
+    return out;
+  };
+  for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    if (encoder.encode(f.path).length > 100) {
+      const body = (n: number) => `${n} path=${f.path}\n`;
+      let length = encoder.encode(body(0)).length;
+      while (encoder.encode(body(length)).length !== length) length = encoder.encode(body(length)).length;
+      const record = encoder.encode(body(length));
+      blocks.push(header("pax", record.length, 0o644, "x"), padded(record));
+    }
+    blocks.push(header(f.path.slice(0, 100), f.data.length, f.executable ? 0o755 : 0o644, "0"), padded(f.data));
+  }
+  blocks.push(new Uint8Array(1024));
+  const out = new Uint8Array(blocks.reduce((n, b) => n + b.length, 0));
+  let at = 0;
+  for (const b of blocks) {
+    out.set(b, at);
+    at += b.length;
+  }
+  return out;
 }

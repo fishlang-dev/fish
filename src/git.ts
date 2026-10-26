@@ -8,5 +8,5 @@ export function git(cwd: string, ...args: string[]) {
   return Bun.spawnSync(["git", ...quiet, ...transports, ...args], { cwd, stderr: "pipe", stdout: "pipe", env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" } });
 }
 
-// The first line git wrote to stderr, without its `fatal: `.
-export const firstLine = (text: string) => text.trim().split("\n").find((l) => l.trim() !== "")?.replace(/^fatal: /, "") ?? "git failed";
+// The line of git's output that says what went wrong, skipping a push's "To <url>" and hints.
+export const firstLine = (text: string) => text.trim().split("\n").find((l) => l.trim() !== "" && !/^(To |hint: )/.test(l))?.trim().replace(/^fatal: /, "") ?? "git failed";

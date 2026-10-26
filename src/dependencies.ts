@@ -12,7 +12,7 @@ import { findManifest, inManifest, loadManifest, MANIFEST, parseToml, type Depen
 
 // A Fish package of a program: its manifest, its real directory, the packages its dependencies
 // name, by the names it imports them under, and for one from git, the commit it was fetched at.
-export type Package = { manifest: Manifest; dir: string; deps: Map<string, Package>; git?: { url: string; commit: string }; registry?: { url: string; version: string } };
+export type Package = { manifest: Manifest; dir: string; deps: Map<string, Package>; git?: { url: string; commit: string }; registry?: { url: string; version: string; unsafe: boolean } };
 
 // The packages a program whose entry is `entry` is built from, the one holding the entry first,
 // or none when no `fish.toml` is at or above it. Each package's dependencies come from its own
@@ -86,10 +86,12 @@ function lock(packages: Package[]) {
     if (checksum && same && was !== checksum) {
       throw inManifest(new CompileError(`the files of '${p.manifest.name}' at ${p.dir} no longer match its checksum in ${LOCKFILE}; delete that directory to fetch it again`, before!.start, before!.end), file, had);
     }
-    return { name: p.manifest.name, source, checksum, version: p.registry?.version };
+    // The package manager flags a dependency that uses unsafe when it first enters the lock.
+    if (p.registry?.unsafe && before?.keys.get("unsafe")?.value.value !== true) console.error(`note: '${p.manifest.name}' ${p.registry.version} from the registry uses unsafe`);
+    return { name: p.manifest.name, source, checksum, version: p.registry?.version, unsafe: p.registry?.unsafe };
   });
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  const text = ["# Written by fishc build; it records exactly which packages a build used.", "version = 1", ...entries.map((e) => `\n[[package]]\nname = "${e.name}"${e.version ? `\nversion = "${e.version}"` : ""}\nsource = ${JSON.stringify(e.source)}${e.checksum ? `\nchecksum = "${e.checksum}"` : ""}`)].join("\n") + "\n";
+  const text = ["# Written by fishc build; it records exactly which packages a build used.", "version = 1", ...entries.map((e) => `\n[[package]]\nname = "${e.name}"${e.version ? `\nversion = "${e.version}"` : ""}\nsource = ${JSON.stringify(e.source)}${e.checksum ? `\nchecksum = "${e.checksum}"` : ""}${e.unsafe ? "\nunsafe = true" : ""}`)].join("\n") + "\n";
   if (text === had) return;
   if (locking.locked) throw inManifest(new CompileError(`${LOCKFILE} is out of date with ${MANIFEST}, and --locked keeps it as it is; build without --locked to update it, then commit it`, 0, 1), had === undefined ? join(root!.dir, MANIFEST) : file, had);
   // Written beside it and moved over it, so a build reading it never sees half a lock.
@@ -132,7 +134,7 @@ function fromRegistry(root: Package, wanted: Wanted[], byName: Map<string, Packa
     try {
       // What the lock can't answer is asked of the index as it is now, not as it was last cloned.
       const index = openIndex(url, true);
-      chosen = [...resolveVersions(index, roots, pinned).values()].map((e) => ({ name: e.name, text: e.text, deps: e.dependencies, dir: () => unpacked(index, e) }));
+      chosen = [...resolveVersions(index, roots, pinned).values()].map((e) => ({ name: e.name, text: e.text, deps: e.dependencies, unsafe: e.unsafe, dir: () => unpacked(index, e) }));
     } catch (e) {
       throw blame(e);
     }
@@ -160,7 +162,7 @@ function fromRegistry(root: Package, wanted: Wanted[], byName: Map<string, Packa
     if (listed && (declared.size !== listed.size || [...listed].some(([n, r]) => declared.get(n) !== r))) {
       throw blame(new Error(`the registry lists other dependencies for '${entry.name}' ${entry.text} than its own ${MANIFEST} declares`), entry.name);
     }
-    const pkg: Package = { manifest, dir, deps: new Map(), registry: { url, version: entry.text } };
+    const pkg: Package = { manifest, dir, deps: new Map(), registry: { url, version: entry.text, unsafe: entry.unsafe } };
     made.set(entry.name, pkg);
     byDir.set(dir, pkg);
     byName.set(entry.name, pkg);
@@ -185,24 +187,25 @@ function fromRegistry(root: Package, wanted: Wanted[], byName: Map<string, Packa
 
 // A registry package resolution chose: from the index, with its listed dependencies, or from the
 // lock and cache, whose own manifest was checked against the index when it was first unpacked.
-type Chosen = { name: string; text: string; deps?: Map<string, string>; dir: () => string };
+type Chosen = { name: string; text: string; deps?: Map<string, string>; unsafe: boolean; dir: () => string };
 
 // The registry versions `fish.lock` holds for packages from this index, by name, and the checksum
 // of each one's files.
-function lockedVersions(root: Package, url: string): Map<string, { version: string; checksum: string }> {
+function lockedVersions(root: Package, url: string): Map<string, { version: string; checksum: string; unsafe: boolean }> {
   const file = join(root.dir, LOCKFILE);
   if (!existsSync(file)) return new Map();
-  const found = new Map<string, { version: string; checksum: string }>();
+  const found = new Map<string, { version: string; checksum: string; unsafe: boolean }>();
   for (const [name, t] of locked(file, readFileSync(file, "utf8"))) {
     const [version, checksum] = [t.keys.get("version")?.value.value, t.keys.get("checksum")?.value.value];
-    if (t.keys.get("source")?.value.value === `registry+${url}` && typeof version === "string" && typeof checksum === "string") found.set(name, { version, checksum: checksum.replace(/^sha256:/, "") });
+    const unsafe = t.keys.get("unsafe")?.value.value === true;
+    if (t.keys.get("source")?.value.value === `registry+${url}` && typeof version === "string" && typeof checksum === "string") found.set(name, { version, checksum: checksum.replace(/^sha256:/, ""), unsafe });
   }
   return found;
 }
 
 // The registry packages, straight from the lock and the cache, when the locked versions still fit
 // every range and each is already unpacked; undefined when the index has to be asked.
-function fromLock(url: string, roots: Map<string, Request[]>, pinned: Map<string, { version: string; checksum: string }>): Chosen[] | undefined {
+function fromLock(url: string, roots: Map<string, Request[]>, pinned: Map<string, { version: string; checksum: string; unsafe: boolean }>): Chosen[] | undefined {
   const chosen = new Map<string, string>();
   const queue = [...roots].map(([name, rs]) => ({ name, ranges: rs.map((r) => r.range) }));
   while (queue.length > 0) {
@@ -218,7 +221,7 @@ function fromLock(url: string, roots: Map<string, Request[]>, pinned: Map<string
       queue.push({ name: d.name, ranges: [d.version] });
     }
   }
-  return [...chosen].map(([name, dir]) => ({ name, text: pinned.get(name)!.version, dir: () => dir }));
+  return [...chosen].map(([name, dir]) => ({ name, text: pinned.get(name)!.version, unsafe: pinned.get(name)!.unsafe, dir: () => dir }));
 }
 
 // Where a registry package's versions are unpacked in the cache, one directory per archive by its
@@ -243,8 +246,8 @@ function cachedCopy(url: string, name: string, version: string, checksum: string
   return undefined;
 }
 
-const MAX_DOWNLOAD = 64 * 1024 * 1024;
-const MAX_UNPACKED = 256 * 1024 * 1024;
+export const MAX_DOWNLOAD = 64 * 1024 * 1024;
+export const MAX_UNPACKED = 256 * 1024 * 1024;
 
 // A registry package's files, from its archive, unpacked once into the cache after its sha256
 // matched the index's; the archive is refused rather than partly unpacked, and a copy whose files

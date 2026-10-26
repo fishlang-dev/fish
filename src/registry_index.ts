@@ -10,7 +10,7 @@ import { compare, formatVersion, parseRange, parseVersion, satisfies, type Versi
 export const DEFAULT_REGISTRY = "https://github.com/fishlang-dev/registry";
 
 // One version of a package as the index lists it.
-export type IndexEntry = { name: string; version: Version; text: string; dependencies: Map<string, string>; sha256: string; yanked: boolean };
+export type IndexEntry = { name: string; version: Version; text: string; dependencies: Map<string, string>; sha256: string; yanked: boolean; unsafe: boolean };
 
 // A registry's index, cloned into the cache: where its archives are, and each package's versions.
 export type Index = { url: string; dl: string; versions(name: string): IndexEntry[] };
@@ -68,7 +68,7 @@ function clone(url: string, base: string) {
 
 // A package's versions from its index file, two letters deep as crates.io keeps it, each line one
 // version; a line that isn't one is refused naming where it is.
-function versions(url: string, dir: string, name: string): IndexEntry[] {
+export function versions(url: string, dir: string, name: string): IndexEntry[] {
   if (!validName(name)) throw new Error(`'${name}' isn't a package name`);
   const file = join(dir, name.slice(0, 2), name);
   if (!existsSync(file)) throw new Error(`the registry has no package '${name}'`);
@@ -96,7 +96,8 @@ function versions(url: string, dir: string, name: string): IndexEntry[] {
       if (!validName(dep) || typeof range !== "string" || !parseRange(range)) throw bad(`its dependency '${dep}' isn't a name with a version range`);
       dependencies.set(dep, range);
     }
-    return [{ name, version, text: raw.version as string, dependencies, sha256: raw.sha256, yanked: raw.yanked === true }];
+    if (raw.unsafe !== undefined && typeof raw.unsafe !== "boolean") throw bad("its unsafe isn't true or false");
+    return [{ name, version, text: raw.version as string, dependencies, sha256: raw.sha256, yanked: raw.yanked === true, unsafe: raw.unsafe === true }];
   });
 }
 
