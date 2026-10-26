@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1557,6 +1557,12 @@ export function expressions(ctx: Context) {
     // A generic one given as a callback is the instance the callback's types make.
     if (f.typeParams?.some((p) => !isLifetime(p))) return instanceArrow(e);
     if (f.foreign) throw unsupported("C functions used as values", e);
+    // A package's function Fish couldn't type is refused where it is used as a value too.
+    const refused = f.js ? jsUncalled.get(f) : undefined;
+    if (refused) {
+      refused.note ??= { message: `'${f.js!.name}' is used here`, start: e.start, end: e.end };
+      throw refused;
+    }
     if (f.throws) throw unsupported("functions that throw used as values", e);
     const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
     if (odd) throw unsupported(odd.comptime ? "functions with comptime parameters used as values" : odd.rest ? "functions with rest parameters used as values" : "functions with defaulted parameters used as values", e);
@@ -2928,8 +2934,6 @@ export function expressions(ctx: Context) {
     return classes.get("AbortError")!.type;
   }
 
-  // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
-  // its controller has aborted: values computed by the runtime, not fields.
   // Whether a value passes where a JS shape is wanted: a handle of a shape with its fields, or a
   // Fish value with them, converted; methods only a handle has.
   function takesShape(from: Type, shape: InterfaceType | ObjectType): boolean {
@@ -2943,12 +2947,17 @@ export function expressions(ctx: Context) {
     const source = own ?? (typeof from !== "string" && (from.kind === "object" || from.kind === "class") && !isTuple(from) ? from : undefined);
     if (!source) return `a '${show(from)}' isn't an object`;
     if (!own && shape.kind === "interface" && shape.methods.length > 0) return `its methods come only with a value JS made`;
-    // A handle of another shape has the methods this one declares, by name and count.
+    // A handle of another shape has the methods this one declares, by name and types.
     if (own && shape.kind === "interface") {
       const methods = own.kind === "interface" ? own.methods : [];
-      const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && n.params.length === m.params.length));
-      if (lacking) return `property '${lacking.name}' is missing`;
+      const same = (a: Method, b: Method) => a.params.length === b.params.length && a.params.every((p, i) => lower(p) === lower(b.params[i]!)) && (b.returns === "void" || lower(a.returns) === lower(b.returns));
+      const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
+      if (lacking) return methods.some((n) => n.name === lacking.name) ? `method '${lacking.name}' takes or gives other types` : `property '${lacking.name}' is missing`;
     }
+    // A member Fish couldn't type that the shape declares is one only a handle of it has.
+    const aside = shape.kind === "interface" ? [...(jsUntyped.get(shape)?.keys() ?? [])] : [];
+    const unseen = aside.find((n) => own?.kind !== "interface" || !(jsUntyped.get(own)?.has(n) ?? false));
+    if (unseen !== undefined && own !== shape) return `property '${unseen}' is missing`;
     // A Fish class's private fields stay its own.
     const fields = source.kind === "class" ? source.fields.filter((g) => (g.access ?? "public") === "public") : source.fields;
     for (const f of shape.fields) {
@@ -3090,7 +3099,7 @@ export function expressions(ctx: Context) {
   // `new C(...)` of a package's class: its constructor's parameters, giving a handle.
   function jsNew(e: Extract<Expr, { kind: "new" }>, c: Interface): Type {
     if (c.typeParams.length > 0) throw unsupported("generic classes of a package", e);
-    const constructor = c.jsClass!.constructors[0] ?? [];
+    const constructor = jsChain(c).find((k) => k.jsClass!.constructors.length > 0)?.jsClass!.constructors[0] ?? [];
     const params = jsParams(constructor);
     params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
     jsArgs(e, params);
@@ -3098,14 +3107,28 @@ export function expressions(ctx: Context) {
     return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
 
+  // A package's class and the classes it extends, nearest first: a class without its own
+  // constructor takes its base's, and inherits its statics, as in JS.
+  function jsChain(c: Interface): Interface[] {
+    const chain = [c];
+    for (let at = c; ; ) {
+      const base = at.extends[0]?.kind === "ref" ? jsClasses.get(at.extends[0].name) : undefined;
+      if (!base || chain.includes(base)) return chain;
+      chain.push(base);
+      at = base;
+    }
+  }
+
   // A package's class's static member: a property read, or a method called.
   function jsStatic(c: Interface, name: string, at: Expr): TypeMember {
-    const found = c.jsClass!.statics.find((m) => "name" in m && m.name === name);
+    const found = jsChain(c).flatMap((k) => k.jsClass!.statics).find((m) => "name" in m && m.name === name);
     if (!found) throw new CompileError(`property '${name}' does not exist on '${c.name}'`, at.start, at.end);
     jsUses.push(at);
     return found;
   }
 
+  // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
+  // its controller has aborted: values computed by the runtime, not fields.
   function blockProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     if (linked(e)) throw unsupported(`optional chains through '${t.which}' values`, e);
     computed.add(e);

@@ -654,7 +654,15 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
-  funcs.forEach((f) => checkBody(definition(f)));
+  funcs.forEach((f) => {
+    try {
+      checkBody(definition(f));
+    } catch (e) {
+      // A package's function Fish can't type is refused where a program calls it.
+      if (!f.js || !(e instanceof CompileError)) throw e;
+      jsUncalled.set(f, e);
+    }
+  });
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
     else checkBody(pending.shift()!);
@@ -669,7 +677,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // one, as nothing can run them yet.
   // So is one holding a JS value anywhere, as an any or a handle, though nothing was called.
   const holdsJs = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue", true);
-  const typed = all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js).flatMap((i): Span[] => [
+  const typed = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)].flatMap((i): Span[] => [
     ...[...i.types, ...i.coercions].filter(([, t]) => holdsJs(t)).map(([x]) => x),
     ...[...i.locals].filter(([, l]) => holdsJs(l.type)).map(([x]) => x),
   ]);

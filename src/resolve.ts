@@ -533,7 +533,15 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   }
 
   function members(i: Interface, t: InterfaceType): InterfaceType {
+    // A package's interface or class may declare again what it inherits, narrowing it, as
+    // TypeScript lets a derived member replace its base's.
+    const inherited = new Set<string>();
     const add = (name: string, at: Span) => {
+      if (i.js && inherited.delete(name)) {
+        t.fields = t.fields.filter((f) => f.name !== name);
+        t.methods = t.methods.filter((m) => m.name !== name);
+        return;
+      }
       if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
         throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
@@ -543,8 +551,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       const resolved = resolveType(node);
       const base = jsShape(resolved) ?? resolved;
       if (typeof base === "string" || (base.kind !== "interface" && !(i.js && base.kind === "object"))) throw new CompileError("an interface can only extend interfaces", node.start, node.end);
-      for (const f of base.fields) add(f.name, node), t.fields.push(f);
-      if (base.kind === "interface") for (const m of base.methods) add(m.name, node), t.methods.push(m);
+      for (const f of base.fields) add(f.name, node), t.fields.push(f), inherited.add(f.name);
+      if (base.kind === "interface") for (const m of base.methods) add(m.name, node), t.methods.push(m), inherited.add(m.name);
     }
     const member1 = memberOf(i, t, add);
     for (const m of i.members) {
@@ -553,7 +561,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         try {
           member1(m);
         } catch (e) {
-          if (!(e instanceof CompileError) || !("name" in m) || typeof m.name !== "string") throw e;
+          if (!(e instanceof CompileError)) throw e;
+          // A member without a name, as an index or call signature, is never reached by one.
+          if (!("name" in m) || typeof m.name !== "string") continue;
           if (!jsUntyped.has(t)) jsUntyped.set(t, new Map());
           jsUntyped.get(t)!.set(m.name, e);
         }
