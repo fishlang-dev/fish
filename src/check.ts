@@ -16,7 +16,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsPlain, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -675,24 +675,17 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
   // A program that type-checks with a package's declarations is stopped at its first use of
   // one, as nothing can run them yet.
-  // So is one holding a package's handle anywhere, though nothing was called. A plain JsValue
-  // the engine gave back runs.
-  const holdsHandle = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue" && u.of !== "void", true);
   const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)];
-  const typed = compiledInstances.flatMap((i): Span[] => [
-    ...[...i.types].filter(([, t]) => holdsHandle(t)).map(([x]) => x),
-    ...[...i.locals].filter(([, l]) => holdsHandle(l.type)).map(([x]) => x),
-  ]);
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
-  const used = earliest(jsUses) ?? earliest(typed);
+  const used = earliest(jsUses);
   if (used) throw new CompileError("running a package's code isn't supported yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
-  // A package's function called with values or giving one that don't cross as plain values yet.
-  const unplain = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
+  // A package's function called with a value, or giving one, that has no JS form.
+  const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;
     const gives = i.calls.get(x)?.returns ?? "void";
-    return x.args.some((a) => !jsPlain(i.types.get(a)!)) || (gives !== "void" && !jsPlain(gives));
+    return x.args.some((a) => !jsConverts(i.types.get(a)!)) || (gives !== "void" && !jsConverts(gives));
   })));
-  if (unplain) throw new CompileError("calling a package's function with arrays, objects or handles isn't supported yet", unplain.start, unplain.end);
+  if (unconverted) throw new CompileError("this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
   // An argument of a package's function becomes a JS value as the call converts it.
   const converted = new Set(compiledInstances.flatMap((i) => [...i.calls.keys()].flatMap((x) => (x.kind === "call" && jsCalls.has(x) ? x.args : []))));
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !converted.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));

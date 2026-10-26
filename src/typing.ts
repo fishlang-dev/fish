@@ -392,12 +392,17 @@ export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block
 // The same, or a reference to one.
 export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
-// Whether a value crosses between Fish and JS as one JS value converted on the way: a string, a
-// number, a boolean, empty, a literal, a JsValue, or a union of those.
-export function jsPlain(t: Type): boolean {
-  if (t === "string" || t === "boolean" || t === "null" || isNumeric(t) || isPlainJs(t)) return true;
+// Whether a value crosses between Fish and JS converted on the way: a string, a number, a
+// boolean, empty, a literal, a JS value or handle, and unions, arrays, tuples and objects of them.
+export function jsConverts(t: Type): boolean {
+  if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
   if (typeof t === "string") return false;
-  return t.kind === "literal" || (t.kind === "union" && t.members.every(jsPlain));
+  if (t.kind === "ref") return jsConverts(t.to);
+  if (t.kind === "block") return t.which === "JsValue";
+  if (t.kind === "union") return t.members.every(jsConverts);
+  if (t.kind === "array" || t.kind === "fixed") return jsConverts(t.element);
+  if (t.kind === "object") return t.fields.every((f) => jsConverts(f.type));
+  return t.kind === "literal";
 }
 
 // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to

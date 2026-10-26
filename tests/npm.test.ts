@@ -7,7 +7,7 @@ import { compile } from "../src/main.ts";
 
 // What stops a program that type-checks with a package's declarations: a form that can't run
 // yet, or a package with no JS to bundle, as these fixtures have only declarations.
-const TYPE_CHECKED = /(running a package's code isn't supported yet|calling a package's function with arrays, objects or handles isn't supported yet|has no JS Fish could bundle)/;
+const TYPE_CHECKED = /(running a package's code isn't supported yet|this call gives a package's function a value with no JS form yet|has no JS Fish could bundle)/;
 
 // Builds `main.fsh` in a project of these files, giving the compile error it stops at, with
 // any note, as fishc prints it.

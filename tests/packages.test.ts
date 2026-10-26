@@ -26,6 +26,15 @@ export function show(x) { return typeof x + ":" + x; }
 export function boom() { throw new RangeError("too far"); }
 export function liar() { return 5; }
 export function same(x) { return x; }
+export function count(xs) { return xs.length; }
+export function chunk(xs, n) { const out = []; for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n)); return out; }
+export function pair() { return ["a", 1]; }
+export function swap(p) { return [p[1], p[0]]; }
+export function describe(o) { return o.name + ":" + (o.deep === undefined ? "?" : o.deep) + ":" + Object.keys(o).length; }
+export function make(n) { return { count: n, label: "made" }; }
+export function relabel(r) { return r.label + r.count; }
+export function identical(a, b) { return a === b; }
+export function strings() { return ["a", 2]; }
 `,
   "node_modules/esm/dist/helper.js": "export function helper(s) { return s.toUpperCase(); }\n",
   "node_modules/esm/index.d.ts": `export declare const VERSION: string;
@@ -42,6 +51,17 @@ export declare function show(x: number): string;
 export declare function boom(): void;
 export declare function liar(): string;
 export declare function same(x: any): unknown;
+export interface Options { name: string; deep?: boolean }
+export interface Result { count: number; label: string }
+export declare function count(xs: string[]): number;
+export declare function chunk(xs: string[], n: number): string[][];
+export declare function pair(): [string, number];
+export declare function swap(p: [string, number]): [number, string];
+export declare function describe(o: Options): string;
+export declare function make(n: number): Result;
+export declare function relabel(r: Result): string;
+export declare function identical(a: Result, b: Result): boolean;
+export declare function strings(): string[];
 `,
   "node_modules/cjs/package.json": JSON.stringify({ name: "cjs", main: "lib.js", types: "lib.d.ts" }),
   "node_modules/cjs/lib.js": "exports.n = 3;\nexports.name = 'cjs';\n",
@@ -129,7 +149,32 @@ test("a JS throw, or a result that isn't what its declaration says, panics at th
   expect(run(`import { liar } from "esm";\nfunction main() {\n  console.log(liar());\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:15:\n'liar' from 'esm' gave a number, where its declaration says 'string'\n", exitCode: 101 });
 });
 
-test("an overload's signature is the one called, and arrays and objects wait for their step", () => {
+test("an overload's signature is the one called", () => {
   expect(run(`import { show } from "esm";\nfunction main() {\n  console.log(show(1), show("1"));\n}\n`)).toEqual({ stdout: "number:1 string:1\n", stderr: "", exitCode: 0 });
-  expect(run(`import { same } from "esm";\nfunction main() {\n  same([1, 2]);\n}\n`)).toBe("main.fsh:3:3: error: calling a package's function with arrays, objects or handles isn't supported yet");
+});
+
+test("arrays, tuples and objects are copied across, and a handle passes as itself, with no leaks", () => {
+  const main = `import { count, chunk, pair, swap, describe, make, relabel, identical } from "esm";
+function main() {
+  const xs = ["a", "b", "c"];
+  console.log(count(xs), count(["z"]), xs.length);
+  const c = chunk(xs, 2);
+  console.log(c.length, c[0].length, c[1][0]);
+  const [s, n] = pair();
+  const t: [string, f64] = ["b", 2];
+  console.log(s, n, swap(t)[0], swap(pair())[1]);
+  console.log(describe({ name: "x" }), describe({ name: "y", deep: true }));
+  const r = make(3);
+  const other = make(3);
+  console.log(relabel(r), relabel(make(4)), identical(r, r), identical(r, other));
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "3 1 3\n2 2 c\na 1 2 a\nx:?:1 y:true:2\nmade3 made4 true false\n", stderr: "", exitCode: 0 });
+});
+
+test("an array whose elements aren't what the declaration says panics naming them", () => {
+  const ran = run(`import { strings } from "esm";\nfunction main() {\n  console.log(strings());\n}\n`);
+  expect(ran).toMatchObject({ stdout: "", exitCode: 101 });
+  expect((ran as { stderr: string }).stderr).toStartWith("panicked at main.fsh:3:15:\n'strings' from 'esm' gave an array holding a number, where its declaration says 'string'\n");
 });

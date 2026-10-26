@@ -363,4 +363,51 @@ void fsh_rt_js_mismatch(fsh_js *b, const char *what, const char *declared, const
   JSContext *cx = fsh_js_enter();
   fsh_js_expect(cx, b, false, what, declared, where);
 }
+// New JS arrays and objects, filled a part at a time, each part's box given up.
+fsh_js *fsh_rt_js_array(void) {
+  JSContext *cx = fsh_js_enter();
+  JSValue v = JS_NewArray(cx);
+  fsh_js_leave();
+  return fsh_js_box(v);
+}
+
+fsh_js *fsh_rt_js_object(void) {
+  JSContext *cx = fsh_js_enter();
+  JSValue v = JS_NewObject(cx);
+  fsh_js_leave();
+  return fsh_js_box(v);
+}
+
+void fsh_rt_js_push(fsh_js *array, fsh_js *part) {
+  JSContext *cx = fsh_js_enter();
+  int64_t length = 0;
+  JS_GetLength(cx, array->value, &length);
+  JS_SetPropertyInt64(cx, array->value, length, JS_DupValue(cx, part->value));
+  fsh_js_drop(cx, part);
+  fsh_js_leave();
+}
+
+void fsh_rt_js_put(fsh_js *object, const char *name, fsh_js *part) {
+  JSContext *cx = fsh_js_enter();
+  JS_SetPropertyStr(cx, object->value, name, JS_DupValue(cx, part->value));
+  fsh_js_drop(cx, part);
+  fsh_js_leave();
+}
+
+// Panics, giving up the box, unless the value is an object, as a handle's declaration says.
+void fsh_rt_js_object_is(fsh_js *b, const char *what, const char *declared, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  fsh_js_expect(cx, b, JS_IsObject(b->value), what, declared, where);
+  fsh_js_leave();
+}
+
+// An array's length, panicking, giving up the box, when the value isn't an array.
+int64_t fsh_rt_js_length(fsh_js *b, const char *what, const char *declared, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  fsh_js_expect(cx, b, JS_IsArray(b->value), what, declared, where);
+  int64_t length = 0;
+  if (JS_GetLength(cx, b->value, &length) < 0) fsh_js_throw(cx, where);
+  fsh_js_leave();
+  return length;
+}
 `;

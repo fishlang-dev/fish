@@ -1174,11 +1174,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${loaded} = load ${llvm(type.to)}, ptr ${v}`);
       return toJs(loaded, type.to, empty);
     }
-    if (isPlainJs(type)) {
+    if (typeof type !== "string" && type.kind === "block") {
       emit(`call void @fsh_rt_block_retain(ptr ${v})`);
       return v;
     }
     if (typeof type !== "string" && type.kind === "union") return eachMember(v, type, blockType("JsValue"), (part, m) => toJs(part, m, empty));
+    // An array or a tuple as a new JS array, and an object as a new JS object, each part
+    // converted in turn.
+    if (typeof type !== "string" && (type.kind === "array" || type.kind === "fixed" || (type.kind === "object" && type.tuple))) {
+      emit(`${box} = call ptr @fsh_rt_js_array()`);
+      const push = (part: string, t: Type) => emit(`call void @fsh_rt_js_push(ptr ${box}, ptr ${toJs(part, t, "null")})`);
+      if (type.kind === "array") {
+        const [data, length] = [temp(), temp()];
+        emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+        emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+        elements(type.element, data, length, (at) => {
+          const part = temp();
+          emit(`${part} = load ${llvm(type.element)}, ptr ${at}`);
+          push(part, type.element);
+        });
+      } else {
+        const parts = type.kind === "fixed" ? Array.from({ length: type.size }, () => type.element) : elementsOf(type);
+        parts.forEach((t, i) => {
+          const part = temp();
+          emit(`${part} = extractvalue ${llvm(type)} ${v}, ${type.kind === "fixed" ? i : fieldPath(type, String(i)).join(", ")}`);
+          push(part, t);
+        });
+      }
+      return box;
+    }
+    if (typeof type !== "string" && type.kind === "object") {
+      emit(`${box} = call ptr @fsh_rt_js_object()`);
+      for (const f of type.fields) {
+        const part = temp();
+        emit(`${part} = extractvalue ${llvm(type)} ${v}, ${fieldPath(type, f.name).join(", ")}`);
+        emit(`call void @fsh_rt_js_put(ptr ${box}, ptr ${cString(f.name)}, ptr ${toJs(part, f.type, "undefined")})`);
+      }
+      return box;
+    }
     if (typeof type !== "string" && type.kind === "literal") {
       const value = type.value;
       if (typeof value === "string") emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${text(value)})`);
@@ -1202,6 +1235,39 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function fromJs(box: string, type: Type, what: string, at: Expr): string {
     if (isPlainJs(type)) return box;
     const checked = (call: string) => `${call}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`;
+    // A handle of a declared shape holds an object.
+    if (typeof type !== "string" && type.kind === "block") {
+      unwinding(`call void ${checked("@fsh_rt_js_object_is")}`);
+      return box;
+    }
+    // A JS array as a new Fish array, each element read as the declaration says; a tuple's
+    // elements by their places.
+    if (typeof type !== "string" && (type.kind === "array" || (type.kind === "object" && type.tuple))) {
+      const length = temp();
+      unwinding(`call i64 ${checked("@fsh_rt_js_length")}`, length);
+      // ponytail: an element that isn't what its declaration says panics leaving the elements read
+      // so far, and the array's box, unfreed; free them on the way out if a panic stops being final
+      const read = (i: string, element: Type) => {
+        const part = temp();
+        unwinding(`call ptr @fsh_rt_js_at(ptr ${box}, i64 ${i}, ptr ${panicAt(at)})`, part);
+        return fromJs(part, element, `${what} an array holding`, at);
+      };
+      if (type.kind === "array") {
+        const data = temp();
+        emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, length)})`);
+        elements(type.element, data, length, (slot, i) => emit(`store ${llvm(type.element)} ${read(i, type.element)}, ptr ${slot}`));
+        emit(`call void @fsh_rt_js_release(ptr ${box})`);
+        return built(data, length, length);
+      }
+      let made = "zeroinitializer";
+      elementsOf(type).forEach((element, i) => {
+        const next = temp();
+        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(element)} ${read(String(i), element)}, ${fieldPath(type, String(i)).join(", ")}`);
+        made = next;
+      });
+      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      return made;
+    }
     if (type === "string" || type === "f64" || type === "boolean") {
       const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
       const v = temp();
