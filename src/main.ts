@@ -148,7 +148,6 @@ export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\
 
 // Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
 // the engine's glue and sources with it when the program's IR calls the engine.
-
 function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
   const native = join(dir, "native.c");
   const js = callsEngine(ir);

@@ -116,6 +116,15 @@ function not(b: Ref<boolean>): boolean {
   return !b;
 }
 
+// Narrowed to several kinds, it stays the JsValue, out of the Option and through the reference.
+function kinds(u: Ref<JsValue | null>): boolean {
+  if (u !== null && (typeof u === "string" || typeof u === "number")) {
+    const held = { u };
+    return typeof held.u === "number";
+  }
+  return false;
+}
+
 // A borrowed JsValue narrows too, read through the reference.
 function lent(v: Ref<JsValue>): string {
   if (typeof v === "string") return v;
@@ -142,6 +151,8 @@ function main() {
   if (found !== null && typeof found === "string") console.log(found.length);
   const shaped: { a: JsValue; b?: JsValue } = { a: o.get("n") };
   console.log(shaped.b === null);
+  const [n, none]: [JsValue | null, JsValue | null] = [o.get("n"), null];
+  console.log(kinds(n), kinds(none));
 }
 `;
 
@@ -149,7 +160,7 @@ function main() {
 // objects and arrays, each value read freed.
 test("JsValues are narrowed and read", () => {
   expect(sanitized("narrowing", NARROWING)).toEqual({
-    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish 4\n4\nfalse\nfish\nother\n4\ntrue\n",
+    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish 4\n4\nfalse\nfish\nother\n4\ntrue\ntrue false\n",
     stderr: "",
     exitCode: 0,
   });

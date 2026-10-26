@@ -3755,7 +3755,7 @@ export function expressions(ctx: Context) {
         // each time; one narrowed to several stays a JsValue.
         const js = jsRead(local.type, read);
         if (js === "one") ctx.copiesOut.add(e);
-        if (js === "several") return isRefType(local.type) ? local.type : unfoldedMembers(local.type).find(isPlainJs)!;
+        if (js === "several") return stillJs(local.type);
         return read ?? local.type;
       }
       // Its literal type, which a string takes it as.
@@ -4855,12 +4855,15 @@ export function expressions(ctx: Context) {
     locals.set(p, local);
     const js = jsRead(local.type, narrowed(local));
     if (js === "one") throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
-    if (js === "several") throw new CompileError(`'${p.name}' could be several kinds of JS value here; write '${p.name}: ${p.name}'`, p.start, p.end);
+    if (js === "several") return { name: p.name, type: stillJs(local.type) };
     return { name: p.name, type: widenEnum(narrowed(local) ?? local.type) };
   }
 
-  function unfoldedMembers(t: Type): Type[] {
-    return typeof t !== "string" && t.kind === "union" ? t.members : [t];
+  // What a variable holding a JsValue reads as where `typeof` left several kinds of JS value:
+  // the JsValue, taken out of a union holding it, through a reference too.
+  function stillJs(t: Type): Type {
+    if (isRefType(t)) return refType(stillJs(t.to), t.mutable);
+    return typeof t !== "string" && t.kind === "union" ? t.members.find(isPlainJs)! : t;
   }
 
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
