@@ -16,13 +16,13 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsPlain, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsBodies, jsCalledAt, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { jsBodies, jsCalledAt, jsCalls, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -686,7 +686,16 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses) ?? earliest(typed);
   if (used) throw new CompileError("running a package's code isn't supported yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
-  const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
+  // A package's function called with values or giving one that don't cross as plain values yet.
+  const unplain = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
+    if (x.kind !== "call" || !jsCalls.has(x)) return false;
+    const gives = i.calls.get(x)?.returns ?? "void";
+    return x.args.some((a) => !jsPlain(i.types.get(a)!)) || (gives !== "void" && !jsPlain(gives));
+  })));
+  if (unplain) throw new CompileError("calling a package's function with arrays, objects or handles isn't supported yet", unplain.start, unplain.end);
+  // An argument of a package's function becomes a JS value as the call converts it.
+  const converted = new Set(compiledInstances.flatMap((i) => [...i.calls.keys()].flatMap((x) => (x.kind === "call" && jsCalls.has(x) ? x.args : []))));
+  const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !converted.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };

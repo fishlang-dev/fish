@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsAccessors, jsEmptyTests, jsEvaluations, jsExports, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -161,7 +161,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds } = conversions(builder);
+  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
 
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
@@ -1143,17 +1143,117 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return box;
   }
 
+  // A call of a package's function: each argument converted into a new JS value, and the result
+  // read back as its declaration says.
+  function jsCall(e: Extract<Expr, { kind: "call" }>, name: JsName, target: Instance): string | undefined {
+    const fn = jsExport(name, e);
+    const args = e.args.map((a, i) => {
+      const v = known.get(a) ?? evaluate(a);
+      if (fresh(a) && !known.has(a)) pending.push({ v, type: types.get(a)! });
+      return toJs(v, types.get(a)!, target.body.params[i]?.optional ? "undefined" : "null");
+    });
+    const argv = alloca(`[${Math.max(args.length, 1)} x ptr]`);
+    args.forEach((box, i) => {
+      const at = temp();
+      emit(`${at} = getelementptr [${args.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
+      emit(`store ptr ${box}, ptr ${at}`);
+    });
+    const result = temp();
+    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(e)})`, result);
+    const gives = types.get(e) ?? (target.returns === "void" ? undefined : target.returns);
+    if (gives === undefined) return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
+    return fromJs(result, gives, `'${name.name}' from '${name.module}' gave`, e);
+  }
+
+  // A Fish value as a new JS value, in a box of its own; empty is `undefined` or `null`, as the
+  // parameter it is passed to takes it.
+  function toJs(v: string, type: Type, empty: "undefined" | "null"): string {
+    const box = temp();
+    if (isRef(type)) {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(type.to)}, ptr ${v}`);
+      return toJs(loaded, type.to, empty);
+    }
+    if (isPlainJs(type)) {
+      emit(`call void @fsh_rt_block_retain(ptr ${v})`);
+      return v;
+    }
+    if (typeof type !== "string" && type.kind === "union") return eachMember(v, type, blockType("JsValue"), (part, m) => toJs(part, m, empty));
+    if (typeof type !== "string" && type.kind === "literal") {
+      const value = type.value;
+      if (typeof value === "string") emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${text(value)})`);
+      else if (typeof value === "boolean") emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${value ? 1 : 0})`);
+      else emit(`${box} = call ptr @fsh_rt_js_of_number(double ${floatConstant(Number(value), "f64")})`);
+      return box;
+    }
+    if (type === "string") emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${v})`);
+    else if (type === "boolean") {
+      const word = temp();
+      emit(`${word} = zext i1 ${v} to i32`);
+      emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${word})`);
+    } else if (type === "null") emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 ${empty === "undefined" ? 1 : 0})`);
+    else emit(`${box} = call ptr @fsh_rt_js_of_number(double ${type === "f64" ? v : cast(v, type, "f64")})`);
+    return box;
+  }
+
   // A JsValue read as the type its declaration gives it, checked, giving up its box: `what` says
-  // what gave it, as "'f' from 'pkg' gave".
+  // what gave it, as "'f' from 'pkg' gave". A union takes the first member the JS value is, its
+  // literals tried before the rest.
   function fromJs(box: string, type: Type, what: string, at: Expr): string {
     if (isPlainJs(type)) return box;
-    const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
-    const v = temp();
-    unwinding(`call ${result} @fsh_rt_js_as_${read}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`, v);
-    if (type !== "boolean") return v;
-    const yes = temp();
-    emit(`${yes} = icmp ne i32 ${v}, 0`);
-    return yes;
+    const checked = (call: string) => `${call}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`;
+    if (type === "string" || type === "f64" || type === "boolean") {
+      const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
+      const v = temp();
+      unwinding(`call ${result} ${checked(`@fsh_rt_js_as_${read}`)}`, v);
+      if (type !== "boolean") return v;
+      const yes = temp();
+      emit(`${yes} = icmp ne i32 ${v}, 0`);
+      return yes;
+    }
+    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    const order = [...members.filter((m) => typeof m !== "string" && m.kind === "literal"), ...members.filter((m) => typeof m === "string" || m.kind !== "literal")];
+    const [slot, done] = [alloca(llvm(type)), label()];
+    for (const m of order) {
+      const [yes, no, is] = [label(), label(), temp()];
+      emit(`${is} = call i32 @fsh_rt_js_is(ptr ${box}, ${jsTest(m)})`);
+      const holds = temp();
+      emit(`${holds} = icmp ne i32 ${is}, 0`);
+      emit(`br i1 ${holds}, label %${yes}, label %${no}`);
+      startBlock(yes);
+      let v: string;
+      if (m === "string" || m === "f64" || m === "boolean" || isPlainJs(m)) v = fromJs(box, m, what, at);
+      else {
+        emit(`call void @fsh_rt_js_release(ptr ${box})`);
+        v = "zeroinitializer";
+      }
+      emit(`store ${llvm(type)} ${convert(v, m, type)}, ptr ${slot}`);
+      emit(`br label %${done}`);
+      startBlock(no);
+    }
+    unwinding(`call void ${checked("@fsh_rt_js_mismatch")}`);
+    emit("unreachable");
+    startBlock(done);
+    const out = temp();
+    emit(`${out} = load ${llvm(type)}, ptr ${slot}`);
+    return out;
+  }
+
+  // What `fsh_rt_js_is` takes to test a JS value for a member of a declared union: its kind,
+  // and for a literal, its value.
+  function jsTest(m: Type): string {
+    const kind = (k: number, s = "null", d = "0.0") => `i32 ${k}, ptr ${s}, double ${d}`;
+    if (m === "null") return kind(1);
+    if (m === "string") return kind(2);
+    if (m === "boolean") return kind(4);
+    if (isPlainJs(m)) return kind(0);
+    if (typeof m !== "string" && m.kind === "literal") {
+      const value = m.value;
+      if (typeof value === "string") return kind(5, text(value));
+      if (typeof value === "boolean") return kind(value ? 7 : 6);
+      return kind(8, "null", floatConstant(Number(value), "f64"));
+    }
+    return kind(3);
   }
 
   // A JsValue narrowed to a string, number or boolean, read out of JS.
@@ -5405,6 +5505,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const target = calls.get(e);
+    const js = jsCalls.get(e);
+    if (js && target) return jsCall(e, js, target);
     if (!target) {
       if (formatCalls.has(e)) return formatted(e);
       if (inspectCalls.has(e)) {

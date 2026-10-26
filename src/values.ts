@@ -8,7 +8,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsRead, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsPlain, jsRead, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -354,8 +354,8 @@ export const jsEvaluations = new WeakSet<Expr>();
 export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
 // The reads of a package's consts, by the export each reads.
 export const jsExports = new WeakMap<Expr, JsName>();
-// The types a value from JS can be read as so far.
-const crossesBack = (t: Type) => t === "string" || t === "f64" || t === "boolean" || isPlainJs(t);
+// The calls of a package's functions, by the export each calls, with the signature checked.
+export const jsCalls = new WeakMap<Expr, JsName>();
 // The `get`, `at` and `has` calls on a JsValue.
 export const jsAccessors = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
@@ -1312,7 +1312,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
     if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
-    if (target.js) jsUses.push(e);
+    if (target.js) jsCalls.set(e, target.js);
     if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
     else refuseSpread(e.args);
     expectFrom(target, e.args);
@@ -3721,7 +3721,7 @@ export function expressions(ctx: Context) {
         const jsConst = local ? undefined : byName.get(e.name);
         if (jsConst?.js?.const) {
           const type = jsView(resolveType(jsConst.returnType!));
-          if (crossesBack(type)) jsExports.set(e, jsConst.js);
+          if (jsPlain(type)) jsExports.set(e, jsConst.js);
           else jsUses.push(e);
           return type;
         }

@@ -5,6 +5,10 @@ import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
 
+// What stops a program that type-checks with a package's declarations: a form that can't run
+// yet, or a package with no JS to bundle, as these fixtures have only declarations.
+const TYPE_CHECKED = /(running a package's code isn't supported yet|calling a package's function with arrays, objects or handles isn't supported yet|has no JS Fish could bundle)/;
+
 // Builds `main.fsh` in a project of these files, giving the compile error it stops at, with
 // any note, as fishc prints it.
 function stops(files: Record<string, string>): string {
@@ -48,7 +52,7 @@ function main() {
 }
 `,
   });
-  expect(out).toContain("main.fsh:3:21: error: running a package's code isn't supported yet");
+  expect(out).toMatch(TYPE_CHECKED);
 });
 
 test("a wrong argument is refused in TypeScript's terms", () => {
@@ -71,7 +75,7 @@ test("a declaration Fish can't type is refused where it is declared, noting the 
 const LIB = "export interface Options { deep?: boolean; name: string; nested?: Inner }\ninterface Inner { level: number }\nexport interface Result { readonly count: number; label: string; describe(prefix: string): string; parts(): string[] }\nexport declare function run(o: Options): Result;\nexport declare const VERSION: string;\nexport type Point = { x: number; y: number };\nexport declare function origin(): Point;\nexport declare function at(p: Point): string;\nexport declare class Box {\n  constructor(size: number, label?: string);\n  size: number;\n  readonly id: string;\n  grow(by: number): void;\n  static make(): Box;\n  static readonly MAX: number;\n  private secret: string;\n}\nexport declare function show(r: Result): void;\nexport declare function anything(v: any): void;\n";
 
 test("consts, interfaces, object types and classes type-check as JS handles", () => {
-  expect(stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": "import { run, VERSION, origin, at, Box, Options } from \"lib\";\nfunction main() {\n  const r = run({ name: \"x\", deep: true, nested: { level: 2 } });\n  const n: f64 = r.count;\n  r.label = \"new\";\n  const d: string = r.describe(\"p\");\n  const parts: string[] = r.parts();\n  const v: string = VERSION;\n  const p = origin();\n  const s: string = at(p);\n  const t: string = at({ x: 1.5, y: 2.5 });\n  const b = new Box(3, \"b\");\n  b.grow(2);\n  b.size = 4;\n  const id: string = b.id;\n  const m = Box.make();\n  const max: f64 = Box.MAX;\n  const o: Options = { name: \"kept\" };\n  run(o);\n}\n" })).toContain("main.fsh:3:13: error: running a package's code isn't supported yet");
+  expect(stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": "import { run, VERSION, origin, at, Box, Options } from \"lib\";\nfunction main() {\n  const r = run({ name: \"x\", deep: true, nested: { level: 2 } });\n  const n: f64 = r.count;\n  r.label = \"new\";\n  const d: string = r.describe(\"p\");\n  const parts: string[] = r.parts();\n  const v: string = VERSION;\n  const p = origin();\n  const s: string = at(p);\n  const t: string = at({ x: 1.5, y: 2.5 });\n  const b = new Box(3, \"b\");\n  b.grow(2);\n  b.size = 4;\n  const id: string = b.id;\n  const m = Box.make();\n  const max: f64 = Box.MAX;\n  const o: Options = { name: \"kept\" };\n  run(o);\n}\n" })).toMatch(TYPE_CHECKED);
 });
 
 test("a handle's members, a Fish value for a shape, and a class are refused in TypeScript's terms", () => {
@@ -85,16 +89,16 @@ test("a handle's members, a Fish value for a shape, and a class are refused in T
   expect(refused("const b = new Box(\"x\");")).toBe("argument of type '\"x\"' is not assignable to parameter of type 'number'");
   expect(refused("const x = Box.nope;")).toBe("property 'nope' does not exist on 'Box'");
   expect(refused("show({ count: 1, label: \"l\" });")).toBe("argument of type '{ count: i64; label: string }' is not assignable to parameter of type 'Result': its methods come only with a value JS made");
-  expect(refused("const r = run({ name: \"a\" }); anything(r); anything([1, 2]); anything(\"s\");")).toStartWith("running a package's code isn't supported yet");
+  expect(refused("const r = run({ name: \"a\" }); anything(r); anything([1, 2]); anything(\"s\");")).toMatch(TYPE_CHECKED);
 });
 
 test("a generic declaration is typed for each call's type arguments", () => {
-  expect(stops({ "node_modules/gen/index.d.ts": "export declare function chunk<T>(xs: T[], n: number): T[][];\nexport declare function first<T>(xs: T[]): T | undefined;\nexport declare function pair<A, B>(a: A, b: B): [A, B];\nexport declare function wrap<T>(v: T): { value: T };\n", "main.fsh": "import { chunk, first, pair, wrap } from \"gen\";\nfunction main() {\n  const c: string[][] = chunk([\"a\", \"b\", \"c\"], 2);\n  const n: f64[][] = chunk([1.5, 2.5], 1);\n  const f: string | null = first([\"x\"]);\n  const p: [string, boolean] = pair(\"s\", true);\n  const w = wrap(3.5);\n  const v: f64 = w.value;\n}\n" })).toContain("main.fsh:3:25: error: running a package's code isn't supported yet");
+  expect(stops({ "node_modules/gen/index.d.ts": "export declare function chunk<T>(xs: T[], n: number): T[][];\nexport declare function first<T>(xs: T[]): T | undefined;\nexport declare function pair<A, B>(a: A, b: B): [A, B];\nexport declare function wrap<T>(v: T): { value: T };\n", "main.fsh": "import { chunk, first, pair, wrap } from \"gen\";\nfunction main() {\n  const c: string[][] = chunk([\"a\", \"b\", \"c\"], 2);\n  const n: f64[][] = chunk([1.5, 2.5], 1);\n  const f: string | null = first([\"x\"]);\n  const p: [string, boolean] = pair(\"s\", true);\n  const w = wrap(3.5);\n  const v: f64 = w.value;\n}\n" })).toMatch(TYPE_CHECKED);
 });
 
 test("each signature of a function declared more than once is tried in order", () => {
   const OV = "export declare function format(d: number): string;\nexport declare function format(d: string, pattern: string): string;\nexport declare function format(d: boolean[]): number;\n";
-  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() {\n  const a: string = format(1.5);\n  const b: string = format(\"x\", \"yyyy\");\n  const c: f64 = format([true]);\n}\n" })).toContain("main.fsh:3:21: error: running a package's code isn't supported yet");
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() {\n  const a: string = format(1.5);\n  const b: string = format(\"x\", \"yyyy\");\n  const c: f64 = format([true]);\n}\n" })).toMatch(TYPE_CHECKED);
   expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a = format(true); }\n" })).toContain("error: no signature of 'format' takes (boolean); it takes (d: number), (d: string, pattern: string), (d: boolean[])");
   // The first that takes the arguments gives the result.
   expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n" })).toContain("error: type 'string' is not assignable to type 'number'");
@@ -103,12 +107,12 @@ test("each signature of a function declared more than once is tried in order", (
 const WHOLE = {"node_modules/dflt/index.d.ts": "export default function slug(s: string): string;\n", "node_modules/ns/index.d.ts": "export declare function a(n: number): string;\nexport declare const b: boolean;\n", "node_modules/lodashy/index.d.ts": "declare namespace _ {\n  function chunk<T>(xs: T[], n: number): T[][];\n  const VERSION: string;\n}\nexport = _;\n", "node_modules/lo/index.d.ts": "interface LoDashStatic {\n  chunk<T>(xs: T[], size?: number): T[][];\n  camelCase(s?: string): string;\n  VERSION: string;\n}\ndeclare const _: LoDashStatic;\nexport = _;\n"};
 
 test("default, namespace and export = imports reach a package's declarations", () => {
-  expect(stops({ ...WHOLE, "main.fsh": "import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n" })).toContain("main.fsh:6:21: error: running a package's code isn't supported yet");
+  expect(stops({ ...WHOLE, "main.fsh": "import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n" })).toMatch(TYPE_CHECKED);
   expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error: 'ns' has no export 'nope'");
 });
 
 test("a const of an interface with generic methods, as lodash declares itself", () => {
-  expect(stops({ ...WHOLE, "main.fsh": "import _ from \"lo\";\nfunction main() {\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const d: f64[][] = _.chunk([1.5]);\n  const s: string = _.camelCase(\"x y\");\n  const v: string = _.VERSION;\n}\n" })).toContain("main.fsh:3:25: error: running a package's code isn't supported yet");
+  expect(stops({ ...WHOLE, "main.fsh": "import _ from \"lo\";\nfunction main() {\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const d: f64[][] = _.chunk([1.5]);\n  const s: string = _.camelCase(\"x y\");\n  const v: string = _.VERSION;\n}\n" })).toMatch(TYPE_CHECKED);
 });
 
 const P = `export interface A { a: string }
@@ -139,7 +143,7 @@ test("overloads imported in two files keep their signatures apart", () => {
     "node_modules/p/index.d.ts": P,
     "lib.fsh": "import { format } from \"p\";\nexport function show(): string { return format(1.5); }\n",
     "main.fsh": "import { format } from \"p\";\nimport { show } from \"./lib\";\nfunction main() { const a = format(\"x\"); console.log(show()); }\n",
-  }))).toStartWith("running a package's code isn't supported yet");
+  }))).toMatch(TYPE_CHECKED);
 });
 
 test("a handle's members cross only what can, and a handle passes only with the methods asked for", () => {
@@ -147,18 +151,18 @@ test("a handle's members cross only what can, and a handle passes only with the 
   expect(refused("s().each((x) => {});")).toBe("'each' of 'S' takes a '(x: number) => void', which can't cross between Fish and JS yet: functions crossing between Fish and JS aren't supported yet");
   expect(refused("takeB(getA());")).toBe("argument of type 'A' is not assignable to parameter of type 'B': property 'go' is missing");
   expect(refused("const v = VERSION();")).toBe("this expression is not callable: type 'string' has no call signatures");
-  expect(refused("const c = child(); const a: string = c.a; const b: f64 = c.b; const k = new K2(); const ka: string = k.a;")).toStartWith("running a package's code isn't supported yet");
+  expect(refused("const c = child(); const a: string = c.a; const b: f64 = c.b; const k = new K2(); const ka: string = k.a;")).toMatch(TYPE_CHECKED);
 });
 
 test("a namespace's members are read where the name isn't rebound, and a default class names itself", () => {
   expect(first(stops({
     "node_modules/lodashy/index.d.ts": "declare namespace _ {\n  function chunk<T>(xs: T[], n: number): T[][];\n}\nexport = _;\n",
     "main.fsh": "import _ from \"lodashy\";\nfunction main() { const c: string[][] = _.chunk([\"a\"], 1); const ns = [{ n: 1 }].map((_) => _.n); }\n",
-  }))).toStartWith("running a package's code isn't supported yet");
+  }))).toMatch(TYPE_CHECKED);
   expect(first(stops({
     "node_modules/k/index.d.ts": "export default class K { static make(): K; size: number; }\n",
     "main.fsh": "import K from \"k\";\nfunction main() { const k = K.make(); const n: f64 = k.size; }\n",
-  }))).toStartWith("running a package's code isn't supported yet");
+  }))).toMatch(TYPE_CHECKED);
 });
 
 test("a package imported twice is one set of types, and a borrowed handle passes as the handle", () => {
@@ -167,7 +171,7 @@ test("a package imported twice is one set of types, and a borrowed handle passes
     "node_modules/p/index.d.ts": R,
     "lib.fsh": "import { f } from \"p\";\nexport function make() { return f(); }\n",
     "main.fsh": "import { g, rs } from \"p\";\nimport { make } from \"./lib\";\nfunction main() { g(make()); for (const r of rs()) g(r); }\n",
-  }))).toStartWith("running a package's code isn't supported yet");
+  }))).toMatch(TYPE_CHECKED);
   // An index signature, which Fish can't type, comes only with a value JS made.
   expect(first(stops({
     "node_modules/p/index.d.ts": "export interface D { [k: string]: number }\nexport declare function take(d: D): void;\n",
@@ -179,7 +183,7 @@ test("a nested Fish value is checked against a recursive shape, part by part", (
   const U = "export interface U { child?: U; v: string }\nexport declare function takeU(u: U): void;\n";
   const refused = (arg: string) => first(stops({ "node_modules/p/index.d.ts": U, "main.fsh": `import { takeU } from "p";\nfunction main() { takeU(${arg}); }\n` }));
   expect(refused(`{ v: "a", child: { v: 5 } }`)).toBe("argument of type '{ child: { v: i64 }; v: string }' is not assignable to parameter of type 'U': property 'child' is a '{ v: i64 }', not a 'null | U'");
-  expect(refused(`{ v: "a", child: { v: "b" } }`)).toStartWith("running a package's code isn't supported yet");
+  expect(refused(`{ v: "a", child: { v: "b" } }`)).toMatch(TYPE_CHECKED);
 });
 
 test("a Fish class whose type refers to itself through an array is refused, not followed forever", () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { build } from "../src/main.ts";
+import { sanitized } from "./sanitized.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fish-packages-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -16,12 +17,31 @@ export const VERSION = helper("one");
 export const COUNT = 2.5;
 export const ON = true;
 export const WRONG = 7;
+export function shout(s) { return helper(s) + "!"; }
+export function add(a, b) { return a + b; }
+export function maybe(s) { return s === undefined ? null : "got " + s; }
+export function kind(v) { return v === null ? "e" : typeof v === "string" ? "s" : typeof v === "number" ? "n" : "b"; }
+export function either(flag) { return flag ? "yes" : 42; }
+export function show(x) { return typeof x + ":" + x; }
+export function boom() { throw new RangeError("too far"); }
+export function liar() { return 5; }
+export function same(x) { return x; }
 `,
   "node_modules/esm/dist/helper.js": "export function helper(s) { return s.toUpperCase(); }\n",
   "node_modules/esm/index.d.ts": `export declare const VERSION: string;
 export declare const COUNT: number;
 export declare const ON: boolean;
 export declare const WRONG: string;
+export declare function shout(s: string): string;
+export declare function add(a: number, b: number): number;
+export declare function maybe(s?: string): string | null;
+export declare function kind(v: string | number | boolean | null): "s" | "n" | "b" | "e";
+export declare function either(flag: boolean): string | number;
+export declare function show(x: string): string;
+export declare function show(x: number): string;
+export declare function boom(): void;
+export declare function liar(): string;
+export declare function same(x: any): unknown;
 `,
   "node_modules/cjs/package.json": JSON.stringify({ name: "cjs", main: "lib.js", types: "lib.d.ts" }),
   "node_modules/cjs/lib.js": "exports.n = 3;\nexports.name = 'cjs';\n",
@@ -37,12 +57,17 @@ let made = 0;
 
 // Builds `main` in a project with the packages above and runs it, reporting the leak count;
 // or gives the compile error it stops at, as fishc prints it.
-function run(main: string): { stdout: string; stderr: string; exitCode: number | null } | string {
+function project(main: string): string {
   const dir = join(root, `p${made++}`);
   for (const [path, text] of Object.entries({ ...PACKAGES, "main.fsh": main })) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), text);
   }
+  return dir;
+}
+
+function run(main: string): { stdout: string; stderr: string; exitCode: number | null } | string {
+  const dir = project(main);
   const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
   try {
     build(entry, out);
@@ -77,4 +102,34 @@ test("a package needing a Node built-in, or with no JS, is refused", () => {
 
 test("a program importing a package it never reaches at run time isn't bundled", () => {
   expect(run(`import { size } from "needsfs";\nfunction main() { console.log(1); }\n`)).toEqual({ stdout: "1\n", stderr: "", exitCode: 0 });
+});
+
+test("a package's functions are called with values converted both ways, under ASan with no leaks", () => {
+  const main = `import { shout, add, maybe, kind, either, show, same } from "esm";
+function main() {
+  const n: i64 = 2;
+  const word = "h" + "i";
+  console.log(shout(word), add(1.5, 2), add(n as f64, 3));
+  console.log(maybe(), maybe("x"));
+  console.log(kind("a"), kind(1), kind(true), kind(null));
+  const yes = either(true);
+  const no = either(false);
+  console.log(yes, no, show("a"), show(2));
+  const back = same("text");
+  if (typeof back === "string") console.log(back.length);
+  shout("dropped");
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "HI! 3.5 5\nnull got x\ns n b e\nyes 42 string:a number:2\n4\n", stderr: "", exitCode: 0 });
+});
+
+test("a JS throw, or a result that isn't what its declaration says, panics at the call", () => {
+  expect(run(`import { boom } from "esm";\nfunction main() {\n  boom();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:3:\nuncaught exception in JS: RangeError: too far\n", exitCode: 101 });
+  expect(run(`import { liar } from "esm";\nfunction main() {\n  console.log(liar());\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:15:\n'liar' from 'esm' gave a number, where its declaration says 'string'\n", exitCode: 101 });
+});
+
+test("an overload's signature is the one called, and arrays and objects wait for their step", () => {
+  expect(run(`import { show } from "esm";\nfunction main() {\n  console.log(show(1), show("1"));\n}\n`)).toEqual({ stdout: "number:1 string:1\n", stderr: "", exitCode: 0 });
+  expect(run(`import { same } from "esm";\nfunction main() {\n  same([1, 2]);\n}\n`)).toBe("main.fsh:3:3: error: calling a package's function with arrays, objects or handles isn't supported yet");
 });

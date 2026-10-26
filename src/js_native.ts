@@ -278,4 +278,89 @@ int32_t fsh_rt_js_as_boolean(fsh_js *b, const char *what, const char *declared, 
   fsh_js_leave();
   return yes;
 }
+// Fish values as new JS values, each in a box of its own; an empty one is undefined when
+// undefined is set, and null otherwise.
+fsh_js *fsh_rt_js_of_string(fsh_str *s) {
+  JSContext *cx = fsh_js_enter();
+  JSValue v = JS_NewStringLen(cx, s->bytes, s->length);
+  fsh_js_leave();
+  return fsh_js_box(v);
+}
+
+fsh_js *fsh_rt_js_of_number(double d) {
+  return fsh_js_box(JS_NewFloat64(NULL, d));
+}
+
+fsh_js *fsh_rt_js_of_boolean(int32_t yes) {
+  return fsh_js_box(JS_NewBool(NULL, yes));
+}
+
+fsh_js *fsh_rt_js_of_empty(int32_t undefined) {
+  return fsh_js_box(undefined ? JS_UNDEFINED : JS_NULL);
+}
+
+// Calls a JS function with self as this, or undefined when there is none, giving up every box
+// it is given; the jobs the call queued run before it returns, as they would once JS's own call
+// stack emptied.
+fsh_js *fsh_rt_js_call(fsh_js *fn, fsh_js *self, int64_t argc, fsh_js **argv, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  JSValue args[argc > 0 ? argc : 1];
+  for (int64_t i = 0; i < argc; i++) {
+    args[i] = JS_DupValue(cx, argv[i]->value);
+    fsh_js_drop(cx, argv[i]);
+  }
+  JSValue f = JS_DupValue(cx, fn->value);
+  fsh_js_drop(cx, fn);
+  JSValue me = self ? JS_DupValue(cx, self->value) : JS_UNDEFINED;
+  if (self) fsh_js_drop(cx, self);
+  JSValue result = JS_Call(cx, f, me, argc, args);
+  JS_FreeValue(cx, f);
+  JS_FreeValue(cx, me);
+  for (int64_t i = 0; i < argc; i++) JS_FreeValue(cx, args[i]);
+  if (JS_IsException(result)) fsh_js_throw(cx, where);
+  JSContext *ran;
+  for (int done; (done = JS_ExecutePendingJob(fsh_js_runtime, &ran)) != 0;) {
+    if (done < 0) {
+      JS_FreeValue(cx, result);
+      fsh_js_throw(cx, where);
+    }
+  }
+  fsh_js_leave();
+  return fsh_js_box(result);
+}
+
+// Whether a JS value is of a kind a declared type has: 0 anything, 1 null or undefined, 2 a
+// string, 3 a number, 4 a boolean, 5 the string text, 6 false, 7 true, 8 the number number.
+int32_t fsh_rt_js_is(fsh_js *b, int32_t kind, fsh_str *text, double number) {
+  JSValue v = b->value;
+  switch (kind) {
+    case 0: return 1;
+    case 1: return JS_IsNull(v) || JS_IsUndefined(v);
+    case 2: return JS_IsString(v);
+    case 3: return JS_IsNumber(v);
+    case 4: return JS_IsBool(v);
+    case 6: return JS_IsBool(v) && !JS_VALUE_GET_BOOL(v);
+    case 7: return JS_IsBool(v) && JS_VALUE_GET_BOOL(v);
+    case 8: {
+      double d = 0;
+      if (!JS_IsNumber(v)) return 0;
+      JS_ToFloat64(fsh_js_context, &d, v);
+      return d == number;
+    }
+  }
+  if (!JS_IsString(v)) return 0;
+  JSContext *cx = fsh_js_enter();
+  size_t length;
+  const char *bytes = JS_ToCStringLen(cx, &length, v);
+  int32_t same = bytes && (int64_t)length == text->length && memcmp(bytes, text->bytes, length) == 0;
+  JS_FreeCString(cx, bytes);
+  fsh_js_leave();
+  return same;
+}
+
+// A JS value none of its declaration's types took.
+void fsh_rt_js_mismatch(fsh_js *b, const char *what, const char *declared, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  fsh_js_expect(cx, b, false, what, declared, where);
+}
 `;

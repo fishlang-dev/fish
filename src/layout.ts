@@ -77,7 +77,7 @@ export const compound = (t: Type): boolean => typeof t !== "string" && ["object"
 
 export function conversions(b: Slots) {
   const { emit, temp, label, startBlock, alloca, deep } = b;
-  return { convert, test, equals, unionField, holds };
+  return { convert, test, equals, unionField, holds, eachMember };
 
   // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with
   // x a union, to a check of x's tag, and of its payload when v isn't a literal. Undefined for
