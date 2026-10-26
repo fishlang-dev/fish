@@ -91,16 +91,16 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   const packageModule = (from: string, specifier: string, s: Stmt, importing: Stmt[]): Module => {
     const exports = packageExports(from, specifier, s, entry);
     const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
-    if (s.kind === "exportAll") throw unsupported("re-exporting all of a package", s);
+    if (s.kind === "exportAll") throw new CompileError("re-exporting all of a package isn't supported yet; re-export the names it has by name", s.start, s.end);
     // A package imported whole, or a default export that is a namespace, is reached through its
     // name: the members the file uses, as `ns.f`, are what it imports.
     const defaulted = s.kind === "import" && s.default !== undefined ? exports.names.get("default") : undefined;
     const spaced = defaulted && unwrapped(defaulted.at).kind === "namespace";
     const whole = s.kind === "import" ? (s.namespace ?? (spaced ? s.default : undefined)) : undefined;
-    const reached = whole === undefined ? [] : membersUsed(importing, whole).map((m) => {
-      if (!exports.names.has(m.name)) throw new CompileError(`'${specifier}' has no export '${m.name}'`, m.start, m.end);
-      return { name: m.name, alias: undefined, typeOnly: false, start: m.start, end: m.end };
-    });
+    // A member it lacks may be another name's, under a binding of its own; one reached through
+    // the namespace is refused when the program is linked.
+    const reached = whole === undefined ? [] : membersUsed(importing, whole).filter((m) => exports.names.has(m.name))
+      .map((m) => ({ name: m.name, alias: undefined, typeOnly: false, start: m.start, end: m.end }));
     // Each name imported is exported by the module; the types its declaration names, and theirs,
     // are declared in it too, as they are where the package declares them.
     const statements: Stmt[] = [];
@@ -113,7 +113,14 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         return;
       }
       declaredHere.set(name, declared);
-      const made = jsDeclaration(declared, name, specifier, at, as);
+      let made: Stmt;
+      try {
+        made = jsDeclaration(declared, name, specifier, at, as);
+      } catch (e) {
+        // A declaration only referred to that Fish can't take is left out, refused where named.
+        if (exported || !(e instanceof CompileError)) throw e;
+        return;
+      }
       const overloads = jsOverloads(declared, made, name, specifier);
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
@@ -127,7 +134,9 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     for (const sp of [...named, ...reached]) add(exports.names.get(sp.name)!, sp.name, true, sp);
     // A default export that isn't a namespace is a declaration of its own, exported as the default.
     if (defaulted && !spaced) {
-      const local = `${specifier} default`;
+      // A named declaration keeps its name, which it may use of itself.
+      const own = unwrapped(defaulted.at) as { name?: unknown };
+      const local = typeof own.name === "string" && !declaredHere.has(own.name) ? own.name : `${specifier} default`;
       add(defaulted, local, false, s, "default");
       statements.push({ kind: "exportNamed", typeOnly: false, specifiers: [{ name: local, alias: "default", typeOnly: false, start: s.start, end: s.end }], module: undefined, start: s.start, end: s.end });
     }
@@ -516,6 +525,8 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     const name = n.name as string;
     const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
     if (!exports.includes(name)) {
+      // A package's module holds only the members the file uses, so what else it has isn't listed.
+      if (space.explicit && space.from.whole) throw new CompileError(`'${space.from.file}' has no export '${name}'`, n.start as number, n.end as number);
       if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
       return false;
     }

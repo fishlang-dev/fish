@@ -1,3 +1,5 @@
+import type { CompileError } from "./diag.ts";
+
 // The checker's types. Object types are interned, so two types are structurally identical,
 // the same fields with the same types in any order, exactly when they are the same object.
 
@@ -306,11 +308,17 @@ export function uncrossable(t: Type): string | undefined {
       return "Promises crossing between Fish and JS aren't supported yet";
     case "interface":
     case "dyn":
+      if (t.kind === "dyn" && callableOf.has(t.of)) return "functions crossing between Fish and JS aren't supported yet";
       return promiseElement(t.kind === "dyn" ? t.of : t) !== undefined ? "Promises crossing between Fish and JS aren't supported yet" : "Fish has no JS form for it";
     default:
       return "Fish has no JS form for it";
   }
 }
+
+// The members of a package's shapes Fish can't type, each with why: refused only where used.
+export const jsUntyped = new WeakMap<InterfaceType, Map<string, CompileError>>();
+// The same for a package's function a program imports but doesn't call.
+export const jsUncalled = new WeakMap<object, CompileError>();
 
 // What a declared type is when JS gives it: an object, as a handle of its shape, inside unions,
 // arrays and tuples too.

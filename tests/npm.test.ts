@@ -110,3 +110,53 @@ test("default, namespace and export = imports reach a package's declarations", (
 test("a const of an interface with generic methods, as lodash declares itself", () => {
   expect(stops({ ...WHOLE, "main.fsh": "import _ from \"lo\";\nfunction main() {\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const d: f64[][] = _.chunk([1.5]);\n  const s: string = _.camelCase(\"x y\");\n  const v: string = _.VERSION;\n}\n" })).toContain("main.fsh:3:25: error: running a package's code needs a JS engine");
 });
+
+const P = `export interface A { a: string }
+export interface B { a: string; go(): string }
+export declare function getA(): A;
+export declare function takeB(b: B): void;
+export interface S { each(f: (x: number) => void): void; read(): string }
+export declare function s(): S;
+export declare const VERSION: string;
+export interface Base { a: string }
+export interface Child extends Base { b: number }
+export declare function child(): Child;
+export declare class K1 { a: string }
+export declare class K2 extends K1 { b: number }
+export declare function f(s: string): string;
+export declare function format(d: number): string;
+export declare function format(d: string): string;
+`;
+const first = (out: string) => out.split("\n")[0]!.replace(/^.*error: /, "");
+
+test("a JsValue with no call of the package still stops the program, and an import not called builds", () => {
+  expect(first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "function main() { const o: JsValue = 5; }\n" }))).toStartWith("running a package's code needs a JS engine");
+  expect(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "import { f } from \"p\";\nfunction main() { console.log(\"hi\"); }\n" })).toBe("built");
+});
+
+test("overloads imported in two files keep their signatures apart", () => {
+  expect(first(stops({
+    "node_modules/p/index.d.ts": P,
+    "lib.fsh": "import { format } from \"p\";\nexport function show(): string { return format(1.5); }\n",
+    "main.fsh": "import { format } from \"p\";\nimport { show } from \"./lib\";\nfunction main() { const a = format(\"x\"); console.log(show()); }\n",
+  }))).toStartWith("running a package's code needs a JS engine");
+});
+
+test("a handle's members cross only what can, and a handle passes only with the methods asked for", () => {
+  const refused = (body: string) => first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": `import { getA, takeB, s, VERSION, child, K2 } from "p";\nfunction main() { ${body} }\n` }));
+  expect(refused("s().each((x) => {});")).toBe("'each' of 'S' takes a '(x: number) => void', which can't cross between Fish and JS yet: functions crossing between Fish and JS aren't supported yet");
+  expect(refused("takeB(getA());")).toBe("argument of type 'A' is not assignable to parameter of type 'B': property 'go' is missing");
+  expect(refused("const v = VERSION();")).toBe("this expression is not callable: type 'string' has no call signatures");
+  expect(refused("const c = child(); const a: string = c.a; const b: f64 = c.b; const k = new K2(); const ka: string = k.a;")).toStartWith("running a package's code needs a JS engine");
+});
+
+test("a namespace's members are read where the name isn't rebound, and a default class names itself", () => {
+  expect(first(stops({
+    "node_modules/lodashy/index.d.ts": "declare namespace _ {\n  function chunk<T>(xs: T[], n: number): T[][];\n}\nexport = _;\n",
+    "main.fsh": "import _ from \"lodashy\";\nfunction main() { const c: string[][] = _.chunk([\"a\"], 1); const ns = [{ n: 1 }].map((_) => _.n); }\n",
+  }))).toStartWith("running a package's code needs a JS engine");
+  expect(first(stops({
+    "node_modules/k/index.d.ts": "export default class K { static make(): K; size: number; }\n",
+    "main.fsh": "import K from \"k\";\nfunction main() { const k = K.make(); const n: f64 = k.size; }\n",
+  }))).toStartWith("running a package's code needs a JS engine");
+});

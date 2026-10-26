@@ -16,13 +16,13 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsCalledAt, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { jsBodies, jsCalledAt, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -465,7 +465,9 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     if (s.js) {
-      funcs.push({ ...s, body: [] });
+      const body = { ...s, body: [] };
+      jsBodies.set(s, body);
+      funcs.push(body);
       continue;
     }
     if (!hasBody(s)) throw unsupported("functions without a body", s);
@@ -665,9 +667,17 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
   // A program that type-checks with a package's declarations is stopped at its first use of
   // one, as nothing can run them yet.
-  const used = jsUses.reduce<Expr | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
+  // So is one holding a JS value anywhere, as an any or a handle, though nothing was called.
+  const holdsJs = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue", true);
+  const typed = all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js).flatMap((i): Span[] => [
+    ...[...i.types, ...i.coercions].filter(([, t]) => holdsJs(t)).map(([x]) => x),
+    ...[...i.locals].filter(([, l]) => holdsJs(l.type)).map(([x]) => x),
+  ]);
+  const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
+  const used = earliest(jsUses) ?? earliest(typed);
   if (used) throw new CompileError("running a package's code needs a JS engine, which Fish doesn't have yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
-  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body)), ...closures.filter((i) => i.concrete)] };
+  // A package's declarations have no body to compile.
+  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
 
   // What a function's returned reference borrows from: the parameters with its written
   // lifetime, or by elision `this` for a method, or the only reference parameter.
@@ -851,7 +861,20 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   // A package's function's signature, from its declaration: what it takes and gives must cross
   // between Fish and JS, as strings, booleans, numbers, Options, unions and literals of them,
   // arrays of them copied across, and opaque JS values.
+  // One imported but not called yet is refused only where a program calls it.
   function jsSignature(instance: Instance) {
+    try {
+      jsSigned(instance);
+    } catch (e) {
+      if (!(e instanceof CompileError) || jsCalledAt.has(instance.body)) throw e;
+      jsUncalled.set(instance.body, e);
+      instance.signature = [];
+      instance.returns = blockType("JsValue");
+      done.add(instance);
+    }
+  }
+
+  function jsSigned(instance: Instance) {
     const f = instance.body;
     const named = `'${f.js!.name}' from '${f.js!.module}'`;
     // A declaration Fish can't type is refused where it is declared, noting the call that reached it.

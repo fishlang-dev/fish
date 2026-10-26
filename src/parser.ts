@@ -246,8 +246,8 @@ export type Interface = Span & { kind: "interface"; name: string; typeParams: Ty
 // What a package's declaration names: the package and the name it exports it by. A const is
 // read as a value.
 export type JsName = { module: string; name: string; const?: true;
-  // A function declared with several signatures: the names its other signatures are declared by.
-  overloads?: string[] };
+  // A function declared with several signatures: its other signatures, in the order declared.
+  overloads?: Func[] };
 
 export type Func = Span & {
   // `macro` marks `macro function`, a comptime function over syntax trees.

@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -434,6 +434,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (utility) {
       const [count, apply, example] = utility;
       if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
+      // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
+      const shapes = args.map(jsShape);
+      if (shapes.some((x) => x !== undefined)) {
+        const made = apply(args.map((a, k) => (shapes[k] ? objectType(shapes[k]!.fields) : a)), t, t.args);
+        return typeof made !== "string" && made.kind === "object" && !made.tuple ? blockType("JsValue", made) : made;
+      }
       return apply(args, t, t.args);
     }
     throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
@@ -533,12 +539,33 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       }
     };
     for (const node of i.extends) {
-      const base = resolveType(node);
-      if (typeof base === "string" || base.kind !== "interface") throw new CompileError("an interface can only extend interfaces", node.start, node.end);
+      // A package's interface or class extends another's shape, which a JS handle holds.
+      const resolved = resolveType(node);
+      const base = jsShape(resolved) ?? resolved;
+      if (typeof base === "string" || (base.kind !== "interface" && !(i.js && base.kind === "object"))) throw new CompileError("an interface can only extend interfaces", node.start, node.end);
       for (const f of base.fields) add(f.name, node), t.fields.push(f);
-      for (const m of base.methods) add(m.name, node), t.methods.push(m);
+      if (base.kind === "interface") for (const m of base.methods) add(m.name, node), t.methods.push(m);
     }
+    const member1 = memberOf(i, t, add);
     for (const m of i.members) {
+      // A package's member Fish can't type is refused only where a program uses it.
+      if (i.js) {
+        try {
+          member1(m);
+        } catch (e) {
+          if (!(e instanceof CompileError) || !("name" in m) || typeof m.name !== "string") throw e;
+          if (!jsUntyped.has(t)) jsUntyped.set(t, new Map());
+          jsUntyped.get(t)!.set(m.name, e);
+        }
+        continue;
+      }
+      member1(m);
+    }
+    return t;
+  }
+
+  function memberOf(i: Interface, t: InterfaceType, add: (name: string, at: Span) => void) {
+    return (m: TypeMember) => {
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
         if (m.optional) throw unsupported("optional methods", m);
@@ -563,8 +590,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         add(f.name, m);
         t.fields.push(f);
       }
-    }
-    return t;
+    };
   }
 
   // An alias met again while its own type is made leads back to itself: that is where the

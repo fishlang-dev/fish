@@ -26,8 +26,16 @@ export function jsDeclaration(declared: Declared, name: string, specifier: strin
       const type: TypeNode = one.type ?? { kind: "ref", name: "JsValue", args: [], start: d.start, end: d.end };
       return { kind: "function", name, async: false, generator: false, macro: false, typeParams: [], params: [], returnType: type, body: undefined, js: { ...js, const: true }, start: one.start, end: one.end };
     }
-    case "interface":
-      return Object.assign(d, { name, js, members: d.members.map(plainMethod) });
+    case "interface": {
+      // Every declaration of the interface where it is declared adds to it, as TypeScript
+      // merges them.
+      const merged = declared.scope.flatMap((x) => {
+        const u = unwrap(x);
+        return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(structuredClone(x)) : [];
+      }) as Interface[];
+      merged.forEach(lowerTypes);
+      return Object.assign(d, { name, js, members: shapeMembers([...d.members, ...merged.flatMap((m) => m.members)]) });
+    }
     case "typeAlias":
       return Object.assign(d, { name, js });
     case "class":
@@ -43,19 +51,31 @@ export function jsOverloads(declared: Declared, made: Stmt, name: string, specif
   const first = unwrap(declared.at);
   if (first.kind !== "function" || made.kind !== "function") return [];
   const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
-  const named = others.map((_, i) => `${name} signature ${i + 2}`);
-  if (others.length > 0) made.js = { ...made.js!, overloads: named };
-  return others.map((s, i) => {
+  const signatures = others.map((s, i) => {
     const d = unwrap(structuredClone(s)) as Extract<Stmt, { kind: "function" }>;
     lowerTypes(d);
-    return Object.assign(d, { name: named[i]!, body: undefined, js: { module: specifier, name } });
+    return Object.assign(d, { name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, name } });
   });
+  if (others.length > 0) made.js = { ...made.js!, overloads: signatures };
+  return signatures;
 }
 
-// A JS method a declaration marks optional is called as any other.
+// An interface's members as a shape's: an accessor a property, read-only unless it has a setter;
+// a method declared with several signatures by its first; one marked optional as any other.
 // ponytail: an absent optional method throws in JS when called; `?.()` on handles would check
-function plainMethod(m: TypeMember): TypeMember {
-  return m.kind === "method" && m.optional ? { ...m, optional: false } : m;
+function shapeMembers(members: TypeMember[]): TypeMember[] {
+  const seen = new Set<string>();
+  return members.flatMap((m): TypeMember[] => {
+    const name = "name" in m && typeof m.name === "string" ? m.name : undefined;
+    if (m.kind === "set") return [];
+    if (name !== undefined && seen.has(name)) return [];
+    if (name !== undefined) seen.add(name);
+    if (m.kind === "get") {
+      const settable = members.some((x) => x.kind === "set" && x.name === name);
+      return [{ kind: "property", name: m.name, optional: false, readonly: !settable, type: m.returns ?? { kind: "ref", name: "JsValue", args: [], start: m.start, end: m.end }, start: m.start, end: m.end }];
+    }
+    return [m.kind === "method" && m.optional ? { ...m, optional: false } : m];
+  });
 }
 
 // A class as the shape of its instances: its public fields, accessors and methods; its
@@ -78,7 +98,11 @@ function classShape(c: ClassNode, name: string, js: JsName): Interface {
       into.push({ kind: "property", name: m.name, optional: false, readonly: !settable, type: m.returnType ?? untyped(m), start: m.start, end: m.end });
     }
   }
-  return { kind: "interface", name, typeParams: c.typeParams, extends: [], members, js, jsClass: { constructors, statics }, start: c.start, end: c.end };
+  // A base class's instances' members are its instances' too, as an interface extends another.
+  const base = c.extends?.kind === "instantiation" ? c.extends.expr : c.extends;
+  const typeArgs = c.extends?.kind === "instantiation" ? c.extends.typeArgs : [];
+  const extended: TypeNode[] = base?.kind === "ident" ? [{ kind: "ref", name: base.name, args: typeArgs, start: base.start, end: base.end }] : [];
+  return { kind: "interface", name, typeParams: c.typeParams, extends: extended, members, js, jsClass: { constructors, statics }, start: c.start, end: c.end };
 }
 
 function unwrap(s: Stmt): Stmt {

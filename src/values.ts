@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsView, type InterfaceType } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -338,6 +338,10 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
 // The uses of a package's declarations, which a program can't run until Fish has a JS engine.
 export const jsUses: Expr[] = [];
+// The calls into a package, whose arguments cross by copy, so nothing moves into them.
+export const jsCrossings = new WeakSet<Expr>();
+// The function each of a package's signatures is checked as, by its declaration.
+export const jsBodies = new WeakMap<object, Body>();
 // A package's classes, by name: what `new` and their statics are checked against.
 export const jsClasses = new Map<string, Interface>();
 // Where each of a package's functions is first called, noted on a refusal of its declaration.
@@ -950,9 +954,11 @@ export function expressions(ctx: Context) {
       const m = jsStatic(jsClass, callee.name, e);
       if (m.kind !== "method") throw new CompileError(`'${callee.name}' is a property of '${jsClass.name}', not a method`, callee.start, callee.end);
       if (m.typeParams.length > 0) throw unsupported("generic methods of a package's types", callee);
-      jsArgs(e, jsParams(m.params));
+      const params = jsParams(m.params);
+      params.forEach((p) => crossing(p, `'${jsClass.name}.${callee.name}' takes a`, e));
+      jsArgs(e, params);
       const returns = m.returns ? resolveType(m.returns) : blockType("JsValue");
-      return { type: returns === "void" ? "void" : jsView(returns), what: `'${callee.name}'` };
+      return { type: crossing(returns === "void" ? "void" : jsView(returns), `'${jsClass.name}.${callee.name}' gives a`, e), what: `'${callee.name}'` };
     }
     if (callee.kind === "ident" && TIMER_CALLS.has(callee.name) && !lookup(callee.name) && !byName.has(callee.name)) {
       timerCall(e, callee.name);
@@ -1240,6 +1246,12 @@ export function expressions(ctx: Context) {
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
     const target = found?.js?.overloads ? jsOverload(e, found) : found;
+    // A package's const is a value; one holding a function would be a function crossing from JS.
+    if (target?.js?.const) {
+      const held = resolveType(target.returnType!);
+      const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
+      throw new CompileError(callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
+    }
     // node:util's functions that take any values, as Node's do, given their meaning here.
     const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
@@ -1302,7 +1314,14 @@ export function expressions(ctx: Context) {
       const array = lower(isRefType(argTypes[0]) ? argTypes[0].to : argTypes[0]);
       if (isArray(array)) clonable(array.element, e, target.name.slice("array ".length));
     }
+    if (target.js) jsCrossings.add(e);
     if (target.js && !jsCalledAt.has(target)) jsCalledAt.set(target, e);
+    // Its declaration was refused before a call reached it: this call is where that counts.
+    const refused = target.js ? jsUncalled.get(target) : undefined;
+    if (refused) {
+      refused.note ??= { message: `'${target.js!.name}' is called here`, start: e.start, end: e.end };
+      throw refused;
+    }
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
@@ -2924,13 +2943,23 @@ export function expressions(ctx: Context) {
     const source = own ?? (typeof from !== "string" && (from.kind === "object" || from.kind === "class") && !isTuple(from) ? from : undefined);
     if (!source) return `a '${show(from)}' isn't an object`;
     if (!own && shape.kind === "interface" && shape.methods.length > 0) return `its methods come only with a value JS made`;
+    // A handle of another shape has the methods this one declares, by name and count.
+    if (own && shape.kind === "interface") {
+      const methods = own.kind === "interface" ? own.methods : [];
+      const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && n.params.length === m.params.length));
+      if (lacking) return `property '${lacking.name}' is missing`;
+    }
+    // A Fish class's private fields stay its own.
+    const fields = source.kind === "class" ? source.fields.filter((g) => (g.access ?? "public") === "public") : source.fields;
     for (const f of shape.fields) {
-      const found = source.fields.find((g) => g.name === f.name);
+      const found = fields.find((g) => g.name === f.name);
       if (!found) {
         if (isOption(f.type)) continue;
         return `property '${f.name}' is missing`;
       }
       if (!passesJs(found.type, f.type)) return `property '${f.name}' is a '${show(found.type)}', not a '${show(f.type)}'`;
+      const why = own ? undefined : uncrossable(found.type);
+      if (why) return `property '${f.name}' is a '${show(found.type)}', which can't cross between Fish and JS yet: ${why}`;
     }
     return undefined;
   }
@@ -2956,17 +2985,33 @@ export function expressions(ctx: Context) {
     return holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue");
   }
 
+  // A shape's member Fish couldn't type, as the refusal of its declaration, noting this use.
+  function untyped(shape: InterfaceType | ObjectType | undefined, name: string, at: Span): CompileError | undefined {
+    const why = shape?.kind === "interface" ? jsUntyped.get(shape)?.get(name) : undefined;
+    if (why && !why.note) why.note = { message: `'${name}' is used here`, start: at.start, end: at.end };
+    return why;
+  }
+
+  // A type a handle's member gives or takes, refused when it can't cross between Fish and JS.
+  function crossing(t: Type, what: string, at: Span): Type {
+    // A generic body's definition holds placeholders, which each instance checks as what they are.
+    if (holdsPart(t, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined)) return t;
+    const why = t === "void" ? undefined : uncrossable(t);
+    if (why) throw new CompileError(`${what} '${show(t)}', which can't cross between Fish and JS yet: ${why}`, at.start, at.end);
+    return t;
+  }
+
   // A JS handle's property, as its shape declares it, read from JS.
   function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     const shape = jsShape(t);
     const found = shape?.fields.find((f) => f.name === e.name);
     if (found) {
       jsUses.push(e);
-      return jsView(found.type);
+      return crossing(jsView(found.type), `property '${e.name}' of '${show(t)}' is a`, e);
     }
     const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
     if (method) throw new CompileError(`'${e.name}' is a method of '${show(t)}'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
-    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    throw untyped(shape, e.name, e) ?? new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
   // A JS handle's method, called with its declared parameters.
@@ -2975,30 +3020,35 @@ export function expressions(ctx: Context) {
     const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
     if (!method) {
       const field = shape?.fields.some((f) => f.name === callee.name);
-      throw new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
+      throw untyped(shape, callee.name, callee) ?? new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
     jsUses.push(e);
     // A generic one is typed for the call's type arguments, written or inferred.
     if (method.generic) {
       // An optional parameter left out is undefined, as JS gives it.
       while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ kind: "null", start: e.end, end: e.end });
+      jsCrossings.add(e);
       const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
-      return { type: typed.type === "void" ? "void" : jsView(typed.type), what: typed.what };
+      e.args.forEach((a) => crossing(types.get(a) ?? "void", `'${callee.name}' of '${show(t)}' is given a`, a));
+      return { type: crossing(typed.type === "void" ? "void" : jsView(typed.type), `'${callee.name}' of '${show(t)}' gives a`, e), what: typed.what };
     }
+    method.params.forEach((p) => crossing(p, `'${callee.name}' of '${show(t)}' takes a`, e));
     jsArgs(e, method.params);
-    return { type: method.returns === "void" ? "void" : jsView(method.returns), what: `'${callee.name}'` };
+    return { type: crossing(method.returns === "void" ? "void" : jsView(method.returns), `'${callee.name}' of '${show(t)}' gives a`, e), what: `'${callee.name}'` };
   }
 
   // The signature of a package's function a call takes: the first, in the order declared, whose
   // parameters the arguments pass for; a generic one is taken on the count of its arguments.
   function jsOverload(e: Call, first: Body): Body {
-    const signatures = [first, ...first.js!.overloads!.map((n) => byName.get(n)!)];
+    const signatures = [first, ...first.js!.overloads!.map((f) => jsBodies.get(f)!)];
     if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
     const given = e.args.map((a) => value(a));
+    // In a generic body's definition an argument may be a placeholder: each instance picks again.
+    const open = given.some((t) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined));
     const fitting = signatures.find((f) => {
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
       if (given.length < required || (given.length > f.params.length && !f.params.at(-1)?.rest)) return false;
-      if ((f.typeParams?.length ?? 0) > 0) return true;
+      if ((f.typeParams?.length ?? 0) > 0 || open) return true;
       return given.every((t, i) => {
         const p = f.params[Math.min(i, f.params.length - 1)]!;
         const declared = p.type ? resolveType(p.type) : blockType("JsValue");
@@ -3013,6 +3063,7 @@ export function expressions(ctx: Context) {
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
   function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[]) {
+    jsCrossings.add(e);
     const list = e.args ?? [];
     let required = params.length;
     while (required > 0 && isOption(params[required - 1]!)) required--;
@@ -3040,7 +3091,9 @@ export function expressions(ctx: Context) {
   function jsNew(e: Extract<Expr, { kind: "new" }>, c: Interface): Type {
     if (c.typeParams.length > 0) throw unsupported("generic classes of a package", e);
     const constructor = c.jsClass!.constructors[0] ?? [];
-    jsArgs(e, jsParams(constructor));
+    const params = jsParams(constructor);
+    params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
+    jsArgs(e, params);
     jsUses.push(e);
     return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
@@ -3653,7 +3706,7 @@ export function expressions(ctx: Context) {
           const m = jsStatic(jsClass, e.name, e);
           if (m.kind !== "property") throw new CompileError(`'${e.name}' is a method of '${jsClass.name}'; call it`, e.start, e.end);
           const declared = m.type ? resolveType(m.type) : blockType("JsValue");
-          return jsView(m.optional ? unionType([declared, "null"]) : declared);
+          return crossing(jsView(m.optional ? unionType([declared, "null"]) : declared), `'${jsClass.name}.${e.name}' is a`, e);
         }
         if (isMath(e.object)) {
           if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError(`'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
@@ -4735,7 +4788,7 @@ export function expressions(ctx: Context) {
         const field = handle?.fields.find((f) => f.name === (target as { name: string }).name);
         if (field) {
           if (field.readonly) throw new CompileError(`'${field.name}' is read-only in its declaration`, target.start, target.end);
-          return field.type;
+          return crossing(field.type, `property '${field.name}' is a`, target);
         }
         const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
         throw new CompileError(through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
