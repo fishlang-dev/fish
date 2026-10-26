@@ -151,8 +151,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Whether the one thunk copying a Dyn that can't be copied is made.
   let uncopyable = false;
   const elementDrops = new Map<Type, string>();
-  // The functions JS calls a Fish callback through, by its type and where it was given.
+  // The functions JS calls a Fish callback through, by its type and where it was given, and the
+  // tasks settling the JS promises Fish futures are given to JS as.
   const callbacks = new Map<string, string>();
+  const settlers = new Map<string, [string, string]>();
   // Where a value going to JS is given, for a callback's panics to name.
   let jsSite: Expr | undefined;
   const vtables = new Map<string, string>();
@@ -1165,8 +1167,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const boxes = args.map((a, i) => {
       jsSite = a;
       const to = coercions.get(a);
-      // A callback is handed over to JS, which keeps it, as the stored callable it meets.
-      if (to !== undefined && holdsPart(to, isCallback)) return toJs(owned(a), to, optional(i) ? "undefined" : "null");
+      // A callback is handed over to JS, which keeps it, as the stored callable it meets, and a
+      // future as the stored Promise, which a task awaits.
+      if (to !== undefined && holdsPart(to, (t) => isCallback(t) || isPromised(t))) return toJs(owned(a), to, optional(i) ? "undefined" : "null");
       return toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null", coercions.get(a));
     });
     const argv = alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
@@ -1240,6 +1243,61 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
   }
 
+  // A stored Promise, which crosses into JS as a promise.
+  function isPromised(t: Type): boolean {
+    return typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined;
+  }
+
+  // The task settling a JS promise with what a stored Promise gives, given at `at`: its poll,
+  // awaiting the Promise and resolving the JS promise with its value made a JS value, and the
+  // drop of a frame never finished. The frame holds the Promise and the settling functions.
+  function jsSettler(type: DynType, at: Expr): [string, string] {
+    const key = `${keyOf(type)} ${at.start}`;
+    const made = settlers.get(key);
+    if (made) return made;
+    const n = settlers.size;
+    const names: [string, string] = [`@"fsh.js.settle.${n}"`, `@"fsh.js.settle.drop.${n}"`];
+    settlers.set(key, names);
+    const frame = `{ ${DYN}, ptr }`;
+    const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const [innerAt, settleAt, settle] = [temp(), temp(), temp()];
+    emit(`${innerAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 0`);
+    emit(`${settleAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
+    emit(`${settle} = load ptr, ptr ${settleAt}`);
+    const step = pollStep(type, innerAt, at);
+    startBlock(step.waiting);
+    emit("ret i32 0");
+    startBlock(step.failed);
+    emit("unreachable");
+    startBlock(step.ready);
+    const gives = promiseElement(type.of)!;
+    const v = step.value();
+    jsSite = at;
+    const box = gives === "void" || v === undefined ? temp() : toJs(v, gives, "null");
+    if (gives === "void" || v === undefined) emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 1)`);
+    emit(`call void @fsh_rt_js_settle(ptr ${settle}, ptr ${box})`);
+    if (v !== undefined && gives !== "void") dispose(v, gives);
+    const old = temp();
+    emit(`${old} = load ${DYN}, ptr ${innerAt}`);
+    dispose(old, type);
+    emit("ret i32 1");
+    out.push(`define internal i32 ${names[0]}(ptr %cx, ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const [promise, held] = [temp(), temp()];
+    emit(`${promise} = load ${DYN}, ptr %frame`);
+    dispose(promise, type);
+    const at1 = temp();
+    emit(`${at1} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
+    emit(`${held} = load ptr, ptr ${at1}`);
+    emit(`call void @fsh_rt_js_release(ptr ${held})`);
+    emit("ret void");
+    out.push(`define internal void ${names[1]}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    if (n === 0) out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes, jsSite } = saved);
+    return names;
+  }
+
   // The function JS calls a callback of this type through, given at `at`: what JS gives it read
   // as its parameters say, the callable called, and what it gives made a JS value. Called with a
   // count below zero, as JS's garbage collector drops the function, it drops the callable.
@@ -1306,6 +1364,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return v;
     }
     if (typeof type !== "string" && type.kind === "union") return eachMember(v, type, blockType("JsValue"), (part, m) => toJs(part, m, empty, declared));
+    // A Fish future as a JS promise, settled by a task that awaits it, spawned now.
+    if (isPromised(type)) {
+      const [settleAt, frame] = [alloca("ptr"), alloca(`{ ${DYN}, ptr }`)];
+      emit(`${box} = call ptr @fsh_rt_js_promise(ptr ${settleAt})`);
+      const [settle, innerAt, heldAt, task] = [temp(), temp(), temp(), temp()];
+      emit(`${settle} = load ptr, ptr ${settleAt}`);
+      emit(`${innerAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 0`);
+      emit(`store ${DYN} ${v}, ptr ${innerAt}`);
+      emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
+      emit(`store ptr ${settle}, ptr ${heldAt}`);
+      const [poll, drop] = jsSettler(type as DynType, jsSite!);
+      unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
+      emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
+      return box;
+    }
     // A callback as a JS function that owns it.
     if (isCallback(type)) {
       const [data, table] = [temp(), temp()];

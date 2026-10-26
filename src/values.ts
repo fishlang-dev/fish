@@ -3176,6 +3176,13 @@ export function expressions(ctx: Context) {
     jsGiven.add(a);
     // A callback given to JS is kept by JS, which may call it later from whichever task calls
     // into JS next, so what it holds goes with it to any thread.
+    // A future given to JS is a promise, running as a task from when it is given.
+    if (typeof given !== "string" && (given.kind === "future" || given.kind === "handle")) {
+      if (!ctx.async) throw new CompileError("a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function", a.start, a.end);
+      const blocker = unsent(given);
+      if (blocker) throw new CompileError(`a Promise given to JS runs as a task of its own, so it must own everything it uses; it holds a '${show(blocker)}'`, a.start, a.end);
+      return;
+    }
     if (typeof given !== "string" && (given.kind === "closure" || given.kind === "function" || given.kind === "dyn")) {
       const blocker = unsent(given);
       if (blocker) throw new CompileError(`a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${show(blocker)}'`, a.start, a.end);

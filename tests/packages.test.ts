@@ -51,6 +51,8 @@ export function keep(f) { kept = f; }
 export function fire(s) { return kept === null ? "none" : kept(s); }
 export function forget() { kept = null; }
 export function misuse(f) { return f("not a number"); }
+export async function plusOne(p) { const v = await p; return v + 1; }
+export function ignore(p) { return "ignored"; }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
 export function ov(b) { return { a: b ? "s" : 1 }; }
@@ -104,6 +106,8 @@ export declare function keep(f: (s: string) => string): void;
 export declare function fire(s: string): string;
 export declare function forget(): void;
 export declare function misuse(f: (n: number) => number): number;
+export declare function plusOne(p: Promise<number>): Promise<number>;
+export declare function ignore(p: Promise<void>): string;
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
@@ -390,4 +394,29 @@ test("a callback holding what isn't Send is refused, and one JS gives the wrong 
   const misused = run(`import { misuse } from "esm";\nfunction main() {\n  console.log(misuse((n) => n + 1));\n}\n`);
   expect(misused).toMatchObject({ stdout: "", exitCode: 101 });
   expect((misused as { stderr: string }).stderr).toStartWith("panicked at main.fsh:3:22:\na callback was given a string, where its declaration says 'number'\n");
+});
+
+test("a Fish future given to JS is a promise, running as a task from when it is given", () => {
+  const main = `import { plusOne, ignore } from "esm";
+async function seven(): Promise<f64> {
+  await sleep(5);
+  return 7;
+}
+async function done(): Promise<void> {
+  await sleep(5);
+  console.log("ran though ignored");
+}
+async function main(): Promise<void> throws JsError {
+  const n = await plusOne(seven());
+  console.log(n, ignore(done()));
+  await sleep(50);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "8 ignored\nran though ignored\n", stderr: "", exitCode: 0 });
+});
+
+test("a future is given to JS only inside an async function, and only one that can't throw", () => {
+  expect(run(`import { ignore } from "esm";\nasync function done(): Promise<void> {}\nfunction main() {\n  console.log(ignore(done()));\n}\n`)).toBe("main.fsh:4:22: error: a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function");
+  expect(run(`import { plusOne } from "esm";\nclass Bad { message: string = "b"; }\nasync function fails(): Promise<f64> throws Bad {\n  throw new Bad();\n}\nasync function main(): Promise<void> throws JsError {\n  const n = await plusOne(fails());\n}\n`)).toStartWith("main.fsh:7:27: error: a stored 'Promise<number>' can't throw yet");
 });

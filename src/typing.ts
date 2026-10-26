@@ -325,7 +325,12 @@ function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | u
         const fn = callableOf.get(t.of)!;
         return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
       }
-      return promiseElement(t.kind === "dyn" ? t.of : t) !== undefined ? "Promises crossing between Fish and JS aren't supported yet" : "Fish has no JS form for it";
+      {
+        // A Fish future given to JS is a promise of what it gives.
+        const promised = promiseElement(t.kind === "dyn" ? t.of : t);
+        if (promised === undefined) return "Fish has no JS form for it";
+        return t.kind === "dyn" ? (promised === "void" ? undefined : uncrossable(promised)) : "Promises crossing between Fish and JS aren't supported yet";
+      }
     default:
       return "Fish has no JS form for it";
   }
@@ -427,6 +432,7 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
     const fn = callableOf.get(t.of)!;
     return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].every((u) => jsConverts(u, within));
   }
+  if (t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of) === "void" || jsConverts(promiseElement(t.of)!, within);
   if (t.kind === "future") return leafOf.get(t)?.method === "jsAwait" && (t.gives === "void" || jsConverts(t.gives, within));
   const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
     : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
@@ -438,12 +444,12 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
 }
 
 // What a package's parameter takes: a function type, alone or as an Option, is a callback that
-// JS may keep, so a stored callable, owning what it uses.
+// JS may keep, so a stored callable, owning what it uses; a `Promise<T>` is a stored one, as the
+// task settling the JS promise owns it.
 export function jsTakes(t: Type): Type {
   if (typeof t === "string") return t;
-  if (t.kind === "function") return callableType(t);
   if (t.kind === "union") return unionType(t.members.map(jsTakes));
-  return t;
+  return stored(t);
 }
 
 // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to

@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -563,7 +563,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       }
       // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
       // A package's function parameter is a callback JS keeps, a stored callable, not a bound.
-      if (!f.accessor && (type.kind === "interface" || (type.kind === "function" && !f.js) || (type.kind === "regex" && type.any) || (type.kind === "object" && !type.tuple && concrete(type)))) {
+      if (!f.accessor && ((type.kind === "interface" && !(f.js && promiseElement(type) !== undefined)) || (type.kind === "function" && !f.js) || (type.kind === "regex" && type.any) || (type.kind === "object" && !type.tuple && concrete(type)))) {
         found!.set(i, type);
         if (written !== type) borrows.set(i, written as RefType);
       }

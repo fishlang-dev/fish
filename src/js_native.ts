@@ -642,4 +642,26 @@ static void fsh_js_end(void) {
   fsh_js_runtime = NULL;
   fsh_js_leave();
 }
+// A new JS promise, its resolving function boxed at settle.
+fsh_js *fsh_rt_js_promise(fsh_js **settle) {
+  JSContext *cx = fsh_js_enter();
+  JSValue functions[2];
+  JSValue promise = JS_NewPromiseCapability(cx, functions);
+  JS_FreeValue(cx, functions[1]);
+  *settle = fsh_js_box(functions[0]);
+  fsh_js_leave();
+  return fsh_js_box(promise);
+}
+
+// Resolves a JS promise with a value, giving up both boxes, then runs what that queued.
+void fsh_rt_js_settle(fsh_js *settle, fsh_js *value) {
+  JSContext *cx = fsh_js_enter();
+  JSValue v = JS_DupValue(cx, value->value);
+  JS_FreeValue(cx, JS_Call(cx, settle->value, JS_UNDEFINED, 1, &v));
+  JS_FreeValue(cx, v);
+  fsh_js_drop(cx, value);
+  fsh_js_drop(cx, settle);
+  fsh_js_settle(cx);
+  fsh_js_leave();
+}
 `;
