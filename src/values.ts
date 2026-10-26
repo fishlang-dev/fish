@@ -393,6 +393,8 @@ export function expressions(ctx: Context) {
   const fixedLiterals = new Map<Expr, FixedType>();
   // The place an assignment is checking as its target, while it does.
   let writing: Expr | undefined;
+  // The assignment an expression statement is, whose value nothing uses.
+  let statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
   const once = new WeakSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
@@ -617,7 +619,10 @@ export function expressions(ctx: Context) {
       const gives = awaited(e);
       if (gives !== "void") types.set(e, gives);
     }
-    else value(e);
+    else {
+      if (e.kind === "assign") statementAssign = e;
+      value(e);
+    }
   }
 
   // `match`: the subject is read once, then each arm's pattern is tried in order, binding names
@@ -3082,6 +3087,12 @@ export function expressions(ctx: Context) {
     const found = shape?.fields.find((f) => f.name === e.name);
     if (found) {
       jsMembers.add(e);
+      // A callback or a Promise goes to JS when written, but Fish has no reading of one back.
+      const kept = (u: Type) => typeof u !== "string" && u.kind === "dyn" && keptByJs(u);
+      if (writing !== e && holdsPart(found.type, kept)) {
+        const promise = holdsPart(found.type, (u) => kept(u) && promiseElement((u as DynType).of) !== undefined);
+        throw new CompileError(`reading property '${e.name}' of '${show(t)}' isn't supported yet: it holds a ${promise ? "Promise" : "function"}, which Fish can give JS but not read back`, e.start, e.end);
+      }
       return crossing(jsView(found.type), `property '${e.name}' of '${show(t)}' is a`, e);
     }
     const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
@@ -4170,7 +4181,11 @@ export function expressions(ctx: Context) {
           : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         // A handle's property is written in JS, with the value converted.
-        if (jsMembers.has(e.target)) givenToJs(e.value, assigned);
+        if (jsMembers.has(e.target)) {
+          givenToJs(e.value, assigned);
+          // What JS is given is JS's to keep, so nothing is left to be the assignment's value.
+          if (keptByJs(target) && statementAssign !== e) throw new CompileError(`a callback or a Promise written to property '${(e.target as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
+        }
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
         const narrow = local && narrowed(local);

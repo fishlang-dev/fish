@@ -6414,15 +6414,23 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // assignment's own value is what the property holds, a handle as the new JS value.
     if (jsMembers.has(e.target) && e.target.kind === "member") {
       const object = jsHandle(e.target.object);
-      const [v, type] = [jsOperand(e.value), types.get(e)!];
       const declared = jsShape(referent(valueType(e.target.object)))?.fields.find((f) => f.name === (e.target as Extract<Expr, { kind: "member" }>).name);
-      const box = toJs(v, types.get(e.value)!, declared?.optional ? "undefined" : "null");
+      const empty = declared?.optional ? "undefined" : "null";
+      // A callback or a future goes as the stored callable or Promise it meets, as an argument does.
+      const held = coercions.get(e.value) ?? types.get(e.value)!;
+      const kept = isCallback(held) || isPromised(held);
+      const type = types.get(e)!;
+      jsSite = e.value;
+      const v = kept ? owned(e.value) : jsOperand(e.value);
+      const box = toJs(v, kept ? held : types.get(e.value)!, empty);
       const handle = typeof type !== "string" && type.kind === "block";
       if (handle) {
         emit(`call void @fsh_rt_block_retain(ptr ${box})`);
         pending.push({ v: box, type });
       }
       unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${text(e.target.name)}, ptr ${box}, ptr ${panicAt(e)})`);
+      // A callback or a Promise is only written as a statement, whose value nothing reads.
+      if (kept) return "zeroinitializer";
       return handle ? box : convert(v, types.get(e.value)!, type);
     }
     const op = ASSIGNMENTS[e.op]!;

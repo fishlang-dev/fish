@@ -58,6 +58,7 @@ export function withOpts(o) { return o.cb(1); }
 export function deep(o) { return o.inner.v; }
 export function listed(o) { return o.list.length; }
 export function optional() { try { return require("not-installed-anywhere").x; } catch { return "caught"; } }
+export class Slot { constructor() { this.handler = (s) => s; this.done = Promise.resolve("none"); } fire(s) { return this.handler(s); } async settled() { return await this.done; } }
 export class Emitter { constructor() { this.handlers = []; } on(f) { this.handlers.push(f); } emit(s) { return this.handlers.map((f) => f(s)).join(","); } }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
@@ -120,6 +121,7 @@ export declare function deep(o: { inner: { v: number } }): number;
 export declare function listed(o: { list: string[] }): number;
 export declare function optional(): string;
 export declare class Emitter { on(f: (s: string) => string): void; emit(s: string): string; }
+export declare class Slot { handler: (s: string) => string; done: Promise<string>; fire(s: string): string; settled(): Promise<string>; }
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
@@ -483,6 +485,26 @@ async function main(): Promise<void> throws JsError {
 `;
   const dir = project(main);
   expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "x! amade1,A\nsoon\n", stderr: "", exitCode: 0 });
+});
+
+test("a callback or a Promise written to a handle's property goes to JS, and isn't read back", () => {
+  const main = `import { Slot } from "esm";
+async function later(): Promise<string> {
+  return "later";
+}
+async function main(): Promise<void> throws JsError {
+  const s = new Slot();
+  const tail = "?";
+  s.handler = (t) => t + tail;
+  s.done = later();
+  const settled = await s.settled();
+  console.log(s.fire("why"), settled);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "why? later\n", stderr: "", exitCode: 0 });
+  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = s.handler;\n}\n`)).toBe("main.fsh:4:13: error: reading property 'handler' of 'Slot' isn't supported yet: it holds a function, which Fish can give JS but not read back");
+  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`)).toBe("main.fsh:4:14: error: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own");
 });
 
 test("a callback inside an object given to JS waits", () => {
