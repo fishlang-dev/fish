@@ -1,4 +1,5 @@
-// The Math functions and constants, number parsing, and toFixed.
+// The Math functions and constants, number parsing, and toFixed. Math's functions are correctly
+// rounded, so these are the same on every platform: the double nearest the exact result.
 // case: math_float
 // expect: 2.5 3 2 3 2 2.5 1
 // expect: -2.5 -2 -3 -2 -2 2.5 -1
@@ -11,7 +12,7 @@
 // expect: -Infinity -Infinity -Infinity Infinity -Infinity
 // expect: 1.4142135623730951 3 1024 1.4142135623730951 2.718281828459045 1.00000000005e-10
 // expect: 2.302585092994046 9.999999999500001e-11 3 3
-// expect: 0.8414709848078965 0.5403023058681398 1.557407724654902 0.5235987755982988 1.0471975511965976 0.7853981633974483 2.356194490192345
+// expect: 0.8414709848078965 0.5403023058681398 1.5574077246549023 0.5235987755982989 1.0471975511965979 0.7853981633974483 2.356194490192345
 // expect: 1.1752011936438014 1.5430806348152437 0.7615941559557649 5
 // expect: 3.141592653589793 2.718281828459045 0.6931471805599453 2.302585092994046 1.4426950408889634 0.4342944819032518 1.4142135623730951 0.7071067811865476
 // expect: 7 -1 0 10 -7 200 7
@@ -48,7 +49,7 @@ function main() {
 // expect: -Infinity -Infinity -Infinity Infinity -Infinity
 // expect: 1.4142135623730951 3 1024 1.4142135623730951 2.718281828459045 1.00000000005e-10
 // expect: 2.302585092994046 9.999999999500001e-11 3 3
-// expect: 0.8414709848078965 0.5403023058681398 1.557407724654902 0.5235987755982988 1.0471975511965976 0.7853981633974483 2.356194490192345
+// expect: 0.8414709848078965 0.5403023058681398 1.5574077246549023 0.5235987755982989 1.0471975511965979 0.7853981633974483 2.356194490192345
 // expect: 1.1752011936438014 1.5430806348152437 0.7615941559557649 5
 // expect: 3.141592653589793 2.718281828459045 0.6931471805599453 2.302585092994046 1.4426950408889634 0.4342944819032518 1.4142135623730951 0.7071067811865476
 // expect: 7 -1 0 10 -7 200 7
@@ -71,6 +72,29 @@ function main() {
   console.log(Math.max(f, 2), Math.min(f, -1), Math.max(1, 2, 3), Math.min(0.5, 0.25));
   console.log(1 / Math.min(0, -0.0), 1 / Math.max(-0.0, 0), Math.max(1, 0.0 / 0.0), Math.min(0.0 / 0.0, 1), 1 / Math.sign(-0.0), Math.sign(0.0 / 0.0));
   console.log(Math.sqrt(-1), Math.log(0), 1 / Math.round(-0.4));
+}
+// case: math_correctly_rounded
+// Inputs where glibc, macOS's libm or V8's fdlibm give a neighbour of the nearest double.
+// expect: 1.3200061217959123 -0.7990214786596138 -0.2218487496163564 1.4596031111569496 0.18232155679395465
+// expect: 0.201336002541094 1.0810723718384547 0.6043677771171635 0.09983407889920756 1.0469679150031885
+function main() {
+  console.log(Math.cbrt(2.3), Math.sin(29.2), Math.log10(0.6), Math.expm1(0.9), Math.log1p(0.2));
+  console.log(Math.sinh(0.2), Math.cosh(0.4), Math.tanh(0.7), Math.asinh(0.1), Math.acosh(1.6));
+}
+// case: math_pow_js
+// Where JavaScript's pow differs from C's: a NaN exponent, or a base of 1 or -1 to an infinite
+// power, gives NaN, not 1. `**` is the same function.
+// expect: NaN NaN NaN 1 1024 1.4142135623730951
+// expect: NaN NaN 1.4142135623730951 2.755676
+function main() {
+  const nan = 0.0 / 0.0;
+  const inf = 1 / 0.0;
+  console.log(Math.pow(1, nan), Math.pow(1, inf), Math.pow(-1, -inf), Math.pow(nan, 0), Math.pow(2, 10), Math.pow(2, 0.5));
+  const one = 1.0;
+  const half = 0.5;
+  const x: f32 = 1.5;
+  const y: f32 = 2.5;
+  console.log(one ** nan, (-one) ** inf, 2.0 ** half, x ** y);
 }
 // case: math_f32_and_shadowing
 // expect: 2.5 1.5 -2.5 -1

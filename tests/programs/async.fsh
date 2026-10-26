@@ -842,9 +842,9 @@ async function nap(ms: i64): Promise<i64> {
 }
 
 async function main() {
-  const c = spawn(after(150, "third" + 3));
-  const a = spawn(after(50, "first" + 1));
-  const b = spawn(after(100, "second" + 2));
+  const c = spawn(after(500, "third" + 3));
+  const a = spawn(after(100, "first" + 1));
+  const b = spawn(after(300, "second" + 2));
   const ra = await a;
   const rb = await b;
   const rc = await c;
@@ -996,7 +996,7 @@ async function save(n: i64) {
 async function main() {
   save(1);
 }
-// error: this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'
+// error: this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await', or wrap the call in 'spawn(...)' for fire-and-forget
 // case: async_wrong_return_type
 async function one(): i64 {
   return 1;

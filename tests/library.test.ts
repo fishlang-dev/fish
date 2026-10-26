@@ -92,20 +92,24 @@ function run(dir: string, ...args: string[]) {
 
 const EXPECTED = "42 14 1 0 3.00 -3\n9 9 9 0 42\nhello from fish1\n";
 
+// A test that builds a library, links a C program to it and runs it spawns several compilers,
+// which on a busy CI runner can take longer than bun's 5 seconds.
+const BUILDS = 30_000;
+
 for (const kind of ["static", "shared"] as const) {
   test(`a C program calls a ${kind} library's exports`, () => {
     const result = run(library(kind));
     expect(result.stdout.toString()).toBe(EXPECTED);
     expect(result.stderr.toString()).toBe("");
     expect(result.exitCode).toBe(0);
-  });
+  }, BUILDS);
 
   for (const panic of ["unwind", "abort"] as const) {
     test(`a panic in a ${kind} library's export aborts instead of unwinding into C, built to ${panic}`, () => {
       const result = run(library(kind, panic), "explode");
       expect(result.stderr.toString()).toContain("index out of bounds");
       expect(result.signalCode).toBe("SIGABRT");
-    });
+    }, BUILDS);
   }
 }
 
@@ -119,7 +123,7 @@ test("the header declares each export in C's types", () => {
   expect(header).toContain("void greet(void);");
   expect(header).toContain('extern "C" {');
   expect(header).not.toContain("square");
-});
+}, BUILDS);
 
 test("two Fish libraries link into one C program, from C and C++", () => {
   const dir = mkdtempSync(join(tmp, "two-"));
@@ -137,7 +141,7 @@ test("two Fish libraries link into one C program, from C and C++", () => {
     if (built.exitCode !== 0) throw new Error(built.stderr.toString());
     expect(Bun.spawnSync([join(dir, "two")]).stdout.toString()).toBe("2 100 7\n");
   }
-});
+}, BUILDS);
 
 // What a library can't export to C, and why.
 for (const [src, message] of [

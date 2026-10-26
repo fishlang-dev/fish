@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { JS_NATIVE } from "../src/js_native.ts";
 import { compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
 import { NATIVE } from "../src/native.ts";
+import { mathObjects } from "../src/mathlib.ts";
 
 // Builds the program at `file` with the runtime, the engine and the program all under
 // AddressSanitizer, and runs it reporting leaks. ASan instruments only IR functions marked for
@@ -16,7 +17,7 @@ export function sanitized(file: string, src: string) {
   const [ll, c, out] = [`${file}.ll`, `${file}.c`, `${file}.out`];
   writeFileSync(ll, ir);
   writeFileSync(c, `${NATIVE}\n${JS_NATIVE}`);
-  const built = Bun.spawnSync(["clang", "-w", "-g", "-funwind-tables", "-fsanitize=address", "-x", "ir", ll, "-x", "c", c, "-I", ENGINE, ...ENGINE_SOURCES, "-o", out, "-lm", "-pthread"]);
+  const built = Bun.spawnSync(["clang", "-w", "-g", "-funwind-tables", "-fsanitize=address", "-x", "ir", ll, "-x", "c", c, "-I", ENGINE, ...ENGINE_SOURCES, "-x", "none", ...mathObjects(), "-o", out, "-lm", "-pthread"]);
   expect(built.stderr.toString()).toBe("");
   const run = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
   return { stdout: run.stdout.toString(), stderr: run.stderr.toString(), exitCode: run.exitCode };

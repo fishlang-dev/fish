@@ -661,3 +661,6 @@ static const uint32_t fsh_case_ignorable[][2] = {
 0x1e8d6},{0x1e944,0x1e94b},{0x1f3fb,0x1f3ff},{0xe0001,0xe0001},{0xe0020,0xe007f},{0xe0100,0xe01ef}
 };
 `;
+
+// The Unicode version of the engine the tables were made from.
+export const CASEMAP_UNICODE = "17.0";

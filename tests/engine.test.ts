@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,9 @@ import { CompileError } from "../src/diag.ts";
 import { buildAsync, callsEngine, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
 import { allowEngineHook } from "../src/modules.ts";
 import { sanitized as sanitize } from "./sanitized.ts";
+
+// Each test builds a program with the JS engine, whose sources take several seconds to compile.
+setDefaultTimeout(30_000);
 
 const dir = mkdtempSync(join(tmpdir(), "fish-engine-"));
 beforeAll(() => allowEngineHook(true));
