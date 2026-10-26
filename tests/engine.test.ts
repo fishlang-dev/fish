@@ -64,26 +64,93 @@ async function main() {
 }
 `;
 
-// Handles copied, held by tasks on other threads and dropped, with the runtime, the engine and the
-// program all under AddressSanitizer, and every box freed.
-test("JS handles are counted, sent and freed", () => {
-  const file = join(dir, "handles.fsh");
-  writeFileSync(file, HANDLES);
-  // ASan instruments only IR functions marked for it, and crashes on the empty struct accesses
-  // the IR makes, which touch nothing.
-  const ir = compile(HANDLES, file)
+// Builds a program with the runtime, the engine and the program all under AddressSanitizer, and
+// runs it reporting leaks. ASan instruments only IR functions marked for it, and crashes on the
+// empty struct accesses the IR makes, which touch nothing.
+function sanitized(name: string, src: string) {
+  const file = join(dir, `${name}.fsh`);
+  writeFileSync(file, src);
+  const ir = compile(src, file)
     .replaceAll(" uwtable ", " uwtable sanitize_address ")
     .replace(/^( *%[^ ]+) = load \{\}, ptr .*$/gm, "$1 = select i1 true, {} zeroinitializer, {} zeroinitializer")
     .replace(/^ *store \{\} .*$/gm, "");
-  const [ll, c, out] = [join(dir, "handles.ll"), join(dir, "handles.c"), join(dir, "handles")];
+  const [ll, c, out] = [join(dir, `${name}.ll`), join(dir, `${name}.c`), join(dir, name)];
   writeFileSync(ll, ir);
   writeFileSync(c, `${NATIVE}\n${JS_NATIVE}`);
   const built = Bun.spawnSync(["clang", "-w", "-g", "-funwind-tables", "-fsanitize=address", "-x", "ir", ll, "-x", "c", c, "-I", ENGINE, ...ENGINE_SOURCES, "-o", out, "-lm", "-pthread"]);
   expect(built.stderr.toString()).toBe("");
   const run = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
-  expect(run.stderr.toString()).toBe("");
-  expect(run.stdout.toString()).toBe("2\ndone\n");
-  expect(run.exitCode).toBe(0);
+  return { stdout: run.stdout.toString(), stderr: run.stderr.toString(), exitCode: run.exitCode };
+}
+
+// Handles copied, held by tasks on other threads and dropped, and every box freed.
+test("JS handles are counted, sent and freed", () => {
+  expect(sanitized("handles", HANDLES)).toEqual({ stdout: "2\ndone\n", stderr: "", exitCode: 0 });
+});
+
+const NARROWING = `import { evaluate } from "fish:engine";
+
+function describe(v: JsValue): string {
+  if (typeof v === "string") return \`a string, \${v}, of length \${v.length}\`;
+  if (typeof v === "number") return \`a number, \${v + 0.5}\`;
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "function") return "a function";
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  return "an object";
+}
+
+function empty(v: Ref<JsValue>): boolean {
+  return v === null || v === undefined;
+}
+
+function main() {
+  const o = evaluate("export default { name: 'fish', n: 2, ok: true, list: [10, 'x'], f() {}, none: null, big: 1n };");
+  for (const key of ["name", "n", "ok", "f", "missing", "none", "big"]) console.log(describe(o.get(key)));
+  const list = o.get("list");
+  console.log(describe(list.at(0)), describe(list.at(1)), describe(list.at(5)));
+  console.log(o.has("name"), o.has("zzz"), list.has("length"), empty(o.get("none")), empty(list));
+  const s = o.get("name");
+  if (typeof s !== "string") return;
+  const kept = s;
+  const read = () => s;
+  console.log(kept + read(), { s: s }.s);
+}
+`;
+
+// typeof reads a string, number or boolean out of JS where it narrows, and the accessors read
+// objects and arrays, each value read freed.
+test("JsValues are narrowed and read", () => {
+  expect(sanitized("narrowing", NARROWING)).toEqual({
+    stdout: "a string, fish, of length 4\na number, 2.5\ntrue\na function\nundefined\nnull\nan object\na number, 10.5 a string, x, of length 1 undefined\ntrue false true true false\nfishfish fish\n",
+    stderr: "",
+    exitCode: 0,
+  });
+});
+
+// Reading through undefined throws in JS, which is a panic here.
+test("reading a property of undefined panics", async () => {
+  const file = join(dir, "undefined.fsh");
+  writeFileSync(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default undefined;");\n  const w = v.get("x");\n}\n`);
+  await buildAsync(file, `${file}.out`);
+  const run = Bun.spawnSync([`${file}.out`]);
+  expect(run.stderr.toString()).toBe(`panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\n`);
+  expect(run.exitCode).toBe(101);
+});
+
+// What a JsValue refuses, each naming what to write instead.
+test.each([
+  ["const v = evaluate(''); console.log(v.a);", "a 'JsValue' could be anything, as an 'unknown' could, so its properties are read with 'get': 'v.get(\"a\")'"],
+  ["const v = evaluate(''); const x = v[0];", "a 'JsValue' could be anything, as an 'unknown' could, so its elements are read with 'at': 'v.at(i)'"],
+  ["const v = evaluate(''); v.push(1);", "a 'JsValue' has no method 'push': its own are 'get', 'at' and 'has', and it is narrowed with 'typeof' to read it"],
+  ["const v = evaluate(''); const x = v.get(1);", "'get' takes a key, as a 'string', not 'i64'"],
+  ["const v = evaluate(''); const x = v.at();", "'at' takes an index, as an 'i64'"],
+  ["const v = evaluate(''); const x = typeof v === 'nope';", "'typeof' can only be compared with \"number\", \"boolean\", \"string\", \"object\", \"undefined\", \"function\", \"bigint\", \"symbol\" here"],
+  ["const v = evaluate(''); if (typeof v === 'string') { const o = { v }; }", "'v' is read out of JS as a 'string' here; write 'v: v'"],
+])("refused: %s", (body, message) => {
+  const [file, src] = [join(dir, `refused-${Bun.hash(body)}.fsh`), `import { evaluate } from "fish:engine";\nfunction main() { ${body} }\n`];
+  writeFileSync(file, src);
+  expect(() => compile(src, file)).toThrow(message);
 });
 
 // A throw while a module runs, or one that never parses, rejects or never settles, is a panic.

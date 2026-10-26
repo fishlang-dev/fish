@@ -1,7 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -101,7 +101,14 @@ export function conversions(b: Slots) {
     if (kind) {
       const [v, type] = [value(kind.operand), typeOf(kind.operand)];
       const name = (kind.name as { value: string }).value;
-      result = holdsWhere(v, type, (m) => category(m) === name);
+      const through = typeof type !== "string" && type.kind === "ref" && isPlainJs(type.to);
+      if (isPlainJs(type) || through) {
+        const [box, found] = [through ? temp() : v, temp()];
+        if (through) emit(`${box} = load ptr, ptr ${v}`);
+        emit(`${found} = call i32 @fsh_rt_js_typeof(ptr ${box}, ptr ${b.text(name)})`);
+        result = temp();
+        emit(`${result} = icmp ne i32 ${found}, 0`);
+      } else result = holdsWhere(v, type, (m) => category(m) === name);
     } else {
       const [left, right] = [typeOf(e.left), typeOf(e.right)];
       const unionLeft = typeof left !== "string" && left.kind === "union";

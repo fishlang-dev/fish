@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -19,7 +19,7 @@ import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
-import { kindTests, literalValue, type Facts, type Guard } from "./narrow.ts";
+import { isEmpty, kindTests, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -350,6 +350,10 @@ export const jsCalledAt = new WeakMap<object, Expr>();
 export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerClear">();
 // The test hook's `jsEvaluate(source)` calls, each running a JS module.
 export const jsEvaluations = new WeakSet<Expr>();
+// The `v === null` and `v === undefined` tests of a JsValue: what is tested, and for which.
+export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
+// The `get`, `at` and `has` calls on a JsValue.
+export const jsAccessors = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -3047,6 +3051,7 @@ export function expressions(ctx: Context) {
 
   // A JS handle's property, as its shape declares it, read from JS.
   function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
+    if (t.of === "void") throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so its properties are read with 'get': '${placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
     const shape = jsShape(t);
     const found = shape?.fields.find((f) => f.name === e.name);
     if (found) {
@@ -3058,8 +3063,24 @@ export function expressions(ctx: Context) {
     throw untyped(shape, e.name, e) ?? new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
+  // `v.get(key)` and `v.at(i)` read a property or an element of a JsValue, and `v.has(key)` tests
+  // for one.
+  function jsAccessor(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const name = callee.name;
+    const takes = ({ get: "string", has: "string", at: "i64" } as Record<string, Type>)[name];
+    if (!takes) throw new CompileError(`a 'JsValue' has no method '${name}': its own are 'get', 'at' and 'has', and it is narrowed with 'typeof' to read it`, callee.start, callee.end);
+    const what = takes === "i64" ? "an index, as an 'i64'" : "a key, as a 'string'";
+    if (e.args.length !== 1) throw new CompileError(`'${name}' takes ${what}`, e.start, e.end);
+    expect(e.args[0]!, takes);
+    const given = value(e.args[0]!);
+    coerce(e.args[0]!, given, takes, `'${name}' takes ${what}, not '${show(given)}'`);
+    jsAccessors.add(e);
+    return { type: name === "has" ? "boolean" : blockType("JsValue"), what: `'${name}'` };
+  }
+
   // A JS handle's method, called with its declared parameters.
   function jsMethodCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
+    if (t.of === "void") return jsAccessor(e, callee);
     const shape = jsShape(t);
     const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
     if (!method) {
@@ -3723,7 +3744,14 @@ export function expressions(ctx: Context) {
         if (ctx.sharing && local.param && !objects.has(e) && interiorMutable(held)) {
           throw new CompileError(`inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
         }
-        return narrowed(local) ?? local.type;
+        const read = narrowed(local);
+        // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
+        // each time; one narrowed to several stays a JsValue.
+        if (isPlainJs(local.type)) {
+          if (read !== "string" && read !== "f64" && read !== "boolean") return local.type;
+          ctx.copiesOut.add(e);
+        }
+        return read ?? local.type;
       }
       // Its literal type, which a string takes it as.
       case "string":
@@ -3744,6 +3772,7 @@ export function expressions(ctx: Context) {
           return unfolded(object.element);
         }
         const array = isArray(object);
+        if (isPlainJs(object)) throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so its elements are read with 'at': '${placeText(e.object)}.at(i)'`, e.start, e.end);
         if (!stringLike(object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
         if (array && object !== through) coercions.set(e.object, object);
@@ -4131,7 +4160,7 @@ export function expressions(ctx: Context) {
           return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = typeofComparison(e, unions) ?? equality(e) ?? unionComparison(e, unions, adapt);
+          const special = jsEmpty(e) ?? typeofComparison(e, unions) ?? equality(e) ?? unionComparison(e, unions, adapt);
           if (special) return special;
         }
         if (e.op === "instanceof") return instanceofCheck(e, unions);
@@ -4289,6 +4318,22 @@ export function expressions(ctx: Context) {
   // `===` between values holding objects, arrays or instances compares them by value, as Fish's
   // Eq does, where TypeScript compares objects by identity: every part has to compare, and the
   // wider value is compared as the narrower.
+  // `v === null` and `v === undefined` test a JsValue for JS's two empty values, which Fish's one
+  // empty value can't tell apart.
+  function jsEmpty(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
+    for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
+      if (!isEmpty(other, locals as Map<Expr, Local>)) continue;
+      const t = value(subject);
+      once.add(subject);
+      if (!isPlainJs(isRefType(t) ? t.to : t)) return undefined;
+      once.delete(subject);
+      value(other);
+      jsEmptyTests.set(e, [subject, other.kind === "null" ? "null" : "undefined"]);
+      return "boolean";
+    }
+    return undefined;
+  }
+
   function equality(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     const [left, right] = [value(e.left), value(e.right)];
     once.add(e.left);
@@ -4803,6 +4848,10 @@ export function expressions(ctx: Context) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
     locals.set(p, local);
+    if (isPlainJs(local.type)) {
+      if (["string", "f64", "boolean"].includes(narrowed(local) as string)) throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
+      return { name: p.name, type: local.type };
+    }
     return { name: p.name, type: widenEnum(narrowed(local) ?? local.type) };
   }
 

@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsEvaluations, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, jsAccessors, jsEmptyTests, jsEvaluations, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -1135,12 +1135,30 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return undefined;
   }
 
-  // A Semaphore's or Channel's method. Those that wait give a future holding a count on the
-  // block, and for `send` the value going in.
+  // A JsValue narrowed to a string, number or boolean, read out of JS.
+  function jsRead(box: string, as: Type): string {
+    const [read, v] = [temp(), temp()];
+    if (as === "string") return emit(`${read} = call ptr @fsh_rt_js_string(ptr ${box})`), read;
+    if (as === "f64") return emit(`${read} = call double @fsh_rt_js_number(ptr ${box})`), read;
+    emit(`${read} = call i32 @fsh_rt_js_boolean(ptr ${box})`);
+    emit(`${v} = icmp ne i32 ${read}, 0`);
+    return v;
+  }
+
+  // A Semaphore's or Channel's method, or a JsValue's. Those that wait give a future holding a
+  // count on the block, and for `send` the value going in.
   function blockCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
     const t = referent(valueType(callee.object)) as BlockType;
     const handle = temp();
     emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
+    if (jsAccessors.has(e)) {
+      const [made, has] = [temp(), temp()];
+      const at = callee.name === "at" ? `i64 ${value(e.args[0]!)}` : `ptr ${value(e.args[0]!)}`;
+      unwinding(`call ${callee.name === "has" ? "i32" : "ptr"} @fsh_rt_js_${callee.name}(ptr ${handle}, ${at}, ptr ${panicAt(e)})`, made);
+      if (callee.name !== "has") return made;
+      emit(`${has} = icmp ne i32 ${made}, 0`);
+      return has;
+    }
     if (callee.name === "abort") return void emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
     if (callee.name === "throwIfAborted") {
       const [aborted, yes, stop, fine] = [temp(), temp(), label(), label()];
@@ -5032,6 +5050,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return e.op === "+" || e.op === "??";
       case "member":
         return calls.has(e) || current.copiesOut.has(e) || computed.has(e);
+      // A JsValue read out of JS as a string.
+      case "ident":
+        return current.copiesOut.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
         return !indexes(valueType(e.object));
@@ -7313,6 +7334,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const local = resolved(e);
         const t = temp();
         emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
+        if (current.copiesOut.has(e)) return jsRead(t, types.get(e)!);
         // Where a check narrowed the variable, its value comes out of the union.
         return convert(t, local.type, types.get(e)!);
       }
@@ -7437,6 +7459,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (e.op === "??" && !isOption(lower(valueType(e.left)))) return owned(e.left);
         if (e.op === "??") return orElse(e);
         if (e.op === "+" && types.get(e) === "string") return concat(written(operand(e.left, [e.right]), valueType(e.left)), written(value(e.right), valueType(e.right)));
+        const empty = jsEmptyTests.get(e);
+        if (empty) {
+          const [found, same] = [temp(), temp()];
+          let box = value(empty[0]);
+          if (isRef(valueType(empty[0]))) {
+            const loaded = temp();
+            emit(`${loaded} = load ptr, ptr ${box}`);
+            box = loaded;
+          }
+          emit(`${found} = call i32 @fsh_rt_js_typeof(ptr ${box}, ptr ${text(empty[1])})`);
+          emit(`${same} = icmp ${e.op === "===" ? "ne" : "eq"} i32 ${found}, 0`);
+          return same;
+        }
         const first = (x: Expr) => (x === e.left ? operand(x, [e.right]) : value(x));
         const tested = test(e, first, valueType);
         if (tested) return tested;

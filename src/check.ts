@@ -680,7 +680,10 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const holdsJs = (plain: boolean) => (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue" && (plain || u.of !== "void"), true);
   const typed = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)].flatMap((i): Span[] => [
     ...[...i.types].filter(([, t]) => holdsJs(false)(t)).map(([x]) => x),
-    ...[...i.coercions].filter(([, t]) => holdsJs(true)(t)).map(([x]) => x),
+    // ponytail: a source already holding a JsValue is taken as lent or moved, not crossing; a
+    // source mixing a JsValue with a Fish value meant to become JS slips past; check conversions
+    // into JS part by part once Fish values cross
+    ...[...i.coercions].filter(([x, t]) => holdsJs(true)(t) && !holdsJs(true)(i.types.get(x as Expr) ?? "void")).map(([x]) => x),
     ...[...i.locals].filter(([, l]) => holdsJs(false)(l.type)).map(([x]) => x),
   ]);
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);

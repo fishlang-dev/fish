@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
+import { isNumeric, isPlainJs, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -31,8 +31,10 @@ export function ofKind(t: Type, kind: Kind): boolean {
   return kind === "Array" ? held.kind === "array" : held.kind === "map" && held.set === (kind === "Set");
 }
 
-// The names a `typeof` comparison can check for.
+// The names a `typeof` comparison can check for, and for a JsValue, all JS gives.
 export const TYPEOF = new Set(["number", "boolean", "string", "object", "undefined"]);
+export const JS_TYPEOF = new Set(["number", "boolean", "string", "object", "undefined", "function", "bigint", "symbol"]);
+const JS_READS: Record<string, Type> = { string: "string", number: "f64", boolean: "boolean" };
 
 // The operand of `typeof x === "name"` or `"name" !== typeof x`, and the name, if `e` is one.
 export function typeofTest(e: Expr): { operand: Expr; name: Expr } | undefined {
@@ -75,6 +77,14 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
   const test = typeofTest(e);
   if (test) {
     const name = test.name.kind === "string" ? test.name.value : undefined;
+    const local = test.operand.kind === "ident" ? locals.get(test.operand) : undefined;
+    // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
+    const read = name && JS_READS[name];
+    if (local && read && isPlainJs(local.type) && narrowable(local)) {
+      const facts: Guard = { yes: new Map([[local, read]]), no: new Map() };
+      return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
+    }
+    if (local && isPlainJs(local.type)) return nothing;
     return name ? split(test.operand, (m) => (category(m) === name ? "yes" : "no"), e.op === "===") : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {

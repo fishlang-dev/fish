@@ -429,7 +429,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       case "ident":
         if (instance.envs?.has(e)) return made(e);
-        return locals.has(e) ? use(e, consume) : undefined;
+        // A JsValue read out of JS gives a new value, leaving the JsValue as it was.
+        return locals.has(e) ? use(e, instance.copiesOut.has(e) ? undefined : consume) : undefined;
       case "super":
       case "this":
         free("this", e, "read");

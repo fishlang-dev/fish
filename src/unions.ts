@@ -1,8 +1,8 @@
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
-import { kindTests, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
+import { JS_TYPEOF, kindTests, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, fits, isNumeric, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
+import { baseOf, field, fits, isNumeric, isPlainJs, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
@@ -187,9 +187,10 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
 export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
   const test = typeofTest(e);
   if (!test) return undefined;
-  value(test.operand);
-  if (test.name.kind !== "string" || !TYPEOF.has(test.name.value)) {
-    throw new CompileError(`'typeof' can only be compared with ${[...TYPEOF].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
+  const tested = value(test.operand);
+  const names = isPlainJs(typeof tested !== "string" && tested.kind === "ref" ? tested.to : tested) ? JS_TYPEOF : TYPEOF;
+  if (test.name.kind !== "string" || !names.has(test.name.value)) {
+    throw new CompileError(`'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
   }
   return "boolean";
 }
