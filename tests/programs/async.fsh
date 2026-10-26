@@ -996,7 +996,7 @@ async function save(n: i64) {
 async function main() {
   save(1);
 }
-// error: this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'
+// error: this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await', or wrap the call in 'spawn(...)' for fire-and-forget
 // case: async_wrong_return_type
 async function one(): i64 {
   return 1;
