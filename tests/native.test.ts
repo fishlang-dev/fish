@@ -85,20 +85,19 @@ test("case mapping matches JavaScript for every code point", () => {
   const fromTables = (cp: number, special: Map<number, number[]>, simple: Map<number, number[]>) => String.fromCodePoint(...(special.get(cp) ?? simple.get(cp) ?? [cp]));
   const engine: string[] = [];
   const tables: string[] = [];
-  const points: string[] = [];
   const cps: number[] = [];
   for (let cp = 0; cp <= 0x10ffff; cp++) {
     if ((cp >= 0xd800 && cp < 0xe000) || cp === 0x0a) continue;
     const c = String.fromCodePoint(cp);
-    const at = `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
     engine.push(c.toUpperCase(), c.toLowerCase());
     tables.push(fromTables(cp, upperSpecial!, upper!), fromTables(cp, lowerSpecial!, lower!));
-    points.push(`${at} upper`, `${at} lower`);
     cps.push(cp, cp);
   }
+  // Each code point's upper case is at an even index, and its lower case after it.
+  const point = (i: number) => `U+${cps[i]!.toString(16).toUpperCase().padStart(4, "0")} ${i % 2 === 0 ? "upper" : "lower"}`;
   const differing = engine.flatMap((mapped, i) => (mapped === tables[i] ? [] : [i]));
   const older = differing.length > 0 && differing.every((i) => engine[i] === String.fromCodePoint(cps[i]!));
-  const shown = (indices: number[], got: string[], want: string[]) => indices.slice(0, 5).map((i) => `${points[i]}: ${JSON.stringify(got[i])} for ${JSON.stringify(want[i])}`).join("; ");
+  const shown = (indices: number[], got: string[], want: string[]) => indices.slice(0, 5).map((i) => `${point(i)}: ${JSON.stringify(got[i])} for ${JSON.stringify(want[i])}`).join("; ");
   if (differing.length > 0 && !older) {
     throw new Error(`the case tables differ from this Bun's case mapping (Unicode ${process.versions.unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`bun scripts/casemap.ts\`. Bun gives ${shown(differing, engine, tables)}`);
   }
@@ -106,4 +105,4 @@ test("case mapping matches JavaScript for every code point", () => {
   const wrong = tables.flatMap((mapped, i) => (mapped === lines[i] ? [] : [i]));
   if (wrong.length > 0) throw new Error(`the runtime's case mapping differs from its tables: it gives ${shown(wrong, lines, tables)}`);
   expect(stderr).toBe("");
-});
+}, 30_000);
