@@ -96,7 +96,7 @@ type AstStmt =
   | { start: i64; end: i64; kind: "exportAssign"; value: AstExpr }
   | { start: i64; end: i64; kind: "exportAsNamespace"; name: string }
   | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[]; js?: AstJsName }
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] } }
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] }; jsSource?: AstStmt }
   | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: AstJsName }
   | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[]; kind: "class" };
 type AstTupleElement =
@@ -159,7 +159,7 @@ type AstTypeParam =
 type AstTypeAlias =
   | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[]; js?: AstJsName };
 type AstInterface =
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] } };
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] }; jsSource?: AstStmt };
 type AstJsName =
   | { module: string; name: string; const?: true; overloads?: AstFunc[] };
 type AstFunc =

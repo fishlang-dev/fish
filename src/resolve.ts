@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -78,7 +78,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   const recursives = new Map<string, RecursiveType>();
   const recursiveAliases = new Map<RecursiveType, TypeAlias>();
-  const traits = new Map<Interface, Map<string, InterfaceType>>();
+  const traits = new Map<object, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
@@ -519,8 +519,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (args.length !== i.typeParams.length) {
       throw new CompileError(`interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
-    let byArgs = traits.get(i);
-    if (!byArgs) traits.set(i, byArgs = new Map());
+    // Every copy of a package's interface, one per import of it, is one type.
+    const owner = i.jsSource ?? i;
+    let byArgs = traits.get(owner);
+    if (!byArgs) traits.set(owner, byArgs = new Map());
     const key = args.map(keyOf).join(",");
     const found = byArgs.get(key);
     if (found) return found;
@@ -562,10 +564,12 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
           member1(m);
         } catch (e) {
           if (!(e instanceof CompileError)) throw e;
-          // A member without a name, as an index or call signature, is never reached by one.
-          if (!("name" in m) || typeof m.name !== "string") continue;
+          // A member without a name, as an index or call signature, is never reached by one, but
+          // still comes only with a value JS made.
+          const key = "name" in m && typeof m.name === "string" ? m.name : `[${m.kind}]`;
           if (!jsUntyped.has(t)) jsUntyped.set(t, new Map());
-          jsUntyped.get(t)!.set(m.name, e);
+          jsUntyped.get(t)!.set(key, e);
+          if ("optional" in m && m.optional) jsOptional.add(e);
         }
         continue;
       }

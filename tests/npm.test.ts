@@ -160,3 +160,17 @@ test("a namespace's members are read where the name isn't rebound, and a default
     "main.fsh": "import K from \"k\";\nfunction main() { const k = K.make(); const n: f64 = k.size; }\n",
   }))).toStartWith("running a package's code needs a JS engine");
 });
+
+test("a package imported twice is one set of types, and a borrowed handle passes as the handle", () => {
+  const R = "export interface R { with(o: R): R; put<T>(x: T): T; n: number }\nexport declare function f(): R;\nexport declare function g(r: R): void;\nexport declare function rs(): R[];\n";
+  expect(first(stops({
+    "node_modules/p/index.d.ts": R,
+    "lib.fsh": "import { f } from \"p\";\nexport function make() { return f(); }\n",
+    "main.fsh": "import { g, rs } from \"p\";\nimport { make } from \"./lib\";\nfunction main() { g(make()); for (const r of rs()) g(r); }\n",
+  }))).toStartWith("running a package's code needs a JS engine");
+  // An index signature, which Fish can't type, comes only with a value JS made.
+  expect(first(stops({
+    "node_modules/p/index.d.ts": "export interface D { [k: string]: number }\nexport declare function take(d: D): void;\n",
+    "main.fsh": "import { take } from \"p\";\nfunction main() { take({ a: \"x\" }); }\n",
+  }))).toBe("argument of type '{ a: string }' is not assignable to parameter of type 'D': its index signature comes only with a value JS made");
+});

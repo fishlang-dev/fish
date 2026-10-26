@@ -241,7 +241,9 @@ export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: Ty
 // A package's interface or class, from its `.d.ts`, sets `js`, its values JS handles; a class
 // also has `jsClass`, its constructors' parameters and its statics.
 export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[];
-  js?: JsName; jsClass?: { constructors: Param[][]; statics: TypeMember[] } };
+  js?: JsName; jsClass?: { constructors: Param[][]; statics: TypeMember[] };
+  // The declaration a package's interface was copied from, which every copy of it is typed by.
+  jsSource?: Stmt };
 
 // What a package's declaration names: the package and the name it exports it by. A const is
 // read as a value.

@@ -8,7 +8,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -359,6 +359,8 @@ export function expressions(ctx: Context) {
   const wanted = new Map<Expr, Type>();
   // The T a `new Promise` or `Promise.resolve` is awaited where a T is wanted for.
   const awaitedAs = new Map<Expr, Type>();
+  // The pairs of JS shapes being compared, each taken to fit while it is.
+  const comparing = new Map<object, Set<object>>();
   // Arrows checked to own what they capture, being stored.
   const owning = new WeakSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
@@ -2942,22 +2944,45 @@ export function expressions(ctx: Context) {
 
   // Why a value doesn't pass where a JS shape is wanted, said of the first field that fails.
   function missingField(from: Type, shape: InterfaceType | ObjectType): string | undefined {
+    // A borrowed handle is the handle, counted again where it goes.
+    if (isRefType(from) && jsShape(from.to)) from = from.to;
     const own = jsShape(from);
     if (own === shape) return undefined;
+    // Shapes that refer to themselves are taken to fit while they are compared.
+    const pair = comparing.get(own ?? shape);
+    if (pair?.has(shape)) return undefined;
+    if (!comparing.has(own ?? shape)) comparing.set(own ?? shape, new Set());
+    comparing.get(own ?? shape)!.add(shape);
+    try {
+      return shapeMisses(from, own, shape);
+    } finally {
+      comparing.get(own ?? shape)!.delete(shape);
+    }
+  }
+
+  function shapeMisses(from: Type, own: InterfaceType | ObjectType | undefined, shape: InterfaceType | ObjectType): string | undefined {
     const source = own ?? (typeof from !== "string" && (from.kind === "object" || from.kind === "class") && !isTuple(from) ? from : undefined);
     if (!source) return `a '${show(from)}' isn't an object`;
     if (!own && shape.kind === "interface" && shape.methods.length > 0) return `its methods come only with a value JS made`;
     // A handle of another shape has the methods this one declares, by name and types.
     if (own && shape.kind === "interface") {
       const methods = own.kind === "interface" ? own.methods : [];
-      const same = (a: Method, b: Method) => a.params.length === b.params.length && a.params.every((p, i) => lower(p) === lower(b.params[i]!)) && (b.returns === "void" || lower(a.returns) === lower(b.returns));
+      // A method fits as TypeScript's do: the wanted one's arguments pass for its parameters, an
+      // extra one of its own optional, and what it gives passes for what is wanted; a generic
+      // one is matched by its parameters' count.
+      const same = (a: Method, b: Method) => {
+        if (a.params.length < b.params.length || a.params.slice(b.params.length).some((p) => !isOption(p))) return false;
+        if (a.generic || b.generic) return a.params.length === b.params.length;
+        return b.params.every((p, i) => passesJs(p, a.params[i]!)) && (b.returns === "void" || passesJs(a.returns, b.returns));
+      };
       const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
       if (lacking) return methods.some((n) => n.name === lacking.name) ? `method '${lacking.name}' takes or gives other types` : `property '${lacking.name}' is missing`;
     }
     // A member Fish couldn't type that the shape declares is one only a handle of it has.
-    const aside = shape.kind === "interface" ? [...(jsUntyped.get(shape)?.keys() ?? [])] : [];
+    const held = shape.kind === "interface" ? jsUntyped.get(shape) : undefined;
+    const aside = [...(held ?? [])].filter(([, why]) => !jsOptional.has(why)).map(([n]) => n);
     const unseen = aside.find((n) => own?.kind !== "interface" || !(jsUntyped.get(own)?.has(n) ?? false));
-    if (unseen !== undefined && own !== shape) return `property '${unseen}' is missing`;
+    if (unseen !== undefined) return unseen.startsWith("[") ? `its ${unseen === "[index]" ? "index" : "call"} signature comes only with a value JS made` : `property '${unseen}' is missing`;
     // A Fish class's private fields stay its own.
     const fields = source.kind === "class" ? source.fields.filter((g) => (g.access ?? "public") === "public") : source.fields;
     for (const f of shape.fields) {
@@ -2976,6 +3001,7 @@ export function expressions(ctx: Context) {
   // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
   // for it, inside unions and arrays too.
   function passesJs(from: Type, to: Type): boolean {
+    if (isRefType(from) && typeof from.to !== "string" && from.to.kind === "block" && from.to.which === "JsValue") from = from.to;
     if (fits(from, to)) return true;
     // An integer is a number in JS, as a literal in an object for one is written.
     // ponytail: past 2^53 an integer loses precision, as it would in JS; refuse if that matters
@@ -4400,6 +4426,8 @@ export function expressions(ctx: Context) {
     // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything, and
     // a Fish value of a shape's fields becomes a new JS object of that shape.
     if (typeof to !== "string" && to.kind === "block" && to.which === "JsValue") {
+      // A borrowed handle passes as the handle, counted again.
+      if (isRefType(type) && typeof type.to !== "string" && type.to.kind === "block" && type.to.which === "JsValue") type = type.to;
       const shape = jsShape(to);
       if (shape ? takesShape(type, shape) : uncrossable(type) === undefined) {
         coercions.set(e, to);

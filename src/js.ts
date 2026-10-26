@@ -34,12 +34,12 @@ export function jsDeclaration(declared: Declared, name: string, specifier: strin
         return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(structuredClone(x)) : [];
       }) as Interface[];
       merged.forEach(lowerTypes);
-      return Object.assign(d, { name, js, members: shapeMembers([...d.members, ...merged.flatMap((m) => m.members)]) });
+      return Object.assign(d, { name, js, jsSource: declared.at, members: shapeMembers([...d.members, ...merged.flatMap((m) => m.members)]) });
     }
     case "typeAlias":
       return Object.assign(d, { name, js });
     case "class":
-      return classShape(d, name, js);
+      return Object.assign(classShape(d, name, js), { jsSource: declared.at });
     default:
       throw new CompileError(`'${name}' from '${specifier}' is ${KINDS[d.kind] ?? "a declaration"}, which can't be imported from a package yet`, at.start, at.end);
   }

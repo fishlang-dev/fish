@@ -317,6 +317,8 @@ export function uncrossable(t: Type): string | undefined {
 
 // The members of a package's shapes Fish can't type, each with why: refused only where used.
 export const jsUntyped = new WeakMap<InterfaceType, Map<string, CompileError>>();
+// The refusals of members held aside that are optional, which a value may leave out.
+export const jsOptional = new WeakSet<CompileError>();
 // The same for a package's function a program imports but doesn't call.
 export const jsUncalled = new WeakMap<object, CompileError>();
 
