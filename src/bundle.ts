@@ -45,6 +45,8 @@ async function main(request: Request): Promise<Result> {
   const unbuilt = (log: BuildLog | undefined, otherwise: string): Result => {
     const r = owner(log?.position?.file ?? "");
     const said = (log?.message ?? otherwise).replace(/\s*Maybe you need to "bun install"\?$/, "");
+    const bun = /cannot import Bun builtin: "([^"]+)"/.exec(said)?.[1];
+    if (bun) return { index: r.index, message: `'${r.specifier}' needs Bun's own '${bun}' module, which a package's JS can't use in Fish yet` };
     return { index: r.index, message: `'${r.specifier}' has no JS Fish could bundle: ${said}` };
   };
   let built: Awaited<ReturnType<typeof Bun.build>>;
@@ -69,10 +71,11 @@ async function main(request: Request): Promise<Result> {
     return unbuilt((e as { errors?: BuildLog[] }).errors?.[0], String(e));
   }
   if (!built.success) return unbuilt(built.logs.find((l) => l.level === "error") as BuildLog | undefined, "the bundler couldn't build it");
-  // What the bundler left outside the bundle, building for Node, is Node's own modules.
+  // What the bundler left outside the bundle that Node has is one of Node's own modules; any
+  // other, like an optional require of a package that isn't installed, fails when it runs.
   const inputs = built.metafile?.inputs ?? {};
   const builtIns = Object.entries(inputs).flatMap(([file, input]) => (input as { imports: { path: string; external?: boolean }[] }).imports
-    .filter((i) => i.external).map((i) => ({ importer: resolve(file), name: i.path.replace(/^node:/, "") })));
+    .filter((i) => i.external && process.getBuiltinModule(i.path) !== undefined).map((i) => ({ importer: resolve(file), name: i.path.replace(/^node:/, "") })));
   if (builtIns.length > 0) return builtInUsed(request, builtIns[0]!, inputs, virtual);
   return { code: await built.outputs[0]!.text() };
 }
@@ -90,7 +93,8 @@ function builtInUsed(request: Request, used: { importer: string; name: string },
   const r = request.find((q) => reaches(virtual(q))) ?? request[0]!;
   const user = packageOf(used.importer);
   const through = user === undefined || r.specifier === user || r.specifier.startsWith(`${user}/`) ? "" : ` through '${user}'`;
-  return { index: r.index, message: `'${r.specifier}' needs Node's '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
+  const runtime = used.name === "bun" || used.name.startsWith("bun:") ? "Bun's own" : "Node's";
+  return { index: r.index, message: `'${r.specifier}' needs ${runtime} '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
 }
 
 if (import.meta.main) console.log(JSON.stringify(await main(JSON.parse(await Bun.stdin.text()) as Request)));

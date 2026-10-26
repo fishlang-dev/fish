@@ -1438,7 +1438,7 @@ export function expressions(ctx: Context) {
       }
       // A parameter of a function that isn't generic has its type before the call; an arrow
       // given to a package is a callback JS keeps, so it owns what it captures.
-      if (a.kind !== "arrow" && known) expect(a, known[i]!);
+      if (a.kind !== "arrow" && known && known[i] !== undefined) expect(a, target.js ? jsTakes(known[i]!) : known[i]!);
       if (a.kind === "arrow" && known && target.js && known[i] !== undefined) expect(a, jsTakes(known[i]!));
       // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
       const node = target.params[i]?.type;
@@ -3043,7 +3043,9 @@ export function expressions(ctx: Context) {
     if (typeof to === "string") return false;
     if (to.kind === "union") return to.members.some((m) => passesJs(from, m));
     if (to.kind === "array") return typeof from !== "string" && from.kind === "array" && passesJs(from.element, to.element);
-    const shape = jsShape(to);
+    // A nested object becomes a new JS object as the one holding it does, so it takes a Fish value
+    // of its shape the same way.
+    const shape = jsShape(to) ?? (to.kind === "object" && !to.tuple ? to : undefined);
     if (shape) return takesShape(from, shape);
     return to.kind === "block" && to.which === "JsValue" && uncrossable(from) === undefined;
   }
@@ -3176,6 +3178,8 @@ export function expressions(ctx: Context) {
   // A value given to JS, which the call or write converts: refused when it has no JS form.
   function givenToJs(a: Expr, given: Type) {
     jsGiven.add(a);
+    // A type parameter is what it stands for in this instance.
+    while (typeof given !== "string" && given.kind === "param" && given.concrete !== undefined) given = given.concrete;
     // A callback given to JS is kept by JS, which may call it later from whichever task calls
     // into JS next, so what it holds goes with it to any thread.
     // A future given to JS is a promise, running as a task from when it is given.
@@ -3190,7 +3194,9 @@ export function expressions(ctx: Context) {
       if (blocker) throw new CompileError(`a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${show(blocker)}'`, a.start, a.end);
       return;
     }
-    // A callback or a future inside another value would be dropped by Fish as well as kept by JS.
+    // JS keeps a callback or a future, so one only borrowed here can't be given; one inside
+    // another value would be dropped by Fish as well as kept by JS.
+    if (isRefType(given) && keptByJs(given.to)) throw new CompileError("JS keeps a callback or a Promise given to it, so it is given owned, not borrowed; give it a clone, or take it owned", a.start, a.end);
     if (holdsPart(given, (u) => u !== given && keptByJs(u))) throw new CompileError("a callback or a Promise inside another value isn't supported yet; give it to JS on its own", a.start, a.end);
     const open = holdsPart(given, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined);
     if (!open && !jsConverts(given)) throw new CompileError(`a '${show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);

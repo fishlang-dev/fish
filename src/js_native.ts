@@ -628,6 +628,9 @@ typedef struct fsh_js_callback {
 } fsh_js_callback;
 
 static fsh_js_callback *fsh_js_callbacks = NULL;
+// Set while the engine is torn down, when the records stay listed until the runtime is freed, as
+// dropping one callable may free other callbacks' functions.
+static int32_t fsh_js_tearing = 0;
 
 // JS calling a Fish callback, with undefined for each parameter it left out.
 static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int magic, void *opaque) {
@@ -646,6 +649,8 @@ static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValue
 static void fsh_js_forget(void *opaque) {
   fsh_js_callback *c = opaque;
   if (!c->dropped) c->run(c->data, c->table, -1, NULL);
+  c->dropped = 1;
+  if (fsh_js_tearing) return;
   if (c->prev) c->prev->next = c->next;
   else fsh_js_callbacks = c->next;
   if (c->next) c->next->prev = c->prev;
@@ -673,6 +678,7 @@ static void fsh_js_end(void) {
   if (!fsh_js_runtime) return;
   JSContext *cx = fsh_js_enter();
   // The callables JS still holds let go of what they hold while the engine still runs.
+  fsh_js_tearing = 1;
   for (fsh_js_callback *c = fsh_js_callbacks; c; c = c->next) {
     if (c->dropped) continue;
     c->dropped = 1;
@@ -686,6 +692,11 @@ static void fsh_js_end(void) {
   JS_RunGC(fsh_js_runtime);
   JS_FreeRuntime(fsh_js_runtime);
   fsh_js_runtime = NULL;
+  while (fsh_js_callbacks) {
+    fsh_js_callback *next = fsh_js_callbacks->next;
+    fsh_rt_free(fsh_js_callbacks);
+    fsh_js_callbacks = next;
+  }
   fsh_js_leave();
 }
 // A new JS promise, its resolving function boxed at settle.

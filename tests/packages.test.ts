@@ -55,6 +55,8 @@ export async function plusOne(p) { const v = await p; return v + 1; }
 export function ignore(p) { return "ignored"; }
 export function never() { return new Promise(() => {}); }
 export function withOpts(o) { return o.cb(1); }
+export function deep(o) { return o.inner.v; }
+export function optional() { try { return require("not-installed-anywhere").x; } catch { return "caught"; } }
 export class Emitter { constructor() { this.handlers = []; } on(f) { this.handlers.push(f); } emit(s) { return this.handlers.map((f) => f(s)).join(","); } }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
@@ -113,6 +115,8 @@ export declare function plusOne(p: Promise<number>): Promise<number>;
 export declare function ignore(p: Promise<void>): string;
 export declare function never(): Promise<string>;
 export declare function withOpts(o: { cb: (x: number) => number }): number;
+export declare function deep(o: { inner: { v: number } }): number;
+export declare function optional(): string;
 export declare class Emitter { on(f: (s: string) => string): void; emit(s: string): string; }
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
@@ -459,4 +463,8 @@ async function main(): Promise<void> throws JsError {
 
 test("a callback inside an object given to JS waits", () => {
   expect(run(`import { withOpts } from "esm";\nfunction main() {\n  console.log(withOpts({ cb: (x) => x + 1 }));\n}\n`)).toStartWith("node_modules/esm/index.d.ts:");
+});
+
+test("a nested object given to JS takes numbers as JS does, and an optional require runs", () => {
+  expect(run(`import { deep, optional } from "esm";\nfunction main() {\n  console.log(deep({ inner: { v: 5 } }), optional());\n}\n`)).toEqual({ stdout: "5 caught\n", stderr: "", exitCode: 0 });
 });
