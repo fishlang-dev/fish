@@ -7,7 +7,7 @@ import { compile } from "../src/main.ts";
 
 // What stops a program that type-checks with a package's declarations: a form that can't run
 // yet, or a package with no JS to bundle, as these fixtures have only declarations.
-const TYPE_CHECKED = /(reading this package's const isn't supported yet|this call gives a package's function a value with no JS form yet|has no JS Fish could bundle|turning a Fish value into a 'JsValue' isn't supported yet)/;
+const TYPE_CHECKED = /(reading this package's const isn't supported yet|this call gives a package's function a value with no JS form yet|has no JS Fish could bundle|turning a Fish value into a JS value isn't supported yet)/;
 
 // Builds `main.fsh` in a project of these files, giving the compile error it stops at, with
 // any note, as fishc prints it.
@@ -134,7 +134,7 @@ export declare function format(d: string): string;
 const first = (out: string) => out.split("\n")[0]!.replace(/^.*error: /, "");
 
 test("a Fish value made a JsValue stops the program, and an import not called builds", () => {
-  expect(first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "function main() { const o: JsValue = 5; }\n" }))).toStartWith("turning a Fish value into a 'JsValue' isn't supported yet");
+  expect(first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "function main() { const o: JsValue = 5; }\n" }))).toStartWith("turning a Fish value into a JS value isn't supported yet");
   expect(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "import { f } from \"p\";\nfunction main() { console.log(\"hi\"); }\n" })).toBe("built");
 });
 

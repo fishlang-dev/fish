@@ -38,6 +38,10 @@ export function strings() { return ["a", 2]; }
 export function id(v) { return v; }
 export function maybeObj(b) { return b ? { count: 1, label: "m" } : null; }
 export function rb() { return 7; }
+export function sn(b) { return b ? ["a"] : [1, 2]; }
+export function at() { return ["t", 9]; }
+export function ov(b) { return { a: b ? "s" : 1 }; }
+export function nested(k) { return k === "n" ? null : { inner: k === "i" ? null : { v: 1 } }; }
 let made = 0;
 export class Box {
   constructor(size, name) { this.size = size; this.id = (name ?? "box") + (++made); }
@@ -76,6 +80,10 @@ export declare function strings(): string[];
 export declare function id<T>(v: T): T;
 export declare function maybeObj(b: boolean): Result | null;
 export declare function rb(): Result | boolean;
+export declare function sn(b: boolean): string[] | number[];
+export declare function at(): string[] | [string, number];
+export declare function ov(b: boolean): { a: string } | { a: number };
+export declare function nested(k: string): { inner: { v: number } | null } | null;
 export declare class Box {
   constructor(size: number, name?: string);
   size: number;
@@ -251,6 +259,25 @@ test("a result no member of its declared union takes panics", () => {
 });
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
-  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a 'JsValue' isn't supported yet");
+  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a JS value isn't supported yet");
   expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
+});
+
+test("a union's members of one JS kind are told apart by what they hold", () => {
+  const main = `import { sn, at, ov, nested } from "esm";
+function main() {
+  console.log(sn(true), sn(false), at(), ov(true), ov(false));
+  console.log(nested("n"), nested("i"), nested("x"));
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "[ 'a' ] [ 1, 2 ] [ 't', 9 ] { a: 's' } { a: 1 }\nnull { inner: null } { inner: { v: 1 } }\n", stderr: "", exitCode: 0 });
+});
+
+test("a generic Fish function forwards its type parameter to a package", () => {
+  expect(run(`import { id } from "esm";\nfunction g<T>(x: T): T {\n  return id(x);\n}\nfunction main() {\n  console.log(g("ok"), g(3));\n}\n`)).toEqual({ stdout: "ok 3\n", stderr: "", exitCode: 0 });
+});
+
+test("an empty value is undefined in a property written with ?, and null in one that isn't", () => {
+  expect(run(`import { describe } from "esm";\nfunction main() {\n  const deep: boolean | null = null;\n  console.log(describe({ name: "z", deep }));\n}\n`)).toEqual({ stdout: "z:?:2\n", stderr: "", exitCode: 0 });
 });

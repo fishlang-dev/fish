@@ -470,4 +470,31 @@ fsh_js *fsh_rt_js_new(fsh_js *made, int64_t argc, fsh_js **argv, const char *whe
   fsh_js_leave();
   return fsh_js_box(result);
 }
+// A property, by name, or an element, by index when name is NULL, read for a test: anything that
+// throws as it is read, or isn't there to read, is undefined.
+fsh_js *fsh_rt_js_peek(fsh_js *b, const char *name, int64_t index) {
+  JSContext *cx = fsh_js_enter();
+  JSValue v = JS_UNDEFINED;
+  if (JS_IsObject(b->value)) {
+    v = name ? JS_GetPropertyStr(cx, b->value, name) : JS_GetPropertyInt64(cx, b->value, index);
+    if (JS_IsException(v)) {
+      JS_FreeValue(cx, JS_GetException(cx));
+      v = JS_UNDEFINED;
+    }
+  }
+  fsh_js_leave();
+  return fsh_js_box(v);
+}
+
+// An array's length for a test, 0 where it can't be read.
+int64_t fsh_rt_js_count(fsh_js *b) {
+  JSContext *cx = fsh_js_enter();
+  int64_t length = 0;
+  if (JS_GetLength(cx, b->value, &length) < 0) {
+    JS_FreeValue(cx, JS_GetException(cx));
+    length = 0;
+  }
+  fsh_js_leave();
+  return length;
+}
 `;

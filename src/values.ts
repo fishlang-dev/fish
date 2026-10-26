@@ -4509,6 +4509,8 @@ export function expressions(ctx: Context) {
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
+    // An array literal takes the array of JS values it meets element by element, as any does.
+    if (e.kind === "array" && typeof to !== "string" && to.kind === "array" && holdsJs(to) && literalArray(e, type, to)) return;
     // An Option or array of JS values takes what each of its members would.
     if (typeof to !== "string" && to.kind !== "block" && holdsJs(to) && !fits(type, to) && passesJs(type, to)) {
       coercions.set(e, to);

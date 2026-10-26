@@ -399,6 +399,7 @@ export function jsConverts(t: Type): boolean {
   if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
   if (typeof t === "string") return false;
   if (t.kind === "ref") return jsConverts(t.to);
+  if (t.kind === "param") return t.concrete !== undefined && jsConverts(t.concrete);
   if (t.kind === "block") return t.which === "JsValue";
   if (t.kind === "union") return t.members.every(jsConverts);
   if (t.kind === "array" || t.kind === "fixed") return jsConverts(t.element);

@@ -170,7 +170,7 @@ test.each([
   ["const v = evaluate(''); const x = typeof v === 'nope';", "'typeof' can only be compared with \"number\", \"boolean\", \"string\", \"object\", \"undefined\", \"function\", \"bigint\", \"symbol\" here"],
   ["const v = evaluate(''); if (typeof v === 'string') { const o = { v }; }", "'v' is read out of JS as a 'string' here; write 'v: v'"],
   ["const v = evaluate(''); const u: JsValue | string = v; const s = typeof u === 'string';", "'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own"],
-  ["const v = evaluate(''); const xs: (JsValue | string)[] = [v, 's']; const ys: JsValue[] = xs;", "turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS"],
+  ["const v = evaluate(''); const xs: (JsValue | string)[] = [v, 's']; const ys: JsValue[] = xs;", "turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS"],
   ["const v = evaluate(''); if (typeof v === 'string') { const r: Ref<string> = v; }", "'r' would keep borrowing what 'v' gives here, which is read out of JS anew at each use"],
   ["const v = evaluate(''); v.x = 1;", "writing a JS value's properties isn't supported yet; a 'JsValue' is read with 'get'"],
   ["const v = evaluate(''); v[0] = 1;", "writing a JS value's elements isn't supported yet; a 'JsValue' is read with 'at'"],

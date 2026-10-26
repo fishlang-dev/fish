@@ -687,7 +687,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   if (unconverted) throw new CompileError("this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
   // A value given to JS becomes a JS value as the call or write converts it.
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
-  if (crossing) throw new CompileError("turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS", crossing.start, crossing.end);
+  if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
 
@@ -706,7 +706,8 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       return members.some((m) => !to.members.includes(m) && !js(m) && !others.some((o) => fits(m, o) && !intoJs(m, o)));
     }
     if (typeof from === "string") return false;
-    if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return intoJs(from.element, to.element);
+    // An array is never converted element by element where JS values are wanted.
+    if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return from.element !== "never" && (from.element !== to.element || intoJs(from.element, to.element));
     // A field the value leaves out is an absent optional one, which turns nothing into JS.
     if (to.kind === "object" && (from.kind === "object" || from.kind === "class")) return to.fields.some((f) => from.fields.some((g) => g.name === f.name && intoJs(g.type, f.type)));
     return false;
