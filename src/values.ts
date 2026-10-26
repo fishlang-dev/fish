@@ -3518,6 +3518,8 @@ export function expressions(ctx: Context) {
     const inner = holdsInterior(stored);
     if (inner) throw say(`can't clone ${inner === stored ? "" : "a value holding "}${article(inner.which)}, which is changed in place wherever it is shared; make a new one from what it holds`);
     if (holdsHandle(stored)) throw say("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself");
+    // Its value is given once, so a copy awaited after the first would find nothing to give.
+    if (holdsPart(stored, (u) => typeof u !== "string" && u.kind === "future" && u.name.startsWith("promise await"))) throw say("can't clone a Promise made with 'new Promise', or a value holding one: its value is given once, to one await; await it once and share the value");
     // Two mutable references to one thing can't be.
     if (holdsMut(type)) throw say("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing");
   }

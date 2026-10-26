@@ -331,3 +331,10 @@ async function main(): Promise<void> throws Error {
   const p = r.promise;
   const s = r;
 }
+// case: promise_new_clone
+// error: can't clone a Promise made with 'new Promise', or a value holding one: its value is given once, to one await; await it once and share the value
+async function main(): Promise<void> {
+  const p = new Promise<void>((resolve) => { resolve(); });
+  const q = p.clone();
+  await Promise.all([p, q]);
+}
