@@ -151,6 +151,12 @@ exports.unset = () => process.env.FISH_SHIM_SURELY_UNSET === undefined;
 exports.args = () => process.argv.slice(2).join(",");
 `,
   "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\n",
+  "node_modules/files/package.json": JSON.stringify({ name: "files", type: "module", main: "i.js", types: "i.d.ts" }),
+  "node_modules/files/i.js": `import { readFile, writeFile } from "node:fs/promises";
+export async function roundTrip(path, text) { await writeFile(path, text); const back = await readFile(path, "utf8"); const bytes = await readFile(path); return back + ":" + bytes.length + ":" + (bytes instanceof Uint8Array); }
+export async function missing(path) { try { await readFile(path); return "read"; } catch (e) { return e.code + " " + e.syscall; } }
+`,
+  "node_modules/files/i.d.ts": "export declare function roundTrip(path: string, text: string): Promise<string>;\nexport declare function missing(path: string): Promise<string>;\n",
   "node_modules/usescrypto/package.json": JSON.stringify({ name: "usescrypto", main: "i.js", types: "i.d.ts" }),
   "node_modules/usescrypto/i.js": "exports.id = require('crypto').randomUUID;\n",
   "node_modules/usescrypto/i.d.ts": "export declare function id(): string;\n",
@@ -496,4 +502,16 @@ function main() {
 `;
   expect(run(main, ["one", "two"])).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two\n", stderr: "", exitCode: 0 });
   expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
+});
+
+test("bundled JS's fs/promises reads and writes through Fish's blocking pool, a failure as Node's error", () => {
+  const dir = project("");
+  const main = `import { roundTrip, missing } from "files";
+async function main(): Promise<void> throws JsError {
+  const r = await roundTrip(${JSON.stringify(join(dir, "written.txt"))}, "héllo");
+  const m = await missing(${JSON.stringify(join(dir, "absent.txt"))});
+  console.log(r, m);
+}
+`;
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true ENOENT open\n", stderr: "", exitCode: 0 });
 });

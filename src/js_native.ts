@@ -775,8 +775,119 @@ static JSValue fsh_host_exit(JSContext *cx, JSValueConst self, int argc, JSValue
   return JS_UNDEFINED;
 }
 
+// fs/promises' readFile and writeFile: a job on Fish's blocking pool, polled by a task of its
+// own that settles the JS promise when the job is done, so JS isn't held while the file is read.
+// Without the async runtime running, the file is read or written at once.
+typedef struct {
+  fsh_str *path;
+  fsh_array bytes;
+  fsh_file_job *job;
+  JSValue settle[2];
+  int32_t op;
+  int32_t text;
+} fsh_js_file;
+
+// A file's failure as Node's fs gives it: an Error with its code, system call and path.
+static JSValue fsh_js_file_error(JSContext *cx, fsh_str **parts) {
+  JSValue error = JS_NewError(cx);
+  const char *names[] = {"message", "code", "syscall", "path"};
+  for (int i = 0; i < 4; i++) {
+    if (!parts[i]) continue;
+    JS_SetPropertyStr(cx, error, names[i], JS_NewStringLen(cx, parts[i]->bytes, parts[i]->length));
+    fsh_rt_str_release(parts[i]);
+  }
+  return error;
+}
+
+// Settles the promise with a finished job's outcome, 1 being done, and lets go of the file.
+static void fsh_js_file_settled(JSContext *cx, fsh_js_file *f, int32_t outcome, fsh_array *out, fsh_str **parts) {
+  JSValue v = JS_UNDEFINED;
+  if (outcome != 1) v = fsh_js_file_error(cx, parts);
+  else if (f->op == 0) v = f->text ? JS_NewStringLen(cx, out->data ? out->data : "", out->length) : JS_NewUint8ArrayCopy(cx, (const uint8_t *)out->data, out->length);
+  fsh_rt_free(out->data);
+  JS_FreeValue(cx, JS_Call(cx, f->settle[outcome == 1 ? 0 : 1], JS_UNDEFINED, 1, &v));
+  JS_FreeValue(cx, v);
+  JS_FreeValue(cx, f->settle[0]);
+  JS_FreeValue(cx, f->settle[1]);
+  fsh_rt_str_release(f->path);
+  fsh_rt_free(f->bytes.data);
+  fsh_js_settle(cx);
+}
+
+static int32_t fsh_js_file_poll(fsh_task *task, void *frame) {
+  fsh_js_file *f = frame;
+  fsh_array out = { 0 };
+  fsh_str *parts[4] = { 0 };
+  int32_t outcome = fsh_rt_file_poll(f->path, &f->bytes, &f->job, f->op, task, &out, parts);
+  if (outcome == 0) return 0;
+  JSContext *cx = fsh_js_enter();
+  fsh_js_file_settled(cx, f, outcome, &out, parts);
+  fsh_js_leave();
+  fsh_rt_file_job_release(f->job);
+  return 1;
+}
+
+// A job the runtime drops unfinished as the program ends.
+static void fsh_js_file_drop(void *frame) {
+  fsh_js_file *f = frame;
+  fsh_js_enter();
+  JS_FreeValueRT(fsh_js_runtime, f->settle[0]);
+  JS_FreeValueRT(fsh_js_runtime, f->settle[1]);
+  fsh_js_leave();
+  fsh_rt_str_release(f->path);
+  fsh_rt_free(f->bytes.data);
+  fsh_rt_file_job_release(f->job);
+}
+
+static void fsh_js_nothing(void *output) {}
+
+static JSValue fsh_host_file(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int op) {
+  fsh_js_file f = { 0 };
+  f.op = op;
+  size_t length = 0;
+  const char *path = argc > 0 ? JS_ToCStringLen(cx, &length, argv[0]) : NULL;
+  if (!path) return JS_ThrowTypeError(cx, "the path must be a string");
+  f.path = fsh_str_of(path, length);
+  JS_FreeCString(cx, path);
+  if (op == 0 && argc > 1) {
+    // "utf8", or { encoding: "utf8" }, reads text.
+    JSValue encoding = JS_IsObject(argv[1]) ? JS_GetPropertyStr(cx, argv[1], "encoding") : JS_DupValue(cx, argv[1]);
+    const char *name = JS_IsString(encoding) ? JS_ToCString(cx, encoding) : NULL;
+    f.text = name && (strcmp(name, "utf8") == 0 || strcmp(name, "utf-8") == 0);
+    JS_FreeCString(cx, name);
+    JS_FreeValue(cx, encoding);
+  }
+  if (op == 1) {
+    size_t size = 0;
+    const char *text = argc > 1 && JS_IsString(argv[1]) ? JS_ToCStringLen(cx, &size, argv[1]) : NULL;
+    const uint8_t *bytes = text ? (const uint8_t *)text : argc > 1 ? JS_GetUint8Array(cx, &size, argv[1]) : NULL;
+    if (!bytes) {
+      fsh_rt_str_release(f.path);
+      JS_FreeValue(cx, JS_GetException(cx));
+      return JS_ThrowTypeError(cx, "the data must be a string or a Uint8Array");
+    }
+    f.bytes.data = size ? fsh_rt_alloc(size) : NULL;
+    if (size) memcpy(f.bytes.data, bytes, size);
+    f.bytes.length = f.bytes.capacity = size;
+    JS_FreeCString(cx, text);
+  }
+  JSValue promise = JS_NewPromiseCapability(cx, f.settle);
+  if (!fsh_main_task) {
+    fsh_array out = { 0 };
+    fsh_str *parts[4] = { 0 };
+    int32_t outcome = op == 0 ? fsh_rt_fs_read_sync(f.path, &out, parts) : fsh_rt_fs_write_sync(f.path, &f.bytes, parts);
+    fsh_js_file_settled(cx, &f, outcome, &out, parts);
+    return promise;
+  }
+  fsh_task *task = fsh_rt_spawn(fsh_js_file_poll, fsh_js_file_drop, fsh_js_nothing, &f, sizeof f, 0);
+  fsh_rt_handle_drop(task);
+  return promise;
+}
+
 static void fsh_js_host(JSContext *cx) {
   JSValue host = JS_NewObject(cx);
+  JS_SetPropertyStr(cx, host, "readFile", JS_NewCFunctionMagic(cx, (JSCFunctionMagic *)fsh_host_file, "readFile", 2, JS_CFUNC_generic_magic, 0));
+  JS_SetPropertyStr(cx, host, "writeFile", JS_NewCFunctionMagic(cx, (JSCFunctionMagic *)fsh_host_file, "writeFile", 2, JS_CFUNC_generic_magic, 1));
   JS_SetPropertyStr(cx, host, "cwd", JS_NewCFunction(cx, fsh_host_cwd, "cwd", 0));
   JS_SetPropertyStr(cx, host, "hostname", JS_NewCFunction(cx, fsh_host_hostname, "hostname", 0));
   JS_SetPropertyStr(cx, host, "tmpdir", JS_NewCFunction(cx, fsh_host_tmpdir, "tmpdir", 0));

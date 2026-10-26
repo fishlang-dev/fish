@@ -265,8 +265,14 @@ export const exit = process.exit;
 export default process;
 `;
 
+const FS_PROMISES = String.raw`
+export const readFile = (path, options) => __fish.readFile(path, options);
+export const writeFile = (path, data) => __fish.writeFile(path, data);
+export default { readFile, writeFile };
+`;
+
 // Each shim by the names a package imports it under.
-const SHIMS: Record<string, string> = { path: PATH, "path/posix": PATH, os: OS, process: PROCESS };
+const SHIMS: Record<string, string> = { path: PATH, "path/posix": PATH, os: OS, process: PROCESS, "fs/promises": FS_PROMISES };
 
 // The package a file of the bundle belongs to, as node_modules names it.
 const packageOf = (file: string) => /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(file)?.[1];
@@ -313,7 +319,7 @@ async function main(request: Request): Promise<Result> {
         setup(build) {
           // Bun's own helpers are imported by a module with no path.
           build.onResolve({ filter: /^(node:)?module$/ }, (args) => (args.importer.startsWith("/") ? undefined : { path: requires }));
-          build.onResolve({ filter: /^(node:)?(path|path\/posix|os|process)$/ }, (args) => ({ path: shim(args.path.replace(/^node:/, "")) }));
+          build.onResolve({ filter: /^(node:)?(path|path\/posix|os|process|fs\/promises)$/ }, (args) => ({ path: shim(args.path.replace(/^node:/, "")) }));
         },
       }],
     });
