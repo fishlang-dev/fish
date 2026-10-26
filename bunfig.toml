@@ -1,0 +1,3 @@
+[test]
+# Builds the Math runtime before any test runs, so no test's time limit pays for it.
+preload = ["./tests/setup.ts"]

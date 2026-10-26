@@ -12,6 +12,7 @@ import type { Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
+import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import type { Instance } from "./check.ts";
@@ -76,13 +77,13 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   try {
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
+      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-x", "none", ...mathObjects(), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
     } else {
       run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
       run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", ...(js ? ["-I", ENGINE] : []), native, "-o", runtime, optimize]);
       const objects = engine.map((source, i) => join(dir, `engine${i}.o`));
       engine.forEach((source, i) => run(["clang", "-c", "-fPIC", "-I", ENGINE, source, "-o", objects[i]!, optimize]));
-      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime, ...objects]);
+      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime, ...objects, ...mathObjects()]);
     }
     writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
   } finally {
@@ -130,7 +131,7 @@ export function build(file: string, out: string, release = false, panic: Panic =
   const ir = compile(readFileSync(file, "utf8"), file, release, panic);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir), { stdin: new TextEncoder().encode(ir) });
+    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir, mathObjects()), { stdin: new TextEncoder().encode(ir) });
     if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -142,7 +143,7 @@ export async function buildAsync(file: string, out: string, release = false, pan
   const ir = compile(readFileSync(file, "utf8"), file, release, panic);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir, await mathObjectsAsync()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
     const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
     if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   } finally {
@@ -158,13 +159,14 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
 
 // Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
-// the engine's glue and sources with it when the program's IR calls the engine.
-function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
+// the engine's glue and sources with it when the program's IR calls the engine, and the prebuilt
+// `Math` objects.
+function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string, maths: string[]): string[] {
   const native = join(dir, "native.c");
   const js = callsEngine(ir);
   writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
   const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
-  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
+  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-x", "none", ...maths, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
 }
 
 function fail(message: string): never {

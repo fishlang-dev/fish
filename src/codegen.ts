@@ -58,8 +58,10 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 // which may hold quotes, so those are escaped as LLVM spells them.
 const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
 
-// The Math functions LLVM has intrinsics for; the other float ones are libm's.
-const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt", "exp", "log", "log2", "log10", "sin", "cos", "pow"]);
+// The `Math` functions LLVM's intrinsics compute exactly. The rest call the runtime's
+// correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
+// libm of the machine compiling.
+const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
@@ -399,19 +401,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
     if (!isFloat(type)) return operate(op, a, b, at, type as Integer);
     const result = temp();
+    // `**` is `Math.pow`; an f32 one is worked in f64 and rounded back.
     if (op === "**") {
-      const intrinsic = `@llvm.pow.${type}`;
-      intrinsics.add(`declare ${llvm(type)} ${intrinsic}(${llvm(type)}, ${llvm(type)})`);
-      emit(`${result} = call ${llvm(type)} ${intrinsic}(${llvm(type)} ${a}, ${llvm(type)} ${b})`);
+      intrinsics.add("declare double @fsh_math_pow(double, double)");
+      if (type === "f64") {
+        emit(`${result} = call double @fsh_math_pow(double ${a}, double ${b})`);
+        return result;
+      }
+      const [x, y, wide] = [temp(), temp(), temp()];
+      emit(`${x} = fpext float ${a} to double`);
+      emit(`${y} = fpext float ${b} to double`);
+      emit(`${wide} = call double @fsh_math_pow(double ${x}, double ${y})`);
+      emit(`${result} = fptrunc double ${wide} to float`);
       return result;
     }
     emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
     return result;
   }
 
-  // `Math` on f64 lowers to LLVM's intrinsics or to libm; `abs`, `sign`, `min` and `max` keep
-  // their numeric type, a float `min` or `max` giving NaN for any NaN and telling -0 from 0, as
-  // JavaScript does.
+  // `Math` on f64 lowers to LLVM's intrinsics or to the runtime's functions; `abs`, `sign`, `min`
+  // and `max` keep their numeric type, a float `min` or `max` giving NaN for any NaN and telling
+  // -0 from 0, as JavaScript does.
   function mathCall(e: Extract<Expr, { kind: "call" }>): string {
     const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
     const type = types.get(e) as Numeric;
@@ -430,7 +440,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return result;
     };
     if (MATH_INTRINSICS.has(name)) return call(`@llvm.${name}.f64`, args);
-    if (name in MATH_FLOAT && name !== "round") return call(`@${name}`, args);
+    if (name in MATH_FLOAT && name !== "round") return call(`@fsh_math_${name}`, args);
     const [x] = args as [string];
     const float = isFloat(type);
     const number = (n: number) => (float ? floatConstant(n, type) : String(n));
