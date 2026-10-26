@@ -6,7 +6,7 @@ import { bindings } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
-import { callableOf, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -791,9 +791,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // so it is handed over.
     if (jsCrossings.has(call)) {
       return args.forEach((a) => {
-        const to = coercions.get(a);
-        const callback = to !== undefined && typeof to !== "string" && to.kind === "dyn";
-        expr(a, callback ? (p) => `'${p}' moved here: a callback given to JS is kept by JS, as it may call it later; pass '${p}.clone()' to keep a copy` : undefined);
+        const kept = keptByJs(coercions.get(a) ?? "void") || keptByJs(types.get(a)!);
+        expr(a, kept ? (p) => `'${p}' moved here: JS keeps a callback or a Promise given to it, as it may use it later; pass '${p}.clone()' to keep a copy` : undefined);
       });
     }
     for (const a of args) {

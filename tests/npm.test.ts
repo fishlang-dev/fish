@@ -148,7 +148,8 @@ test("overloads imported in two files keep their signatures apart", () => {
 
 test("a handle's members cross only what can, and a handle passes only with the methods asked for", () => {
   const refused = (body: string) => first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": `import { getA, takeB, s, VERSION, child, K2 } from "p";\nfunction main() { ${body} }\n` }));
-  expect(refused("s().each((x) => {});")).toBe("'each' of 'S' takes a '(x: number) => void', which can't cross between Fish and JS yet: functions crossing between Fish and JS aren't supported yet");
+  // A method takes a callback as a package's function does; this fixture has no JS to run it.
+  expect(refused("s().each((x) => {});")).toMatch(TYPE_CHECKED);
   expect(refused("takeB(getA());")).toBe("argument of type 'A' is not assignable to parameter of type 'B': property 'go' is missing");
   expect(refused("const v = VERSION();")).toBe("this expression is not callable: type 'string' has no call signatures");
   expect(refused("const c = child(); const a: string = c.a; const b: f64 = c.b; const k = new K2(); const ka: string = k.a;")).toMatch(TYPE_CHECKED);

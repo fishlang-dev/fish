@@ -53,6 +53,9 @@ export function forget() { kept = null; }
 export function misuse(f) { return f("not a number"); }
 export async function plusOne(p) { const v = await p; return v + 1; }
 export function ignore(p) { return "ignored"; }
+export function never() { return new Promise(() => {}); }
+export function withOpts(o) { return o.cb(1); }
+export class Emitter { constructor() { this.handlers = []; } on(f) { this.handlers.push(f); } emit(s) { return this.handlers.map((f) => f(s)).join(","); } }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
 export function ov(b) { return { a: b ? "s" : 1 }; }
@@ -108,6 +111,9 @@ export declare function forget(): void;
 export declare function misuse(f: (n: number) => number): number;
 export declare function plusOne(p: Promise<number>): Promise<number>;
 export declare function ignore(p: Promise<void>): string;
+export declare function never(): Promise<string>;
+export declare function withOpts(o: { cb: (x: number) => number }): number;
+export declare class Emitter { on(f: (s: string) => string): void; emit(s: string): string; }
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
@@ -419,4 +425,38 @@ async function main(): Promise<void> throws JsError {
 test("a future is given to JS only inside an async function, and only one that can't throw", () => {
   expect(run(`import { ignore } from "esm";\nasync function done(): Promise<void> {}\nfunction main() {\n  console.log(ignore(done()));\n}\n`)).toBe("main.fsh:4:22: error: a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function");
   expect(run(`import { plusOne } from "esm";\nclass Bad { message: string = "b"; }\nasync function fails(): Promise<f64> throws Bad {\n  throw new Bad();\n}\nasync function main(): Promise<void> throws JsError {\n  const n = await plusOne(fails());\n}\n`)).toStartWith("main.fsh:7:27: error: a stored 'Promise<number>' can't throw yet");
+});
+
+test("callbacks from fields and given to a handle's methods, kept at exit, and an await that never settles, leak nothing", () => {
+  const main = `import { keep, fire, Emitter, make, never, relabel } from "esm";
+class Holder {
+  f: (s: string) => string;
+  constructor() { this.f = (s) => s + "!"; }
+}
+async function waits(): Promise<string> throws JsError {
+  const s = await never();
+  return s;
+}
+async function soon(): Promise<string> throws JsError {
+  await sleep(5);
+  return "soon";
+}
+async function main(): Promise<void> throws JsError {
+  const h = new Holder();
+  keep(h.f);
+  const e = new Emitter();
+  const r = make(1);
+  e.on((s) => s + relabel(r));
+  e.on((s) => s.toUpperCase());
+  console.log(fire("x"), e.emit("a"));
+  const first = await Promise.race([waits(), soon()]);
+  console.log(first);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "x! amade1,A\nsoon\n", stderr: "", exitCode: 0 });
+});
+
+test("a callback inside an object given to JS waits", () => {
+  expect(run(`import { withOpts } from "esm";\nfunction main() {\n  console.log(withOpts({ cb: (x) => x + 1 }));\n}\n`)).toStartWith("node_modules/esm/index.d.ts:");
 });

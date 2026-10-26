@@ -4,7 +4,7 @@
 // One runtime and context serve the whole program, made on first use. Every call into them holds
 // fsh_js_lock, so tasks on any thread may use JS while JS never runs in parallel with itself. A
 // JsValue is a counted box holding one JS value; the last release frees the value under the lock.
-// The engine is never torn down: its last values may be held by constants still alive at exit.
+// The engine is torn down at exit only for the leak check, which runs after every value is dropped.
 export const JS_NATIVE = String.raw`
 #include "quickjs.h"
 
@@ -32,6 +32,10 @@ __attribute__((constructor)) static void fsh_js_begin(void) {
   fsh_engine_end = fsh_js_end;
 }
 
+// How deep the thread holding the lock is in it: the engine's stack is measured from the first
+// entry only, as a callback entering again is deeper on the same stack.
+static int32_t fsh_js_depth = 0;
+
 static JSContext *fsh_js_enter(void) {
   pthread_once(&fsh_js_once, fsh_js_lock_init);
   pthread_mutex_lock(&fsh_js_lock);
@@ -40,11 +44,12 @@ static JSContext *fsh_js_enter(void) {
     fsh_js_context = JS_NewContext(fsh_js_runtime);
   }
   // The engine measures its stack from the thread that last entered it, and tasks move threads.
-  JS_UpdateStackTop(fsh_js_runtime);
+  if (fsh_js_depth++ == 0) JS_UpdateStackTop(fsh_js_runtime);
   return fsh_js_context;
 }
 
 static void fsh_js_leave(void) {
+  fsh_js_depth--;
   pthread_mutex_unlock(&fsh_js_lock);
 }
 
@@ -524,11 +529,15 @@ static void fsh_js_settle(JSContext *cx) {
   }
 }
 
-// What a promise's settling runs: it wakes the task awaiting it, and lets go of it.
+// What a promise's settling runs: it wakes the task awaiting it. Each of the two functions holds
+// the task until JS drops it, settled or never settled.
 static JSValue fsh_js_woken(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int magic, void *task) {
   fsh_rt_wake(task);
-  fsh_task_release(task);
   return JS_UNDEFINED;
+}
+
+static void fsh_js_unwoken(void *task) {
+  fsh_task_release(task);
 }
 
 // Awaits a JS value: 1 with what a promise fulfilled with, or anything else as itself, in out; 5
@@ -536,6 +545,21 @@ static JSValue fsh_js_woken(JSContext *cx, JSValueConst self, int argc, JSValueC
 // says the task already waits for it.
 int32_t fsh_rt_js_await(fsh_js *b, int32_t *waiting, fsh_task *task, fsh_js **out) {
   JSContext *cx = fsh_js_enter();
+  // A thenable that isn't a promise is adopted by one, as JS's await does.
+  if (!*waiting && JS_PromiseState(cx, b->value) == JS_PROMISE_NOT_A_PROMISE && JS_IsObject(b->value)) {
+    JSValue then = JS_GetPropertyStr(cx, b->value, "then");
+    if (JS_IsException(then)) JS_FreeValue(cx, JS_GetException(cx));
+    else if (JS_IsFunction(cx, then)) {
+      JSValue settle[2];
+      JSValue adopted = JS_NewPromiseCapability(cx, settle);
+      JS_FreeValue(cx, JS_Call(cx, settle[0], JS_UNDEFINED, 1, &b->value));
+      JS_FreeValue(cx, settle[0]);
+      JS_FreeValue(cx, settle[1]);
+      JS_FreeValue(cx, b->value);
+      b->value = adopted;
+    }
+    JS_FreeValue(cx, then);
+  }
   fsh_js_settle(cx);
   int32_t outcome = 0;
   switch (JS_PromiseState(cx, b->value)) {
@@ -554,11 +578,10 @@ int32_t fsh_rt_js_await(fsh_js *b, int32_t *waiting, fsh_task *task, fsh_js **ou
     default:
       if (*waiting) break;
       *waiting = 1;
-      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
-      // Only one of the two runs, and lets go of the task.
+      __atomic_fetch_add(&task->refs, 2, __ATOMIC_RELAXED);
       JSValue handlers[2] = {
-        JS_NewCClosure(cx, fsh_js_woken, "woken", NULL, 1, 0, task),
-        JS_NewCClosure(cx, fsh_js_woken, "woken", NULL, 1, 0, task),
+        JS_NewCClosure(cx, fsh_js_woken, "woken", fsh_js_unwoken, 1, 0, task),
+        JS_NewCClosure(cx, fsh_js_woken, "woken", fsh_js_unwoken, 1, 0, task),
       };
       JSValue then = JS_GetPropertyStr(cx, b->value, "then");
       JS_FreeValue(cx, JS_Call(cx, then, b->value, 2, handlers));
@@ -594,12 +617,17 @@ fsh_str *fsh_rt_js_message(fsh_js *b) {
 // codegen made for its type, which converts what JS gives it, calls it, and converts what it
 // gives back; called with a count below zero, it drops the callable.
 typedef fsh_js *(*fsh_js_trampoline)(void *data, void *table, int64_t argc, fsh_js **argv);
-typedef struct {
+// Every callback JS holds is listed, so tearing the engine down drops each before JS frees it.
+typedef struct fsh_js_callback {
   void *data;
   void *table;
   fsh_js_trampoline run;
   int32_t length;
+  int32_t dropped;
+  struct fsh_js_callback *prev, *next;
 } fsh_js_callback;
+
+static fsh_js_callback *fsh_js_callbacks = NULL;
 
 // JS calling a Fish callback, with undefined for each parameter it left out.
 static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int magic, void *opaque) {
@@ -613,10 +641,14 @@ static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValue
   return v;
 }
 
-// JS's garbage collector dropping the function, and with it the callable.
+// JS's garbage collector dropping the function, and with it the callable, unless the teardown
+// dropped it first.
 static void fsh_js_forget(void *opaque) {
   fsh_js_callback *c = opaque;
-  c->run(c->data, c->table, -1, NULL);
+  if (!c->dropped) c->run(c->data, c->table, -1, NULL);
+  if (c->prev) c->prev->next = c->next;
+  else fsh_js_callbacks = c->next;
+  if (c->next) c->next->prev = c->prev;
   fsh_rt_free(c);
 }
 
@@ -626,7 +658,12 @@ fsh_js *fsh_rt_js_function(void *data, void *table, fsh_js_trampoline run, int32
   c->table = table;
   c->run = run;
   c->length = length;
+  c->dropped = 0;
   JSContext *cx = fsh_js_enter();
+  c->prev = NULL;
+  c->next = fsh_js_callbacks;
+  if (fsh_js_callbacks) fsh_js_callbacks->prev = c;
+  fsh_js_callbacks = c;
   JSValue f = JS_NewCClosure(cx, fsh_js_called, "callback", fsh_js_forget, length, 0, c);
   fsh_js_leave();
   return fsh_js_box(f);
@@ -635,9 +672,18 @@ fsh_js *fsh_rt_js_function(void *data, void *table, fsh_js_trampoline run, int32
 static void fsh_js_end(void) {
   if (!fsh_js_runtime) return;
   JSContext *cx = fsh_js_enter();
+  // The callables JS still holds let go of what they hold while the engine still runs.
+  for (fsh_js_callback *c = fsh_js_callbacks; c; c = c->next) {
+    if (c->dropped) continue;
+    c->dropped = 1;
+    c->run(c->data, c->table, -1, NULL);
+  }
   if (fsh_js_bundled) JS_FreeValue(cx, fsh_js_packages);
   JS_FreeContext(cx);
   fsh_js_context = NULL;
+  // What finalizers let go of while the collector removes cycles is collected by a later pass.
+  JS_RunGC(fsh_js_runtime);
+  JS_RunGC(fsh_js_runtime);
   JS_FreeRuntime(fsh_js_runtime);
   fsh_js_runtime = NULL;
   fsh_js_leave();

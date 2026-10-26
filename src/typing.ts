@@ -296,6 +296,8 @@ export function uncrossable(t: Type, within = new Set<Type>()): string | undefin
 }
 
 function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | undefined): string | undefined {
+  // A callback or a stored Promise crosses on its own, as JS keeps it, not inside another value.
+  const kept = (u: Type) => typeof u !== "string" && u.kind === "dyn" && keptByJs(u);
   switch (t.kind) {
     case "literal":
       return undefined;
@@ -303,11 +305,14 @@ function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | u
       if (t.bound?.kind === "function") return "functions crossing between Fish and JS aren't supported yet";
       return t.concrete === undefined ? "a type parameter's value isn't known here" : uncrossable(t.concrete);
     case "union":
+      if (t.members.some(kept)) return "a callback or a Promise in a union, as an optional parameter holds one, isn't supported yet";
       return t.members.map(uncrossable).find((w) => w !== undefined);
     case "array":
     case "fixed":
+      if (holdsPart(t.element, kept)) return "a callback or a Promise inside an array isn't supported yet; give it on its own";
       return uncrossable(t.element);
     case "object":
+      if ((t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).some((u) => holdsPart(u, kept))) return "a callback or a Promise inside an object isn't supported yet; give it on its own";
       return (t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).map(uncrossable).find((w) => w !== undefined);
     case "block":
       return t.which === "JsValue" ? undefined : `a '${t.which}' is Fish's own`;
@@ -323,6 +328,11 @@ function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | u
       // A callback crosses as a JS function when what it takes and gives do.
       if (t.kind === "dyn" && callableOf.has(t.of)) {
         const fn = callableOf.get(t.of)!;
+        // What JS gives a callback is read into Fish, which has no reading of a JS function or
+        // promise as a Fish one.
+        if (fn.params.some((p) => holdsPart(p, (u) => kept(u) || (typeof u !== "string" && (u.kind === "function" || (u.kind === "interface" && promiseElement(u) !== undefined)))))) {
+          return "a callback that is given a function or a Promise isn't supported yet";
+        }
         return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
       }
       {
@@ -443,13 +453,23 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   return all;
 }
 
-// What a package's parameter takes: a function type, alone or as an Option, is a callback that
-// JS may keep, so a stored callable, owning what it uses; a `Promise<T>` is a stored one, as the
-// task settling the JS promise owns it.
+// A value JS keeps once it is given: a stored callable or a stored Promise, or what is stored as
+// one, a closure, a function or a future. Given to JS, it is handed over.
+export function keptByJs(t: Type): boolean {
+  if (typeof t === "string") return false;
+  if (t.kind === "dyn") return callableOf.has(t.of) || promiseElement(t.of) !== undefined;
+  return t.kind === "closure" || t.kind === "function" || t.kind === "future" || t.kind === "handle";
+}
+
+// What a package's parameter takes: a function type is a callback that JS may keep, so a stored
+// callable, owning what it uses; a `Promise<T>` is a stored one, as the task settling the JS
+// promise owns it; an object type is a handle of that shape, which a Fish value of it meets by
+// being made a new JS object.
 export function jsTakes(t: Type): Type {
   if (typeof t === "string") return t;
   if (t.kind === "union") return unionType(t.members.map(jsTakes));
-  return stored(t);
+  if (t.kind === "function" || (t.kind === "interface" && promiseElement(t) !== undefined)) return stored(t);
+  return jsView(t);
 }
 
 // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to

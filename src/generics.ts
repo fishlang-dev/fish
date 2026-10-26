@@ -562,8 +562,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
         throw new CompileError(`a setter's parameter can't have the interface type '${type.name}'`, p.start, p.end);
       }
       // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
-      // A package's function parameter is a callback JS keeps, a stored callable, not a bound.
-      if (!f.accessor && ((type.kind === "interface" && !(f.js && promiseElement(type) !== undefined)) || (type.kind === "function" && !f.js) || (type.kind === "regex" && type.any) || (type.kind === "object" && !type.tuple && concrete(type)))) {
+      // A package's function or object parameter is a callback JS keeps or a JS object, its type
+      // the same for every call, not a bound.
+      if (!f.accessor && ((type.kind === "interface" && !(f.js && promiseElement(type) !== undefined)) || (type.kind === "function" && !f.js) || (type.kind === "regex" && type.any) || (type.kind === "object" && !type.tuple && concrete(type) && !f.js))) {
         found!.set(i, type);
         if (written !== type) borrows.set(i, written as RefType);
       }

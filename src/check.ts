@@ -930,10 +930,12 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     }
     // What its type parameters stand for, as plain types, since JS sees no Fish placeholders.
     const concrete = new Map([...scopeOf(instance)].map(([n, t]): [string, Type] => [n, lower(t)]));
-    const params = paramTypes(instance, concrete).map(jsTakes);
+    const declared = paramTypes(instance, concrete);
+    const params = declared.map(jsTakes);
     f.params.forEach((p, i) => {
       if (p.rest) throw unsupported(`rest parameters on a package's functions, as ${named} takes,`, p);
-      const why = uncrossable(params[i]!);
+      // An object type taken as a JS object's shape is still checked for what it holds.
+      const why = uncrossable(params[i]!) ?? (params[i] !== declared[i] && typeof declared[i] !== "string" && declared[i]!.kind !== "function" && declared[i]!.kind !== "interface" ? uncrossable(declared[i]!) : undefined);
       if (why) throw refuse(`${named} takes a '${show(params[i]!)}', which can't cross between Fish and JS yet: ${why}`, p.type ?? p);
     });
     instance.signature = params;

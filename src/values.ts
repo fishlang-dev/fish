@@ -8,7 +8,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -3122,8 +3122,10 @@ export function expressions(ctx: Context) {
       e.args.forEach((a) => crossing(types.get(a) ?? "void", `'${callee.name}' of '${show(t)}' is given a`, a));
       return { type: crossing(typed.type === "void" ? "void" : jsView(typed.type), `'${callee.name}' of '${show(t)}' gives a`, e), what: typed.what };
     }
-    method.params.forEach((p) => crossing(p, `'${callee.name}' of '${show(t)}' takes a`, e));
-    jsArgs(e, method.params, method.optional ?? []);
+    // A callback or a Promise it takes is one JS keeps, and an object type a JS object's shape.
+    const params = method.params.map(jsTakes);
+    params.forEach((p) => crossing(p, `'${callee.name}' of '${show(t)}' takes a`, e));
+    jsArgs(e, params, method.optional ?? []);
     return { type: crossing(method.returns === "void" ? "void" : jsView(method.returns), `'${callee.name}' of '${show(t)}' gives a`, e), what: `'${callee.name}'` };
   }
 
@@ -3188,6 +3190,8 @@ export function expressions(ctx: Context) {
       if (blocker) throw new CompileError(`a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${show(blocker)}'`, a.start, a.end);
       return;
     }
+    // A callback or a future inside another value would be dropped by Fish as well as kept by JS.
+    if (holdsPart(given, (u) => u !== given && keptByJs(u))) throw new CompileError("a callback or a Promise inside another value isn't supported yet; give it to JS on its own", a.start, a.end);
     const open = holdsPart(given, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined);
     if (!open && !jsConverts(given)) throw new CompileError(`a '${show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);
   }
@@ -3689,9 +3693,11 @@ export function expressions(ctx: Context) {
   }
 
   function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
-    // A package's function takes what its signature made of its declaration for JS.
+    // A package's function takes a callback or a Promise as its signature made it for JS, a
+    // stored one JS keeps.
     if (target.body.js && target.concrete) returnOf(target, at);
-    const params = target.body.js && target.concrete && target.signature ? target.signature : paramTypes(target);
+    const signature = target.body.js && target.concrete ? target.signature : undefined;
+    const params = signature && signature.length > 0 ? signature : paramTypes(target);
     arity(list.length, target.body.params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];

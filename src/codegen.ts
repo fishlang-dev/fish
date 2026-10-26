@@ -1168,8 +1168,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       jsSite = a;
       const to = coercions.get(a);
       // A callback is handed over to JS, which keeps it, as the stored callable it meets, and a
-      // future as the stored Promise, which a task awaits.
-      if (to !== undefined && holdsPart(to, (t) => isCallback(t) || isPromised(t))) return toJs(owned(a), to, optional(i) ? "undefined" : "null");
+      // future as the stored Promise, which a task awaits; one read from a place moves out of it.
+      const held = to ?? types.get(a)!;
+      if (isCallback(held) || isPromised(held)) return toJs(owned(a), held, optional(i) ? "undefined" : "null");
       return toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null", coercions.get(a));
     });
     const argv = alloca(`[${Math.max(boxes.length, 1)} x ptr]`);

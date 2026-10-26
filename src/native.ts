@@ -92,7 +92,9 @@ __attribute__((destructor)) static void fsh_leaks(void) {
   const char *check = getenv("FISH_LEAKS");
   if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
-  if (check && check[0] == '1' && live != 0 && !fsh_abandoned) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
+  // After a panic, what JS frames it unwound held is still live in the engine, not leaked.
+  int32_t held = fsh_engine_end && fsh_panic_began;
+  if (check && check[0] == '1' && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
 }
 
 typedef struct fsh_str {
