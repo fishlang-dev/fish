@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Each test builds a program with clang, which can take past bun's 5 seconds on a busy CI runner.
+setDefaultTimeout(30_000);
 
 // The std `fs` module's blocking calls against node's: the same calls in a directory of their
 // own, output compared.
