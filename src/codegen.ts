@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, isPlainJs, jsShape, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -1225,6 +1225,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
+  // The shape an object is given as: a package's, or an object type, through an Option.
+  function jsShapeOf(t: Type): ObjectType | InterfaceType | undefined {
+    if (typeof t === "string") return undefined;
+    if (t.kind === "union") return t.members.map(jsShapeOf).find((s) => s !== undefined);
+    return jsShape(t) ?? (t.kind === "object" ? t : undefined);
+  }
+
   // A Fish value as a new JS value, in a box of its own; empty is `undefined` for a parameter
   // written with `?`, which JS may leave out, and `null` otherwise. A field an object leaves out
   // isn't there in JS either.
@@ -1268,7 +1275,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type.kind === "object") {
       emit(`${box} = call ptr @fsh_rt_js_object()`);
       // The shape the object is given as says which properties are written with `?`.
-      const shape = declared === undefined ? undefined : jsShape(referent(declared)) ?? (typeof declared !== "string" && declared.kind === "object" ? declared : undefined);
+      const shape = declared === undefined ? undefined : jsShapeOf(referent(declared));
       for (const f of type.fields) {
         const [part, into] = [temp(), shape?.fields.find((g) => g.name === f.name)];
         emit(`${part} = extractvalue ${llvm(type)} ${v}, ${fieldPath(type, f.name).join(", ")}`);

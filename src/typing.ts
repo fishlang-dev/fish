@@ -395,16 +395,19 @@ export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.ki
 
 // Whether a value crosses between Fish and JS converted on the way: a string, a number, a
 // boolean, empty, a literal, a JS value or handle, and unions, arrays, tuples and objects of them.
-export function jsConverts(t: Type): boolean {
+// A Fish type holding itself has no JS form yet, as converting it would never end: `within` is
+// the types the walk is inside.
+export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
-  if (typeof t === "string") return false;
-  if (t.kind === "ref") return jsConverts(t.to);
-  if (t.kind === "param") return t.concrete !== undefined && jsConverts(t.concrete);
+  if (typeof t === "string" || within.has(t)) return false;
   if (t.kind === "block") return t.which === "JsValue";
-  if (t.kind === "union") return t.members.every(jsConverts);
-  if (t.kind === "array" || t.kind === "fixed") return jsConverts(t.element);
-  if (t.kind === "object") return t.fields.every((f) => jsConverts(f.type));
-  return t.kind === "literal";
+  const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
+    : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
+  if (parts === undefined) return false;
+  within.add(t);
+  const all = parts.every((u) => jsConverts(u, within));
+  within.delete(t);
+  return all;
 }
 
 // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to
@@ -970,7 +973,11 @@ export function unionType(parts: Type[], name?: string): Type {
 // The members of `union` a value of `type` can go into: the one it is, or else every one it
 // fits. The checker allows exactly one.
 export function membersFor(type: Type, union: UnionType): Type[] {
-  return union.members.includes(type) ? [type] : union.members.filter((m) => fits(type, m));
+  if (union.members.includes(type)) return [type];
+  const fitting = union.members.filter((m) => fits(type, m));
+  // A JS value goes into the union's JS value, whichever declared shape each has.
+  const js = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue";
+  return fitting.length > 0 || !js(type) ? fitting : union.members.filter(js);
 }
 
 // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
@@ -1592,7 +1599,8 @@ export function show(t: Type): string {
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
   // A JS handle shows the shape its declaration gives it.
-  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of) : t.which;
+  // A package's shape is shown by the name the package gives it, not the one linking gave it.
+  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
   if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;

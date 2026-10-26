@@ -84,6 +84,7 @@ export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
 export declare function nested(k: string): { inner: { v: number } | null } | null;
+export interface Labeled { label: string }
 export declare class Box {
   constructor(size: number, name?: string);
   size: number;
@@ -108,9 +109,9 @@ let made = 0;
 
 // Builds `main` in a project with the packages above and runs it, reporting the leak count;
 // or gives the compile error it stops at, as fishc prints it.
-function project(main: string): string {
+function project(main: string, files: Record<string, string> = {}): string {
   const dir = join(root, `p${made++}`);
-  for (const [path, text] of Object.entries({ ...PACKAGES, "main.fsh": main })) {
+  for (const [path, text] of Object.entries({ ...PACKAGES, ...files, "main.fsh": main })) {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), text);
   }
@@ -280,4 +281,24 @@ test("a generic Fish function forwards its type parameter to a package", () => {
 
 test("an empty value is undefined in a property written with ?, and null in one that isn't", () => {
   expect(run(`import { describe } from "esm";\nfunction main() {\n  const deep: boolean | null = null;\n  console.log(describe({ name: "z", deep }));\n}\n`)).toEqual({ stdout: "z:?:2\n", stderr: "", exitCode: 0 });
+});
+
+test("a handle meets another declaration of its type, in another file or a shape it fits", () => {
+  const main = `import { make } from "esm";
+import type { Labeled } from "esm";
+import { counted } from "./lib.fsh";
+function main() {
+  const r = make(2);
+  const l: Labeled = make(3);
+  const ls: Labeled[] = [make(4), l.clone()];
+  const maybe: Labeled | null = r.clone();
+  console.log(counted(r), l.label, ls.length, maybe !== null);
+}
+`;
+  const dir = project(main, { "lib.fsh": `import { relabel } from "esm";\nimport type { Result } from "esm";\nexport function counted(r: Result): string {\n  return relabel(r);\n}\n` });
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "made2 made 2 true\n", stderr: "", exitCode: 0 });
+});
+
+test("a Fish type holding itself has no JS form yet", () => {
+  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("main.fsh:5:16: error: a 'Tree' has no JS form yet, so it can't be given to JS");
 });

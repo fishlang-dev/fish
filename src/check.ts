@@ -707,7 +707,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     }
     if (typeof from === "string") return false;
     // An array is never converted element by element where JS values are wanted.
-    if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return from.element !== "never" && (from.element !== to.element || intoJs(from.element, to.element));
+    if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return from.element !== "never" && !(js(from.element) && js(to.element)) && (from.element !== to.element || intoJs(from.element, to.element));
     // A field the value leaves out is an absent optional one, which turns nothing into JS.
     if (to.kind === "object" && (from.kind === "object" || from.kind === "class")) return to.fields.some((f) => from.fields.some((g) => g.name === f.name && intoJs(g.type, f.type)));
     return false;

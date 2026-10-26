@@ -271,8 +271,12 @@ export function conversions(b: Slots) {
     if (to === "string" && typeof from !== "string" && from.kind === "literal") return b.text(String(from.value));
     // Code holding a `never` value never runs.
     if (from === "never") return "undef";
-    // An empty array literal holds no element to convert.
-    if (typeof from !== "string" && from.kind === "array" && from.element === "never" && typeof to !== "string" && to.kind === "array") return v;
+    // A JS value is the same box whichever declared shape it meets.
+    if (typeof from !== "string" && from.kind === "block" && from.which === "JsValue" && typeof to !== "string" && to.kind === "block" && to.which === "JsValue") return v;
+    // An empty array literal holds no element to convert, and an array of JS values holds the
+    // same boxes whichever shape each is declared to have.
+    const js = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue";
+    if (typeof from !== "string" && from.kind === "array" && typeof to !== "string" && to.kind === "array" && (from.element === "never" || (js(from.element) && js(to.element)))) return v;
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     if (typeof from !== "string" && from.kind === "ref") {
