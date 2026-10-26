@@ -661,3 +661,7 @@ static const uint32_t fsh_case_ignorable[][2] = {
 0x1e8d6},{0x1e944,0x1e94b},{0x1f3fb,0x1f3ff},{0xe0001,0xe0001},{0xe0020,0xe007f},{0xe0100,0xe01ef}
 };
 `;
+
+// The Unicode version the tables were made from, by name and by scripts/unicode.ts's
+// fingerprint of its data.
+export const CASEMAP_UNICODE = { version: "17.0", fingerprint: "b79e3d5ef91bfea7" };

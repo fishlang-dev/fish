@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CASEMAP, CASEMAP_UNICODE } from "../src/casemap.ts";
 import { NATIVE } from "../src/native.ts";
+import { unicodeFingerprint } from "../scripts/unicode.ts";
 
 // The runtime's own behaviour, checked from C: the leak report and string blocks.
 const tmp = mkdtempSync(join(tmpdir(), "fish-native-"));
@@ -51,8 +53,17 @@ test("the halves of a surrogate pair join into one character", () => {
   expect(stderr).toBe("");
 });
 
-// Every code point's upper and lower case, one at a time, against the JavaScript engine the
-// case tables were made from. Surrogates map to themselves and are left out of the comparison.
+// A case table of src/casemap.ts, by its C name: each row's first code point and what it maps to.
+function table(name: string): Map<number, number[]> {
+  const body = new RegExp(`${name}\\[\\]\\[\\d\\] = \\{([^;]*)\\};`).exec(CASEMAP)![1]!;
+  const rows = [...body.matchAll(/\{([^}]*)\}/g)].map((m) => m[1]!.split(",").map(Number));
+  return new Map(rows.map(([from, ...to]) => [from!, to.filter((c) => c !== 0)]));
+}
+
+// Every code point's upper and lower case, one at a time, against JavaScript's. Surrogates map
+// to themselves and are left out of the comparison. A JavaScript engine on another Unicode
+// version than the tables were made from maps some code points differently, so there the tables
+// themselves are what the runtime must give.
 test("case mapping matches JavaScript for every code point", () => {
   const { stdout, stderr } = run(`
     for (uint32_t cp = 0; cp <= 0x10FFFF; cp++) {
@@ -67,13 +78,20 @@ test("case mapping matches JavaScript for every code point", () => {
       }
       fsh_rt_str_release(s);
     }`);
+  const sameUnicode = unicodeFingerprint() === CASEMAP_UNICODE.fingerprint;
+  const [upper, lower, upperSpecial, lowerSpecial] = ["fsh_upper", "fsh_lower", "fsh_upper_special", "fsh_lower_special"].map(table) as Map<number, number[]>[];
+  const fromTables = (cp: number, special: Map<number, number[]>, simple: Map<number, number[]>) => String.fromCodePoint(...(special.get(cp) ?? simple.get(cp) ?? [cp]));
   const expected: string[] = [];
   for (let cp = 0; cp <= 0x10ffff; cp++) {
     if (cp >= 0xd800 && cp < 0xe000) continue;
     const c = String.fromCodePoint(cp);
-    expected.push(c.toUpperCase(), c.toLowerCase());
+    if (sameUnicode) expected.push(c.toUpperCase(), c.toLowerCase());
+    else expected.push(fromTables(cp, upperSpecial!, upper!), fromTables(cp, lowerSpecial!, lower!));
   }
-  // A Bun on a newer Unicode version differs until the tables are made again from it.
-  if (stdout !== `${expected.join("\n")}\n`) throw new Error("the case tables differ from this Bun's case mapping; regenerate them with `bun scripts/casemap.ts`");
+  // On the tables' own Unicode version, the engine's case mapping is the reference, and a
+  // difference means the tables are stale.
+  if (stdout !== `${expected.join("\n")}\n`) {
+    throw new Error(sameUnicode ? "the case tables differ from this Bun's case mapping; regenerate them with `bun scripts/casemap.ts`" : `the runtime's case mapping differs from its own tables (made from Unicode ${CASEMAP_UNICODE.version})`);
+  }
   expect(stderr).toBe("");
 });
