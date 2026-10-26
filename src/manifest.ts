@@ -1,9 +1,14 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { CompileError } from "./diag.ts";
 
-// A package as its `fish.toml` describes it, `dir` being where that file was found.
-export type Manifest = { name: string; version: string; entry: string; dir: string };
+// A package another depends on, from a local path or a git repository pinned to a commit, and
+// where its entry is in the depending package's `fish.toml`.
+export type Dependency = { name: string; start: number; end: number } & ({ path: string } | { git: string; rev: string });
+
+// A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
+// what a package depending on it imports, `entry` the program it builds.
+export type Manifest = { name: string; version: string; entry: string; lib: string; dependencies: Dependency[]; dir: string };
 
 export const MANIFEST = "fish.toml";
 
@@ -11,13 +16,16 @@ export const MANIFEST = "fish.toml";
 export const NAME_RULE = "a package name is lowercase letters, digits and '-', starting with a letter, at most 64 characters";
 export const validName = (name: string) => /^[a-z][a-z0-9-]{0,63}$/.test(name);
 
-type Spanned<T> = { value: T; start: number; end: number };
-type Table = { start: number; end: number; keys: Map<string, { key: Spanned<string>; value: Spanned<string | number | boolean> }> };
+export type Spanned<T> = { value: T; start: number; end: number };
+export type Entries = Map<string, { key: Spanned<string>; value: Spanned<TomlValue> }>;
+export type TomlValue = string | number | boolean | Entries;
+export type Table = { start: number; end: number; keys: Entries };
 
-// The TOML a manifest uses: comments, `[table]` headers, bare and quoted keys, basic and literal
-// strings, integers and booleans. Anything else is refused where it starts rather than misread.
-export function parseToml(src: string): Map<string, Table> {
-  const tables = new Map<string, Table>();
+// The TOML a manifest and a lockfile use: comments, `[table]` and `[[array of tables]]` headers,
+// bare and quoted keys, basic and literal strings, integers, booleans and inline tables. Anything
+// else is refused where it starts rather than misread.
+export function parseToml(src: string): Map<string, Table | Table[]> {
+  const tables = new Map<string, Table | Table[]>();
   let current: Table = { start: 0, end: 0, keys: new Map() };
   tables.set("", current);
   let at = 0;
@@ -61,8 +69,9 @@ export function parseToml(src: string): Map<string, Table> {
         }
         const hex = escape === "u" ? 4 : escape === "U" ? 8 : 0;
         const digits = src.slice(at + 2, at + 2 + hex);
-        if (hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex) throw new CompileError("this escape isn't one TOML has", at, at + 2);
-        value += String.fromCodePoint(parseInt(digits, 16));
+        const code = parseInt(digits, 16);
+        if (hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new CompileError("this escape isn't one TOML has", at, at + 2);
+        value += String.fromCodePoint(code);
         at += 2 + hex;
         continue;
       }
@@ -72,15 +81,48 @@ export function parseToml(src: string): Map<string, Table> {
     at++;
     return { value, start, end: at };
   };
-  const value = (): Spanned<string | number | boolean> => {
+  // One `key = value` into `keys`, a key given twice refused.
+  const entry = (keys: Entries) => {
+    const k = key();
+    space();
+    if (src[at] !== "=") throw new CompileError("expected '=' after the key", at, at + 1);
+    at++;
+    space();
+    const v = value();
+    if (keys.has(k.value)) throw new CompileError(`'${k.value}' is given twice`, k.start, k.end);
+    keys.set(k.value, { key: k, value: v });
+  };
+  // `{ a = 1, b = "x" }`, on one line, as TOML has it.
+  const inline = (): Spanned<Entries> => {
+    const start = at;
+    const keys: Entries = new Map();
+    at++;
+    space();
+    if (src[at] === "}") {
+      at++;
+      return { value: keys, start, end: at };
+    }
+    for (;;) {
+      entry(keys);
+      space();
+      if (src[at] === "}") break;
+      if (src[at] !== ",") throw new CompileError("expected ',' or '}' in this inline table", at, at + 1);
+      at++;
+      space();
+    }
+    at++;
+    return { value: keys, start, end: at };
+  };
+  const value = (): Spanned<TomlValue> => {
     const start = at;
     if (src[at] === '"' || src[at] === "'") return string();
-    const word = /^[^\s#]+/.exec(src.slice(at))?.[0] ?? "";
+    if (src[at] === "{") return inline();
+    const word = /^[^\s#,}]+/.exec(src.slice(at))?.[0] ?? "";
     at += word.length;
     if (word === "true" || word === "false") return { value: word === "true", start, end: at };
     if (/^[+-]?(0|[1-9]\d*)$/.test(word)) return { value: Number(word), start, end: at };
     if (word === "") throw new CompileError("expected a value after '='", start, start + 1);
-    throw unread(start, word.startsWith("[") ? "an array" : word.startsWith("{") ? "an inline table" : "this value");
+    throw unread(start, word.startsWith("[") ? "an array" : "this value");
   };
   while (at < src.length) {
     space();
@@ -90,27 +132,25 @@ export function parseToml(src: string): Map<string, Table> {
     }
     if (src[at] === "[") {
       const start = at;
-      if (src[at + 1] === "[") throw unread(at, "an array of tables");
-      at++;
+      const array = src[at + 1] === "[";
+      at += array ? 2 : 1;
       space();
       const name = key();
       space();
-      if (src[at] !== "]") throw new CompileError("expected ']' to close the table's name", at, at + 1);
-      at++;
-      if (tables.has(name.value)) throw new CompileError(`the table [${name.value}] is given twice`, start, at);
+      if (!src.startsWith(array ? "]]" : "]", at)) throw new CompileError(`expected '${array ? "]]" : "]"}' to close the table's name`, at, at + 1);
+      at += array ? 2 : 1;
       current = { start, end: at, keys: new Map() };
-      tables.set(name.value, current);
+      const had = tables.get(name.value);
+      if (array && (had === undefined || Array.isArray(had))) {
+        if (had) had.push(current);
+        else tables.set(name.value, [current]);
+      } else if (had !== undefined) {
+        throw new CompileError(`the table [${name.value}] is given twice`, start, at);
+      } else tables.set(name.value, current);
       endOfLine();
       continue;
     }
-    const k = key();
-    space();
-    if (src[at] !== "=") throw new CompileError("expected '=' after the key", at, at + 1);
-    at++;
-    space();
-    const v = value();
-    if (current.keys.has(k.value)) throw new CompileError(`'${k.value}' is given twice`, k.start, k.end);
-    current.keys.set(k.value, { key: k, value: v });
+    entry(current.keys);
     endOfLine();
   }
   return tables;
@@ -120,17 +160,17 @@ export function parseToml(src: string): Map<string, Table> {
 // entry, and nothing a manifest doesn't have, so a misspelled key isn't silently ignored.
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry"], dependencies: [] };
-  for (const [name, table] of tables) {
-    if (!(name in known)) throw new CompileError(`a manifest has no table [${name}]; it has [package] and [dependencies]`, table.start, table.end);
+  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib"], dependencies: [] };
+  for (const [name, found] of tables) {
+    const table = Array.isArray(found) ? found[0]! : found;
+    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package] and [dependencies]`, table.start, table.end);
     for (const { key } of table.keys.values()) {
-      if (name === "dependencies") throw new CompileError("dependencies aren't supported yet; a package builds from its own files for now", key.start, key.end);
-      if (!known[name]!.includes(key.value)) {
+      if (name !== "dependencies" && !known[name]!.includes(key.value)) {
         throw new CompileError(name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
       }
     }
   }
-  const pkg = tables.get("package");
+  const pkg = tables.get("package") as Table | undefined;
   if (!pkg) throw new CompileError(`${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
   const text = (field: string): Spanned<string> | undefined => {
     const found = pkg.keys.get(field);
@@ -144,9 +184,42 @@ export function readManifest(src: string, dir: string): Manifest {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/.test(version.value)) {
     throw new CompileError("a version is MAJOR.MINOR.PATCH, as in \"0.1.0\", with an optional pre-release such as \"1.0.0-beta.1\"", version.start, version.end);
   }
-  const entry = text("entry");
-  if (entry && !entry.value.endsWith(".fsh")) throw new CompileError("the entry is a .fsh file, as in entry = \"src/main.fsh\"", entry.start, entry.end);
-  return { name: name.value, version: version.value, entry: entry?.value ?? "src/main.fsh", dir };
+  const file = (field: string, fallback: string) => {
+    const found = text(field);
+    if (found && !found.value.endsWith(".fsh")) throw new CompileError(`the ${field} is a .fsh file, as in ${field} = "${fallback}"`, found.start, found.end);
+    if (found && (isAbsolute(found.value) || normalize(found.value).split(sep)[0] === "..")) throw new CompileError(`the ${field} is a file inside the package, as in ${field} = "${fallback}"`, found.start, found.end);
+    return found?.value ?? fallback;
+  };
+  const entry = file("entry", "src/main.fsh");
+  const lib = file("lib", "src/lib.fsh");
+  const listed = tables.get("dependencies") as Table | undefined;
+  const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
+  return { name: name.value, version: version.value, entry, lib, dependencies, dir };
+}
+
+// A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.
+function dependency(key: Spanned<string>, value: Spanned<TomlValue>): Dependency {
+  const at = { name: key.value, start: key.start, end: value.end };
+  if (!validName(key.value)) throw new CompileError(`'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
+  const form = "a dependency is a table naming where it comes from, as in { path = \"../util\" } or { git = \"https://...\", rev = \"<commit>\" }";
+  if (!(value.value instanceof Map)) throw new CompileError(form, value.start, value.end);
+  const entries = value.value;
+  const text = (field: string): Spanned<string> | undefined => {
+    const found = entries.get(field);
+    if (found && typeof found.value.value !== "string") throw new CompileError(`'${field}' is a string`, found.value.start, found.value.end);
+    return found?.value as Spanned<string> | undefined;
+  };
+  for (const { key: k } of entries.values()) {
+    if (!["path", "git", "rev"].includes(k.value)) throw new CompileError(`a dependency has no key '${k.value}'; it has path, or git and rev`, k.start, k.end);
+  }
+  const [path, git, rev] = [text("path"), text("git"), text("rev")];
+  if (path && (git || rev)) throw new CompileError("a dependency comes from a path or from git, not both", value.start, value.end);
+  if (path) return { ...at, path: path.value };
+  if (!git) throw new CompileError(form, value.start, value.end);
+  if (git.value.startsWith("-")) throw new CompileError("a git URL can't start with '-'", git.start, git.end);
+  if (!rev) throw new CompileError("a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
+  if (!/^[0-9a-f]{7,40}$/.test(rev.value)) throw new CompileError("rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move", rev.start, rev.end);
+  return { ...at, git: git.value, rev: rev.value };
 }
 
 // The nearest `fish.toml` at or above `from`.
@@ -158,16 +231,33 @@ export function findManifest(from: string): string | undefined {
   }
 }
 
-// Reads and checks the manifest at `file`, whose entry must exist.
-export function loadManifest(file: string): Manifest {
+// Reads and checks the manifest at `file`, whose entry, or lib, must exist when `needs` says so.
+// An error in it renders against it, wherever it was reached from.
+export function loadManifest(file: string, needs?: "entry" | "lib"): Manifest {
   const src = readFileSync(file, "utf8");
-  const manifest = readManifest(src, dirname(file));
-  if (!existsSync(join(manifest.dir, manifest.entry))) {
-    const pkg = parseToml(src).get("package")!;
-    const at = pkg.keys.get("entry")?.value ?? pkg;
-    throw new CompileError(`the entry '${manifest.entry}' doesn't exist; create it, or name another with entry = "..."`, at.start, at.end);
+  try {
+    const manifest = readManifest(src, dirname(file));
+    const pkg = parseToml(src).get("package") as Table;
+    for (const field of ["entry", "lib"] as const) {
+      const at = pkg.keys.get(field)?.value ?? pkg;
+      const path = join(manifest.dir, manifest[field]);
+      if (!existsSync(path)) {
+        if (field === needs) throw new CompileError(`the ${field} '${manifest[field]}' doesn't exist; create it, or name another with ${field} = "..."`, at.start, at.end);
+        continue;
+      }
+      // A dependency's link can't carry the file out of the package either; the program's own may.
+      if (needs === "lib" && !realpathSync(path).startsWith(realpathSync(manifest.dir) + sep)) throw new CompileError(`the ${field} '${manifest[field]}' leads outside the package; it is a file inside it`, at.start, at.end);
+    }
+    return manifest;
+  } catch (e) {
+    throw inManifest(e, file, src);
   }
-  return manifest;
+}
+
+// Has a compile error found in the manifest at `file` render against that file.
+export function inManifest(e: unknown, file: string, src = readFileSync(file, "utf8")): unknown {
+  if (e instanceof CompileError && e.sources.length === 0) e.sources = [{ base: 0, src, file: relative(process.cwd(), file) || file }];
+  return e;
 }
 
 // A new package named `name` in `dir`: its manifest, and a greeting entry and a `.gitignore`

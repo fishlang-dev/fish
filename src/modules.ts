@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
+import { dependencyLib, dependencyOf, resolvePackages } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
@@ -40,7 +41,7 @@ export function fileAt(offset: number): string {
 }
 
 // Loads `entry`, given as `src` when it is already read, and every file it imports.
-export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
+export function load(entry: string, src = readFileSync(entry, "utf8"), fish = resolvePackages(entry)): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
@@ -72,6 +73,13 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         module.targets.set(s, visit("std:fish:engine", ENGINE_HOOK, "fish:engine"));
         continue;
       }
+      // A bare name the importing file's own fish.toml depends on is that Fish package, even one
+      // Node also has; `node:` always means the built-in, and any other bare name is npm's.
+      const lib = fish && !path.startsWith("std:") && !/^(\.\.?(\/|$)|node:)/.test(specifier) ? dependencyLib(fish, path, specifier, s) : undefined;
+      if (lib) {
+        module.targets.set(s, visit(lib, readFileSync(lib, "utf8"), relative(dirname(entry), lib)));
+        continue;
+      }
       const named = stdModule(specifier);
       if (named) {
         module.targets.set(s, std(named));
@@ -81,7 +89,14 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         module.targets.set(s, packageModule(path, specifier, s, statements));
         continue;
       }
+      // A dependency builds from its own files, which its checksum covers, and reaches others by name,
+      // whether the path climbs out as written or through a link.
+      const owner = fish && !path.startsWith("std:") ? dependencyOf(fish, path) : undefined;
+      const outside = (file: string) => owner !== undefined && !file.startsWith(owner.dir + "/");
+      const escape = () => new CompileError(`'${specifier}' leads outside the package '${owner!.manifest.name}'; a package imports its own files by path, and other packages by name`, s.start, s.end);
+      if (outside(join(dirname(realpathSync(path)), specifier))) throw escape();
       const target = resolveSpecifier(path, specifier, s);
+      if (outside(realpathSync(target))) throw escape();
       module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));

@@ -7,6 +7,7 @@ import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
+import { locking } from "./dependencies.ts";
 import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, vacant, validName } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
@@ -206,6 +207,7 @@ if (import.meta.main) {
           self: { type: "string" },
           plan: { type: "string" },
           compare: { type: "string" },
+          locked: { type: "boolean" },
         },
       });
     } catch (e) {
@@ -269,6 +271,7 @@ if (import.meta.main) {
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
+  locking.locked = values.locked === true;
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
@@ -276,7 +279,7 @@ if (import.meta.main) {
     const found = findManifest(process.cwd());
     if (!found) fail(`fishc build: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
-      const manifest = loadManifest(found);
+      const manifest = loadManifest(found, "entry");
       target = relative(process.cwd(), join(manifest.dir, manifest.entry));
       out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
       if (!values["emit-llvm"]) mkdirSync(dirname(out), { recursive: true });
@@ -287,7 +290,7 @@ if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {

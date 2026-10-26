@@ -25,7 +25,7 @@ const UNITS: { source: string; flags: string[] }[] = [
 ];
 
 // FISH_CACHE_DIR, else the user's cache directory, else the system's temporary one.
-function cacheDir(): string {
+export function cacheDir(): string {
   if (process.env.FISH_CACHE_DIR) return process.env.FISH_CACHE_DIR;
   const base = process.env.XDG_CACHE_HOME || (homedir() ? join(homedir(), ".cache") : tmpdir());
   return join(base, "fish");

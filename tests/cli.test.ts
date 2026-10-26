@@ -46,7 +46,7 @@ test("a package's entry and its errors are found through the manifest", () => {
   const gone = dir("gone", { "fish.toml": `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n` });
   expect(fishc(gone, "build").err.split("\n")[0]).toBe(`fish.toml:4:9: error: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`);
   const typo = dir("typo", { "fish.toml": `[package]\nname = "typo"\nverison = "1.0.0"\n` });
-  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error: [package] has no key 'verison'; it has name, version, entry");
+  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error: [package] has no key 'verison'; it has name, version, entry, lib");
 });
 
 test("fishc build with no file and no package says how to make one", () => {
