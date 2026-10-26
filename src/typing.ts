@@ -283,10 +283,19 @@ export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 // Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
 // booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
 // copied across, and opaque JS values.
-export function uncrossable(t: Type): string | undefined {
+export function uncrossable(t: Type, within = new Set<Type>()): string | undefined {
   // An empty array's element type, `never`, holds no value to cross.
   if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return undefined;
   if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
+  // A type holding itself has no JS form yet, as converting it would never end.
+  if (within.has(t)) return "a type holding itself has no JS form yet";
+  within.add(t);
+  const why = crossing(t, (u) => uncrossable(u, within));
+  within.delete(t);
+  return why;
+}
+
+function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | undefined): string | undefined {
   switch (t.kind) {
     case "literal":
       return undefined;
@@ -311,7 +320,11 @@ export function uncrossable(t: Type): string | undefined {
       return "Promises crossing between Fish and JS aren't supported yet";
     case "interface":
     case "dyn":
-      if (t.kind === "dyn" && callableOf.has(t.of)) return "functions crossing between Fish and JS aren't supported yet";
+      // A callback crosses as a JS function when what it takes and gives do.
+      if (t.kind === "dyn" && callableOf.has(t.of)) {
+        const fn = callableOf.get(t.of)!;
+        return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
+      }
       return promiseElement(t.kind === "dyn" ? t.of : t) !== undefined ? "Promises crossing between Fish and JS aren't supported yet" : "Fish has no JS form for it";
     default:
       return "Fish has no JS form for it";
@@ -410,6 +423,10 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
   if (typeof t === "string" || within.has(t)) return false;
   if (t.kind === "block") return t.which === "JsValue";
+  if (t.kind === "dyn" && callableOf.has(t.of)) {
+    const fn = callableOf.get(t.of)!;
+    return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].every((u) => jsConverts(u, within));
+  }
   if (t.kind === "future") return leafOf.get(t)?.method === "jsAwait" && (t.gives === "void" || jsConverts(t.gives, within));
   const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
     : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
@@ -418,6 +435,15 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   const all = parts.every((u) => jsConverts(u, within));
   within.delete(t);
   return all;
+}
+
+// What a package's parameter takes: a function type, alone or as an Option, is a callback that
+// JS may keep, so a stored callable, owning what it uses.
+export function jsTakes(t: Type): Type {
+  if (typeof t === "string") return t;
+  if (t.kind === "function") return callableType(t);
+  if (t.kind === "union") return unionType(t.members.map(jsTakes));
+  return t;
 }
 
 // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to

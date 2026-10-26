@@ -13,11 +13,27 @@ typedef struct {
   JSValue value;
 } fsh_js;
 
-static pthread_mutex_t fsh_js_lock = PTHREAD_MUTEX_INITIALIZER;
+// The lock is reentrant: a Fish callback JS calls may call into JS again.
+static pthread_mutex_t fsh_js_lock;
+static pthread_once_t fsh_js_once = PTHREAD_ONCE_INIT;
 static JSRuntime *fsh_js_runtime = NULL;
 static JSContext *fsh_js_context = NULL;
 
+static void fsh_js_lock_init(void) {
+  pthread_mutexattr_t reentrant;
+  pthread_mutexattr_init(&reentrant);
+  pthread_mutexattr_settype(&reentrant, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&fsh_js_lock, &reentrant);
+  pthread_mutexattr_destroy(&reentrant);
+}
+
+static void fsh_js_end(void);
+__attribute__((constructor)) static void fsh_js_begin(void) {
+  fsh_engine_end = fsh_js_end;
+}
+
 static JSContext *fsh_js_enter(void) {
+  pthread_once(&fsh_js_once, fsh_js_lock_init);
   pthread_mutex_lock(&fsh_js_lock);
   if (!fsh_js_runtime) {
     fsh_js_runtime = JS_NewRuntime();
@@ -39,10 +55,12 @@ static fsh_js *fsh_js_box(JSValue value) {
   return b;
 }
 
+// A value is freed through the runtime, not the context, as a callback JS drops while the engine
+// is torn down at exit lets go of what it holds after the context is gone.
 void fsh_rt_js_release(fsh_js *b) {
   if (!b || __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) > 0) return;
-  JSContext *cx = fsh_js_enter();
-  JS_FreeValue(cx, b->value);
+  fsh_js_enter();
+  JS_FreeValueRT(fsh_js_runtime, b->value);
   fsh_js_leave();
   fsh_rt_free(b);
 }
@@ -50,7 +68,7 @@ void fsh_rt_js_release(fsh_js *b) {
 // The same, inside the engine.
 static void fsh_js_drop(JSContext *cx, fsh_js *b) {
   if (__atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) > 0) return;
-  JS_FreeValue(cx, b->value);
+  JS_FreeValueRT(fsh_js_runtime, b->value);
   fsh_rt_free(b);
 }
 
@@ -571,5 +589,57 @@ fsh_str *fsh_rt_js_message(fsh_js *b) {
   JS_FreeValue(cx, shown);
   fsh_js_leave();
   return s;
+}
+// A Fish callback as a JS function: the stored callable's data and table, and the function
+// codegen made for its type, which converts what JS gives it, calls it, and converts what it
+// gives back; called with a count below zero, it drops the callable.
+typedef fsh_js *(*fsh_js_trampoline)(void *data, void *table, int64_t argc, fsh_js **argv);
+typedef struct {
+  void *data;
+  void *table;
+  fsh_js_trampoline run;
+  int32_t length;
+} fsh_js_callback;
+
+// JS calling a Fish callback, with undefined for each parameter it left out.
+static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int magic, void *opaque) {
+  fsh_js_callback *c = opaque;
+  fsh_js *boxes[c->length > 0 ? c->length : 1];
+  for (int32_t i = 0; i < c->length; i++) boxes[i] = fsh_js_box(i < argc ? JS_DupValue(cx, argv[i]) : JS_UNDEFINED);
+  fsh_js *gives = c->run(c->data, c->table, c->length, boxes);
+  if (!gives) return JS_UNDEFINED;
+  JSValue v = JS_DupValue(cx, gives->value);
+  fsh_js_drop(cx, gives);
+  return v;
+}
+
+// JS's garbage collector dropping the function, and with it the callable.
+static void fsh_js_forget(void *opaque) {
+  fsh_js_callback *c = opaque;
+  c->run(c->data, c->table, -1, NULL);
+  fsh_rt_free(c);
+}
+
+fsh_js *fsh_rt_js_function(void *data, void *table, fsh_js_trampoline run, int32_t length) {
+  fsh_js_callback *c = fsh_rt_alloc(sizeof(fsh_js_callback));
+  c->data = data;
+  c->table = table;
+  c->run = run;
+  c->length = length;
+  JSContext *cx = fsh_js_enter();
+  JSValue f = JS_NewCClosure(cx, fsh_js_called, "callback", fsh_js_forget, length, 0, c);
+  fsh_js_leave();
+  return fsh_js_box(f);
+}
+// Tears the engine down at exit, for the leak check: its finalizers drop the callbacks JS kept.
+static void fsh_js_end(void) {
+  if (!fsh_js_runtime) return;
+  JSContext *cx = fsh_js_enter();
+  if (fsh_js_bundled) JS_FreeValue(cx, fsh_js_packages);
+  JS_FreeContext(cx);
+  fsh_js_context = NULL;
+  JS_FreeRuntime(fsh_js_runtime);
+  fsh_js_runtime = NULL;
+  fsh_js_leave();
 }
 `;

@@ -131,6 +131,7 @@ export const RUNTIME = [
   "declare i64 @fsh_rt_js_count(ptr)",
   "declare i32 @fsh_rt_js_await(ptr, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_js_message(ptr)",
+  "declare ptr @fsh_rt_js_function(ptr, ptr, ptr, i32)",
   "declare double @fsh_rt_js_as_integer(ptr, double, double, ptr, ptr, ptr)",
   "declare void @fsh_rt_js_mismatch(ptr, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_js_array()",

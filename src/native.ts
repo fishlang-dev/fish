@@ -80,10 +80,17 @@ void fsh_rt_constants(void (*drop)(void)) {
   fsh_constants_drop = drop;
 }
 
+// What tears the JS engine down, when the program has one, so what JS still holds, like Fish
+// callbacks, is freed before the leak check counts it; after a panic, values it left held keep
+// the engine from being torn down.
+static void (*fsh_engine_end)(void) = NULL;
+static int32_t fsh_panic_began = 0;
+
 __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   const char *check = getenv("FISH_LEAKS");
+  if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   if (check && check[0] == '1' && live != 0 && !fsh_abandoned) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
 }
@@ -510,6 +517,7 @@ static _Thread_local int32_t fsh_token = 0;
 void fsh_rt_panic(const char *message) {
   static _Thread_local struct _Unwind_Exception exception;
   fsh_token = 0;
+  fsh_panic_began = 1;
   fflush(NULL);
   fputs(message, stderr);
   if (fsh_panic_abort) abort();

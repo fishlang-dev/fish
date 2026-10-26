@@ -787,8 +787,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Arguments are handed over, or lent for the call, in order.
   function handOver(args: Expr[], name: string, call: Expr) {
-    // What crosses into JS is copied there, so it is only read here.
-    if (jsCrossings.has(call)) return args.forEach((a) => expr(a));
+    // What crosses into JS is copied there, so it is only read here; a callback is kept by JS,
+    // so it is handed over.
+    if (jsCrossings.has(call)) {
+      return args.forEach((a) => {
+        const to = coercions.get(a);
+        const callback = to !== undefined && typeof to !== "string" && to.kind === "dyn";
+        expr(a, callback ? (p) => `'${p}' moved here: a callback given to JS is kept by JS, as it may call it later; pass '${p}.clone()' to keep a copy` : undefined);
+      });
+    }
     for (const a of args) {
       expr(a, (p) => `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`);
       lent(a).forEach(([place, part, mutable], i) => lend(place, mutable, part, undefined, name, call, part.start, partKey(part, i)));

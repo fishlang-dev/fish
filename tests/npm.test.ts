@@ -64,11 +64,11 @@ test("a wrong argument is refused in TypeScript's terms", () => {
 
 test("a declaration Fish can't type is refused where it is declared, noting the call", () => {
   const out = stops({
-    "node_modules/case/index.d.ts": CASE,
-    "main.fsh": "import { each } from \"case\";\nfunction main() { each((x) => {}); }\n",
+    "node_modules/case/index.d.ts": "export declare function counts(m: Map<string, number>): void;\n",
+    "main.fsh": "import { counts } from \"case\";\nfunction main() { counts(new Map<string, f64>()); }\n",
   });
-  expect(out).toContain("node_modules/case/index.d.ts:4:33: error: 'each' from 'case' takes a '(x: number) => void', which can't cross between Fish and JS yet: functions crossing between Fish and JS aren't supported yet");
-  expect(out).toContain("main.fsh:2:19: note: 'each' is called here");
+  expect(out).toContain("node_modules/case/index.d.ts:1:35: error: 'counts' from 'case' takes a 'Map<string, number>', which can't cross between Fish and JS yet: Fish has no JS form for it");
+  expect(out).toContain("main.fsh:2:19: note: 'counts' is called here");
 });
 
 

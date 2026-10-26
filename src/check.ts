@@ -16,7 +16,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -683,7 +683,12 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;
     const gives = i.calls.get(x)?.returns ?? "void";
-    return x.args.some((a) => !jsConverts(i.types.get(a)!)) || (gives !== "void" && !jsConverts(gives));
+    // A callback crosses as the stored callable it meets.
+    const given = (a: Expr) => {
+      const to = i.coercions.get(a);
+      return to !== undefined && holdsPart(to, (u) => typeof u !== "string" && u.kind === "dyn") ? to : i.types.get(a)!;
+    };
+    return x.args.some((a) => !jsConverts(given(a))) || (gives !== "void" && !jsConverts(gives));
   })));
   if (unconverted) throw new CompileError("this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
   // A value given to JS becomes a JS value as the call or write converts it.
@@ -925,7 +930,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     }
     // What its type parameters stand for, as plain types, since JS sees no Fish placeholders.
     const concrete = new Map([...scopeOf(instance)].map(([n, t]): [string, Type] => [n, lower(t)]));
-    const params = paramTypes(instance, concrete);
+    const params = paramTypes(instance, concrete).map(jsTakes);
     f.params.forEach((p, i) => {
       if (p.rest) throw unsupported(`rest parameters on a package's functions, as ${named} takes,`, p);
       const why = uncrossable(params[i]!);

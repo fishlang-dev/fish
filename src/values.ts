@@ -8,7 +8,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1423,7 +1423,7 @@ export function expressions(ctx: Context) {
     const known = generic ? undefined : paramTypes(instanceOf(target));
     list.forEach((a, i) => {
       const t = bounds.get(i);
-      if (t?.kind === "function") expect(a, t);
+      if (t?.kind === "function") expect(a, target.js ? jsTakes(t) : t);
       // A `new Promise` given for a `Promise<T>` parameter takes its T from there.
       if (t?.kind === "interface" && promiseElement(t) !== undefined) expect(a, t);
       // An arrow in an object literal given for an object-typed parameter takes its field's type,
@@ -1436,8 +1436,10 @@ export function expressions(ctx: Context) {
           if (want && p.kind === "property") expect(p.value, want);
         }
       }
-      // A parameter of a function that isn't generic has its type before the call.
+      // A parameter of a function that isn't generic has its type before the call; an arrow
+      // given to a package is a callback JS keeps, so it owns what it captures.
       if (a.kind !== "arrow" && known) expect(a, known[i]!);
+      if (a.kind === "arrow" && known && target.js && known[i] !== undefined) expect(a, jsTakes(known[i]!));
       // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
       const node = target.params[i]?.type;
       if (!known && (a.kind === "array" || tupleLiterals.has(a)) && node?.kind === "tuple") {
@@ -3172,8 +3174,13 @@ export function expressions(ctx: Context) {
   // A value given to JS, which the call or write converts: refused when it has no JS form.
   function givenToJs(a: Expr, given: Type) {
     jsGiven.add(a);
-    // A function given to JS is refused where the package declares it takes one.
-    if (typeof given !== "string" && (given.kind === "closure" || given.kind === "function" || given.kind === "dyn")) return;
+    // A callback given to JS is kept by JS, which may call it later from whichever task calls
+    // into JS next, so what it holds goes with it to any thread.
+    if (typeof given !== "string" && (given.kind === "closure" || given.kind === "function" || given.kind === "dyn")) {
+      const blocker = unsent(given);
+      if (blocker) throw new CompileError(`a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${show(blocker)}'`, a.start, a.end);
+      return;
+    }
     const open = holdsPart(given, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined);
     if (!open && !jsConverts(given)) throw new CompileError(`a '${show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);
   }
@@ -3181,7 +3188,7 @@ export function expressions(ctx: Context) {
   // A package's declared parameters as Fish types: an optional one is an Option.
   function jsParams(params: Param[]): Type[] {
     return params.map((p) => {
-      const declared = p.type ? resolveType(p.type) : blockType("JsValue");
+      const declared = jsTakes(p.type ? resolveType(p.type) : blockType("JsValue"));
       return p.optional ? unionType([declared, "null"]) : declared;
     });
   }
@@ -3675,7 +3682,9 @@ export function expressions(ctx: Context) {
   }
 
   function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
-    const params = paramTypes(target);
+    // A package's function takes what its signature made of its declaration for JS.
+    if (target.body.js && target.concrete) returnOf(target, at);
+    const params = target.body.js && target.concrete && target.signature ? target.signature : paramTypes(target);
     arity(list.length, target.body.params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];

@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -151,6 +151,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Whether the one thunk copying a Dyn that can't be copied is made.
   let uncopyable = false;
   const elementDrops = new Map<Type, string>();
+  // The functions JS calls a Fish callback through, by its type and where it was given.
+  const callbacks = new Map<string, string>();
+  // Where a value going to JS is given, for a callback's panics to name.
+  let jsSite: Expr | undefined;
   const vtables = new Map<string, string>();
   // The functions `sort` compares through: one per comparator, and one per element type for the
   // default order.
@@ -1158,7 +1162,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Arguments going to JS, each a new JS value in a buffer of boxes the call gives up; `optional`
   // says which parameters JS may leave out, so an empty value is undefined there.
   function jsArgv(args: Expr[], optional: (i: number) => boolean): string {
-    const boxes = args.map((a, i) => toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null", coercions.get(a)));
+    const boxes = args.map((a, i) => {
+      jsSite = a;
+      const to = coercions.get(a);
+      // A callback is handed over to JS, which keeps it, as the stored callable it meets.
+      if (to !== undefined && holdsPart(to, isCallback)) return toJs(owned(a), to, optional(i) ? "undefined" : "null");
+      return toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null", coercions.get(a));
+    });
     const argv = alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
     boxes.forEach((box, i) => {
       const at = temp();
@@ -1225,6 +1235,54 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
+  // A stored callable, which crosses into JS as a function.
+  function isCallback(t: Type): boolean {
+    return typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
+  }
+
+  // The function JS calls a callback of this type through, given at `at`: what JS gives it read
+  // as its parameters say, the callable called, and what it gives made a JS value. Called with a
+  // count below zero, as JS's garbage collector drops the function, it drops the callable.
+  function jsCallback(type: DynType, at: Expr): string {
+    const key = `${keyOf(type)} ${at.start}`;
+    const made = callbacks.get(key);
+    if (made) return made;
+    const name = `@"fsh.js.callback.${callbacks.size}"`;
+    callbacks.set(key, name);
+    const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
+    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const fn = callableOf.get(type.of)!;
+    const [dropping, drop, call] = [temp(), label(), label()];
+    emit(`${dropping} = icmp slt i64 %argc, 0`);
+    emit(`br i1 ${dropping}, label %${drop}, label %${call}`);
+    startBlock(drop);
+    const [half, whole] = [temp(), temp()];
+    emit(`${half} = insertvalue ${DYN} undef, ptr %data, 0`);
+    emit(`${whole} = insertvalue ${DYN} ${half}, ptr %table, 1`);
+    dispose(whole, type);
+    emit("ret ptr null");
+    startBlock(call);
+    const args = fn.params.map((p, i) => {
+      const [slot, box] = [temp(), temp()];
+      emit(`${slot} = getelementptr ptr, ptr %argv, i64 ${i}`);
+      emit(`${box} = load ptr, ptr ${slot}`);
+      return `, ${llvm(p)} ${fromJs(box, p, `a callback was given`, at)}`;
+    });
+    const callee = vslot("%table", 0);
+    const result = fn.returns === "void" ? undefined : temp();
+    unwinding(`call ${fn.returns === "void" ? "void" : llvm(fn.returns)} ${callee}(ptr %data${args.join("")})`, result);
+    if (result === undefined) emit("ret ptr null");
+    else {
+      jsSite = at;
+      const box = toJs(result, fn.returns, "null");
+      dispose(result, fn.returns);
+      emit(`ret ptr ${box}`);
+    }
+    out.push(`define internal ptr ${name}(ptr %data, ptr %table, i64 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    ({ allocas, body, temps, labels, block, pending, scopes, jsSite } = saved);
+    return name;
+  }
+
   // The shape an object is given as: a package's, or an object type, through an Option.
   function jsShapeOf(t: Type): ObjectType | InterfaceType | undefined {
     if (typeof t === "string") return undefined;
@@ -1248,6 +1306,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return v;
     }
     if (typeof type !== "string" && type.kind === "union") return eachMember(v, type, blockType("JsValue"), (part, m) => toJs(part, m, empty, declared));
+    // A callback as a JS function that owns it.
+    if (isCallback(type)) {
+      const [data, table] = [temp(), temp()];
+      emit(`${data} = extractvalue ${DYN} ${v}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${v}, 1`);
+      emit(`${box} = call ptr @fsh_rt_js_function(ptr ${data}, ptr ${table}, ptr ${jsCallback(type as DynType, jsSite!)}, i32 ${callableOf.get((type as DynType).of)!.params.length})`);
+      return box;
+    }
     // An array or a tuple as a new JS array, and an object as a new JS object, each part
     // converted in turn.
     if (typeof type !== "string" && (type.kind === "array" || type.kind === "fixed" || (type.kind === "object" && type.tuple))) {

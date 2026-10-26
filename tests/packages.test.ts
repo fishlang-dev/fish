@@ -44,6 +44,13 @@ export async function nothing() {}
 let pending;
 export function later() { return new Promise((r) => { pending = r; }); }
 export function release(v) { pending(v); }
+export function each(xs, f) { for (const x of xs) f(x); }
+export function mapped(xs, f) { return xs.map((x) => f(x)); }
+let kept = null;
+export function keep(f) { kept = f; }
+export function fire(s) { return kept === null ? "none" : kept(s); }
+export function forget() { kept = null; }
+export function misuse(f) { return f("not a number"); }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
 export function ov(b) { return { a: b ? "s" : 1 }; }
@@ -91,6 +98,12 @@ export declare function fail(m: string): Promise<string>;
 export declare function nothing(): Promise<void>;
 export declare function later(): Promise<string>;
 export declare function release(v: string): void;
+export declare function each(xs: number[], f: (x: number) => void): void;
+export declare function mapped(xs: string[], f: (s: string) => string): string[];
+export declare function keep(f: (s: string) => string): void;
+export declare function fire(s: string): string;
+export declare function forget(): void;
+export declare function misuse(f: (n: number) => number): number;
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
@@ -315,7 +328,7 @@ function main() {
 });
 
 test("a Fish type holding itself has no JS form yet", () => {
-  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("main.fsh:5:16: error: a 'Tree' has no JS form yet, so it can't be given to JS");
+  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("node_modules/esm/index.d.ts:26:34: error: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet");
 });
 
 test("a package's promises are awaited, a rejection thrown as a JsError, and a later settling wakes its task", () => {
@@ -347,4 +360,34 @@ async function main(): Promise<void> throws JsError {
 
 test("awaiting a package's promise is a throw to catch or declare", () => {
   expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error: 'main' must declare 'throws JsError'");
+});
+
+test("Fish callbacks are called by JS during a call and kept for later, and freed when JS drops them", () => {
+  const main = `import { each, mapped, keep, fire, forget, twice } from "esm";
+function shout(s: string): string {
+  return s.toUpperCase();
+}
+function main() {
+  const total = shared({ sum: new Atomic<i64>(0) });
+  const seen = total.clone();
+  each([1, 2, 3], (x) => { seen.sum.add(x as i64); });
+  console.log(total.sum.load());
+  console.log(mapped(["a", "b"], shout), mapped(["c"], (s) => s + make(4).count));
+  const prefix = "got ";
+  keep((s) => prefix + s);
+  console.log(fire("one"), fire("two"));
+  forget();
+  console.log(fire("three"));
+}
+import { make } from "esm";
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "6\n[ 'A', 'B' ] [ 'c4' ]\ngot one got two\nnone\n", stderr: "", exitCode: 0 });
+});
+
+test("a callback holding what isn't Send is refused, and one JS gives the wrong value panics", () => {
+  expect(run(`import { keep } from "esm";\nfunction main() {\n  const c = new Cell<i64>(0);\n  keep((s) => { c.set(1); return s; });\n}\n`)).toBe("main.fsh:4:8: error: a '(s: string) => string' may cross to another thread, so it can't hold a 'Cell<i64>', which changes without a lock");
+  const misused = run(`import { misuse } from "esm";\nfunction main() {\n  console.log(misuse((n) => n + 1));\n}\n`);
+  expect(misused).toMatchObject({ stdout: "", exitCode: 101 });
+  expect((misused as { stderr: string }).stderr).toStartWith("panicked at main.fsh:3:22:\na callback was given a string, where its declaration says 'number'\n");
 });
