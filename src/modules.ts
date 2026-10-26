@@ -5,7 +5,7 @@ import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
-import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
+import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
@@ -20,6 +20,13 @@ export const FILE_SPAN = 2 ** 24;
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean };
 export type Loaded = { modules: Module[]; sources: Source[] };
+
+let engineHook = false;
+
+// Lets programs import `fish:engine`, which only the compiler's own tests do.
+export function allowEngineHook(allowed: boolean) {
+  engineHook = allowed;
+}
 
 // The files of the program last loaded, for naming where a declaration is.
 let loadedFiles: { base: number; file: string }[] = [];
@@ -57,6 +64,11 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     for (const s of statements) {
       const specifier = specifierOf(s);
       if (specifier === undefined) continue;
+      if (specifier === "fish:engine") {
+        if (!engineHook) throw new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
+        module.targets.set(s, visit("std:fish:engine", ENGINE_HOOK, "fish:engine"));
+        continue;
+      }
       const named = stdModule(specifier);
       if (named) {
         module.targets.set(s, std(named));

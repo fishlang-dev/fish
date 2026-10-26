@@ -675,11 +675,13 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
   // A program that type-checks with a package's declarations is stopped at its first use of
   // one, as nothing can run them yet.
-  // So is one holding a JS value anywhere, as an any or a handle, though nothing was called.
-  const holdsJs = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue", true);
+  // So is one holding a package's handle anywhere, or turning a Fish value into a JS one, though
+  // nothing was called. A plain JsValue the engine gave back runs.
+  const holdsJs = (plain: boolean) => (t: Type) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue" && (plain || u.of !== "void"), true);
   const typed = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)].flatMap((i): Span[] => [
-    ...[...i.types, ...i.coercions].filter(([, t]) => holdsJs(t)).map(([x]) => x),
-    ...[...i.locals].filter(([, l]) => holdsJs(l.type)).map(([x]) => x),
+    ...[...i.types].filter(([, t]) => holdsJs(false)(t)).map(([x]) => x),
+    ...[...i.coercions].filter(([, t]) => holdsJs(true)(t)).map(([x]) => x),
+    ...[...i.locals].filter(([, l]) => holdsJs(false)(l.type)).map(([x]) => x),
   ]);
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses) ?? earliest(typed);

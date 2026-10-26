@@ -143,7 +143,7 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 // the engine's glue and sources with it when the program's IR calls the engine.
 function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string): string[] {
   const native = join(dir, "native.c");
-  const js = ir.includes("@fsh_rt_js_");
+  const js = /call [^\n]*@fsh_rt_js_/.test(ir);
   writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
   const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
   return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];

@@ -110,6 +110,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_signal_abort(ptr)",
   "declare ptr @fsh_rt_signal_timeout(i64)",
   "declare void @fsh_rt_socket_release(ptr)",
+  "declare void @fsh_rt_js_release(ptr)",
+  "declare ptr @fsh_rt_js_evaluate(ptr, ptr)",
   "declare i32 @fsh_rt_tcp_bind(ptr, i64, ptr, ptr)",
   "declare i64 @fsh_rt_tcp_port(ptr)",
   "declare i32 @fsh_rt_tcp_accept(ptr, ptr, ptr, ptr)",

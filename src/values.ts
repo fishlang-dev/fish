@@ -348,6 +348,8 @@ export const jsClasses = new Map<string, Interface>();
 export const jsCalledAt = new WeakMap<object, Expr>();
 // The std's timer calls, by which one each is.
 export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerClear">();
+// The test hook's `jsEvaluate(source)` calls, each running a JS module.
+export const jsEvaluations = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
@@ -1198,6 +1200,11 @@ export function expressions(ctx: Context) {
       coerce(e.args[2]!, value(e.args[2]!), "boolean", "whether it repeats is a 'boolean'");
       value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
+    }
+    if (callee.kind === "ident" && callee.name === "jsEvaluate" && fileAt(e.start) === "fish:engine") {
+      coerce(e.args[0]!, value(e.args[0]!), "string", "a module's source is a 'string'");
+      jsEvaluations.add(e);
+      return { type: blockType("JsValue"), what: "'jsEvaluate'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
     if (callee.kind === "ident" && callee.name === "yieldNow" && (!byName.has("yieldNow") || inStd)) {
