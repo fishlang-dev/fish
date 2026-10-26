@@ -1422,7 +1422,20 @@ export function stdModule(specifier: string): string | undefined {
   return Object.hasOwn(STD_MODULES, name) ? name : undefined;
 }
 
-export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + JSON_NAME + AST + AST_HELPERS;
+// What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
+// is in programs that use a package or name it, as holding a JsValue links the engine in.
+const JS_ERROR = String.raw`
+class JsError extends Error {
+  value: JsValue;
+  constructor(message: string, value: JsValue) {
+    super(message);
+    this.name = "JsError";
+    this.value = value;
+  }
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -1439,10 +1452,13 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const json = all.filter((s) => at(s) >= jsonAt && at(s) < jsonAt + JSON_VALUE.length);
   const jsonName = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length && at(s) < jsonAt + JSON_VALUE.length + JSON_NAME.length);
   renameValue([...json, ...jsonName]);
-  const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length);
+  const jsAt = STD_SOURCE.length - JS_ERROR.length;
+  const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length && at(s) < jsAt);
+  const js = all.filter((s) => at(s) >= jsAt);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]]] as const;
-  return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) ? part : []))];
+  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
+  const packages = written.some(fromPackage);
+  return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []))];
 }
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
@@ -1471,6 +1487,11 @@ function renameValue(nodes: unknown) {
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the
 // library's top-level names itself.
+// A declaration a package made, as its imports are linked into the program.
+function fromPackage(s: Stmt): boolean {
+  return s.kind === "export" || s.kind === "declare" ? fromPackage(s.body) : "js" in s && s.js !== undefined;
+}
+
 function uses(written: Stmt[], library: Stmt[], wanted: string[]): boolean {
   const declared = new Set(written.map((s) => ("name" in s ? s.name : undefined)));
   if (library.some((s) => "name" in s && declared.has(s.name))) return false;

@@ -1316,6 +1316,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       startBlock(yes);
     };
     if (typeof type !== "string" && type.kind === "union") return jsUnion(box, type, what, at);
+    // A promise is awaited as a future holding it, which reads what it settles with then.
+    if (typeof type !== "string" && type.kind === "future") {
+      const frame = temp();
+      emit(`${frame} = insertvalue ${llvm(type)} zeroinitializer, ptr ${box}, 1`);
+      return frame;
+    }
     // A handle of a declared shape holds an object.
     if (typeof type !== "string" && type.kind === "block") {
       unwinding(`call void ${checked("@fsh_rt_js_object_is")}`);
@@ -3788,8 +3794,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     };
     const node = temp();
     emit(`${node} = call ptr @fsh_rt_insp_error(ptr ${cString(t.name.replace(/[@<].*$/, ""))}, ptr ${read("name")[0]}, ptr ${read("message")[0]})`);
-    for (const f of fields) {
-      if (f.name === "name" || f.name === "message" || f.name === "cause") continue;
+    // A JsError's JS value is left out, as printing one isn't supported yet.
+    const shown = fields.filter((f) => f.name !== "name" && f.name !== "message" && f.name !== "cause" && !(t.name === "JsError" && f.name === "value"));
+    for (const f of shown) {
       const x = temp();
       emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
       const after = label();
@@ -7183,6 +7190,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
     const leaf = inner.kind === "future" ? leafOf.get(inner) : undefined;
     let given: string | undefined;
+    // What is read only once it is ready, as reading it before would read nothing.
+    let readied: (() => string | undefined) | undefined;
     let reason: string | undefined;
     if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
@@ -7278,6 +7287,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${option} = select i1 ${got}, ${llvm(shape.gives)} ${convert(dyn, leaf.of, shape.gives)}, ${llvm(shape.gives)} ${convert("zeroinitializer", "null", shape.gives)}`);
         given = option;
         emit(`${outcome} = select i1 ${nothing}, i32 1, i32 ${raw}`);
+      } else if (leaf.method === "jsAwait") {
+        // A JS promise: what it settled with, read as its declaration says once it fulfilled,
+        // or what it rejected with, for the JsError its awaiter is thrown.
+        const [waitingAt, made] = [temp(), alloca("ptr")];
+        emit(`${waitingAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+        emit(`${outcome} = call i32 @fsh_rt_js_await(ptr ${handle}, ptr ${waitingAt}, ptr %cx, ptr ${made})`);
+        reason = made;
+        readied = () => {
+          const box = temp();
+          emit(`${box} = load ptr, ptr ${made}`);
+          if (leaf.of !== "void") return fromJs(box, leaf.of, "the awaited promise fulfilled with", e);
+          emit(`call void @fsh_rt_js_release(ptr ${box})`);
+          return undefined;
+        };
       } else if (leaf.method === "sleep") {
         emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {
@@ -7353,7 +7376,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const error = () => {
       const thrown = shape.throws!;
       let error = "";
-      if (leaf && reason && !leaf.signal) {
+      if (leaf?.method === "jsAwait") {
+        error = jsError(reason!, thrown as ClassType);
+      } else if (leaf && reason && !leaf.signal) {
         error = ioError(reason, thrown as ClassType);
       } else if (leaf && reason) {
         // Given a signal, it throws either: an AbortError when it was aborted, leaving no reason.
@@ -7382,7 +7407,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return error;
     };
     const value = () => {
-      let v: string | undefined = given;
+      let v: string | undefined = readied ? readied() : given;
       if (shape.gives !== "void" && !leaf) {
         v = temp();
         emit(`${v} = extractvalue ${pollType(shape)} ${result}, 1`);
@@ -7457,6 +7482,25 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit("ret i32 1");
     } else emit("unreachable");
     return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+  }
+
+  // A JsError from the box of what JS threw at `thrown`: named, its message read from the value,
+  // which it keeps.
+  function jsError(thrown: string, error: ClassType): string {
+    const [box, message] = [temp(), temp()];
+    emit(`${box} = load ptr, ptr ${thrown}`);
+    emit(`${message} = call ptr @fsh_rt_js_message(ptr ${box})`);
+    let made = "zeroinitializer";
+    const put = (name: string, v: string) => {
+      const next = temp();
+      emit(`${next} = insertvalue ${llvm(error)} ${made}, ${llvm(field(error, name)!.type)} ${v}, ${fieldPath(error, name).join(", ")}`);
+      made = next;
+    };
+    put("name", text("JsError"));
+    put("message", message);
+    put("cause", convert("zeroinitializer", "null", field(error, "cause")!.type));
+    put("value", box);
+    return made;
   }
 
   // An IoError from the parts the runtime gave at `parts`: its message, code, system call and

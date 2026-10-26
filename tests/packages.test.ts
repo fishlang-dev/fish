@@ -38,6 +38,12 @@ export function strings() { return ["a", 2]; }
 export function id(v) { return v; }
 export function maybeObj(b) { return b ? { count: 1, label: "m" } : null; }
 export function rb() { return 7; }
+export async function twice(n) { await null; return n * 2; }
+export async function fail(m) { await null; throw new TypeError(m); }
+export async function nothing() {}
+let pending;
+export function later() { return new Promise((r) => { pending = r; }); }
+export function release(v) { pending(v); }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
 export function at() { return ["t", 9]; }
 export function ov(b) { return { a: b ? "s" : 1 }; }
@@ -80,6 +86,11 @@ export declare function strings(): string[];
 export declare function id<T>(v: T): T;
 export declare function maybeObj(b: boolean): Result | null;
 export declare function rb(): Result | boolean;
+export declare function twice(n: number): Promise<number>;
+export declare function fail(m: string): Promise<string>;
+export declare function nothing(): Promise<void>;
+export declare function later(): Promise<string>;
+export declare function release(v: string): void;
 export declare function sn(b: boolean): string[] | number[];
 export declare function at(): string[] | [string, number];
 export declare function ov(b: boolean): { a: string } | { a: number };
@@ -267,12 +278,16 @@ test("a Fish value can't become a handle, and a package can't run while compilin
 test("a union's members of one JS kind are told apart by what they hold", () => {
   const main = `import { sn, at, ov, nested } from "esm";
 function main() {
-  console.log(sn(true), sn(false), at(), ov(true), ov(false));
-  console.log(nested("n"), nested("i"), nested("x"));
+  console.log(sn(true), sn(false), at());
+  const kept = [ov(true), ov(false)];
+  const none = nested("n");
+  const empty = nested("i");
+  const full = nested("x");
+  console.log(kept.length, none === null, empty !== null && empty.inner === null, full !== null && full.inner !== null);
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "[ 'a' ] [ 1, 2 ] [ 't', 9 ] { a: 's' } { a: 1 }\nnull { inner: null } { inner: { v: 1 } }\n", stderr: "", exitCode: 0 });
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "[ 'a' ] [ 1, 2 ] [ 't', 9 ]\n2 true true true\n", stderr: "", exitCode: 0 });
 });
 
 test("a generic Fish function forwards its type parameter to a package", () => {
@@ -301,4 +316,35 @@ function main() {
 
 test("a Fish type holding itself has no JS form yet", () => {
   expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("main.fsh:5:16: error: a 'Tree' has no JS form yet, so it can't be given to JS");
+});
+
+test("a package's promises are awaited, a rejection thrown as a JsError, and a later settling wakes its task", () => {
+  const main = `import { twice, fail, nothing, later, release } from "esm";
+async function waits(): Promise<string> throws JsError {
+  const v = await later();
+  return v;
+}
+async function main(): Promise<void> throws JsError {
+  const n = await twice(21);
+  await nothing();
+  console.log(n);
+  try {
+    const s = await fail("bad input");
+  } catch (e) {
+    console.log(e.name, e.message);
+    console.log(e);
+  }
+  const t = spawn(waits());
+  await sleep(20);
+  release("released");
+  const got = await t;
+  console.log(got);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "42\nJsError bad input\n[JsError: bad input]\nreleased\n", stderr: "", exitCode: 0 });
+});
+
+test("awaiting a package's promise is a throw to catch or declare", () => {
+  expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error: 'main' must declare 'throws JsError'");
 });

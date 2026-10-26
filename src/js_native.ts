@@ -497,4 +497,79 @@ int64_t fsh_rt_js_count(fsh_js *b) {
   fsh_js_leave();
   return length;
 }
+// Runs the jobs JS has queued, as it would once its own call stack emptied; one that throws is
+// dropped, as nothing awaits it.
+static void fsh_js_settle(JSContext *cx) {
+  JSContext *ran;
+  for (int done; (done = JS_ExecutePendingJob(fsh_js_runtime, &ran)) != 0;) {
+    if (done < 0) JS_FreeValue(cx, JS_GetException(ran));
+  }
+}
+
+// What a promise's settling runs: it wakes the task awaiting it, and lets go of it.
+static JSValue fsh_js_woken(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv, int magic, void *task) {
+  fsh_rt_wake(task);
+  fsh_task_release(task);
+  return JS_UNDEFINED;
+}
+
+// Awaits a JS value: 1 with what a promise fulfilled with, or anything else as itself, in out; 5
+// with what it rejected with; or 0 while it is pending, the task woken once it settles. waiting
+// says the task already waits for it.
+int32_t fsh_rt_js_await(fsh_js *b, int32_t *waiting, fsh_task *task, fsh_js **out) {
+  JSContext *cx = fsh_js_enter();
+  fsh_js_settle(cx);
+  int32_t outcome = 0;
+  switch (JS_PromiseState(cx, b->value)) {
+    case JS_PROMISE_NOT_A_PROMISE:
+      *out = fsh_js_box(JS_DupValue(cx, b->value));
+      outcome = 1;
+      break;
+    case JS_PROMISE_FULFILLED:
+      *out = fsh_js_box(JS_PromiseResult(cx, b->value));
+      outcome = 1;
+      break;
+    case JS_PROMISE_REJECTED:
+      *out = fsh_js_box(JS_PromiseResult(cx, b->value));
+      outcome = 5;
+      break;
+    default:
+      if (*waiting) break;
+      *waiting = 1;
+      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+      // Only one of the two runs, and lets go of the task.
+      JSValue handlers[2] = {
+        JS_NewCClosure(cx, fsh_js_woken, "woken", NULL, 1, 0, task),
+        JS_NewCClosure(cx, fsh_js_woken, "woken", NULL, 1, 0, task),
+      };
+      JSValue then = JS_GetPropertyStr(cx, b->value, "then");
+      JS_FreeValue(cx, JS_Call(cx, then, b->value, 2, handlers));
+      JS_FreeValue(cx, then);
+      JS_FreeValue(cx, handlers[0]);
+      JS_FreeValue(cx, handlers[1]);
+  }
+  fsh_js_leave();
+  return outcome;
+}
+
+// The message a thrown JS value gives a JsError: its message property when it is a string, or
+// the value as a string.
+fsh_str *fsh_rt_js_message(fsh_js *b) {
+  JSContext *cx = fsh_js_enter();
+  JSValue message = JS_IsObject(b->value) ? JS_GetPropertyStr(cx, b->value, "message") : JS_UNDEFINED;
+  if (JS_IsException(message)) {
+    JS_FreeValue(cx, JS_GetException(cx));
+    message = JS_UNDEFINED;
+  }
+  JSValue shown = JS_IsString(message) ? JS_DupValue(cx, message) : JS_ToString(cx, b->value);
+  JS_FreeValue(cx, message);
+  size_t length = 0;
+  const char *bytes = JS_IsException(shown) ? NULL : JS_ToCStringLen(cx, &length, shown);
+  if (!bytes) JS_FreeValue(cx, JS_GetException(cx));
+  fsh_str *s = fsh_str_of(bytes ? bytes : "a value that can't be shown", bytes ? length : 26);
+  JS_FreeCString(cx, bytes);
+  JS_FreeValue(cx, shown);
+  fsh_js_leave();
+  return s;
+}
 `;

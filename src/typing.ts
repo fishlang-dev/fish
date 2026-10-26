@@ -307,6 +307,7 @@ export function uncrossable(t: Type): string | undefined {
       return "functions crossing between Fish and JS aren't supported yet";
     case "future":
     case "handle":
+      if (t.kind === "future" && leafOf.get(t)?.method === "jsAwait") return t.gives === "void" ? undefined : uncrossable(t.gives);
       return "Promises crossing between Fish and JS aren't supported yet";
     case "interface":
     case "dyn":
@@ -324,10 +325,18 @@ export const jsOptional = new WeakSet<CompileError>();
 // The same for a package's function a program imports but doesn't call.
 export const jsUncalled = new WeakMap<object, CompileError>();
 
+// The prelude's JsError, what awaiting a JS promise that rejects throws, once the prelude is read.
+let jsError: Type | undefined;
+export function setJsError(t: Type | undefined) {
+  jsError = t;
+}
+
 // What a declared type is when JS gives it: an object, as a handle of its shape, inside unions,
-// arrays and tuples too.
+// arrays and tuples too, and a promise as a Fish future of what it fulfills with.
 export function jsView(t: Type): Type {
   if (typeof t === "string") return t;
+  const promised = promiseElement(t.kind === "dyn" ? t.of : t);
+  if (promised !== undefined && jsError !== undefined) return leafFuture("jsAwait", promised === "void" ? "void" : jsView(promised), jsError);
   if (t.kind === "object" && !t.tuple) return blockType("JsValue", t);
   if (t.kind === "object") return retuple(t, jsView);
   if (t.kind === "union") return unionType(t.members.map(jsView));
@@ -401,6 +410,7 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
   if (typeof t === "string" || within.has(t)) return false;
   if (t.kind === "block") return t.which === "JsValue";
+  if (t.kind === "future") return leafOf.get(t)?.method === "jsAwait" && (t.gives === "void" || jsConverts(t.gives, within));
   const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
     : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
   if (parts === undefined) return false;
@@ -439,7 +449,7 @@ export function blockType(which: BlockType["which"], of: Type = "void"): BlockTy
 // `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
-export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext";
+export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait";
 const leaves = new Map<string, FutureType>();
 export const leafOf = new WeakMap<FutureType, { method: Leaf; of: Type; signal: boolean }>();
 
@@ -457,6 +467,8 @@ const LEAF_FRAMES: Record<Leaf, (of: Type) => Field[]> = {
   readFile: () => [{ name: "path", type: "string" }, { name: "job", type: blockType("FileJob") }],
   writeFile: () => [{ name: "path", type: "string" }, { name: "bytes", type: arrayType("u8") }, { name: "job", type: blockType("FileJob") }],
   timerNext: () => [],
+  // A JS promise, and whether the task already waits for it to settle.
+  jsAwait: () => [{ name: "promise", type: blockType("JsValue") }, { name: "waiting", type: "i32" }],
 };
 
 // A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
@@ -468,7 +480,7 @@ export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false
     const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
     if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
     const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
-      : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : "void";
+      : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of : "void";
     t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
     leaves.set(key, t);
     leafOf.set(t, { method, of, signal });
@@ -760,6 +772,8 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
     case "class":
       // The prelude's Error prints its cause through what ErrorLike gives.
       if ((t.name === "Error" && !t.generic) || t.generic?.name === "AggregateError") return t.generic ? part(t.generic.args[0]!) : undefined;
+      // A JsError prints as an Error, the JS value it keeps left out.
+      if (t.name === "JsError" && !t.generic) return undefined;
       return first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]);
     case "variant":
       return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));

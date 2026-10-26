@@ -16,7 +16,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -644,6 +644,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
 
   classes.forEach((c) => link(c, new Set()));
   classes.forEach(checkOverrides);
+  setJsError(classes.get("JsError")?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
   infoOf.forEach(layout);
@@ -944,7 +945,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     // Checking the callee may instantiate from this call again, so its site is read first.
     const site = siteOf(at);
     const returns = returnOf(instance, at);
-    if (!site) return returns;
+    if (!site || (instance.body.js && instance.concrete)) return returns;
     const f = instance.body;
     const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !describes(declared)) return declared;
@@ -960,6 +961,12 @@ export function check(written: Stmt[], library = false, macros = false): Checked
 
   function returnOf(instance: Instance, at: Span): Type {
     const f = instance.body;
+    // A package's function gives what its signature made of its declaration for JS; a generic
+    // one's definition gives what it declares, as each instance makes its own.
+    if (f.js && instance.concrete) {
+      checkBody(instance);
+      return instance.returns;
+    }
     const declared = returnTypeOf(f, instance.bindings);
     if (declared && !describes(declared)) return declared;
     if (inProgress.has(instance)) {
