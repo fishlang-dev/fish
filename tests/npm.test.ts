@@ -67,9 +67,23 @@ test("a declaration Fish can't type is refused where it is declared, noting the 
   expect(out).toContain("main.fsh:2:19: note: 'each' is called here");
 });
 
-test("importing what isn't a function is refused for now", () => {
-  expect(stops({
-    "node_modules/case/index.d.ts": CASE,
-    "main.fsh": "import { Options } from \"case\";\nfunction main() {}\n",
-  })).toContain("'Options' from 'case' is an interface, and only functions of a package can be imported so far");
+
+const LIB = "export interface Options { deep?: boolean; name: string; nested?: Inner }\ninterface Inner { level: number }\nexport interface Result { readonly count: number; label: string; describe(prefix: string): string; parts(): string[] }\nexport declare function run(o: Options): Result;\nexport declare const VERSION: string;\nexport type Point = { x: number; y: number };\nexport declare function origin(): Point;\nexport declare function at(p: Point): string;\nexport declare class Box {\n  constructor(size: number, label?: string);\n  size: number;\n  readonly id: string;\n  grow(by: number): void;\n  static make(): Box;\n  static readonly MAX: number;\n  private secret: string;\n}\nexport declare function show(r: Result): void;\nexport declare function anything(v: any): void;\n";
+
+test("consts, interfaces, object types and classes type-check as JS handles", () => {
+  expect(stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": "import { run, VERSION, origin, at, Box, Options } from \"lib\";\nfunction main() {\n  const r = run({ name: \"x\", deep: true, nested: { level: 2 } });\n  const n: f64 = r.count;\n  r.label = \"new\";\n  const d: string = r.describe(\"p\");\n  const parts: string[] = r.parts();\n  const v: string = VERSION;\n  const p = origin();\n  const s: string = at(p);\n  const t: string = at({ x: 1.5, y: 2.5 });\n  const b = new Box(3, \"b\");\n  b.grow(2);\n  b.size = 4;\n  const id: string = b.id;\n  const m = Box.make();\n  const max: f64 = Box.MAX;\n  const o: Options = { name: \"kept\" };\n  run(o);\n}\n" })).toContain("main.fsh:3:13: error: running a package's code needs a JS engine");
+});
+
+test("a handle's members, a Fish value for a shape, and a class are refused in TypeScript's terms", () => {
+  const refused = (body: string) => stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": `import { run, Box, show, anything } from "lib";\nfunction main() { ${body} }\n` }).split("\n")[0]!.replace(/^.*error: /, "");
+  expect(refused("run({ name: 5 });")).toBe("argument of type '{ name: i64 }' is not assignable to parameter of type 'Options': property 'name' is a 'i64', not a 'string'");
+  expect(refused("run({ deep: true });")).toBe("argument of type '{ deep: boolean }' is not assignable to parameter of type 'Options': property 'name' is missing");
+  expect(refused("const r = run({ name: \"a\" }); r.count = 1;")).toBe("'count' is read-only in its declaration");
+  expect(refused("const r = run({ name: \"a\" }); const x = r.nope;")).toBe("property 'nope' does not exist on type 'Result'");
+  expect(refused("const r = run({ name: \"a\" }); r.describe(1);")).toBe("argument of type 'i64' is not assignable to parameter of type 'string'");
+  expect(refused("const r = run({ name: \"a\" }); const f = r.describe;")).toBe("'describe' is a method of 'Result'; call it, as in 'r.describe(...)'");
+  expect(refused("const b = new Box(\"x\");")).toBe("argument of type '\"x\"' is not assignable to parameter of type 'number'");
+  expect(refused("const x = Box.nope;")).toBe("property 'nope' does not exist on 'Box'");
+  expect(refused("show({ count: 1, label: \"l\" });")).toBe("argument of type '{ count: i64; label: string }' is not assignable to parameter of type 'Result': its methods come only with a value JS made");
+  expect(refused("const r = run({ name: \"a\" }); anything(r); anything([1, 2]); anything(\"s\");")).toStartWith("running a package's code needs a JS engine");
 });

@@ -95,9 +95,9 @@ type AstStmt =
   | { start: i64; end: i64; kind: "exportAll"; typeOnly: boolean; alias: string | null; module: string }
   | { start: i64; end: i64; kind: "exportAssign"; value: AstExpr }
   | { start: i64; end: i64; kind: "exportAsNamespace"; name: string }
-  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[] }
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[] }
-  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: { module: string; name: string } }
+  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[]; js?: AstJsName }
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] } }
+  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: AstJsName }
   | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[]; kind: "class" };
 type AstTupleElement =
   | { start: i64; end: i64; name: string | null; optional: boolean; rest: boolean; type: AstType };
@@ -157,11 +157,13 @@ type AstDeclarator =
 type AstTypeParam =
   | { start: i64; end: i64; name: string; constraint: AstType | null; default: AstType | null; modifiers: ("const" | "in" | "out")[] };
 type AstTypeAlias =
-  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[] };
+  | { start: i64; end: i64; kind: "typeAlias"; name: string; typeParams: AstTypeParam[]; type: AstType; decorators?: AstExpr[]; js?: AstJsName };
 type AstInterface =
-  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[] };
+  | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] } };
+type AstJsName =
+  | { module: string; name: string; const?: true };
 type AstFunc =
-  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: { module: string; name: string } };
+  | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: AstJsName };
 type AstBinaryOp =
   "??" | "||" | "&&" | "|" | "^" | "&" | "===" | "!==" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "instanceof" | "in" | "<<" | ">>" | ">>>" | "+" | "-" | "*" | "/" | "%" | "**";
 type AstUnaryOp =

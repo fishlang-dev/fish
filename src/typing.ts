@@ -295,7 +295,7 @@ export function uncrossable(t: Type): string | undefined {
     case "fixed":
       return uncrossable(t.element);
     case "object":
-      return t.tuple ? elementsOf(t).map(uncrossable).find((w) => w !== undefined) : "objects crossing to JS aren't supported yet";
+      return (t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).map(uncrossable).find((w) => w !== undefined);
     case "block":
       return t.which === "JsValue" ? undefined : `a '${t.which}' is Fish's own`;
     case "function":
@@ -310,6 +310,23 @@ export function uncrossable(t: Type): string | undefined {
     default:
       return "Fish has no JS form for it";
   }
+}
+
+// What a declared type is when JS gives it: an object, as a handle of its shape, inside unions,
+// arrays and tuples too.
+export function jsView(t: Type): Type {
+  if (typeof t === "string") return t;
+  if (t.kind === "object" && !t.tuple) return blockType("JsValue", t);
+  if (t.kind === "object") return retuple(t, jsView);
+  if (t.kind === "union") return unionType(t.members.map(jsView));
+  if (t.kind === "array") return arrayType(jsView(t.element));
+  return t;
+}
+
+// The shape a JS handle's declaration gives it, when it has one.
+export function jsShape(t: Type): InterfaceType | ObjectType | undefined {
+  if (typeof t === "string" || t.kind !== "block" || t.which !== "JsValue" || typeof t.of === "string") return undefined;
+  return t.of.kind === "interface" || t.of.kind === "object" ? t.of : undefined;
 }
 
 // What the timer task runs: each timer's callback, wrapped as an async function.
@@ -1530,7 +1547,8 @@ export function show(t: Type): string {
   if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
-  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which;
+  // A JS handle shows the shape its declaration gives it.
+  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of) : t.which;
   if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;

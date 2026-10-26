@@ -16,13 +16,13 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, arrayType, blockType, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsCalledAt, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { jsCalledAt, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -368,6 +368,7 @@ function macroShape(f: Func) {
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 export function check(written: Stmt[], library = false, macros = false): Checked {
   jsUses.length = 0;
+  jsClasses.clear();
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
@@ -409,6 +410,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     if (s.kind === "interface") {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
       interfaces.set(s.name, s);
+      if (s.jsClass) jsClasses.set(s.name, s);
       continue;
     }
     if (s.kind === "class" && s.name !== undefined) {
@@ -863,7 +865,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
       if (why) throw refuse(`${named} takes a '${show(params[i]!)}', which can't cross between Fish and JS yet: ${why}`, p.type ?? p);
     });
     instance.signature = params;
-    const returns = f.returnType ? resolveType(f.returnType) : blockType("JsValue");
+    const returns = jsView(f.returnType ? resolveType(f.returnType) : blockType("JsValue"));
     const why = returns === "void" ? undefined : uncrossable(returns);
     if (why) throw refuse(`${named} gives a '${show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!);
     instance.returns = returns;

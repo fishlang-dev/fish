@@ -235,9 +235,17 @@ export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; i
 export type TypeParam = Span & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
 
 // `decorators`, on these and on functions, are the macros applied to them.
-export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[] };
+// A package's type, declared in its `.d.ts`, sets `js`: an object type alias is then a JS handle.
+export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[]; js?: JsName };
 
-export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[] };
+// A package's interface or class, from its `.d.ts`, sets `js`, its values JS handles; a class
+// also has `jsClass`, its constructors' parameters and its statics.
+export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[];
+  js?: JsName; jsClass?: { constructors: Param[][]; statics: TypeMember[] } };
+
+// What a package's declaration names: the package and the name it exports it by. A const is
+// read as a value.
+export type JsName = { module: string; name: string; const?: true };
 
 export type Func = Span & {
   // `macro` marks `macro function`, a comptime function over syntax trees.
@@ -245,8 +253,8 @@ export type Func = Span & {
   // Undefined for an overload signature or a `declare function`. `throws` is the error type.
   typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined;
   decorators?: Expr[];
-  // A package's function, declared in its `.d.ts`: the package and the name it exports it by.
-  js?: { module: string; name: string };
+  // A package's function, or a const read as one, declared in its `.d.ts`.
+  js?: JsName;
 };
 
 export type BinaryOp =

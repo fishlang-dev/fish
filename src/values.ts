@@ -4,11 +4,11 @@ import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
+import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsShape, jsView, type InterfaceType } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -338,6 +338,8 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
 // The uses of a package's declarations, which a program can't run until Fish has a JS engine.
 export const jsUses: Expr[] = [];
+// A package's classes, by name: what `new` and their statics are checked against.
+export const jsClasses = new Map<string, Interface>();
 // Where each of a package's functions is first called, noted on a refusal of its declaration.
 export const jsCalledAt = new WeakMap<object, Expr>();
 // The std's timer calls, by which one each is.
@@ -469,6 +471,14 @@ export function expressions(ctx: Context) {
     // that type gives it: an arrow calling it, its parameters typed from there.
     if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
     if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    // An object literal meeting a JS shape, or an Option of one, takes the types of its fields.
+    const shapes = t === undefined ? [] : (typeof t !== "string" && t.kind === "union" ? t.members : [t]).flatMap((m) => jsShape(m) ?? []);
+    if (e.kind === "object" && shapes.length === 1) {
+      for (const p of e.props) {
+        const declared = p.kind === "property" ? shapes[0]!.fields.find((f) => f.name === p.key)?.type : undefined;
+        if (declared && p.kind === "property") expect(p.value, declared);
+      }
+    }
     // A `new Promise`, `Promise.resolve` or `Promise.reject` meeting a `Promise<T>`, or awaited
     // where a T is wanted, takes its T from there.
     const makesPromise = (x: Expr) => (x.kind === "new" && x.callee.kind === "ident" && x.callee.name === "Promise") || (x.kind === "call" && x.callee.kind === "member" && x.callee.object.kind === "ident" && x.callee.object.name === "Promise");
@@ -933,6 +943,16 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && !lookup("Promise") && !classes.has("Promise")) {
       return combined(e, callee.name as Combiner);
+    }
+    // A static method of a package's class.
+    const jsClass = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? jsClasses.get(callee.object.name) : undefined;
+    if (jsClass && callee.kind === "member") {
+      const m = jsStatic(jsClass, callee.name, e);
+      if (m.kind !== "method") throw new CompileError(`'${callee.name}' is a property of '${jsClass.name}', not a method`, callee.start, callee.end);
+      if (m.typeParams.length > 0) throw unsupported("generic methods of a package's types", callee);
+      jsArgs(e, jsParams(m.params));
+      const returns = m.returns ? resolveType(m.returns) : blockType("JsValue");
+      return { type: returns === "void" ? "void" : jsView(returns), what: `'${callee.name}'` };
     }
     if (callee.kind === "ident" && TIMER_CALLS.has(callee.name) && !lookup(callee.name) && !byName.has(callee.name)) {
       timerCall(e, callee.name);
@@ -2625,6 +2645,7 @@ export function expressions(ctx: Context) {
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
+    if (t.which === "JsValue") return jsMethodCall(e, callee, t);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
@@ -2885,9 +2906,125 @@ export function expressions(ctx: Context) {
 
   // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
   // its controller has aborted: values computed by the runtime, not fields.
+  // Whether a value passes where a JS shape is wanted: a handle of a shape with its fields, or a
+  // Fish value with them, converted; methods only a handle has.
+  function takesShape(from: Type, shape: InterfaceType | ObjectType): boolean {
+    return missingField(from, shape) === undefined;
+  }
+
+  // Why a value doesn't pass where a JS shape is wanted, said of the first field that fails.
+  function missingField(from: Type, shape: InterfaceType | ObjectType): string | undefined {
+    const own = jsShape(from);
+    if (own === shape) return undefined;
+    const source = own ?? (typeof from !== "string" && (from.kind === "object" || from.kind === "class") && !isTuple(from) ? from : undefined);
+    if (!source) return `a '${show(from)}' isn't an object`;
+    if (!own && shape.kind === "interface" && shape.methods.length > 0) return `its methods come only with a value JS made`;
+    for (const f of shape.fields) {
+      const found = source.fields.find((g) => g.name === f.name);
+      if (!found) {
+        if (isOption(f.type)) continue;
+        return `property '${f.name}' is missing`;
+      }
+      if (!passesJs(found.type, f.type)) return `property '${f.name}' is a '${show(found.type)}', not a '${show(f.type)}'`;
+    }
+    return undefined;
+  }
+
+  // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
+  // for it, inside unions and arrays too.
+  function passesJs(from: Type, to: Type): boolean {
+    if (fits(from, to)) return true;
+    // An integer is a number in JS, as a literal in an object for one is written.
+    // ponytail: past 2^53 an integer loses precision, as it would in JS; refuse if that matters
+    if (isInteger(from) && to === "f64") return true;
+    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => passesJs(m, to));
+    if (typeof to === "string") return false;
+    if (to.kind === "union") return to.members.some((m) => passesJs(from, m));
+    if (to.kind === "array") return typeof from !== "string" && from.kind === "array" && passesJs(from.element, to.element);
+    const shape = jsShape(to);
+    if (shape) return takesShape(from, shape);
+    return to.kind === "block" && to.which === "JsValue" && uncrossable(from) === undefined;
+  }
+
+  // Whether a type holds a JS handle or an any, where Fish values of other types pass.
+  function holdsJs(t: Type): boolean {
+    return holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue");
+  }
+
+  // A JS handle's property, as its shape declares it, read from JS.
+  function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
+    const shape = jsShape(t);
+    const found = shape?.fields.find((f) => f.name === e.name);
+    if (found) {
+      jsUses.push(e);
+      return jsView(found.type);
+    }
+    const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
+    if (method) throw new CompileError(`'${e.name}' is a method of '${show(t)}'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
+    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+  }
+
+  // A JS handle's method, called with its declared parameters.
+  function jsMethodCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
+    const shape = jsShape(t);
+    const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
+    if (!method) {
+      const field = shape?.fields.some((f) => f.name === callee.name);
+      throw new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
+    }
+    if (method.generic) throw unsupported("generic methods of a package's types", callee);
+    jsArgs(e, method.params);
+    jsUses.push(e);
+    return { type: method.returns === "void" ? "void" : jsView(method.returns), what: `'${callee.name}'` };
+  }
+
+  // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
+  // as an optional parameter.
+  function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[]) {
+    const list = e.args ?? [];
+    let required = params.length;
+    while (required > 0 && isOption(params[required - 1]!)) required--;
+    if (list.length < required || list.length > params.length) {
+      const expected = required === params.length ? `${required}` : `${required}-${params.length}`;
+      throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${list.length}`, e.start, e.end);
+    }
+    list.forEach((a, i) => {
+      if (a.kind === "spread") throw new CompileError("spreading arguments into a package's functions isn't supported yet", a.start, a.end);
+      expect(a, params[i]!);
+      const given = value(a);
+      coerce(a, given, params[i]!, `argument of type '${show(given)}' is not assignable to parameter of type '${show(params[i]!)}'`);
+    });
+  }
+
+  // A package's declared parameters as Fish types: an optional one is an Option.
+  function jsParams(params: Param[]): Type[] {
+    return params.map((p) => {
+      const declared = p.type ? resolveType(p.type) : blockType("JsValue");
+      return p.optional ? unionType([declared, "null"]) : declared;
+    });
+  }
+
+  // `new C(...)` of a package's class: its constructor's parameters, giving a handle.
+  function jsNew(e: Extract<Expr, { kind: "new" }>, c: Interface): Type {
+    if (c.typeParams.length > 0) throw unsupported("generic classes of a package", e);
+    const constructor = c.jsClass!.constructors[0] ?? [];
+    jsArgs(e, jsParams(constructor));
+    jsUses.push(e);
+    return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
+  }
+
+  // A package's class's static member: a property read, or a method called.
+  function jsStatic(c: Interface, name: string, at: Expr): TypeMember {
+    const found = c.jsClass!.statics.find((m) => "name" in m && m.name === name);
+    if (!found) throw new CompileError(`property '${name}' does not exist on '${c.name}'`, at.start, at.end);
+    jsUses.push(at);
+    return found;
+  }
+
   function blockProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     if (linked(e)) throw unsupported(`optional chains through '${t.which}' values`, e);
     computed.add(e);
+    if (t.which === "JsValue") return jsProperty(e, t);
     if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
     if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
     if (t.which === "TcpListener" && e.name === "port") return "i64";
@@ -3406,6 +3543,12 @@ export function expressions(ctx: Context) {
           return typeOf(e);
         }
         if (!local && e.name === "undefined") return "null";
+        // A package's const, read from JS.
+        const jsConst = local ? undefined : byName.get(e.name);
+        if (jsConst?.js?.const) {
+          jsUses.push(e);
+          return jsView(resolveType(jsConst.returnType!));
+        }
         // A top-level const: its value, computed while compiling. An aggregate is read where it
         // lives, through a reference, as a const can't change.
         const constant = local ? undefined : byName.get(`const ${e.name}`);
@@ -3472,6 +3615,14 @@ export function expressions(ctx: Context) {
         for (const x of e.exprs) joined(x, operand(x), "a template");
         return "string";
       case "member": {
+        // A static property of a package's class.
+        const jsClass = e.object.kind === "ident" && !lookup(e.object.name) ? jsClasses.get(e.object.name) : undefined;
+        if (jsClass) {
+          const m = jsStatic(jsClass, e.name, e);
+          if (m.kind !== "property") throw new CompileError(`'${e.name}' is a method of '${jsClass.name}'; call it`, e.start, e.end);
+          const declared = m.type ? resolveType(m.type) : blockType("JsValue");
+          return jsView(m.optional ? unionType([declared, "null"]) : declared);
+        }
         if (isMath(e.object)) {
           if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError(`'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
           maths.add(e);
@@ -3697,6 +3848,7 @@ export function expressions(ctx: Context) {
           return blockNew(e, e.callee.name, list);
         }
         if (e.callee.kind === "ident" && (e.callee.name === "Map" || e.callee.name === "Set") && !lookup(e.callee.name)) return mapNew(e, e.callee.name === "Set", list);
+        if (e.callee.kind === "ident" && !lookup(e.callee.name) && jsClasses.has(e.callee.name)) return jsNew(e, jsClasses.get(e.callee.name)!);
         if (e.callee.kind === "ident" && e.callee.name === "Promise" && !lookup("Promise") && !classes.has("Promise")) {
           promiseNew(e, list);
           return typeOf(e);
@@ -4132,10 +4284,21 @@ export function expressions(ctx: Context) {
     // A mutable reference lent on must be reachable only through mutable references.
     if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
-    // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything.
-    if (typeof to !== "string" && to.kind === "block" && to.which === "JsValue" && uncrossable(type) === undefined) {
+    // An Option or array of JS values takes what each of its members would.
+    if (typeof to !== "string" && to.kind !== "block" && holdsJs(to) && !fits(type, to) && passesJs(type, to)) {
       coercions.set(e, to);
       return;
+    }
+    // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything, and
+    // a Fish value of a shape's fields becomes a new JS object of that shape.
+    if (typeof to !== "string" && to.kind === "block" && to.which === "JsValue") {
+      const shape = jsShape(to);
+      if (shape ? takesShape(type, shape) : uncrossable(type) === undefined) {
+        coercions.set(e, to);
+        return;
+      }
+      const field = shape && missingField(type, shape);
+      throw new CompileError(field ? `${message}: ${field}` : message, e.start, e.end);
     }
     if (adapt(e, to)) return;
     type = adaptFields(e, type, to);
@@ -4535,6 +4698,13 @@ export function expressions(ctx: Context) {
       if (!computed.has(target) && readCopy(target)) throw new CompileError("this is part of a value read through a Dyn, which gives a copy, so writing it would change only the copy; change it through a method", target.start, target.end);
       if (computed.has(target)) {
         const holder = types.get((target as Extract<Expr, { kind: "member" }>).object);
+        // A JS handle's property is written in JS, whatever holds the handle.
+        const handle = holder === undefined ? undefined : jsShape(isRefType(holder) ? holder.to : holder);
+        const field = handle?.fields.find((f) => f.name === (target as { name: string }).name);
+        if (field) {
+          if (field.readonly) throw new CompileError(`'${field.name}' is read-only in its declaration`, target.start, target.end);
+          return field.type;
+        }
         const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
         throw new CompileError(through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
       }

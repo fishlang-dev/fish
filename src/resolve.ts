@@ -407,6 +407,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const lifetime = slots.get(t.name);
     const args = (lifetime && t.args.length === lifetime.length ? t.args.filter((_, i) => !lifetime[i]) : t.args).map(resolveType);
     const alias = aliases.get(t.name);
+    // A package's object type is a JS handle of that shape; its other aliases are what they say.
+    if (alias?.js) {
+      const aliased = aliasType(alias, args, t);
+      return typeof aliased !== "string" && aliased.kind === "object" && !aliased.tuple ? blockType("JsValue", aliased) : aliased;
+    }
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);
     if (named) return named;
@@ -421,6 +426,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (e && name === undefined) return e.type;
     if (e && e.members.has(name!)) return e.members.get(name!)!;
     const trait = interfaces.get(t.name);
+    // A package's interface or class is a JS handle of its shape.
+    if (trait?.js) return blockType("JsValue", interfaceOf(trait, args, t));
     if (trait) return interfaceOf(trait, args, t);
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);

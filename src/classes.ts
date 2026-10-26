@@ -1,6 +1,6 @@
 import { defaulted, prologues } from "./defaults.ts";
 import { CompileError } from "./diag.ts";
-import type { ClassMember, ClassNode, Expr, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
@@ -21,8 +21,8 @@ export type Body = Span & {
   async?: boolean;
   // Whether it is a C function a `declare function` names, which has no body here.
   foreign?: boolean;
-  // A package's function, typed from its declaration: the package and its export there.
-  js?: { module: string; name: string };
+  // A package's function, or a const read as one, typed from its declaration.
+  js?: JsName;
   // Whether an `export` names it, so a library builds it into a C function too.
   exported?: boolean;
   // A top-level `const`, as a function giving its value, or a `comptime { }` block, as one giving

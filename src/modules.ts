@@ -2,8 +2,8 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
-import { jsDeclaration } from "./js.ts";
-import { exportsOf, findTypings, type Exports } from "./typings.ts";
+import { jsDeclaration, referenced } from "./js.ts";
+import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { unsupported } from "./unsupported.ts";
@@ -92,12 +92,29 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
     if (s.kind === "import" && (s.default !== undefined || s.namespace !== undefined)) throw unsupported("default and namespace imports of packages", s);
     if (s.kind === "exportAll") throw unsupported("re-exporting all of a package", s);
-    const statements = named.map((sp) => {
-      const declared = exports.names.get(sp.name)!;
-      const made = jsDeclaration(declared, sp.name, specifier, sp);
+    // Each name imported is exported by the module; the types its declaration names, and theirs,
+    // are declared in it too, as they are where the package declares them.
+    const statements: Stmt[] = [];
+    const declaredHere = new Map<string, Declared>();
+    // The names imported come first, so one also referred to is exported.
+    const pending: { declared: Declared; name: string }[] = [];
+    const add = (declared: Declared, name: string, exported: boolean, at: Span) => {
+      if (declaredHere.has(name)) {
+        if (declaredHere.get(name)!.at !== declared.at) throw new CompileError(`'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
+        return;
+      }
+      declaredHere.set(name, declared);
+      const made = jsDeclaration(declared, name, specifier, at);
+      const refers = referenced(made);
       shiftSpans(made, declarationFile(declared.file));
-      return { kind: "export", body: made, start: made.start, end: made.end } as Stmt;
-    });
+      statements.push(exported ? ({ kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made);
+      for (const n of refers) {
+        const found = declared.resolve(n);
+        if (found) pending.push({ declared: found, name: n });
+      }
+    };
+    for (const sp of named) add(exports.names.get(sp.name)!, sp.name, true, sp);
+    for (let next = pending.shift(); next; next = pending.shift()) add(next.declared, next.name, false, next.declared.at);
     const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new Map(), globals: new Map() };
     modules.push(module);
     byPath.set(module.path, module);
