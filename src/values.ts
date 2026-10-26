@@ -2948,16 +2948,17 @@ export function expressions(ctx: Context) {
     if (isRefType(from) && jsShape(from.to)) from = from.to;
     const own = jsShape(from);
     if (own === shape) return undefined;
-    // A Fish value is never cyclic, so each of its parts is compared in turn.
-    if (!own) return shapeMisses(from, own, shape);
-    // Handles' shapes that refer to themselves are taken to fit while they are compared.
-    if (comparing.get(own)?.has(shape)) return undefined;
-    if (!comparing.has(own)) comparing.set(own, new Set());
-    comparing.get(own)!.add(shape);
+    // A pair of types met again while it is compared: handles' shapes referring to themselves
+    // fit; a Fish type referring to itself has no value JS could take yet. Object types are
+    // interned, so a nested value of another type is a pair of its own.
+    const source = (own ?? from) as object;
+    if (comparing.get(source)?.has(shape)) return own ? undefined : `'${show(from)}' refers to itself, which can't cross between Fish and JS yet`;
+    if (!comparing.has(source)) comparing.set(source, new Set());
+    comparing.get(source)!.add(shape);
     try {
       return shapeMisses(from, own, shape);
     } finally {
-      comparing.get(own)!.delete(shape);
+      comparing.get(source)!.delete(shape);
     }
   }
 

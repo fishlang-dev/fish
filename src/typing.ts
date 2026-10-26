@@ -283,7 +283,8 @@ export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 // booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
 // copied across, and opaque JS values.
 export function uncrossable(t: Type): string | undefined {
-  if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return undefined;
+  // An empty array's element type, `never`, holds no value to cross.
+  if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return undefined;
   if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
   switch (t.kind) {
     case "literal":

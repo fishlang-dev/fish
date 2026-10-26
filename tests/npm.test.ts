@@ -181,3 +181,10 @@ test("a nested Fish value is checked against a recursive shape, part by part", (
   expect(refused(`{ v: "a", child: { v: 5 } }`)).toBe("argument of type '{ child: { v: i64 }; v: string }' is not assignable to parameter of type 'U': property 'child' is a '{ v: i64 }', not a 'null | U'");
   expect(refused(`{ v: "a", child: { v: "b" } }`)).toStartWith("running a package's code needs a JS engine");
 });
+
+test("a Fish class whose type refers to itself through an array is refused, not followed forever", () => {
+  expect(first(stops({
+    "node_modules/p/index.d.ts": "export interface L { items: L[]; v: string }\nexport declare function takeL(l: L): void;\n",
+    "main.fsh": "import { takeL } from \"p\";\nclass K { v: string = \"a\"; items: K[] = []; }\nfunction main() { takeL(new K()); takeL({ v: \"a\", items: [{ v: \"b\", items: [] }] }); }\n",
+  }))).toBe("argument of type 'K' is not assignable to parameter of type 'L': property 'items' is a 'K[]', not a 'L[]'");
+});
