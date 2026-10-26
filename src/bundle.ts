@@ -1,4 +1,3 @@
-import { builtinModules } from "node:module";
 import { join, resolve } from "node:path";
 import { CompileError } from "./diag.ts";
 import type { Package } from "./modules.ts";
@@ -24,10 +23,6 @@ export function bundle(packages: Package[], used: number[]): string {
   throw new CompileError(result.message, at.start, at.end);
 }
 
-// Node's built-in modules, as a package may name them, and any `node:` one; Bun's bundler takes
-// a plugin's filter as a regex, and one matching every path hides the bundle's in-memory files.
-const BUILT_IN = new RegExp(`^((node:)?(${builtinModules.map((m) => m.replace(/[/.]/g, "\\$&")).join("|")})|node:.*)$`);
-
 // The package a file of the bundle belongs to, as node_modules names it.
 const packageOf = (file: string) => /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(file)?.[1];
 
@@ -41,7 +36,6 @@ async function main(request: Request): Promise<Result> {
   // isn't bundled fails when it runs, as a require of a missing module does.
   const requires = join(request[0]!.dir, "__fish_require__.js");
   files[requires] = "export function createRequire() { return (name) => { throw new Error(`Cannot find module '${name}'`); }; }\n";
-  const builtIns: { importer: string; name: string }[] = [];
   // The import a file of the bundle is reached through: a package's own name names it, and any
   // other file is the first package's, as nothing better is known.
   const owner = (file: string) => {
@@ -61,15 +55,13 @@ async function main(request: Request): Promise<Result> {
       target: "node",
       format: "esm",
       metafile: true,
+      // Bun's bundler takes a plugin's filter as a regex, and one matching every path hides the
+      // bundle's in-memory files.
       plugins: [{
-        name: "fish built-ins",
+        name: "fish require",
         setup(build) {
-          build.onResolve({ filter: BUILT_IN }, (args) => {
-            // Bun's own helpers are imported by a module with no path.
-            if (!args.importer.startsWith("/") && /^(node:)?module$/.test(args.path)) return { path: requires };
-            builtIns.push({ importer: args.importer, name: args.path.replace(/^node:/, "") });
-            return { path: args.path, external: true };
-          });
+          // Bun's own helpers are imported by a module with no path.
+          build.onResolve({ filter: /^(node:)?module$/ }, (args) => (args.importer.startsWith("/") ? undefined : { path: requires }));
         },
       }],
     });
@@ -77,14 +69,18 @@ async function main(request: Request): Promise<Result> {
     return unbuilt((e as { errors?: BuildLog[] }).errors?.[0], String(e));
   }
   if (!built.success) return unbuilt(built.logs.find((l) => l.level === "error") as BuildLog | undefined, "the bundler couldn't build it");
-  if (builtIns.length > 0) return builtInUsed(request, builtIns[0]!, built.metafile?.inputs ?? {}, virtual);
+  // What the bundler left outside the bundle, building for Node, is Node's own modules.
+  const inputs = built.metafile?.inputs ?? {};
+  const builtIns = Object.entries(inputs).flatMap(([file, input]) => (input as { imports: { path: string; external?: boolean }[] }).imports
+    .filter((i) => i.external).map((i) => ({ importer: resolve(file), name: i.path.replace(/^node:/, "") })));
+  if (builtIns.length > 0) return builtInUsed(request, builtIns[0]!, inputs, virtual);
   return { code: await built.outputs[0]!.text() };
 }
 
 // A Node built-in the bundle would need, said of the program's import that reaches it, through
 // the package that uses it when that is another.
-function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string }[] }>, virtual: (r: Request[number]) => string): Result {
-  const graph = new Map(Object.entries(inputs).map(([file, input]) => [resolve(file), input.imports.map((i) => resolve(i.path))]));
+function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string; external?: boolean }[] }>, virtual: (r: Request[number]) => string): Result {
+  const graph = new Map(Object.entries(inputs).map(([file, input]) => [resolve(file), input.imports.filter((i) => !i.external).map((i) => resolve(i.path))]));
   const reaches = (from: string, seen = new Set<string>()): boolean => {
     if (from === used.importer) return true;
     if (seen.has(from)) return false;
@@ -93,9 +89,8 @@ function builtInUsed(request: Request, used: { importer: string; name: string },
   };
   const r = request.find((q) => reaches(virtual(q))) ?? request[0]!;
   const user = packageOf(used.importer);
-  const module = used.name === "bun" ? "Bun's own 'bun' module" : `Node's '${used.name}' module`;
   const through = user === undefined || r.specifier === user || r.specifier.startsWith(`${user}/`) ? "" : ` through '${user}'`;
-  return { index: r.index, message: `'${r.specifier}' needs ${module}${through}, which a package's JS can't use in Fish yet` };
+  return { index: r.index, message: `'${r.specifier}' needs Node's '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
 }
 
 if (import.meta.main) console.log(JSON.stringify(await main(JSON.parse(await Bun.stdin.text()) as Request)));
