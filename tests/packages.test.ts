@@ -56,6 +56,7 @@ export function ignore(p) { return "ignored"; }
 export function never() { return new Promise(() => {}); }
 export function withOpts(o) { return o.cb(1); }
 export function deep(o) { return o.inner.v; }
+export function listed(o) { return o.list.length; }
 export function optional() { try { return require("not-installed-anywhere").x; } catch { return "caught"; } }
 export class Emitter { constructor() { this.handlers = []; } on(f) { this.handlers.push(f); } emit(s) { return this.handlers.map((f) => f(s)).join(","); } }
 export function sn(b) { return b ? ["a"] : [1, 2]; }
@@ -116,6 +117,7 @@ export declare function ignore(p: Promise<void>): string;
 export declare function never(): Promise<string>;
 export declare function withOpts(o: { cb: (x: number) => number }): number;
 export declare function deep(o: { inner: { v: number } }): number;
+export declare function listed(o: { list: string[] }): number;
 export declare function optional(): string;
 export declare class Emitter { on(f: (s: string) => string): void; emit(s: string): string; }
 export declare function sn(b: boolean): string[] | number[];
@@ -466,5 +468,5 @@ test("a callback inside an object given to JS waits", () => {
 });
 
 test("a nested object given to JS takes numbers as JS does, and an optional require runs", () => {
-  expect(run(`import { deep, optional } from "esm";\nfunction main() {\n  console.log(deep({ inner: { v: 5 } }), optional());\n}\n`)).toEqual({ stdout: "5 caught\n", stderr: "", exitCode: 0 });
+  expect(run(`import { deep, optional, listed } from "esm";\nfunction main() {\n  console.log(deep({ inner: { v: 5 } }), optional(), listed({ list: [] }));\n}\n`)).toEqual({ stdout: "5 caught 0\n", stderr: "", exitCode: 0 });
 });

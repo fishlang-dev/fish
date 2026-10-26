@@ -1393,6 +1393,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && (type.kind === "array" || type.kind === "fixed" || (type.kind === "object" && type.tuple))) {
       emit(`${box} = call ptr @fsh_rt_js_array()`);
       const push = (part: string, t: Type) => emit(`call void @fsh_rt_js_push(ptr ${box}, ptr ${toJs(part, t, "null")})`);
+      if (type.kind === "array" && type.element === "never") return box;
       if (type.kind === "array") {
         const [data, length] = [temp(), temp()];
         emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);

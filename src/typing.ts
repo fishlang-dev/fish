@@ -435,7 +435,8 @@ export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.ki
 // A Fish type holding itself has no JS form yet, as converting it would never end: `within` is
 // the types the walk is inside.
 export function jsConverts(t: Type, within = new Set<Type>()): boolean {
-  if (t === "string" || t === "boolean" || t === "null" || isNumeric(t)) return true;
+  // An empty array's element type, `never`, holds no value to convert.
+  if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return true;
   if (typeof t === "string" || within.has(t)) return false;
   if (t.kind === "block") return t.which === "JsValue";
   if (t.kind === "dyn" && callableOf.has(t.of)) {
