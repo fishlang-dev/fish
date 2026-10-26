@@ -7,8 +7,10 @@ import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
-import { locking } from "./dependencies.ts";
-import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, vacant, validName } from "./manifest.ts";
+import { locking, resolvePackages } from "./dependencies.ts";
+import { openIndex, registryUrl } from "./registry_index.ts";
+import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
+import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
@@ -254,6 +256,42 @@ if (import.meta.main) {
     }
     process.exit(0);
   }
+  if (command === "add" || command === "update") {
+    const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
+    if (positionals.length > 2 || (command === "add" && !file) || Object.keys(values).some((k) => k !== "panic")) fail(usage);
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
+    try {
+      const manifest = loadManifest(found);
+      if (command === "add") {
+        const [name, range] = file!.includes("@") ? [file!.slice(0, file!.indexOf("@")), file!.slice(file!.indexOf("@") + 1)] : [file!, undefined];
+        if (!validName(name)) fail(`fishc add: '${name}' isn't a package name: ${NAME_RULE}`);
+        if (manifest.dependencies.some((d) => d.name === name)) fail(`fishc add: '${name}' is already a dependency in ${MANIFEST}`);
+        if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || !parseRange(range))) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
+        const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked).map((e) => e.version);
+        const latest = maxSatisfying(released, parseRange(range ?? "*")!);
+        if (!latest) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
+        const written = range ?? `^${formatVersion(latest)}`;
+        const edited = withDependency(readFileSync(found, "utf8"), `${name} = { version = "${written}" }`);
+        // Written only once the result still reads as the manifest with the new dependency.
+        if (!readManifest(edited, manifest.dir).dependencies.some((d) => d.name === name)) fail(`fishc add: couldn't add '${name}' to ${MANIFEST}; add it by hand`);
+        writeFileSync(found, edited);
+        console.log(`added ${name} ${written}`);
+      } else {
+        if (file && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
+        locking.update = file ? new Set([file]) : "all";
+        resolvePackages(join(manifest.dir, manifest.entry));
+        console.log(`updated ${relative(process.cwd(), join(manifest.dir, "fish.lock")) || "fish.lock"}`);
+      }
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        process.exit(1);
+      }
+      fail(`fishc ${command}: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exit(0);
+  }
   if (command === "new" || command === "init") {
     const usage = "usage: fishc new <name>\n       fishc init [<name>]";
     const flags = Object.keys(values).some((k) => k !== "panic");
@@ -290,7 +328,7 @@ if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {

@@ -36,7 +36,7 @@ test("a manifest missing what it needs, or holding what it doesn't have, is refu
   expect(refused(`[package]\nname = "a"\nversion = "1.0.0"\nentry = "main.ts"\n`)).toBe(`fish.toml:4:9: error: the entry is a .fsh file, as in entry = "src/main.fsh"`);
   expect(refused(`[package]\nnmae = "a"\n`)).toBe("fish.toml:2:1: error: [package] has no key 'nmae'; it has name, version, entry, lib");
   expect(refused(`name = "a"\n`)).toBe("fish.toml:1:1: error: 'name' belongs in a table, such as [package]");
-  expect(refused(`[package]\nname = "a"\nversion = "1.0.0"\n[dev]\n`)).toBe("fish.toml:4:1: error: a manifest has no table [dev]; it has [package] and [dependencies]");
+  expect(refused(`[package]\nname = "a"\nversion = "1.0.0"\n[dev]\n`)).toBe("fish.toml:4:1: error: a manifest has no table [dev]; it has [package], [dependencies] and [registry]");
   expect(refused(`[package]\nname = "a"\nname = "b"\n`)).toBe("fish.toml:3:1: error: 'name' is given twice");
   expect(refused(`[package]\nname = "a"\n[package]\n`)).toBe("fish.toml:3:1: error: the table [package] is given twice");
 });
@@ -46,7 +46,7 @@ test("TOML a manifest doesn't use is refused where it starts", () => {
   expect(refused(`[package]\nname = 1.5\n`)).toBe("fish.toml:2:8: error: this value is TOML Fish doesn't read in a manifest yet");
   expect(refused(`[package]\nname = """a"""\n`)).toBe("fish.toml:2:8: error: a multi-line string is TOML Fish doesn't read in a manifest yet");
   expect(refused(`[package.x]\n`)).toBe("fish.toml:1:9: error: a dotted key is TOML Fish doesn't read in a manifest yet");
-  expect(refused(`[[package]]\n`)).toBe("fish.toml:1:1: error: a manifest has no table [package]; it has [package] and [dependencies]");
+  expect(refused(`[[package]]\n`)).toBe("fish.toml:1:1: error: a manifest has no table [package]; it has [package], [dependencies] and [registry]");
   expect(refused(`[package]\nname = "a\n`)).toBe("fish.toml:2:8: error: this string isn't closed on its line");
   expect(refused(`[package]\nname = "a" b\n`)).toBe("fish.toml:2:12: error: expected the end of the line here");
   expect(refused(`[package]\nname "a"\n`)).toBe("fish.toml:2:6: error: expected '=' after the key");
@@ -72,13 +72,21 @@ test("dependencies come from a path or a git commit, and lib names what a packag
   expect(m.lib).toBe("src/api.fsh");
   expect(m.dependencies.map(({ start, end, ...d }) => d)).toEqual([{ name: "util", path: "../util" }, { name: "http", git: "https://example.com/http.git", rev: "3f2a9c1" }]);
   const pkg = `[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\n`;
-  expect(refused(pkg + `util = "1.0"\n`)).toBe(`fish.toml:5:8: error: a dependency is a table naming where it comes from, as in { path = "../util" } or { git = "https://...", rev = "<commit>" }`);
+  expect(refused(pkg + `util = "1.0"\n`)).toBe(`fish.toml:5:8: error: a dependency is a table naming where it comes from, as in { version = "^1.2.0" }, { path = "../util" } or { git = "https://...", rev = "<commit>" }`);
   expect(refused(pkg + `Util = { path = "x" }\n`)).toContain("fish.toml:5:1: error: 'Util' isn't a package name");
-  expect(refused(pkg + `util = { pth = "x" }\n`)).toBe("fish.toml:5:10: error: a dependency has no key 'pth'; it has path, or git and rev");
-  expect(refused(pkg + `util = { path = "x", git = "y", rev = "abcdef1" }\n`)).toBe("fish.toml:5:8: error: a dependency comes from a path or from git, not both");
+  expect(refused(pkg + `util = { pth = "x" }\n`)).toBe("fish.toml:5:10: error: a dependency has no key 'pth'; it has version, path, or git and rev");
+  expect(refused(pkg + `util = { path = "x", git = "y", rev = "abcdef1" }\n`)).toBe("fish.toml:5:8: error: a dependency comes from one place: the registry by version, a path, or git");
   expect(refused(pkg + `util = { git = "https://x" }\n`)).toBe(`fish.toml:5:8: error: a git dependency is pinned to a commit, as in rev = "3f2a9c1"; branches and tags move`);
   expect(refused(pkg + `util = { git = "https://x", rev = "main" }\n`)).toBe("fish.toml:5:35: error: rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move");
   expect(refused(pkg + `util = { git = "--upload-pack=x", rev = "abcdef1" }\n`)).toBe("fish.toml:5:16: error: a git URL can't start with '-'");
   expect(refused(pkg + `util = { path = 1 }\n`)).toBe("fish.toml:5:17: error: 'path' is a string");
   expect(refused(`[package]\nname = "a"\nversion = "1.0.0"\nlib = "x.ts"\n`)).toBe(`fish.toml:4:7: error: the lib is a .fsh file, as in lib = "src/lib.fsh"`);
+});
+
+test("a registry dependency names an npm-style version range", () => {
+  const pkg = `[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\n`;
+  expect(readManifest(pkg + `http = { version = "^1.2.0" }\nlog = { version = ">=1.0.0 <2.0.0 || 3.x" }\n`, "/p").dependencies.map(({ start, end, ...d }) => d)).toEqual([{ name: "http", version: "^1.2.0" }, { name: "log", version: ">=1.0.0 <2.0.0 || 3.x" }]);
+  expect(refused(pkg + `http = { version = "latest" }\n`)).toBe(`fish.toml:5:20: error: 'latest' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`);
+  expect(refused(pkg + `http = { version = "^1.0.0", path = "../http" }\n`)).toBe("fish.toml:5:8: error: a dependency comes from one place: the registry by version, a path, or git");
+  expect(refused(pkg + `http = { version = "^1.0.0", rev = "abcdef1" }\n`)).toBe("fish.toml:5:36: error: rev pins a git dependency; a registry one is chosen by its version range");
 });

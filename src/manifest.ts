@@ -1,14 +1,15 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { CompileError } from "./diag.ts";
+import { parseRange } from "./semver.ts";
 
-// A package another depends on, from a local path or a git repository pinned to a commit, and
-// where its entry is in the depending package's `fish.toml`.
-export type Dependency = { name: string; start: number; end: number } & ({ path: string } | { git: string; rev: string });
+// A package another depends on, from a local path, a git repository pinned to a commit, or the
+// registry by a version range, and where its entry is in the depending package's `fish.toml`.
+export type Dependency = { name: string; start: number; end: number } & ({ path: string } | { git: string; rev: string } | { version: string });
 
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
-export type Manifest = { name: string; version: string; entry: string; lib: string; dependencies: Dependency[]; dir: string };
+export type Manifest = { name: string; version: string; entry: string; lib: string; dependencies: Dependency[]; registry?: string; dir: string };
 
 export const MANIFEST = "fish.toml";
 
@@ -160,10 +161,10 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 // entry, and nothing a manifest doesn't have, so a misspelled key isn't silently ignored.
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib"], dependencies: [] };
+  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib"], dependencies: [], registry: ["url"] };
   for (const [name, found] of tables) {
     const table = Array.isArray(found) ? found[0]! : found;
-    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package] and [dependencies]`, table.start, table.end);
+    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package], [dependencies] and [registry]`, table.start, table.end);
     for (const { key } of table.keys.values()) {
       if (name !== "dependencies" && !known[name]!.includes(key.value)) {
         throw new CompileError(name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
@@ -194,14 +195,16 @@ export function readManifest(src: string, dir: string): Manifest {
   const lib = file("lib", "src/lib.fsh");
   const listed = tables.get("dependencies") as Table | undefined;
   const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
-  return { name: name.value, version: version.value, entry, lib, dependencies, dir };
+  const registry = (tables.get("registry") as Table | undefined)?.keys.get("url")?.value;
+  if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
+  return { name: name.value, version: version.value, entry, lib, dependencies, ...(registry && { registry: registry.value as string }), dir };
 }
 
 // A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.
 function dependency(key: Spanned<string>, value: Spanned<TomlValue>): Dependency {
   const at = { name: key.value, start: key.start, end: value.end };
   if (!validName(key.value)) throw new CompileError(`'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
-  const form = "a dependency is a table naming where it comes from, as in { path = \"../util\" } or { git = \"https://...\", rev = \"<commit>\" }";
+  const form = "a dependency is a table naming where it comes from, as in { version = \"^1.2.0\" }, { path = \"../util\" } or { git = \"https://...\", rev = \"<commit>\" }";
   if (!(value.value instanceof Map)) throw new CompileError(form, value.start, value.end);
   const entries = value.value;
   const text = (field: string): Spanned<string> | undefined => {
@@ -210,10 +213,15 @@ function dependency(key: Spanned<string>, value: Spanned<TomlValue>): Dependency
     return found?.value as Spanned<string> | undefined;
   };
   for (const { key: k } of entries.values()) {
-    if (!["path", "git", "rev"].includes(k.value)) throw new CompileError(`a dependency has no key '${k.value}'; it has path, or git and rev`, k.start, k.end);
+    if (!["version", "path", "git", "rev"].includes(k.value)) throw new CompileError(`a dependency has no key '${k.value}'; it has version, path, or git and rev`, k.start, k.end);
   }
-  const [path, git, rev] = [text("path"), text("git"), text("rev")];
-  if (path && (git || rev)) throw new CompileError("a dependency comes from a path or from git, not both", value.start, value.end);
+  const [version, path, git, rev] = [text("version"), text("path"), text("git"), text("rev")];
+  if ([version, path, git].filter(Boolean).length > 1) throw new CompileError("a dependency comes from one place: the registry by version, a path, or git", value.start, value.end);
+  if (version) {
+    if (rev) throw new CompileError("rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
+    if (!parseRange(version.value)) throw new CompileError(`'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
+    return { ...at, version: version.value };
+  }
   if (path) return { ...at, path: path.value };
   if (!git) throw new CompileError(form, value.start, value.end);
   if (git.value.startsWith("-")) throw new CompileError("a git URL can't start with '-'", git.start, git.end);
@@ -273,3 +281,22 @@ export function createPackage(dir: string, name: string): void {
 
 // Whether `dir` is missing or holds nothing, so a new package can be made there.
 export const vacant = (dir: string) => !existsSync(dir) || readdirSync(dir).length === 0;
+
+// `fish.toml`'s text with `line` added to its [dependencies], after the last entry there or a new
+// table at the end, every other byte as it was.
+export function withDependency(src: string, line: string): string {
+  // A file written with CRLF line ends keeps them.
+  const eol = src.includes("\r\n") ? "\r\n" : "\n";
+  const lines = src.split("\n");
+  const header = lines.findIndex((l) => /^\s*\[\s*("dependencies"|'dependencies'|dependencies)\s*\]\s*(#.*)?\r?$/.test(l));
+  if (header < 0) return `${src}${src === "" || src.endsWith("\n") ? "" : eol}${eol}[dependencies]${eol}${line}${eol}`;
+  let at = header;
+  for (let i = header + 1; i < lines.length && !/^\s*\[/.test(lines[i]!); i++) if (/^\s*[^\s#]/.test(lines[i]!)) at = i;
+  // A line added after a last line that has no line end takes over that missing end: the old last
+  // line gets one, and the new one, now last, goes without.
+  const last = at === lines.length - 1 && !src.endsWith("\n");
+  if (last) lines[at] += eol === "\r\n" ? "\r" : "";
+  else if (eol === "\r\n") line += "\r";
+  lines.splice(at + 1, 0, line);
+  return lines.join("\n");
+}
