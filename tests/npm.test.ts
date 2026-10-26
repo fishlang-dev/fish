@@ -174,3 +174,10 @@ test("a package imported twice is one set of types, and a borrowed handle passes
     "main.fsh": "import { take } from \"p\";\nfunction main() { take({ a: \"x\" }); }\n",
   }))).toBe("argument of type '{ a: string }' is not assignable to parameter of type 'D': its index signature comes only with a value JS made");
 });
+
+test("a nested Fish value is checked against a recursive shape, part by part", () => {
+  const U = "export interface U { child?: U; v: string }\nexport declare function takeU(u: U): void;\n";
+  const refused = (arg: string) => first(stops({ "node_modules/p/index.d.ts": U, "main.fsh": `import { takeU } from "p";\nfunction main() { takeU(${arg}); }\n` }));
+  expect(refused(`{ v: "a", child: { v: 5 } }`)).toBe("argument of type '{ child: { v: i64 }; v: string }' is not assignable to parameter of type 'U': property 'child' is a '{ v: i64 }', not a 'null | U'");
+  expect(refused(`{ v: "a", child: { v: "b" } }`)).toStartWith("running a package's code needs a JS engine");
+});

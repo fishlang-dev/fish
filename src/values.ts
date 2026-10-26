@@ -2948,15 +2948,16 @@ export function expressions(ctx: Context) {
     if (isRefType(from) && jsShape(from.to)) from = from.to;
     const own = jsShape(from);
     if (own === shape) return undefined;
-    // Shapes that refer to themselves are taken to fit while they are compared.
-    const pair = comparing.get(own ?? shape);
-    if (pair?.has(shape)) return undefined;
-    if (!comparing.has(own ?? shape)) comparing.set(own ?? shape, new Set());
-    comparing.get(own ?? shape)!.add(shape);
+    // A Fish value is never cyclic, so each of its parts is compared in turn.
+    if (!own) return shapeMisses(from, own, shape);
+    // Handles' shapes that refer to themselves are taken to fit while they are compared.
+    if (comparing.get(own)?.has(shape)) return undefined;
+    if (!comparing.has(own)) comparing.set(own, new Set());
+    comparing.get(own)!.add(shape);
     try {
       return shapeMisses(from, own, shape);
     } finally {
-      comparing.get(own ?? shape)!.delete(shape);
+      comparing.get(own)!.delete(shape);
     }
   }
 
@@ -2967,13 +2968,13 @@ export function expressions(ctx: Context) {
     // A handle of another shape has the methods this one declares, by name and types.
     if (own && shape.kind === "interface") {
       const methods = own.kind === "interface" ? own.methods : [];
-      // A method fits as TypeScript's do: the wanted one's arguments pass for its parameters, an
-      // extra one of its own optional, and what it gives passes for what is wanted; a generic
-      // one is matched by its parameters' count.
+      // A method fits as TypeScript's do: it may take fewer parameters, an extra one of its own
+      // is optional, the wanted one's arguments pass for those it has, and what it gives passes for
+      // what is wanted; a generic one is matched by its parameters' count.
       const same = (a: Method, b: Method) => {
-        if (a.params.length < b.params.length || a.params.slice(b.params.length).some((p) => !isOption(p))) return false;
+        if (a.params.slice(b.params.length).some((p) => !isOption(p))) return false;
         if (a.generic || b.generic) return a.params.length === b.params.length;
-        return b.params.every((p, i) => passesJs(p, a.params[i]!)) && (b.returns === "void" || passesJs(a.returns, b.returns));
+        return a.params.every((p, i) => i >= b.params.length || passesJs(b.params[i]!, p)) && (b.returns === "void" || passesJs(a.returns, b.returns));
       };
       const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
       if (lacking) return methods.some((n) => n.name === lacking.name) ? `method '${lacking.name}' takes or gives other types` : `property '${lacking.name}' is missing`;
