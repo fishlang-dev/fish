@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Each test builds a program with clang, which can take past bun's 5 seconds on a busy CI runner.
+setDefaultTimeout(30_000);
 
 // Errors printed by Fish against node's, node's stacks cut to their first line as Fish has none:
 // the same program, its types stripped for node.

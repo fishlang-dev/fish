@@ -369,7 +369,8 @@ function macroShape(f: Func) {
 }
 
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
-export function check(written: Stmt[], library = false, macros = false): Checked {
+// With `module`, it may be a file another imports, checked on its own, so `main` is optional.
+export function check(written: Stmt[], library = false, macros = false, module = false): Checked {
   jsUses.length = 0;
   jsClasses.clear();
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
@@ -494,7 +495,7 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     byName.set(f.name, f);
   }
   const main = byName.get("main");
-  if (!main && !library && !macros) throw new CompileError("no main() function; execution starts there", 0, 0);
+  if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
   // which need each other, it reaches what is set up below lazily.

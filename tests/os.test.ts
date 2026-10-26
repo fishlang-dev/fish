@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
+
+// Each test builds a program with clang, which can take past bun's 5 seconds on a busy CI runner.
+setDefaultTimeout(30_000);
 
 // The std `os` module against Node's, as Bun gives it on this machine: each function, called
 // with the environment varied where the answer reads it.
