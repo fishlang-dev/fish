@@ -2895,9 +2895,10 @@ export function expressions(ctx: Context) {
     const body: Expr = givesPromise(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
     // An async arrow taking nothing is what the timer keeps, so its captures are made once.
     const own = callback.kind === "arrow" && callback.async && callback.params.length === 0 && Array.isArray(callback.body);
-    const wrapper: Expr = own ? callback
+    const kept: Expr = own ? callback
       : { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
-    timerWrappers.add(wrapper);
+    const wrapper: Expr = givesPromise(callback) ? { kind: "call", callee: { kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
+    timerWrappers.add(kept);
     const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
     const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
     helper("timerSet", [wrapper, ms, { kind: "bool", value: name === "setInterval", ...at }, loop]);

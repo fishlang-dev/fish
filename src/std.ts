@@ -160,9 +160,29 @@ type Timeout = i64;
 async function __timerLoop(): Promise<void> {
   while (true) {
     const next = await timerNext();
-    if (next === null) return;
-    await next();
+    if (next !== null) {
+      await next();
+    } else {
+      // An async callback still running may set another timer, so the program waits for it.
+      // ponytail: polled every millisecond; wake the loop from the callback's end if that shows up
+      if (__timerRunning.load() === 0) return;
+      await sleep(1);
+    }
   }
+}
+// An async callback runs as a task of its own, as JavaScript's runs on while later timers fire,
+// so one awaiting another timer doesn't stop the timer task that would fire it.
+// ponytail: the callback's first part may run after a timer due just after it; order it if a program needs that
+const __timerRunning = new Atomic(0);
+function __timerDetached(callback: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    __timerRunning.add(1);
+    spawn(__timerRun(callback()));
+  };
+}
+async function __timerRun(running: Promise<void>): Promise<void> {
+  await running;
+  __timerRunning.sub(1);
 }
 function __timeoutClear(id: Timeout | null): void {
   if (id !== null) timerClear(id);

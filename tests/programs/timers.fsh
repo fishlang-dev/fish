@@ -95,11 +95,11 @@ async function main(): Promise<void> {
 // expect: arrow lit
 // expect: untyped 3 -4
 // expect: async start
-// expect: async end
 // expect: after async
+// expect: async end
 // expect: slow start
 // expect: slow end
-// Passed values reach the function; an async one is awaited before the next timer runs.
+// Passed values reach the function; an async one runs on while later timers fire, as in Node.
 function show(label: string, n: i64): void { console.log(label, n); }
 async function slow(label: string): Promise<void> {
   console.log(label, "start");
@@ -172,7 +172,7 @@ async function main(): Promise<void> {
 // expect: arrow end
 // expect: fn start
 // expect: fn end
-// A callback giving a Promise without being async is awaited too.
+// A callback giving a Promise without being async runs on as an async one does.
 async function slow(label: string): Promise<void> { console.log(label, "start"); await sleep(5); console.log(label, "end"); }
 function viaPromise(): Promise<void> { return slow("fn"); }
 async function main(): Promise<void> {
@@ -214,4 +214,18 @@ async function main(): Promise<void> {
 async function slow(label: string): Promise<void> { console.log(label, "start"); await sleep(5); console.log(label, "end"); }
 async function main(): Promise<void> {
   setTimeout(() => { return slow("block"); }, 1);
+}
+// case: timeout_async_awaits_timer
+// expect: main done
+// expect: callback start
+// expect: callback end
+// An async callback awaiting another timer doesn't hold up the timer task that fires it.
+function delay(ms: i64): Promise<void> { return new Promise((resolve) => { setTimeout(resolve, ms); }); }
+async function main(): Promise<void> {
+  setTimeout(async () => {
+    console.log("callback start");
+    await delay(10);
+    console.log("callback end");
+  }, 1);
+  console.log("main done");
 }
