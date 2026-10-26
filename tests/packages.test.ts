@@ -150,8 +150,9 @@ exports.home = () => process.env.HOME;
 exports.unset = () => process.env.FISH_SHIM_SURELY_UNSET === undefined;
 exports.args = () => process.argv.slice(2).join(",");
 exports.mode = () => process.env.NODE_ENV;
+exports.written = () => { process.env.FISH_SHIM_WRITTEN ||= "set"; const kept = process.env.FISH_SHIM_WRITTEN; delete process.env.FISH_SHIM_WRITTEN; return kept + ("FISH_SHIM_WRITTEN" in process.env); };
 `,
-  "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\nexport declare function mode(): string;\n",
+  "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\nexport declare function mode(): string;\nexport declare function written(): string;\n",
   "node_modules/files/package.json": JSON.stringify({ name: "files", type: "module", main: "i.js", types: "i.d.ts" }),
   "node_modules/files/i.js": `import { readFile, writeFile } from "node:fs/promises";
 export async function roundTrip(path, text) { await writeFile(path, text); const back = await readFile(path, "utf8"); const bytes = await readFile(path); return back + ":" + bytes.length + ":" + (bytes instanceof Uint8Array); }
@@ -493,16 +494,16 @@ test("a nested object given to JS takes numbers as JS does, and an optional requ
 });
 
 test("bundled JS's path, os and process are Fish's, and another Node module is refused naming it", () => {
-  const main = `import { paths, platform, home, unset, args, mode } from "shimmed";
+  const main = `import { paths, platform, home, unset, args, mode, written } from "shimmed";
 import * as path from "node:path";
 import * as os from "node:os";
 function main() {
   console.log(paths());
   console.log([path.join("a", "../b", "c.txt"), path.resolve("/x", "y", ".."), path.relative("/a/b/c", "/a/d"), path.dirname("/a/b/c"), path.basename("/a/b/c.txt", ".txt"), path.extname("x.tar.gz"), path.normalize("/a//b/../c/"), path.sep].join("|"));
-  console.log(platform() === os.platform(), home() === process.env.HOME, unset(), args(), mode());
+  console.log(platform() === os.platform(), home() === process.env.HOME, unset(), args(), mode(), written());
 }
 `;
-  expect(run(main, ["one", "two"], { NODE_ENV: "production" })).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production\n", stderr: "", exitCode: 0 });
+  expect(run(main, ["one", "two"], { NODE_ENV: "production" })).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production setfalse\n", stderr: "", exitCode: 0 });
   expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
 });
 

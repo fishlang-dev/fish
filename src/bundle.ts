@@ -247,11 +247,17 @@ export const EOL = "\n";
 export default { hostname, tmpdir, homedir, platform, availableParallelism, EOL };
 `;
 
-// The process global, made before any package runs, as Node makes it.
+// The process global, made before any package runs, as Node makes it. Fish's environment is
+// read-only, so what JS writes to process.env is kept for JS alone, as packages that default
+// NODE_ENV expect to read it back.
 const GLOBALS = String.raw`
+const written = new Map();
+const read = (name) => (written.has(name) ? written.get(name) : __fish.getenv(name));
 const env = new Proxy({}, {
-  get: (target, name) => (typeof name === "string" ? __fish.getenv(name) : undefined),
-  has: (target, name) => typeof name === "string" && __fish.getenv(name) !== undefined,
+  get: (target, name) => (typeof name === "string" ? read(name) : undefined),
+  has: (target, name) => typeof name === "string" && read(name) !== undefined,
+  set: (target, name, value) => (written.set(name, String(value)), true),
+  deleteProperty: (target, name) => (written.set(name, undefined), true),
 });
 globalThis.process ??= { argv: __fish.argv(), env, platform: __fish.platform(), exit: (code) => __fish.exit(code) };
 `;
