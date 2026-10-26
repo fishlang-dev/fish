@@ -229,3 +229,15 @@ async function main(): Promise<void> {
   }, 1);
   console.log("main done");
 }
+// case: timeout_async_ties_in_order
+// expect: a
+// expect: b
+// expect: c
+// expect: d
+// Timers due together run in the order set, an async one's first part included.
+async function main(): Promise<void> {
+  setTimeout(async () => { console.log("a"); }, 0);
+  setTimeout(() => { console.log("b"); }, 0);
+  setTimeout(async () => { console.log("c"); }, 0);
+  setTimeout(() => { console.log("d"); }, 0);
+}

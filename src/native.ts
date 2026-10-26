@@ -3357,6 +3357,30 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   return t;
 }
 
+// The same, its first poll run here and now, as a JS callback's first part runs where it is
+// called; the task is queued only if that poll waits.
+fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
+  memcpy(t->memory, frame, frame_size);
+  t->frame_size = frame_size;
+  t->output_size = output_size;
+  t->poll = poll;
+  t->drop = drop;
+  t->drop_output = drop_output;
+  t->outcome = 0;
+  t->refs = 2;
+  t->joiner = NULL;
+  t->state = FSH_QUEUED;
+  pthread_mutex_lock(&fsh_alive_lock);
+  t->prev = NULL;
+  t->next = fsh_alive;
+  if (fsh_alive) fsh_alive->prev = t;
+  fsh_alive = t;
+  pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_run(t);
+  return t;
+}
+
 // Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
 // it, and its outcome given; until then the awaiting task is woken when it finishes.
 int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {

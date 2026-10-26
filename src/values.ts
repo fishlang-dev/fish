@@ -1154,7 +1154,8 @@ export function expressions(ctx: Context) {
     // `spawn(p)`: the future runs as a task of its own, on any thread, and its handle awaits it.
     // The std library's code calls the built-ins, whatever a program names its own functions.
     const inStd = e.start >= STD_BASE;
-    if (callee.kind === "ident" && callee.name === "spawn" && (!byName.has("spawn") || inStd)) {
+    // std's `timer spawn` is `spawn` with the task's first poll run at once.
+    if (callee.kind === "ident" && ((callee.name === "spawn" && (!byName.has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd))) {
       if (!ctx.async) throw new CompileError("'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.

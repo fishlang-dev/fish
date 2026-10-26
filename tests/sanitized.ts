@@ -6,13 +6,13 @@ import { NATIVE } from "../src/native.ts";
 
 // Builds the program at `file` with the runtime, the engine and the program all under
 // AddressSanitizer, and runs it reporting leaks. ASan instruments only IR functions marked for
-// it, and crashes on the empty struct accesses the IR makes, which touch nothing.
+// it, and crashes on the empty struct accesses the IR makes, nested ones too, which touch nothing.
 export function sanitized(file: string, src: string) {
   writeFileSync(file, src);
   const ir = compile(src, file)
     .replaceAll(" uwtable ", " uwtable sanitize_address ")
-    .replace(/^( *%[^ ]+) = load \{\}, ptr .*$/gm, "$1 = select i1 true, {} zeroinitializer, {} zeroinitializer")
-    .replace(/^ *store \{\} .*$/gm, "");
+    .replace(/^( *%[^ ]+) = load (\{[{} ,]*\}), ptr .*$/gm, "$1 = select i1 true, $2 zeroinitializer, $2 zeroinitializer")
+    .replace(/^ *store \{[{} ,]*\} .*$/gm, "");
   const [ll, c, out] = [`${file}.ll`, `${file}.c`, `${file}.out`];
   writeFileSync(ll, ir);
   writeFileSync(c, `${NATIVE}\n${JS_NATIVE}`);

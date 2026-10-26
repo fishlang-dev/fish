@@ -6092,12 +6092,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return n;
       }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
-      if (e.callee.kind === "ident" && e.callee.name === "spawn") {
+      if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn")) {
         const future = valueType(e.args[0]!) as FutureType;
         const [poll, drop, dropOutput] = taskGlue(future);
         const [frame, task] = [alloca(llvm(future)), temp()];
         emit(`store ${llvm(future)} ${owned(e.args[0]!)}, ptr ${frame}`);
-        unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
+        const spawning = e.callee.name === "spawn" ? "fsh_rt_spawn" : "fsh_rt_spawn_now";
+        unwinding(`call ptr @${spawning}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
         if (!types.has(e)) pending.push({ v: task, type: handleType(future.gives, future.throws) });
         return task;
       }

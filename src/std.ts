@@ -171,13 +171,13 @@ async function __timerLoop(): Promise<void> {
   }
 }
 // An async callback runs as a task of its own, as JavaScript's runs on while later timers fire,
-// so one awaiting another timer doesn't stop the timer task that would fire it.
-// ponytail: the callback's first part may run after a timer due just after it; order it if a program needs that
+// so one awaiting another timer doesn't stop the timer task that would fire it. Its first part
+// runs at once, so timers due together still run in the order they were set.
 const __timerRunning = new Atomic(0);
 function __timerDetached(callback: () => Promise<void>): () => Promise<void> {
   return async () => {
     __timerRunning.add(1);
-    spawn(__timerRun(callback()));
+    __timerSpawn(__timerRun(callback()));
   };
 }
 async function __timerRun(running: Promise<void>): Promise<void> {
