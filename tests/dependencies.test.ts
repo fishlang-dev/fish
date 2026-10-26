@@ -66,10 +66,65 @@ test("a dependency that can't be used is refused where it is named", () => {
   expect(fishc(app(`a = { path = "../a" }\n`), "build").err).toBe("../b/fish.toml:5:1: error: 'a' depends back on 'b': a -> b -> a; packages can't depend on each other in a cycle");
 });
 
-test("a subpath of a dependency is refused, and a name not in fish.toml still reaches npm's packages", () => {
-  files("sub/words", { "fish.toml": manifest("words"), "src/lib.fsh": `export function word(): string { return "w"; }\n` });
-  const app = files("sub/app", { "fish.toml": manifest("app", `words = { path = "../words" }\n`), "src/main.fsh": `import { word } from "words/extra";\nfunction main() { console.log(word()); }\n` });
-  expect(fishc(app, "build").err).toBe("src/main.fsh:1:1: error: importing a file inside the package 'words' isn't supported yet; import from 'words' itself");
+test("a package's lib is public, its other files' exports are package-private, and unexported names are file-private", () => {
+  const util = `function clean(s: string): string { return s.trim(); }\nexport function slug(s: string): string { return clean(s).toLowerCase(); }\nexport function upper(s: string): string { return clean(s).toUpperCase(); }\n`;
+  const words = (lib: string) => files("levels/words", { "fish.toml": manifest("words"), "src/util.fsh": util, "src/lib.fsh": lib });
+  const lib = `import { slug } from "./util";\nexport { upper } from "./util";\nexport function title(s: string): string { return "[" + slug(s) + "]"; }\n`;
+  words(lib);
+  const app = (main: string) => files("levels/app", { "fish.toml": manifest("app", `words = { path = "../words" }\n`), "src/main.fsh": main });
+  const ok = app(`import { title, upper } from "words";\nfunction main() { console.log(title(" Fish ")); console.log(upper(" fish ")); }\n`);
+  expect(fishc(ok, "build")).toEqual({ code: 0, err: "" });
+  expect(ran(join(ok, "target", "debug", "app"))).toBe("[fish]\nFISH\n");
+  expect(fishc(app(`import { slug } from "words";\nfunction main() { console.log(slug("x")); }\n`), "build").err).toBe("src/main.fsh:1:10: error: 'slug' is private to the package 'words'; only what its lib src/lib.fsh exports is public");
+  expect(fishc(app(`import { nope } from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:10: error: the package 'words' has no export named 'nope' in its lib src/lib.fsh");
+  expect(fishc(app(`import d from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:1: error: the package 'words' has no default export in its lib src/lib.fsh");
+  words(`import { clean } from "./util";\nexport function title(s: string): string { return clean(s); }\n`);
+  expect(fishc(app(`import { title } from "words";\nfunction main() { console.log(title("x")); }\n`), "build").err).toBe("../../words/src/lib.fsh:1:10: error: '../../words/src/util.fsh' has no export named 'clean'; it declares 'clean' without exporting it, so add 'export' before that declaration");
+});
+
+test("a lib or entry can't be a nested package's file, and packages nested in each other keep their own messages", () => {
+  const deep = { "deep/fish.toml": manifest("deep"), "deep/src/lib.fsh": `export function pub(): i64 { return 1; }\n`, "deep/src/inner.fsh": `export function secret(): i64 { return 42; }\n` };
+  const outer = (lib: string, extra = "") => files("own/outer", { "fish.toml": `[package]\nname = "outer"\nversion = "0.1.0"\n${extra}[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "src/lib.fsh": lib });
+  const app = (main: string) => files("own/app", { "fish.toml": manifest("app", `outer = { path = "../outer" }\n`), "src/main.fsh": main });
+  outer("", `lib = "deep/src/inner.fsh"\n`);
+  expect(fishc(app(`import { secret } from "outer";\nfunction main() { console.log(secret()); }\n`), "build").err).toBe("../outer/fish.toml:4:7: error: the lib 'deep/src/inner.fsh' is a file inside the package 'deep'; a package's lib is one of its own files");
+  outer(`import { pub } from "deep";\nexport function o(): i64 { return pub(); }\n`);
+  expect(fishc(app(`import { pub } from "outer";\nfunction main() { console.log(pub()); }\n`), "build").err).toBe("src/main.fsh:1:10: error: the package 'outer' has no export named 'pub' in its lib src/lib.fsh");
+  const entry = files("own/entry", { "fish.toml": `[package]\nname = "entry"\nversion = "0.1.0"\nentry = "deep/src/m.fsh"\n[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "deep/src/m.fsh": `import { secret } from "./inner";\nfunction main() { console.log(secret()); }\n` });
+  expect(fishc(entry, "build").err).toBe("fish.toml:4:9: error: the entry 'deep/src/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
+  const linkedEntry = files("own/linked-entry", { "fish.toml": `[package]\nname = "linked"\nversion = "0.1.0"\nentry = "src/d/m.fsh"\n[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "deep/src/m.fsh": `import { secret } from "./inner";\nfunction main() { console.log(secret()); }\n` });
+  mkdirSync(join(linkedEntry, "src"), { recursive: true });
+  Bun.spawnSync(["ln", "-sfn", "../deep/src", join(linkedEntry, "src", "d")]);
+  expect(fishc(linkedEntry, "build").err).toBe("fish.toml:4:9: error: the entry 'src/d/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
+  const w = files("own/w", { "fish.toml": manifest("w"), "src/lib.fsh": `import { helper } from "./util";\nexport function pub(): i64 { return helper(); }\n`, "src/util.fsh": `export function helper(): i64 { return 7; }\n`, "examples/ex/fish.toml": manifest("ex", `w = { path = "../.." }\n`), "examples/ex/src/main.fsh": `import { helper } from "w";\nfunction main() { console.log(helper()); }\n` });
+  expect(fishc(join(w, "examples", "ex"), "build").err).toBe("src/main.fsh:1:10: error: 'helper' is private to the package 'w'; only what its lib src/lib.fsh exports is public");
+});
+
+test("a relative import into another package's directory is refused, directly or through a link", () => {
+  const util = { "fish.toml": manifest("util"), "src/lib.fsh": `export function u(): i64 { return 1; }\n`, "src/inner.fsh": `export function i(): i64 { return 2; }\n` };
+  const nested = (main: string) => files("nest/app", { "fish.toml": manifest("app", `util = { path = "./packages/util" }\n`), ...Object.fromEntries(Object.entries(util).map(([k, v]) => [`packages/util/${k}`, v])), "vendor/loose/fish.toml": manifest("loose"), "vendor/loose/x.fsh": `export function x(): i64 { return 3; }\n`, "src/main.fsh": main });
+  expect(fishc(nested(`import { i } from "../packages/util/src/inner";\nfunction main() { console.log(i()); }\n`), "build").err).toBe("src/main.fsh:1:1: error: '../packages/util/src/inner' is a file inside the package 'util'; import it by name, as 'util'");
+  const linked = nested(`import { i } from "./link/inner";\nfunction main() { console.log(i()); }\n`);
+  Bun.spawnSync(["ln", "-sfn", "../packages/util/src", join(linked, "src", "link")]);
+  expect(fishc(linked, "build").err).toBe("src/main.fsh:1:1: error: './link/inner' is a file inside the package 'util'; import it by name, as 'util'");
+  const loose = nested(`import { x } from "../vendor/loose/x";\nimport { u } from "util";\nfunction main() { console.log(x() + u()); }\n`);
+  expect(fishc(loose, "build")).toEqual({ code: 0, err: "" });
+  expect(ran(join(loose, "target", "debug", "app"))).toBe("4\n");
+  files("nest/outer", { "fish.toml": manifest("outer", `deep = { path = "./deep" }\n`), "deep/fish.toml": manifest("deep"), "deep/src/lib.fsh": "", "deep/src/x.fsh": `export function x(): i64 { return 5; }\n`, "src/lib.fsh": `import { x } from "../deep/src/x";\nexport function o(): i64 { return x(); }\n` });
+  const top = files("nest/top", { "fish.toml": manifest("top", `outer = { path = "../outer" }\n`), "src/main.fsh": `import { o } from "outer";\nfunction main() { console.log(o()); }\n` });
+  expect(fishc(top, "build").err).toBe("../../outer/src/lib.fsh:1:1: error: '../deep/src/x' is a file inside the package 'deep'; import it by name, as 'deep'");
+});
+
+test("a dependency's inner files are private to it, by every import form, and a name not in fish.toml still reaches npm's packages", () => {
+  files("sub/words", { "fish.toml": manifest("words"), "src/lib.fsh": `export function word(): string { return "w"; }\n`, "src/util.fsh": `export function w(): string { return "u"; }\nexport type W = { n: i64 };\n` });
+  const rule = "'words/src/util' is a file inside the package 'words', and a package's files are private to it; import from 'words', which gives what its lib src/lib.fsh exports";
+  for (const form of [`import { w } from "words/src/util";`, `import type { W } from "words/src/util";`, `export { w } from "words/src/util";`, `export * from "words/src/util";`]) {
+    const app = files("sub/app", { "fish.toml": manifest("app", `words = { path = "../words" }\n`), "src/main.fsh": `${form}\nfunction main() {}\n` });
+    expect([form, fishc(app, "build").err]).toEqual([form, `src/main.fsh:1:1: error: ${rule}`]);
+  }
+  files("sub/mid", { "fish.toml": manifest("mid", `words = { path = "../words" }\n`), "src/lib.fsh": `import { w } from "words/src/util";\nexport function m(): string { return w(); }\n` });
+  const top = files("sub/top", { "fish.toml": manifest("top", `mid = { path = "../mid" }\n`), "src/main.fsh": `import { m } from "mid";\nfunction main() { console.log(m()); }\n` });
+  expect(fishc(top, "build").err).toBe(`../../mid/src/lib.fsh:1:1: error: ${rule}`);
   const npm = files("sub/npm", { "fish.toml": manifest("npm"), "src/main.fsh": `import { x } from "nothing-installed";\nfunction main() {}\n` });
   expect(fishc(npm, "build").err).toContain("can't find the package 'nothing-installed'");
 });

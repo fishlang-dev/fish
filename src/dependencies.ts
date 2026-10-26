@@ -8,7 +8,7 @@ import { openIndex, registryUrl, resolveVersions, Unresolved, type Index, type I
 import { parseRange, parseVersion, satisfies } from "./semver.ts";
 import { untar } from "./tar.ts";
 import { cacheDir } from "./mathlib.ts";
-import { findManifest, inManifest, loadManifest, MANIFEST, parseToml, type Dependency, type Manifest, type Table } from "./manifest.ts";
+import { fieldError, findManifest, inManifest, loadManifest, MANIFEST, parseToml, type Dependency, type Manifest, type Table } from "./manifest.ts";
 
 // A Fish package of a program: its manifest, its real directory, the packages its dependencies
 // name, by the names it imports them under, and for one from git, the commit it was fetched at.
@@ -58,6 +58,13 @@ export function resolvePackages(entry: string): Package[] | undefined {
   visit(root, []);
   if (wanted.length > 0) fromRegistry(root, wanted, byName, byDir);
   const packages = [...byDir.values()];
+  // A lib inside a package nested in this one would build as that package's file, and reach
+  // what is private to it.
+  for (const p of packages) {
+    const lib = join(p.dir, p.manifest.lib);
+    const holder = existsSync(lib) ? packageOf(packages, lib) : undefined;
+    if (holder && holder !== p) throw fieldError(join(p.dir, MANIFEST), "lib", `the lib '${p.manifest.lib}' is a file inside the package '${holder.manifest.name}'; a package's lib is one of its own files`);
+  }
   lock(packages);
   return packages;
 }
@@ -437,23 +444,29 @@ function fetched(dep: Extract<Dependency, { git: string }>, fail: (message: stri
   return [realpathSync(dir), { url: dep.git, commit }];
 }
 
+// The package holding `file`: the one whose directory holds it most closely, so a package nested
+// in another's directory owns its own files.
+export function packageOf(packages: Package[], file: string): Package | undefined {
+  const real = realpathSync(file);
+  return packages.filter((p) => real.startsWith(p.dir + "/")).sort((a, b) => b.dir.length - a.dir.length)[0];
+}
+
 // The dependency package holding `file`, not the program's own, which may reach further.
 export function dependencyOf(packages: Package[], file: string): Package | undefined {
-  const real = realpathSync(file);
-  const owner = packages.filter((p) => real.startsWith(p.dir + "/")).sort((a, b) => b.dir.length - a.dir.length)[0];
+  const owner = packageOf(packages, file);
   return owner === packages[0] ? undefined : owner;
 }
 
 // The library file a bare import names, when the package holding the importing file depends on
 // a Fish package of that name; undefined sends it on to npm's packages.
 export function dependencyLib(packages: Package[], from: string, specifier: string, at: { start: number; end: number }): string | undefined {
-  const file = realpathSync(from);
-  const owner = packages.filter((p) => file.startsWith(p.dir + "/")).sort((a, b) => b.dir.length - a.dir.length)[0];
+  const owner = packageOf(packages, from);
   if (!owner) return undefined;
   const scoped = specifier.startsWith("@");
   const name = specifier.split("/").slice(0, scoped ? 2 : 1).join("/");
   const dep = owner.deps.get(name);
   if (!dep) return undefined;
-  if (name !== specifier) throw new CompileError(`importing a file inside the package '${name}' isn't supported yet; import from '${name}' itself`, at.start, at.end);
+  // A package's lib is its public face: its other files' exports are for its own files alone.
+  if (name !== specifier) throw new CompileError(`'${specifier}' is a file inside the package '${name}', and a package's files are private to it; import from '${name}', which gives what its lib ${dep.manifest.lib} exports`, at.start, at.end);
   return join(dep.dir, dep.manifest.lib);
 }

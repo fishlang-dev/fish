@@ -262,6 +262,14 @@ export function loadManifest(file: string, needs?: "entry" | "lib"): Manifest {
   }
 }
 
+// An error about the manifest at `file`, at its `entry` or `lib` key or else its [package] table.
+export function fieldError(file: string, field: "entry" | "lib", message: string): unknown {
+  const src = readFileSync(file, "utf8");
+  const pkg = parseToml(src).get("package") as Table;
+  const at = pkg.keys.get(field)?.value ?? pkg;
+  return inManifest(new CompileError(message, at.start, at.end), file, src);
+}
+
 // Has a compile error found in the manifest at `file` render against that file.
 export function inManifest(e: unknown, file: string, src = readFileSync(file, "utf8")): unknown {
   if (e instanceof CompileError && e.sources.length === 0) e.sources = [{ base: 0, src, file: relative(process.cwd(), file) || file }];

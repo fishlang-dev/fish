@@ -11,7 +11,7 @@ import { locking, resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
-import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
+import { createPackage, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
@@ -360,6 +360,9 @@ if (import.meta.main) {
     if (!found) fail(`fishc build: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
+      // An entry inside a package nested here would build as that package's program.
+      const holder = findManifest(dirname(realpathSync(join(manifest.dir, manifest.entry))));
+      if (holder && realpathSync(holder) !== realpathSync(found)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
       target = relative(process.cwd(), join(manifest.dir, manifest.entry));
       out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
       if (!values["emit-llvm"]) mkdirSync(dirname(out), { recursive: true });
