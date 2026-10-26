@@ -87,3 +87,15 @@ test("a handle's members, a Fish value for a shape, and a class are refused in T
   expect(refused("show({ count: 1, label: \"l\" });")).toBe("argument of type '{ count: i64; label: string }' is not assignable to parameter of type 'Result': its methods come only with a value JS made");
   expect(refused("const r = run({ name: \"a\" }); anything(r); anything([1, 2]); anything(\"s\");")).toStartWith("running a package's code needs a JS engine");
 });
+
+test("a generic declaration is typed for each call's type arguments", () => {
+  expect(stops({ "node_modules/gen/index.d.ts": "export declare function chunk<T>(xs: T[], n: number): T[][];\nexport declare function first<T>(xs: T[]): T | undefined;\nexport declare function pair<A, B>(a: A, b: B): [A, B];\nexport declare function wrap<T>(v: T): { value: T };\n", "main.fsh": "import { chunk, first, pair, wrap } from \"gen\";\nfunction main() {\n  const c: string[][] = chunk([\"a\", \"b\", \"c\"], 2);\n  const n: f64[][] = chunk([1.5, 2.5], 1);\n  const f: string | null = first([\"x\"]);\n  const p: [string, boolean] = pair(\"s\", true);\n  const w = wrap(3.5);\n  const v: f64 = w.value;\n}\n" })).toContain("main.fsh:3:25: error: running a package's code needs a JS engine");
+});
+
+test("each signature of a function declared more than once is tried in order", () => {
+  const OV = "export declare function format(d: number): string;\nexport declare function format(d: string, pattern: string): string;\nexport declare function format(d: boolean[]): number;\n";
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() {\n  const a: string = format(1.5);\n  const b: string = format(\"x\", \"yyyy\");\n  const c: f64 = format([true]);\n}\n" })).toContain("main.fsh:3:21: error: running a package's code needs a JS engine");
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a = format(true); }\n" })).toContain("error: no signature of 'format' takes (boolean); it takes (d: number), (d: string, pattern: string), (d: boolean[])");
+  // The first that takes the arguments gives the result.
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n" })).toContain("error: type 'string' is not assignable to type 'number'");
+});

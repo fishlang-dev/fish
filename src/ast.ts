@@ -161,7 +161,7 @@ type AstTypeAlias =
 type AstInterface =
   | { start: i64; end: i64; kind: "interface"; name: string; typeParams: AstTypeParam[]; extends: AstType[]; members: AstTypeMember[]; decorators?: AstExpr[]; js?: AstJsName; jsClass?: { constructors: AstParam[][]; statics: AstTypeMember[] } };
 type AstJsName =
-  | { module: string; name: string; const?: true };
+  | { module: string; name: string; const?: true; overloads?: string[] };
 type AstFunc =
   | { start: i64; end: i64; kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null; decorators?: AstExpr[]; js?: AstJsName };
 type AstBinaryOp =

@@ -37,6 +37,21 @@ export function jsDeclaration(declared: Declared, name: string, specifier: strin
   }
 }
 
+// The other signatures of a function declared more than once, each as a function of its own,
+// named apart; the first declared is `name`'s, which lists them, as a call tries them in order.
+export function jsOverloads(declared: Declared, made: Stmt, name: string, specifier: string): Stmt[] {
+  const first = unwrap(declared.at);
+  if (first.kind !== "function" || made.kind !== "function") return [];
+  const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
+  const named = others.map((_, i) => `${name} signature ${i + 2}`);
+  if (others.length > 0) made.js = { ...made.js!, overloads: named };
+  return others.map((s, i) => {
+    const d = unwrap(structuredClone(s)) as Extract<Stmt, { kind: "function" }>;
+    lowerTypes(d);
+    return Object.assign(d, { name: named[i]!, body: undefined, js: { module: specifier, name } });
+  });
+}
+
 // A JS method a declaration marks optional is called as any other.
 // ponytail: an absent optional method throws in JS when called; `?.()` on handles would check
 function plainMethod(m: TypeMember): TypeMember {

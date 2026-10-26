@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
-import { jsDeclaration, referenced } from "./js.ts";
+import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
@@ -105,9 +105,11 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
       }
       declaredHere.set(name, declared);
       const made = jsDeclaration(declared, name, specifier, at);
-      const refers = referenced(made);
-      shiftSpans(made, declarationFile(declared.file));
-      statements.push(exported ? ({ kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made);
+      const overloads = jsOverloads(declared, made, name, specifier);
+      const refers = referenced([made, ...overloads]);
+      const base = declarationFile(declared.file);
+      for (const s of [made, ...overloads]) shiftSpans(s, base);
+      statements.push(exported ? ({ kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
       for (const n of refers) {
         const found = declared.resolve(n);
         if (found) pending.push({ declared: found, name: n });

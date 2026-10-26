@@ -1236,7 +1236,10 @@ export function expressions(ctx: Context) {
       joined(e.args[0]!, operand(e.args[0]!), "'String'");
       return { type: "string", what: "'String'" };
     }
-    const target = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
+    const found = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
+    // A package's function declared with several signatures is checked against the first that
+    // takes the arguments, as TypeScript picks one.
+    const target = found?.js?.overloads ? jsOverload(e, found) : found;
     // node:util's functions that take any values, as Node's do, given their meaning here.
     const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
@@ -2976,6 +2979,27 @@ export function expressions(ctx: Context) {
     jsArgs(e, method.params);
     jsUses.push(e);
     return { type: method.returns === "void" ? "void" : jsView(method.returns), what: `'${callee.name}'` };
+  }
+
+  // The signature of a package's function a call takes: the first, in the order declared, whose
+  // parameters the arguments pass for; a generic one is taken on the count of its arguments.
+  function jsOverload(e: Call, first: Body): Body {
+    const signatures = [first, ...first.js!.overloads!.map((n) => byName.get(n)!)];
+    if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
+    const given = e.args.map((a) => value(a));
+    const fitting = signatures.find((f) => {
+      const required = f.params.filter((p) => !p.optional && !p.rest).length;
+      if (given.length < required || (given.length > f.params.length && !f.params.at(-1)?.rest)) return false;
+      if ((f.typeParams?.length ?? 0) > 0) return true;
+      return given.every((t, i) => {
+        const p = f.params[Math.min(i, f.params.length - 1)]!;
+        const declared = p.type ? resolveType(p.type) : blockType("JsValue");
+        return passesJs(t, p.optional ? unionType([declared, "null"]) : declared);
+      });
+    });
+    if (fitting) return fitting;
+    const shown = signatures.map((f) => `(${f.params.map((p) => `${(p.pattern as { name?: string }).name ?? "_"}${p.optional ? "?" : ""}: ${p.type ? show(resolveType(p.type)) : "any"}`).join(", ")})`).join(", ");
+    throw new CompileError(`no signature of '${first.js!.name}' takes (${given.map(show).join(", ")}); it takes ${shown}`, e.start, e.end);
   }
 
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,

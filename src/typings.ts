@@ -169,7 +169,7 @@ function conditioned(t: unknown, resolve: (target: string) => string | undefined
 
 // A name a declaration file exports: the statement declaring it, the file and text it is in, and
 // what other names mean where it is declared.
-export type Declared = { file: string; src: string; at: Stmt; resolve: (name: string) => Declared | undefined };
+export type Declared = { file: string; src: string; at: Stmt; scope: Stmt[]; resolve: (name: string) => Declared | undefined };
 // A declaration file's exports, with why any of what it re-exports from couldn't be read.
 export type Exports = { names: Map<string, Declared>; problems: string[] };
 
@@ -266,7 +266,7 @@ type Binding = { kind: "own"; at: Stmt } | { kind: "import"; module: string; nam
 
 // A namespace's body sees the names around it, which `outer` gives.
 function exportsIn(scope: Scope, lookup: Lookup, outer?: (name: string) => Declared | undefined): Exports {
-  const declared = (at: Stmt): Declared => ({ file: scope.file, src: scope.src, at, resolve: (name) => binding(name) });
+  const declared = (at: Stmt): Declared => ({ file: scope.file, src: scope.src, at, scope: scope.statements, resolve: (name) => binding(name) });
   const local = new Map<string, Binding>();
   for (const s of scope.statements) {
     for (const n of declares(s)) if (!local.has(n)) local.set(n, { kind: "own", at: s });
