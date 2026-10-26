@@ -141,6 +141,19 @@ export declare class Box {
   "node_modules/needsfs/package.json": JSON.stringify({ name: "needsfs", main: "i.js", types: "i.d.ts" }),
   "node_modules/needsfs/i.js": "const fs = require('fs');\nexports.size = fs.statSync('.').size;\n",
   "node_modules/needsfs/i.d.ts": "export declare const size: number;\n",
+  "node_modules/shimmed/package.json": JSON.stringify({ name: "shimmed", main: "i.js", types: "i.d.ts" }),
+  "node_modules/shimmed/i.js": `const path = require("path");
+const os = require("node:os");
+exports.paths = () => [path.join("a", "../b", "c.txt"), path.resolve("/x", "y", ".."), path.relative("/a/b/c", "/a/d"), path.dirname("/a/b/c"), path.basename("/a/b/c.txt", ".txt"), path.extname("x.tar.gz"), path.normalize("/a//b/../c/"), path.posix.sep].join("|");
+exports.platform = () => os.platform();
+exports.home = () => process.env.HOME;
+exports.unset = () => process.env.FISH_SHIM_SURELY_UNSET === undefined;
+exports.args = () => process.argv.slice(2).join(",");
+`,
+  "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\n",
+  "node_modules/usescrypto/package.json": JSON.stringify({ name: "usescrypto", main: "i.js", types: "i.d.ts" }),
+  "node_modules/usescrypto/i.js": "exports.id = require('crypto').randomUUID;\n",
+  "node_modules/usescrypto/i.d.ts": "export declare function id(): string;\n",
   "node_modules/typesonly/package.json": JSON.stringify({ name: "typesonly", types: "index.d.ts" }),
   "node_modules/typesonly/index.d.ts": "export declare const gone: string;\n",
 };
@@ -158,7 +171,7 @@ function project(main: string, files: Record<string, string> = {}): string {
   return dir;
 }
 
-function run(main: string): { stdout: string; stderr: string; exitCode: number | null } | string {
+function run(main: string, args: string[] = []): { stdout: string; stderr: string; exitCode: number | null } | string {
   const dir = project(main);
   const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
   try {
@@ -166,7 +179,7 @@ function run(main: string): { stdout: string; stderr: string; exitCode: number |
   } catch (e) {
     return formatError(e as never, "main.fsh", main).split("\n")[0]!.replaceAll(`${dir}/`, "");
   }
-  const ran = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const ran = Bun.spawnSync([out, ...args], { env: { ...process.env, FISH_LEAKS: "1" } });
   return { stdout: ran.stdout.toString(), stderr: ran.stderr.toString().replaceAll(`${dir}/`, ""), exitCode: ran.exitCode };
 }
 
@@ -469,4 +482,18 @@ test("a callback inside an object given to JS waits", () => {
 
 test("a nested object given to JS takes numbers as JS does, and an optional require runs", () => {
   expect(run(`import { deep, optional, listed } from "esm";\nfunction main() {\n  console.log(deep({ inner: { v: 5 } }), optional(), listed({ list: [] }));\n}\n`)).toEqual({ stdout: "5 caught 0\n", stderr: "", exitCode: 0 });
+});
+
+test("bundled JS's path, os and process are Fish's, and another Node module is refused naming it", () => {
+  const main = `import { paths, platform, home, unset, args } from "shimmed";
+import * as path from "node:path";
+import * as os from "node:os";
+function main() {
+  console.log(paths());
+  console.log([path.join("a", "../b", "c.txt"), path.resolve("/x", "y", ".."), path.relative("/a/b/c", "/a/d"), path.dirname("/a/b/c"), path.basename("/a/b/c.txt", ".txt"), path.extname("x.tar.gz"), path.normalize("/a//b/../c/"), path.sep].join("|"));
+  console.log(platform() === os.platform(), home() === process.env.HOME, unset(), args());
+}
+`;
+  expect(run(main, ["one", "two"])).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two\n", stderr: "", exitCode: 0 });
+  expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
 });

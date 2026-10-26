@@ -28,6 +28,7 @@ static void fsh_js_lock_init(void) {
 }
 
 static void fsh_js_end(void);
+static void fsh_js_host(JSContext *cx);
 __attribute__((constructor)) static void fsh_js_begin(void) {
   fsh_engine_end = fsh_js_end;
 }
@@ -42,6 +43,7 @@ static JSContext *fsh_js_enter(void) {
   if (!fsh_js_runtime) {
     fsh_js_runtime = JS_NewRuntime();
     fsh_js_context = JS_NewContext(fsh_js_runtime);
+    fsh_js_host(fsh_js_context);
   }
   // The engine measures its stack from the thread that last entered it, and tasks move threads.
   if (fsh_js_depth++ == 0) JS_UpdateStackTop(fsh_js_runtime);
@@ -720,5 +722,72 @@ void fsh_rt_js_settle(fsh_js *settle, fsh_js *value) {
   fsh_js_drop(cx, settle);
   fsh_js_settle(cx);
   fsh_js_leave();
+}
+// What the bundle's shims of Node's os and process call: Fish's own runtime, as host functions
+// on a global __fish object made with the engine.
+static JSValue fsh_js_text(JSContext *cx, const char *text) {
+  return text ? JS_NewString(cx, text) : JS_UNDEFINED;
+}
+
+static JSValue fsh_host_cwd(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return fsh_js_text(cx, fsh_rt_cwd());
+}
+
+static JSValue fsh_host_hostname(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return fsh_js_text(cx, fsh_rt_os_hostname());
+}
+
+static JSValue fsh_host_tmpdir(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return fsh_js_text(cx, fsh_rt_os_tmpdir());
+}
+
+static JSValue fsh_host_homedir(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return fsh_js_text(cx, fsh_rt_os_homedir());
+}
+
+static JSValue fsh_host_platform(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return fsh_js_text(cx, fsh_rt_os_platform());
+}
+
+static JSValue fsh_host_parallelism(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  return JS_NewInt64(cx, fsh_rt_os_parallelism());
+}
+
+static JSValue fsh_host_getenv(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  if (argc < 1 || !JS_IsString(argv[0])) return JS_UNDEFINED;
+  const char *name = JS_ToCString(cx, argv[0]);
+  JSValue v = name ? fsh_js_text(cx, fsh_rt_getenv(name)) : JS_UNDEFINED;
+  JS_FreeCString(cx, name);
+  return v;
+}
+
+static JSValue fsh_host_argv(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  JSValue all = JS_NewArray(cx);
+  int64_t n = fsh_rt_argc();
+  for (int64_t i = 0; i < n; i++) JS_SetPropertyInt64(cx, all, i, fsh_js_text(cx, fsh_rt_arg(i)));
+  return all;
+}
+
+static JSValue fsh_host_exit(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  int64_t code = 0;
+  if (argc > 0 && !JS_IsUndefined(argv[0])) JS_ToInt64(cx, &code, argv[0]);
+  fsh_rt_exit(code);
+  return JS_UNDEFINED;
+}
+
+static void fsh_js_host(JSContext *cx) {
+  JSValue host = JS_NewObject(cx);
+  JS_SetPropertyStr(cx, host, "cwd", JS_NewCFunction(cx, fsh_host_cwd, "cwd", 0));
+  JS_SetPropertyStr(cx, host, "hostname", JS_NewCFunction(cx, fsh_host_hostname, "hostname", 0));
+  JS_SetPropertyStr(cx, host, "tmpdir", JS_NewCFunction(cx, fsh_host_tmpdir, "tmpdir", 0));
+  JS_SetPropertyStr(cx, host, "homedir", JS_NewCFunction(cx, fsh_host_homedir, "homedir", 0));
+  JS_SetPropertyStr(cx, host, "platform", JS_NewCFunction(cx, fsh_host_platform, "platform", 0));
+  JS_SetPropertyStr(cx, host, "parallelism", JS_NewCFunction(cx, fsh_host_parallelism, "parallelism", 0));
+  JS_SetPropertyStr(cx, host, "getenv", JS_NewCFunction(cx, fsh_host_getenv, "getenv", 1));
+  JS_SetPropertyStr(cx, host, "argv", JS_NewCFunction(cx, fsh_host_argv, "argv", 0));
+  JS_SetPropertyStr(cx, host, "exit", JS_NewCFunction(cx, fsh_host_exit, "exit", 1));
+  JSValue global = JS_GetGlobalObject(cx);
+  JS_SetPropertyStr(cx, global, "__fish", host);
+  JS_FreeValue(cx, global);
 }
 `;
