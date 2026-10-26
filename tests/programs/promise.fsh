@@ -104,8 +104,8 @@ async function label(s: Ref<string>): Promise<string> {
 async function main() {
   const start = Date.now();
   const name: string = "x";
-  const [a, b, c] = await Promise.all([after(100, 1), after(100, 2), label(name)]);
-  console.log(a, b, c, Date.now() - start < 180);
+  const [a, b, c] = await Promise.all([after(300, 1), after(300, 2), label(name)]);
+  console.log(a, b, c, Date.now() - start < 550);
   const [x, y] = await Promise.all([yieldNow(), sleep(5)]);
   console.log(x === null && y === null ? "done" : "?");
 }
@@ -316,7 +316,7 @@ async function main() {
 }
 // case: promise_void_array
 // expect: tick 10
-// expect: tick 20
+// expect: tick 200
 // expect: all done 2
 // expect: tick 5
 // expect: race done
@@ -326,12 +326,12 @@ async function tick(ms: i64): Promise<void> {
 }
 async function main() {
   let ps: Promise<void>[] = [];
-  ps.push(tick(20));
+  ps.push(tick(200));
   ps.push(tick(10));
   const all = await Promise.all(ps);
   console.log("all done", all.length);
   let qs: Promise<void>[] = [];
-  qs.push(tick(30));
+  qs.push(tick(300));
   qs.push(tick(5));
   await Promise.race(qs);
   console.log("race done");

@@ -842,9 +842,9 @@ async function nap(ms: i64): Promise<i64> {
 }
 
 async function main() {
-  const c = spawn(after(150, "third" + 3));
-  const a = spawn(after(50, "first" + 1));
-  const b = spawn(after(100, "second" + 2));
+  const c = spawn(after(500, "third" + 3));
+  const a = spawn(after(100, "first" + 1));
+  const b = spawn(after(300, "second" + 2));
   const ra = await a;
   const rb = await b;
   const rc = await c;

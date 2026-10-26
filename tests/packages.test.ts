@@ -1,10 +1,13 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { build } from "../src/main.ts";
 import { sanitized } from "./sanitized.ts";
+
+// Each test builds a program with the JS engine, whose sources take several seconds to compile.
+setDefaultTimeout(30_000);
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fish-packages-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));

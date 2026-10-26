@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Each test builds a program with the JS engine, whose sources take several seconds to compile.
+setDefaultTimeout(30_000);
 
 // The std `path` module against node's `path.posix`, over a table of inputs edge cases included,
 // each call run through Fish and through node and compared line by line.

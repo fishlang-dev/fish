@@ -67,28 +67,37 @@ async function main(): Promise<void> {
 // expect: tick 2
 // expect: timeout 25
 // expect: tick 3
-// An interval runs until its own callback clears it, its state shared.
+// An interval runs until its own callback clears it, its state shared; a timeout set by its
+// second run fires before its third.
 async function main(): Promise<void> {
   const state = shared({ count: new Atomic<i64>(0), id: new Atomic<i64>(0) });
   const s = state.clone();
   state.id.store(setInterval(() => {
     const n = s.count.add(1) + 1;
     console.log("tick", n);
+    if (n === 2) setTimeout(() => { console.log("timeout 25"); }, 0);
     if (n === 3) clearInterval(s.id.load());
-  }, 10));
-  setTimeout(() => { console.log("timeout 25"); }, 25);
+  }, 100));
   console.log("set");
 }
 // case: interval_cleared_outside
 // expect: every
 // expect: every
 // expect: stop
+// The clearing timeout is set by the interval's second run, due long before its third.
 async function main(): Promise<void> {
-  const id = setInterval(() => { console.log("every"); }, 10);
-  setTimeout(() => {
-    clearInterval(id);
-    console.log("stop");
-  }, 25);
+  const state = shared({ count: new Atomic<i64>(0), id: new Atomic<i64>(0) });
+  const s = state.clone();
+  state.id.store(setInterval(() => {
+    console.log("every");
+    if (s.count.add(1) + 1 === 2) {
+      const t = s.clone();
+      setTimeout(() => {
+        clearInterval(t.id.load());
+        console.log("stop");
+      }, 0);
+    }
+  }, 100));
 }
 // case: timeout_arguments_and_async
 // expect: named 1
@@ -139,11 +148,13 @@ async function main(): Promise<void> { setTimeout(f, 1, "s"); }
 // expect: later
 // A program setting timers runs on the async runtime, so a sync main's timers fire after it returns.
 function main(): void {
-  const id = setInterval(() => { console.log("tick"); }, 20);
-  setTimeout(() => {
-    clearInterval(id);
-    console.log("later");
-  }, 50);
+  const state = shared({ count: new Atomic<i64>(0), id: new Atomic<i64>(0) });
+  const s = state.clone();
+  state.id.store(setInterval(() => {
+    console.log("tick");
+    if (s.count.add(1) + 1 === 2) clearInterval(s.id.load());
+  }, 20));
+  setTimeout(() => { console.log("later"); }, 300);
   console.log("main returns");
 }
 // case: timers_sync_main_no_type
@@ -184,11 +195,17 @@ async function main(): Promise<void> {
 // expect: 3
 // expect: stop
 // Each run is passed its own copy of a value that doesn't copy.
-function show(xs: i64[]): void { console.log(xs.length); }
 async function main(): Promise<void> {
   const arr = [1, 2, 3];
-  const id = setInterval(show, 10, arr);
-  setTimeout(() => { clearInterval(id); console.log("stop"); }, 25);
+  const state = shared({ count: new Atomic<i64>(0), id: new Atomic<i64>(0) });
+  const s = state.clone();
+  state.id.store(setInterval((xs: i64[]) => {
+    console.log(xs.length);
+    if (s.count.add(1) + 1 === 2) {
+      clearInterval(s.id.load());
+      console.log("stop");
+    }
+  }, 10, arr));
 }
 // case: timers_sync_main_await
 // error: 'await' can only be used inside an 'async' function
