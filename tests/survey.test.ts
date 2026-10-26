@@ -252,7 +252,7 @@ test("imports wait on other files or Node built-ins by how they are written, and
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Path aliases"], ["Namespace imports"]]);
-    expect(scanFiles(dir)[0]!.rules.map((r) => r.id)).toContain("bunModules");
+    expect(scanFiles(dir)[0]!.findings.map(([rule]) => rule)).toContain("bunModules");
   });
 });
 
