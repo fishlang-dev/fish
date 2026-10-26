@@ -271,8 +271,16 @@ export const exit = process.exit;
 export default process;
 `;
 
+// Bytes read are a Uint8Array that stringifies as text, as Node's Buffer does, so
+// String(await readFile(p)) and JSON.parse(await readFile(p)) read the file.
 const FS_PROMISES = String.raw`
-export const readFile = (path, options) => __fish.readFile(path, options);
+class Bytes extends Uint8Array {
+  toString(encoding = "utf8") {
+    if (encoding !== "utf8" && encoding !== "utf-8") throw new TypeError("Fish decodes a file's bytes only as utf8 so far, not " + encoding);
+    return __fish.decode(this);
+  }
+}
+export const readFile = (path, options) => __fish.readFile(path, options).then((read) => (typeof read === "string" ? read : new Bytes(read.buffer, read.byteOffset, read.length)));
 export const writeFile = (path, data) => __fish.writeFile(path, data);
 export default { readFile, writeFile };
 `;

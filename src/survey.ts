@@ -5,6 +5,7 @@ import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
+import { findTypings } from "./typings.ts";
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
 // The grade counts the work a person does, the migration lint's rejected constructs and guided
@@ -52,6 +53,7 @@ const RULES: Rule[] = [
   { id: "moduleForms", action: "unsupported", title: "namespace imports, 'import x = require()', 'export =' and dynamic import()", feature: "Namespace imports" },
   { id: "pathAliases", action: "unsupported", title: "imports through path aliases such as '@/lib' or '~/lib'", feature: "Path aliases" },
   { id: "bunModules", action: "unsupported", title: "imports of Bun's own modules such as bun:test", feature: "Bun's own modules" },
+  { id: "untypedPackages", action: "unsupported", title: "imports of installed npm packages with no TypeScript declarations", feature: "Calling JsValues" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
   { id: "localCaptures", action: "guided", title: "a class or enum declared inside a function that uses the function's variables: pass them to its constructor" },
@@ -136,6 +138,7 @@ function scanFile(path: string, file: string): FileScan {
   }
   const lines = src.split("\n").filter((l) => l.trim() !== "").length;
   const findings: [string, Example][] = [];
+  surveyed = path;
   try {
     const program = parse(src);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
@@ -470,7 +473,18 @@ function moduleRule(n: Node, specifier: unknown): string | undefined {
   if (stdHas(n, specifier)) return undefined;
   if (specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!)) return "nodeBuiltins";
   if (specifier === "bun" || specifier.startsWith("bun:")) return "bunModules";
-  return (form && !(n.kind === "import" && n.namespace !== undefined)) || n.kind === "exportAll" ? "moduleForms" : undefined;
+  if ((form && !(n.kind === "import" && n.namespace !== undefined)) || n.kind === "exportAll") return "moduleForms";
+  return surveyed !== undefined && untyped(surveyed, specifier) ? "untypedPackages" : undefined;
+}
+
+// The file being scanned, from which its packages are looked up.
+let surveyed: string | undefined;
+
+// Whether a package is installed with no declarations, which Fish types it from; one not
+// installed is the dependency report's to note.
+function untyped(from: string, specifier: string): boolean {
+  const found = findTypings(from, specifier);
+  return "missing" in found && !found.missing.startsWith("can't find the package");
 }
 
 // Whether an import of a Node built-in is one Fish's std module answers: the module whole, or

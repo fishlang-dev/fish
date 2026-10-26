@@ -181,7 +181,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(50);
+  expect(r.rules.length + r.waiting.length).toBe(51);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -256,6 +256,12 @@ test("imports wait on other files or Node built-ins by how they are written, and
   });
   project({ "a.ts": "import * as w from \"ws\";\nexport { x } from \"ws\";\n", "b.ts": "import q = require(\"ws\");\n", "c.ts": "export * from \"ws\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Namespace imports"], ["Namespace imports"]]);
+  });
+});
+
+test("an installed package with no declarations waits on calling JsValues; a typed or missing one doesn't", () => {
+  project({ "a.ts": "import u from \"untyped\";\n", "b.ts": "import t from \"typed\";\n", "c.ts": "import m from \"missing\";\n", "node_modules/untyped/package.json": "{\"name\":\"untyped\",\"main\":\"i.js\"}", "node_modules/untyped/i.js": "module.exports = 1;\n", "node_modules/typed/package.json": "{\"name\":\"typed\",\"main\":\"i.js\",\"types\":\"i.d.ts\"}", "node_modules/typed/i.js": "module.exports = 1;\n", "node_modules/typed/i.d.ts": "declare const t: number;\nexport default t;\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Calling JsValues"], [], []]);
   });
 });
 

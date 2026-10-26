@@ -36,21 +36,61 @@ __attribute__((constructor)) static void fsh_js_begin(void) {
 // How deep the thread holding the lock is in it: the engine's stack is measured from the first
 // entry only, as a callback entering again is deeper on the same stack.
 static int32_t fsh_js_depth = 0;
+// Whether this thread is inside the engine already, as a callback JS runs is.
+static _Thread_local int32_t fsh_js_mine = 0;
+// Where the call into JS this thread is making was written, for a panic entering it.
+static _Thread_local const char *fsh_js_site = NULL;
+
+// Handles let go of under a Fish lock, freed once the engine is next entered.
+static fsh_js **fsh_js_deferred = NULL;
+static int64_t fsh_js_deferred_count = 0, fsh_js_deferred_room = 0;
+static pthread_mutex_t fsh_js_deferred_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static JSContext *fsh_js_enter(void) {
   pthread_once(&fsh_js_once, fsh_js_lock_init);
+  // A thread holding a Fish lock waits here while JS on another thread may run a callback
+  // waiting for that lock, so neither would go on.
+  if (fsh_locks_held > 0 && fsh_js_mine == 0) {
+    const char *at = fsh_js_site ? fsh_js_site : "panicked in a call into JS:\n";
+    const char *why = "called into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\n";
+    char *message = malloc(strlen(at) + strlen(why) + 1);
+    if (!message) {
+      fputs("out of memory\n", stderr);
+      exit(101);
+    }
+    strcpy(message, at);
+    strcat(message, why);
+    fsh_rt_panic(message);
+  }
   pthread_mutex_lock(&fsh_js_lock);
+  fsh_js_mine++;
   if (!fsh_js_runtime) {
     fsh_js_runtime = JS_NewRuntime();
     fsh_js_context = JS_NewContext(fsh_js_runtime);
     fsh_js_host(fsh_js_context);
   }
+  pthread_mutex_lock(&fsh_js_deferred_lock);
+  for (int64_t i = 0; i < fsh_js_deferred_count; i++) {
+    JS_FreeValueRT(fsh_js_runtime, fsh_js_deferred[i]->value);
+    fsh_rt_free(fsh_js_deferred[i]);
+  }
+  fsh_js_deferred_count = 0;
+  pthread_mutex_unlock(&fsh_js_deferred_lock);
   // The engine measures its stack from the thread that last entered it, and tasks move threads.
   if (fsh_js_depth++ == 0) JS_UpdateStackTop(fsh_js_runtime);
   return fsh_js_context;
 }
 
+// Entering for a call written at where, which a panic entering names.
+static JSContext *fsh_js_enter_at(const char *where) {
+  fsh_js_site = where;
+  JSContext *cx = fsh_js_enter();
+  fsh_js_site = NULL;
+  return cx;
+}
+
 static void fsh_js_leave(void) {
+  fsh_js_mine--;
   fsh_js_depth--;
   pthread_mutex_unlock(&fsh_js_lock);
 }
@@ -66,6 +106,21 @@ static fsh_js *fsh_js_box(JSValue value) {
 // is torn down at exit lets go of what it holds after the context is gone.
 void fsh_rt_js_release(fsh_js *b) {
   if (!b || __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  // Under a Fish lock, waiting for the engine could wait forever, so the value waits instead.
+  if (fsh_locks_held > 0 && fsh_js_mine == 0) {
+    pthread_mutex_lock(&fsh_js_deferred_lock);
+    if (fsh_js_deferred_count == fsh_js_deferred_room) {
+      fsh_js_deferred_room = fsh_js_deferred_room ? fsh_js_deferred_room * 2 : 8;
+      fsh_js_deferred = realloc(fsh_js_deferred, fsh_js_deferred_room * sizeof(fsh_js *));
+      if (!fsh_js_deferred) {
+        fputs("out of memory\n", stderr);
+        exit(101);
+      }
+    }
+    fsh_js_deferred[fsh_js_deferred_count++] = b;
+    pthread_mutex_unlock(&fsh_js_deferred_lock);
+    return;
+  }
   fsh_js_enter();
   JS_FreeValueRT(fsh_js_runtime, b->value);
   fsh_js_leave();
@@ -142,7 +197,7 @@ int32_t fsh_rt_js_boolean(fsh_js *b) {
 // A property, an element, or whether there is a property, as JS reads them; reading one of
 // undefined or null throws, as a getter may.
 fsh_js *fsh_rt_js_get(fsh_js *b, fsh_str *key, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   JSAtom name = JS_NewAtomLen(cx, key->bytes, key->length);
   JSValue v = JS_GetProperty(cx, b->value, name);
   JS_FreeAtom(cx, name);
@@ -152,7 +207,7 @@ fsh_js *fsh_rt_js_get(fsh_js *b, fsh_str *key, const char *where) {
 }
 
 fsh_js *fsh_rt_js_at(fsh_js *b, int64_t i, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   JSValue v = JS_GetPropertyInt64(cx, b->value, i);
   if (JS_IsException(v)) fsh_js_throw(cx, where);
   fsh_js_leave();
@@ -160,7 +215,7 @@ fsh_js *fsh_rt_js_at(fsh_js *b, int64_t i, const char *where) {
 }
 
 int32_t fsh_rt_js_has(fsh_js *b, fsh_str *key, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   if (!JS_IsObject(b->value)) {
     JS_ThrowTypeError(cx, "cannot use 'in' operator to search for a key in a value that isn't an object");
     fsh_js_throw(cx, where);
@@ -225,7 +280,7 @@ static JSValue fsh_js_packages;
 
 // An export of the program's n-th package.
 fsh_js *fsh_rt_js_export(const char *bundle, int64_t package, const char *name, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   if (!fsh_js_bundled) {
     fsh_js_packages = fsh_js_run(cx, bundle, strlen(bundle), where);
     fsh_js_bundled = 1;
@@ -273,7 +328,7 @@ static void fsh_js_expect(JSContext *cx, fsh_js *b, bool fits, const char *what,
 
 // A JS value read as the string, number or boolean its declaration says it is, its box given up.
 fsh_str *fsh_rt_js_as_string(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, JS_IsString(b->value), what, declared, where);
   size_t length;
   const char *bytes = JS_ToCStringLen(cx, &length, b->value);
@@ -286,7 +341,7 @@ fsh_str *fsh_rt_js_as_string(fsh_js *b, const char *what, const char *declared, 
 }
 
 double fsh_rt_js_as_number(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, JS_IsNumber(b->value), what, declared, where);
   double d = 0;
   JS_ToFloat64(cx, &d, b->value);
@@ -296,7 +351,7 @@ double fsh_rt_js_as_number(fsh_js *b, const char *what, const char *declared, co
 }
 
 int32_t fsh_rt_js_as_boolean(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, JS_IsBool(b->value), what, declared, where);
   int32_t yes = JS_ToBool(cx, b->value);
   fsh_js_drop(cx, b);
@@ -328,7 +383,7 @@ fsh_js *fsh_rt_js_of_empty(int32_t undefined) {
 // it is given; the jobs the call queued run before it returns, as they would once JS's own call
 // stack emptied.
 fsh_js *fsh_rt_js_call(fsh_js *fn, fsh_js *self, int64_t argc, fsh_js **argv, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   JSValue args[argc > 0 ? argc : 1];
   for (int64_t i = 0; i < argc; i++) {
     args[i] = JS_DupValue(cx, argv[i]->value);
@@ -406,7 +461,7 @@ int32_t fsh_rt_js_field_is(fsh_js *b, const char *name, int32_t kind, fsh_str *t
 // A JS number read as an integer type's value, panicking, giving up the box, unless it is a whole
 // number from min up to, but not including, past.
 double fsh_rt_js_as_integer(fsh_js *b, double min, double past, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   double d = 0;
   int whole = JS_IsNumber(b->value) && JS_ToFloat64(cx, &d, b->value) == 0 && d == trunc(d) && d >= min && d < past;
   fsh_js_expect(cx, b, whole, what, declared, where);
@@ -417,7 +472,7 @@ double fsh_rt_js_as_integer(fsh_js *b, double min, double past, const char *what
 
 // A JS value none of its declaration's types took.
 void fsh_rt_js_mismatch(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, false, what, declared, where);
 }
 // New JS arrays and objects, filled a part at a time, each part's box given up.
@@ -453,14 +508,14 @@ void fsh_rt_js_put(fsh_js *object, const char *name, fsh_js *part) {
 
 // Panics, giving up the box, unless the value is an object, as a handle's declaration says.
 void fsh_rt_js_object_is(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, JS_IsObject(b->value), what, declared, where);
   fsh_js_leave();
 }
 
 // An array's length, panicking, giving up the box, when the value isn't an array.
 int64_t fsh_rt_js_length(fsh_js *b, const char *what, const char *declared, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   fsh_js_expect(cx, b, JS_IsArray(b->value), what, declared, where);
   int64_t length = 0;
   if (JS_GetLength(cx, b->value, &length) < 0) fsh_js_throw(cx, where);
@@ -469,7 +524,7 @@ int64_t fsh_rt_js_length(fsh_js *b, const char *what, const char *declared, cons
 }
 // Writes a property of a JS object, giving up the value's box.
 void fsh_rt_js_set(fsh_js *object, fsh_str *key, fsh_js *part, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   JSAtom name = JS_NewAtomLen(cx, key->bytes, key->length);
   int done = JS_SetProperty(cx, object->value, name, JS_DupValue(cx, part->value));
   JS_FreeAtom(cx, name);
@@ -480,7 +535,7 @@ void fsh_rt_js_set(fsh_js *object, fsh_str *key, fsh_js *part, const char *where
 
 // new of a JS class, giving up its box and every argument's.
 fsh_js *fsh_rt_js_new(fsh_js *made, int64_t argc, fsh_js **argv, const char *where) {
-  JSContext *cx = fsh_js_enter();
+  JSContext *cx = fsh_js_enter_at(where);
   JSValue args[argc > 0 ? argc : 1];
   for (int64_t i = 0; i < argc; i++) {
     args[i] = JS_DupValue(cx, argv[i]->value);
@@ -700,6 +755,9 @@ static void fsh_js_end(void) {
     fsh_js_callbacks = next;
   }
   fsh_js_leave();
+  free(fsh_js_deferred);
+  fsh_js_deferred = NULL;
+  fsh_js_deferred_room = 0;
 }
 // A new JS promise, its resolving function boxed at settle.
 fsh_js *fsh_rt_js_promise(fsh_js **settle) {
@@ -727,6 +785,14 @@ void fsh_rt_js_settle(fsh_js *settle, fsh_js *value) {
 // on a global __fish object made with the engine.
 static JSValue fsh_js_text(JSContext *cx, const char *text) {
   return text ? JS_NewString(cx, text) : JS_UNDEFINED;
+}
+
+// A Uint8Array's bytes read as UTF-8, each bad sequence a U+FFFD, as Node's Buffer decodes.
+static JSValue fsh_host_decode(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
+  size_t size = 0;
+  const uint8_t *bytes = argc > 0 ? JS_GetUint8Array(cx, &size, argv[0]) : NULL;
+  if (!bytes) return JS_EXCEPTION;
+  return JS_NewStringLen(cx, (const char *)bytes, size);
 }
 
 static JSValue fsh_host_cwd(JSContext *cx, JSValueConst self, int argc, JSValueConst *argv) {
@@ -889,6 +955,7 @@ static void fsh_js_host(JSContext *cx) {
   JSValue host = JS_NewObject(cx);
   JS_SetPropertyStr(cx, host, "readFile", JS_NewCFunctionMagic(cx, (JSCFunctionMagic *)fsh_host_file, "readFile", 2, JS_CFUNC_generic_magic, 0));
   JS_SetPropertyStr(cx, host, "writeFile", JS_NewCFunctionMagic(cx, (JSCFunctionMagic *)fsh_host_file, "writeFile", 2, JS_CFUNC_generic_magic, 1));
+  JS_SetPropertyStr(cx, host, "decode", JS_NewCFunction(cx, fsh_host_decode, "decode", 1));
   JS_SetPropertyStr(cx, host, "cwd", JS_NewCFunction(cx, fsh_host_cwd, "cwd", 0));
   JS_SetPropertyStr(cx, host, "hostname", JS_NewCFunction(cx, fsh_host_hostname, "hostname", 0));
   JS_SetPropertyStr(cx, host, "tmpdir", JS_NewCFunction(cx, fsh_host_tmpdir, "tmpdir", 0));

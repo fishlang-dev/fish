@@ -3676,17 +3676,25 @@ static int32_t fsh_me(void) {
   return fsh_token;
 }
 
+// How many locks this thread holds, so a call into JS under one, which could wait forever on a
+// callback JS runs that takes the same lock, is refused.
+static _Thread_local int32_t fsh_locks_held = 0;
+
 int32_t fsh_rt_lock(int32_t *word) {
   int32_t me = fsh_me();
   if (__atomic_load_n(word, __ATOMIC_RELAXED) == me) return 1;
   for (int spins = 0;; spins++) {
     int32_t open = 0;
-    if (__atomic_compare_exchange_n(word, &open, me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
+    if (__atomic_compare_exchange_n(word, &open, me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      fsh_locks_held++;
+      return 0;
+    }
     if (spins >= 64) sched_yield();
   }
 }
 
 void fsh_rt_unlock(int32_t *word) {
+  fsh_locks_held--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
 

@@ -157,7 +157,7 @@ exports.written = () => { process.env.FISH_SHIM_WRITTEN ||= "set"; const kept = 
   "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\nexport declare function mode(): string;\nexport declare function written(): string;\n",
   "node_modules/files/package.json": JSON.stringify({ name: "files", type: "module", main: "i.js", types: "i.d.ts" }),
   "node_modules/files/i.js": `import { readFile, writeFile } from "node:fs/promises";
-export async function roundTrip(path, text) { await writeFile(path, text); const back = await readFile(path, "utf8"); const bytes = await readFile(path); return back + ":" + bytes.length + ":" + (bytes instanceof Uint8Array); }
+export async function roundTrip(path, text) { await writeFile(path, text); const back = await readFile(path, "utf8"); const bytes = await readFile(path); return back + ":" + bytes.length + ":" + (bytes instanceof Uint8Array) + ":" + String(bytes) + ":" + bytes.toString(); }
 export function ordered(path) { const log = []; Promise.resolve().then(() => log.push("micro")); readFile(path); log.push("sync"); return log.join(); }
 export async function missing(path) { try { await readFile(path); return "read"; } catch (e) { return e.code + " " + e.syscall; } }
 `,
@@ -507,6 +507,21 @@ async function main(): Promise<void> throws JsError {
   expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`)).toBe("main.fsh:4:14: error: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own");
 });
 
+test("calling into JS under a Lock panics, and a handle dropped under one is freed later", () => {
+  const main = `import { make, relabel } from "esm";
+function main() {
+  const l = new Lock([make(1), make(2)]);
+  l.update((xs) => { xs.pop(); });
+  const m = make(3);
+  console.log(relabel(m));
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "made3\n", stderr: "", exitCode: 0 });
+  const locked = run(`import { shout } from "esm";\nfunction main() {\n  const l = new Lock("a");\n  l.update((v) => { v = shout(v); });\n}\n`);
+  expect(locked).toEqual({ stdout: "", stderr: "panicked at main.fsh:4:25:\ncalled into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\n", exitCode: 101 });
+});
+
 test("a callback inside an object given to JS waits", () => {
   expect(run(`import { withOpts } from "esm";\nfunction main() {\n  console.log(withOpts({ cb: (x) => x + 1 }));\n}\n`)).toStartWith("node_modules/esm/index.d.ts:");
 });
@@ -538,7 +553,7 @@ async function main(): Promise<void> throws JsError {
   console.log(r, m);
 }
 `;
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true ENOENT open\n", stderr: "", exitCode: 0 });
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true:héllo:héllo ENOENT open\n", stderr: "", exitCode: 0 });
   // With no async runtime the file is read at once, and the promise's jobs still wait for the
   // calling JS to finish.
   expect(run(`import { ordered } from "files";\nfunction main() { console.log(ordered(${JSON.stringify(join(dir, "written.txt"))})); }\n`)).toEqual({ stdout: "sync\n", stderr: "", exitCode: 0 });
