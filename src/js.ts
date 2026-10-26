@@ -14,9 +14,9 @@ const KINDS: Partial<Record<Stmt["kind"], string>> = { enum: "an enum", namespac
 // its types lowered to Fish's and marked as JS. A function stays one, a const becomes a function
 // read as a value, an interface or an object type alias a JS handle's shape, and a class the
 // shape of its instances with its constructors and statics. Its spans stay those of its file.
-export function jsDeclaration(declared: Declared, name: string, specifier: string, at: Span): Stmt {
+export function jsDeclaration(declared: Declared, name: string, specifier: string, at: Span, exported = name): Stmt {
   const d = unwrap(structuredClone(declared.at));
-  const js: JsName = { module: specifier, name };
+  const js: JsName = { module: specifier, name: exported };
   lowerTypes(d);
   switch (d.kind) {
     case "function":

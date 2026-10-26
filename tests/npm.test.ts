@@ -99,3 +99,14 @@ test("each signature of a function declared more than once is tried in order", (
   // The first that takes the arguments gives the result.
   expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n" })).toContain("error: type 'string' is not assignable to type 'number'");
 });
+
+const WHOLE = {"node_modules/dflt/index.d.ts": "export default function slug(s: string): string;\n", "node_modules/ns/index.d.ts": "export declare function a(n: number): string;\nexport declare const b: boolean;\n", "node_modules/lodashy/index.d.ts": "declare namespace _ {\n  function chunk<T>(xs: T[], n: number): T[][];\n  const VERSION: string;\n}\nexport = _;\n", "node_modules/lo/index.d.ts": "interface LoDashStatic {\n  chunk<T>(xs: T[], size?: number): T[][];\n  camelCase(s?: string): string;\n  VERSION: string;\n}\ndeclare const _: LoDashStatic;\nexport = _;\n"};
+
+test("default, namespace and export = imports reach a package's declarations", () => {
+  expect(stops({ ...WHOLE, "main.fsh": "import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n" })).toContain("main.fsh:6:21: error: running a package's code needs a JS engine");
+  expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error: 'ns' has no export 'nope'");
+});
+
+test("a const of an interface with generic methods, as lodash declares itself", () => {
+  expect(stops({ ...WHOLE, "main.fsh": "import _ from \"lo\";\nfunction main() {\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const d: f64[][] = _.chunk([1.5]);\n  const s: string = _.camelCase(\"x y\");\n  const v: string = _.VERSION;\n}\n" })).toContain("main.fsh:3:25: error: running a package's code needs a JS engine");
+});

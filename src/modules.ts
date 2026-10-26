@@ -17,7 +17,8 @@ export const FILE_SPAN = 2 ** 24;
 // `targets` is the file each import and re-export names.
 // `globals`: the std modules a file names as globals, as `os` in `os.hostname()`, without
 // importing them.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module> };
+// `whole`: a package's module an import names whole, as a namespace, reached through its name.
+export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean };
 export type Loaded = { modules: Module[]; sources: Source[] };
 
 // The files of the program last loaded, for naming where a declaration is.
@@ -62,7 +63,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         continue;
       }
       if (!/^\.\.?(\/|$)/.test(specifier)) {
-        module.targets.set(s, packageModule(path, specifier, s));
+        module.targets.set(s, packageModule(path, specifier, s, statements));
         continue;
       }
       const target = resolveSpecifier(path, specifier, s);
@@ -87,24 +88,32 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   };
   // What an import from a package names, as a module of its own: the declarations of the names it
   // imports, each where the package declares it, as JS declarations.
-  const packageModule = (from: string, specifier: string, s: Stmt): Module => {
+  const packageModule = (from: string, specifier: string, s: Stmt, importing: Stmt[]): Module => {
     const exports = packageExports(from, specifier, s, entry);
     const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
-    if (s.kind === "import" && (s.default !== undefined || s.namespace !== undefined)) throw unsupported("default and namespace imports of packages", s);
     if (s.kind === "exportAll") throw unsupported("re-exporting all of a package", s);
+    // A package imported whole, or a default export that is a namespace, is reached through its
+    // name: the members the file uses, as `ns.f`, are what it imports.
+    const defaulted = s.kind === "import" && s.default !== undefined ? exports.names.get("default") : undefined;
+    const spaced = defaulted && unwrapped(defaulted.at).kind === "namespace";
+    const whole = s.kind === "import" ? (s.namespace ?? (spaced ? s.default : undefined)) : undefined;
+    const reached = whole === undefined ? [] : membersUsed(importing, whole).map((m) => {
+      if (!exports.names.has(m.name)) throw new CompileError(`'${specifier}' has no export '${m.name}'`, m.start, m.end);
+      return { name: m.name, alias: undefined, typeOnly: false, start: m.start, end: m.end };
+    });
     // Each name imported is exported by the module; the types its declaration names, and theirs,
     // are declared in it too, as they are where the package declares them.
     const statements: Stmt[] = [];
     const declaredHere = new Map<string, Declared>();
     // The names imported come first, so one also referred to is exported.
     const pending: { declared: Declared; name: string }[] = [];
-    const add = (declared: Declared, name: string, exported: boolean, at: Span) => {
+    const add = (declared: Declared, name: string, exported: boolean, at: Span, as = name) => {
       if (declaredHere.has(name)) {
         if (declaredHere.get(name)!.at !== declared.at) throw new CompileError(`'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
         return;
       }
       declaredHere.set(name, declared);
-      const made = jsDeclaration(declared, name, specifier, at);
+      const made = jsDeclaration(declared, name, specifier, at, as);
       const overloads = jsOverloads(declared, made, name, specifier);
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
@@ -115,9 +124,15 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         if (found) pending.push({ declared: found, name: n });
       }
     };
-    for (const sp of named) add(exports.names.get(sp.name)!, sp.name, true, sp);
+    for (const sp of [...named, ...reached]) add(exports.names.get(sp.name)!, sp.name, true, sp);
+    // A default export that isn't a namespace is a declaration of its own, exported as the default.
+    if (defaulted && !spaced) {
+      const local = `${specifier} default`;
+      add(defaulted, local, false, s, "default");
+      statements.push({ kind: "exportNamed", typeOnly: false, specifiers: [{ name: local, alias: "default", typeOnly: false, start: s.start, end: s.end }], module: undefined, start: s.start, end: s.end });
+    }
     for (let next = pending.shift(); next; next = pending.shift()) add(next.declared, next.name, false, next.declared.at);
-    const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new Map(), globals: new Map() };
+    const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new Map(), globals: new Map(), whole: whole !== undefined };
     modules.push(module);
     byPath.set(module.path, module);
     return module;
@@ -130,6 +145,25 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
   return { modules, sources };
+}
+
+// A statement under `declare` or `export`.
+function unwrapped(s: Stmt): Stmt {
+  return s.kind === "declare" || s.kind === "export" ? unwrapped(s.body) : s;
+}
+
+// The members of a name a file reaches, as `ns.f`, each where it is first reached.
+function membersUsed(statements: Stmt[], name: string): { name: string; start: number; end: number }[] {
+  const found = new Map<string, { name: string; start: number; end: number }>();
+  const walk = (v: unknown) => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (typeof v !== "object" || v === null) return;
+    const n = v as { kind?: string; object?: { kind?: string; name?: string }; name?: string; start?: number; end?: number };
+    if (n.kind === "member" && n.object?.kind === "ident" && n.object.name === name && !found.has(n.name!)) found.set(n.name!, { name: n.name!, start: n.start!, end: n.end! });
+    Object.values(v).forEach(walk);
+  };
+  walk(statements);
+  return [...found.values()];
 }
 
 // The exports of the package an import names, once each name it imports is found among them;
@@ -329,7 +363,7 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     if (s.kind === "import") {
       // A std module imported whole is reached through its name, as `os.hostname()`.
       const whole = s.namespace ?? s.default;
-      if (whole !== undefined && stdModule(s.module)) spaces.set(whole, { from: from!, explicit: true });
+      if (whole !== undefined && (stdModule(s.module) || (from?.whole && (s.namespace !== undefined || s.default !== undefined)))) spaces.set(whole, { from: from!, explicit: true });
       else if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
       else if (s.default !== undefined) bind(s.default, from!, "default", s);
       for (const sp of s.named ?? []) bind(sp.alias ?? sp.name, from!, sp.name, sp);

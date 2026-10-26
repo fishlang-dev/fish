@@ -1447,7 +1447,9 @@ export function expressions(ctx: Context) {
       }
     }
     e.args.forEach((a, i) => {
-      const want = ctx.resolveWith(written.params[i]!.type!, new Map([...scope, ...bindings]));
+      const declared = ctx.resolveWith(written.params[i]!.type!, new Map([...scope, ...bindings]));
+      // An optional parameter is an Option, as a call may leave it empty.
+      const want = written.params[i]!.optional ? unionType([declared, "null"]) : declared;
       coerce(a, argTypes[i]!, want, `argument of type '${show(argTypes[i]!)}' is not assignable to parameter of type '${show(want)}'`);
     });
     return { type: ctx.resolveWith(written.returns, new Map([...scope, ...bindings])), what: name };
@@ -2975,9 +2977,15 @@ export function expressions(ctx: Context) {
       const field = shape?.fields.some((f) => f.name === callee.name);
       throw new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
-    if (method.generic) throw unsupported("generic methods of a package's types", callee);
-    jsArgs(e, method.params);
     jsUses.push(e);
+    // A generic one is typed for the call's type arguments, written or inferred.
+    if (method.generic) {
+      // An optional parameter left out is undefined, as JS gives it.
+      while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ kind: "null", start: e.end, end: e.end });
+      const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
+      return { type: typed.type === "void" ? "void" : jsView(typed.type), what: typed.what };
+    }
+    jsArgs(e, method.params);
     return { type: method.returns === "void" ? "void" : jsView(method.returns), what: `'${callee.name}'` };
   }
 
