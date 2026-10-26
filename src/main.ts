@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
+import { createPackage, findManifest, loadManifest, MANIFEST, NAME_RULE, vacant, validName } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
@@ -251,18 +252,50 @@ if (import.meta.main) {
     }
     process.exit(0);
   }
+  if (command === "new" || command === "init") {
+    const usage = "usage: fishc new <name>\n       fishc init [<name>]";
+    const flags = Object.keys(values).some((k) => k !== "panic");
+    if (positionals.length > 2 || flags || (command === "new" && !file)) fail(usage);
+    const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
+    const name = file ?? basename(dir);
+    if (!validName(name)) {
+      fail(command === "init" && !file ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
+    }
+    if (command === "new" && !vacant(dir)) fail(`fishc new: '${file}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
+    if (command === "init" && existsSync(join(dir, MANIFEST))) fail(`fishc init: there is already a ${MANIFEST} here`);
+    createPackage(dir, name);
+    console.log(`created the package '${name}'${command === "new" ? ` in ${file}/` : ""}`);
+    process.exit(0);
+  }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+  let target = file;
+  let out = values.out;
+  // With no file, the package around the working directory is built, as cargo builds one.
+  if (command === "build" && !file && lib === undefined) {
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc build: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    try {
+      const manifest = loadManifest(found);
+      target = relative(process.cwd(), join(manifest.dir, manifest.entry));
+      out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
+      if (!values["emit-llvm"]) mkdirSync(dirname(out), { recursive: true });
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+      process.exit(1);
+    }
+  }
+  if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
     process.exit(2);
   }
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release, panic, lib !== undefined));
-    else if (lib) buildLibrary(file, values.out ?? basename(file, ".fsh"), lib, values.release, panic, values.link ?? []);
-    else build(file, values.out ?? basename(file, ".fsh"), values.release, panic, values.link ?? []);
+    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined));
+    else if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? []);
+    else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? []);
   } catch (e) {
-    if (e instanceof CompileError) console.error(formatError(e, file, readFileSync(file, "utf8")));
+    if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   }
