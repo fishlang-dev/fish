@@ -149,14 +149,16 @@ exports.platform = () => os.platform();
 exports.home = () => process.env.HOME;
 exports.unset = () => process.env.FISH_SHIM_SURELY_UNSET === undefined;
 exports.args = () => process.argv.slice(2).join(",");
+exports.mode = () => process.env.NODE_ENV;
 `,
-  "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\n",
+  "node_modules/shimmed/i.d.ts": "export declare function paths(): string;\nexport declare function platform(): string;\nexport declare function home(): string;\nexport declare function unset(): boolean;\nexport declare function args(): string;\nexport declare function mode(): string;\n",
   "node_modules/files/package.json": JSON.stringify({ name: "files", type: "module", main: "i.js", types: "i.d.ts" }),
   "node_modules/files/i.js": `import { readFile, writeFile } from "node:fs/promises";
 export async function roundTrip(path, text) { await writeFile(path, text); const back = await readFile(path, "utf8"); const bytes = await readFile(path); return back + ":" + bytes.length + ":" + (bytes instanceof Uint8Array); }
+export function ordered(path) { const log = []; Promise.resolve().then(() => log.push("micro")); readFile(path); log.push("sync"); return log.join(); }
 export async function missing(path) { try { await readFile(path); return "read"; } catch (e) { return e.code + " " + e.syscall; } }
 `,
-  "node_modules/files/i.d.ts": "export declare function roundTrip(path: string, text: string): Promise<string>;\nexport declare function missing(path: string): Promise<string>;\n",
+  "node_modules/files/i.d.ts": "export declare function roundTrip(path: string, text: string): Promise<string>;\nexport declare function missing(path: string): Promise<string>;\nexport declare function ordered(path: string): string;\n",
   "node_modules/usescrypto/package.json": JSON.stringify({ name: "usescrypto", main: "i.js", types: "i.d.ts" }),
   "node_modules/usescrypto/i.js": "exports.id = require('crypto').randomUUID;\n",
   "node_modules/usescrypto/i.d.ts": "export declare function id(): string;\n",
@@ -177,7 +179,7 @@ function project(main: string, files: Record<string, string> = {}): string {
   return dir;
 }
 
-function run(main: string, args: string[] = []): { stdout: string; stderr: string; exitCode: number | null } | string {
+function run(main: string, args: string[] = [], env: Record<string, string> = {}): { stdout: string; stderr: string; exitCode: number | null } | string {
   const dir = project(main);
   const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
   try {
@@ -185,7 +187,7 @@ function run(main: string, args: string[] = []): { stdout: string; stderr: strin
   } catch (e) {
     return formatError(e as never, "main.fsh", main).split("\n")[0]!.replaceAll(`${dir}/`, "");
   }
-  const ran = Bun.spawnSync([out, ...args], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const ran = Bun.spawnSync([out, ...args], { env: { ...process.env, FISH_LEAKS: "1", ...env } });
   return { stdout: ran.stdout.toString(), stderr: ran.stderr.toString().replaceAll(`${dir}/`, ""), exitCode: ran.exitCode };
 }
 
@@ -491,16 +493,16 @@ test("a nested object given to JS takes numbers as JS does, and an optional requ
 });
 
 test("bundled JS's path, os and process are Fish's, and another Node module is refused naming it", () => {
-  const main = `import { paths, platform, home, unset, args } from "shimmed";
+  const main = `import { paths, platform, home, unset, args, mode } from "shimmed";
 import * as path from "node:path";
 import * as os from "node:os";
 function main() {
   console.log(paths());
   console.log([path.join("a", "../b", "c.txt"), path.resolve("/x", "y", ".."), path.relative("/a/b/c", "/a/d"), path.dirname("/a/b/c"), path.basename("/a/b/c.txt", ".txt"), path.extname("x.tar.gz"), path.normalize("/a//b/../c/"), path.sep].join("|"));
-  console.log(platform() === os.platform(), home() === process.env.HOME, unset(), args());
+  console.log(platform() === os.platform(), home() === process.env.HOME, unset(), args(), mode());
 }
 `;
-  expect(run(main, ["one", "two"])).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two\n", stderr: "", exitCode: 0 });
+  expect(run(main, ["one", "two"], { NODE_ENV: "production" })).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production\n", stderr: "", exitCode: 0 });
   expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
 });
 
@@ -514,4 +516,7 @@ async function main(): Promise<void> throws JsError {
 }
 `;
   expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true ENOENT open\n", stderr: "", exitCode: 0 });
+  // With no async runtime the file is read at once, and the promise's jobs still wait for the
+  // calling JS to finish.
+  expect(run(`import { ordered } from "files";\nfunction main() { console.log(ordered(${JSON.stringify(join(dir, "written.txt"))})); }\n`)).toEqual({ stdout: "sync\n", stderr: "", exitCode: 0 });
 });

@@ -312,6 +312,8 @@ async function main(request: Request): Promise<Result> {
       target: "node",
       format: "esm",
       metafile: true,
+      // Bun's bundler otherwise inlines the compiler's own NODE_ENV.
+      define: { "process.env.NODE_ENV": "process.env.NODE_ENV" },
       // Bun's bundler takes a plugin's filter as a regex, and one matching every path hides the
       // bundle's in-memory files.
       plugins: [{

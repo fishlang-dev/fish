@@ -811,7 +811,6 @@ static void fsh_js_file_settled(JSContext *cx, fsh_js_file *f, int32_t outcome, 
   JS_FreeValue(cx, f->settle[1]);
   fsh_rt_str_release(f->path);
   fsh_rt_free(f->bytes.data);
-  fsh_js_settle(cx);
 }
 
 static int32_t fsh_js_file_poll(fsh_task *task, void *frame) {
@@ -822,6 +821,7 @@ static int32_t fsh_js_file_poll(fsh_task *task, void *frame) {
   if (outcome == 0) return 0;
   JSContext *cx = fsh_js_enter();
   fsh_js_file_settled(cx, f, outcome, &out, parts);
+  fsh_js_settle(cx);
   fsh_js_leave();
   fsh_rt_file_job_release(f->job);
   return 1;
@@ -876,6 +876,7 @@ static JSValue fsh_host_file(JSContext *cx, JSValueConst self, int argc, JSValue
     fsh_array out = { 0 };
     fsh_str *parts[4] = { 0 };
     int32_t outcome = op == 0 ? fsh_rt_fs_read_sync(f.path, &out, parts) : fsh_rt_fs_write_sync(f.path, &f.bytes, parts);
+    // The call that reached here runs the queued jobs once the calling JS finishes.
     fsh_js_file_settled(cx, &f, outcome, &out, parts);
     return promise;
   }

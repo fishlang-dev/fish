@@ -251,8 +251,11 @@ test("imports wait on other files or Node built-ins by how they are written, and
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "Process spawning"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Path aliases"], ["Namespace imports"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Bun's own modules"], ["Path aliases"], ["Namespace imports"]]);
     expect(scanFiles(dir)[0]!.findings.map(([rule]) => rule)).toContain("bunModules");
+  });
+  project({ "a.ts": "import * as w from \"ws\";\nexport { x } from \"ws\";\n", "b.ts": "import q = require(\"ws\");\n", "c.ts": "export * from \"ws\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Namespace imports"], ["Namespace imports"]]);
   });
 });
 
