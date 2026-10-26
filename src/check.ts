@@ -22,7 +22,7 @@ import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsBodies, jsCalledAt, jsCalls, jsClasses, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -685,24 +685,25 @@ export function check(written: Stmt[], library = false, macros = false): Checked
     return x.args.some((a) => !jsConverts(i.types.get(a)!)) || (gives !== "void" && !jsConverts(gives));
   })));
   if (unconverted) throw new CompileError("this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
-  // An argument of a package's function becomes a JS value as the call converts it.
-  const converted = new Set(compiledInstances.flatMap((i) => [...i.calls.keys()].flatMap((x) => (x.kind === "call" && jsCalls.has(x) ? x.args : []))));
-  const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !converted.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
+  // A value given to JS becomes a JS value as the call or write converts it.
+  const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a 'JsValue' isn't supported yet; a 'JsValue' comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
   return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
-  // part that isn't a JsValue where `to` takes only one.
+  // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
+  // elements hold nothing.
   function intoJs(from: Type, to: Type): boolean {
     const held = (t: Type) => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
+    const js = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue";
     [from, to] = [held(from), held(to)];
-    if (from === to || typeof to === "string" || !holdsPart(to, isPlainJs, true)) return false;
-    if (isPlainJs(to)) return !isPlainJs(from);
+    if (from === to || from === "never" || typeof to === "string" || !holdsPart(to, js, true)) return false;
+    if (js(to)) return !js(from);
     if (to.kind === "union") {
-      const others = to.members.filter((m) => !isPlainJs(m));
+      const others = to.members.filter((m) => !js(m));
       const members = typeof from !== "string" && from.kind === "union" ? from.members : [from];
-      return members.some((m) => !to.members.includes(m) && !isPlainJs(m) && !others.some((o) => fits(m, o) && !intoJs(m, o)));
+      return members.some((m) => !to.members.includes(m) && !js(m) && !others.some((o) => fits(m, o) && !intoJs(m, o)));
     }
     if (typeof from === "string") return false;
     if ((to.kind === "array" || to.kind === "fixed") && (from.kind === "array" || from.kind === "fixed")) return intoJs(from.element, to.element);

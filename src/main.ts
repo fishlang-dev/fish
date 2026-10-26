@@ -29,7 +29,8 @@ export function compile(src: string, file: string, release = false, panic: Panic
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
 function bundled(ir: string, loaded: Loaded): string {
-  const used = [...new Set([...ir.matchAll(/@fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/g)].map((m) => Number(m[1])))].sort((a, b) => a - b);
+  const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
+  const used = [...new Set([...ir.matchAll(calls)].map((m) => Number(m[1])))].sort((a, b) => a - b);
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
   const text = [...bytes].map((c) => (c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`)).join("");

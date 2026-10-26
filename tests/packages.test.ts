@@ -35,6 +35,9 @@ export function make(n) { return { count: n, label: "made" }; }
 export function relabel(r) { return r.label + r.count; }
 export function identical(a, b) { return a === b; }
 export function strings() { return ["a", 2]; }
+export function id(v) { return v; }
+export function maybeObj(b) { return b ? { count: 1, label: "m" } : null; }
+export function rb() { return 7; }
 let made = 0;
 export class Box {
   constructor(size, name) { this.size = size; this.id = (name ?? "box") + (++made); }
@@ -70,6 +73,9 @@ export declare function make(n: number): Result;
 export declare function relabel(r: Result): string;
 export declare function identical(a: Result, b: Result): boolean;
 export declare function strings(): string[];
+export declare function id<T>(v: T): T;
+export declare function maybeObj(b: boolean): Result | null;
+export declare function rb(): Result | boolean;
 export declare class Box {
   constructor(size: number, name?: string);
   size: number;
@@ -217,4 +223,34 @@ function main() {
 
 test("a compound assignment to a handle's property waits", () => {
   expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error: compound assignments to a package's properties are not supported yet");
+});
+
+test("results of every type the checker lets cross are read as declared", () => {
+  const main = `import { id, maybeObj, Box } from "esm";
+function main() {
+  const i: i64 = id(5);
+  const u: u8 = id(200 as u8);
+  const f: f32 = id(1.5 as f32);
+  const xs: i64[] = id([1, 2]);
+  const given: [i64, string] = [3, "x"];
+  const t = id(given);
+  const n: i64 | null = id(7);
+  const m = maybeObj(true);
+  console.log(i, u, f, xs.length, t[1], n, m !== null, maybeObj(false) === null);
+  let boxes: Box[] = [];
+  boxes.push(new Box(1));
+  console.log(boxes.length);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "5 200 1.5 2 x 7 true true\n1\n", stderr: "", exitCode: 0 });
+});
+
+test("a result no member of its declared union takes panics", () => {
+  expect(run(`import { rb } from "esm";\nfunction main() {\n  const r = rb();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:13:\n'rb' from 'esm' gave a number, where its declaration says 'boolean | Result'\n", exitCode: 101 });
+});
+
+test("a Fish value can't become a handle, and a package can't run while compiling", () => {
+  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a 'JsValue' isn't supported yet");
+  expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
 });

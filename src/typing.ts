@@ -34,7 +34,8 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // `this: Own<this>`, which a call through a Dyn must allow for.
 // A generic method, `map<U>(f: (x: T) => U): U`, keeps its type parameters' names and the node it
 // was written as, as a generic function type does, each call resolving it.
-export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean; generic?: Family };
+// `optional`: which parameters are written with `?`, kept for JS, which tells left out from null.
+export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 

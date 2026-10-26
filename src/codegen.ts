@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsParamsOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -10,7 +10,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, elementsOf, isPlainJs, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, elementsOf, isPlainJs, jsShape, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -1185,11 +1185,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return box;
   }
 
-  // A trailing Option among a handle's method's or constructor's parameters is one JS may leave out.
-  function leftOut(params: Type[]): (i: number) => boolean {
-    let required = params.length;
-    while (required > 0 && isOption(params[required - 1]!)) required--;
-    return (i) => i >= required;
+  // Which parameters of the method, constructor or static a call takes are written with `?`.
+  function optionalAt(call: Expr): (i: number) => boolean {
+    const optional = jsOptionalOf.get(call) ?? [];
+    return (i) => optional[i] === true;
   }
 
   // A property of a JS object read as its declaration says: a handle's, or a class's static.
@@ -1201,11 +1200,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A method of a JS object called with it as `this`, its result read as `gives` says, or
   // dropped when the call's value goes unused.
-  function jsMethod(object: string, name: string, args: Expr[], params: Type[], gives: Type | undefined, what: string, at: Expr): string | undefined {
+  function jsMethod(object: string, name: string, args: Expr[], gives: Type | undefined, what: string, at: Expr): string | undefined {
     const fn = temp();
     unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${text(name)}, ptr ${panicAt(at)})`, fn);
     emit(`call void @fsh_rt_block_retain(ptr ${object})`);
-    const argv = jsArgv(args, leftOut(params));
+    const argv = jsArgv(args, optionalAt(at));
     const result = temp();
     unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr ${object}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(at)})`, result);
     if (gives === undefined || gives === "void") return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
@@ -1220,14 +1219,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     else {
       const call = e as Extract<Expr, { kind: "call" }>;
       const method = (call.callee as Extract<Expr, { kind: "member" }>).name;
-      result = jsMethod(c, method, call.args, jsParamsOf.get(call)!, types.get(call), `'${name.name}.${method}' gave`, call);
+      result = jsMethod(c, method, call.args, types.get(call), `'${name.name}.${method}' gave`, call);
     }
     emit(`call void @fsh_rt_js_release(ptr ${c})`);
     return result;
   }
 
-  // A Fish value as a new JS value, in a box of its own; empty is `undefined` or `null`, as the
-  // parameter it is passed to takes it.
+  // A Fish value as a new JS value, in a box of its own; empty is `undefined` for a parameter
+  // written with `?`, which JS may leave out, and `null` otherwise. A field an object leaves out
+  // isn't there in JS either.
   function toJs(v: string, type: Type, empty: "undefined" | "null"): string {
     const box = temp();
     if (isRef(type)) {
@@ -1269,7 +1269,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       for (const f of type.fields) {
         const part = temp();
         emit(`${part} = extractvalue ${llvm(type)} ${v}, ${fieldPath(type, f.name).join(", ")}`);
-        emit(`call void @fsh_rt_js_put(ptr ${box}, ptr ${cString(f.name)}, ptr ${toJs(part, f.type, "undefined")})`);
+        emit(`call void @fsh_rt_js_put(ptr ${box}, ptr ${cString(f.name)}, ptr ${toJs(part, f.type, "null")})`);
       }
       return box;
     }
@@ -1291,19 +1291,59 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A JsValue read as the type its declaration gives it, checked, giving up its box: `what` says
-  // what gave it, as "'f' from 'pkg' gave". A union takes the first member the JS value is, its
-  // literals tried before the rest.
+  // what gave it, as "'f' from 'pkg' gave". A union takes the first member the JS value is.
   function fromJs(box: string, type: Type, what: string, at: Expr): string {
     if (isPlainJs(type)) return box;
     const checked = (call: string) => `${call}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`;
+    // Panics unless the JS value is what the declaration says, by the test `jsMatches` makes.
+    const expect = (test: string) => {
+      const [yes, no] = [label(), label()];
+      emit(`br i1 ${test}, label %${yes}, label %${no}`);
+      startBlock(no);
+      unwinding(`call void ${checked("@fsh_rt_js_mismatch")}`);
+      emit("unreachable");
+      startBlock(yes);
+    };
+    if (typeof type !== "string" && type.kind === "union") return jsUnion(box, type, what, at);
     // A handle of a declared shape holds an object.
     if (typeof type !== "string" && type.kind === "block") {
       unwinding(`call void ${checked("@fsh_rt_js_object_is")}`);
       return box;
     }
-    // A JS array as a new Fish array, each element read as the declaration says; a tuple's
-    // elements by their places.
-    if (typeof type !== "string" && (type.kind === "array" || (type.kind === "object" && type.tuple))) {
+    if (type === "string" || type === "f64" || type === "boolean") {
+      const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
+      const v = temp();
+      unwinding(`call ${result} ${checked(`@fsh_rt_js_as_${read}`)}`, v);
+      if (type !== "boolean") return v;
+      const yes = temp();
+      emit(`${yes} = icmp ne i32 ${v}, 0`);
+      return yes;
+    }
+    // Another number type takes a JS number it holds exactly.
+    if (isFloat(type) || isInteger(type)) {
+      const [d, v] = [temp(), temp()];
+      if (isFloat(type)) {
+        unwinding(`call double ${checked("@fsh_rt_js_as_number")}`, d);
+        emit(`${v} = fptrunc double ${d} to float`);
+        return v;
+      }
+      const { bits, signed } = INTEGERS[type as Integer];
+      // The bound past the largest value, which a double holds exactly where the largest isn't.
+      const [min, past] = signed ? [-(2 ** (bits - 1)), 2 ** (bits - 1)] : [0, 2 ** bits];
+      unwinding(`call double @fsh_rt_js_as_integer(ptr ${box}, double ${floatConstant(min, "f64")}, double ${floatConstant(past, "f64")}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`, d);
+      emit(`${v} = ${signed ? "fptosi" : "fptoui"} double ${d} to ${llvm(type)}`);
+      return v;
+    }
+    // Empty, and a literal, hold nothing once they are known to be what the declaration says.
+    if (type === "null" || (typeof type !== "string" && type.kind === "literal")) {
+      expect(jsMatches(box, type));
+      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      return "zeroinitializer";
+    }
+    if (typeof type === "string") throw new Error(`internal error: no reading of a '${type}' out of JS`);
+    // A JS array as a new Fish array, each element read as the declaration says; a fixed array
+    // takes exactly its length, and a tuple its elements by their places.
+    if (type.kind === "array" || type.kind === "fixed" || (type.kind === "object" && type.tuple)) {
       const length = temp();
       unwinding(`call i64 ${checked("@fsh_rt_js_length")}`, length);
       // ponytail: an element that isn't what its declaration says panics leaving the elements read
@@ -1320,45 +1360,50 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`call void @fsh_rt_js_release(ptr ${box})`);
         return built(data, length, length);
       }
+      const parts = type.kind === "fixed" ? Array.from({ length: type.size }, () => type.element) : elementsOf(type);
+      const enough = temp();
+      emit(`${enough} = icmp ${type.kind === "fixed" ? "eq" : "sge"} i64 ${length}, ${parts.filter((p) => type.kind === "fixed" || !isOption(p)).length}`);
+      expect(enough);
       let made = "zeroinitializer";
-      elementsOf(type).forEach((element, i) => {
+      parts.forEach((element, i) => {
         const next = temp();
-        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(element)} ${read(String(i), element)}, ${fieldPath(type, String(i)).join(", ")}`);
+        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(element)} ${read(String(i), element)}, ${type.kind === "fixed" ? i : fieldPath(type, String(i)).join(", ")}`);
         made = next;
       });
       emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return made;
     }
-    if (type === "string" || type === "f64" || type === "boolean") {
-      const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
-      const v = temp();
-      unwinding(`call ${result} ${checked(`@fsh_rt_js_as_${read}`)}`, v);
-      if (type !== "boolean") return v;
-      const yes = temp();
-      emit(`${yes} = icmp ne i32 ${v}, 0`);
-      return yes;
+    // A JS object as a new Fish object of its declared shape, each property read in turn.
+    if (type.kind === "object") {
+      expect(jsMatches(box, type));
+      let made = "zeroinitializer";
+      for (const f of type.fields) {
+        const next = temp();
+        const v = jsGet(box, f.name, f.type, `${what} an object whose '${f.name}' is`, at);
+        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(f.type)} ${v}, ${fieldPath(type, f.name).join(", ")}`);
+        made = next;
+      }
+      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      return made;
     }
-    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
-    const order = [...members.filter((m) => typeof m !== "string" && m.kind === "literal"), ...members.filter((m) => typeof m === "string" || m.kind !== "literal")];
+    throw new Error(`internal error: no reading of a '${show(type)}' out of JS`);
+  }
+
+  // A JS value read as the first member of a union it is: literals tried first, then the rest,
+  // a plain JsValue last as it takes anything.
+  function jsUnion(box: string, type: UnionType, what: string, at: Expr): string {
+    const rank = (m: Type) => (typeof m !== "string" && m.kind === "literal" ? 0 : isPlainJs(m) ? 2 : 1);
+    const order = [...type.members].sort((a, b) => rank(a) - rank(b));
     const [slot, done] = [alloca(llvm(type)), label()];
     for (const m of order) {
-      const [yes, no, is] = [label(), label(), temp()];
-      emit(`${is} = call i32 @fsh_rt_js_is(ptr ${box}, ${jsTest(m)})`);
-      const holds = temp();
-      emit(`${holds} = icmp ne i32 ${is}, 0`);
-      emit(`br i1 ${holds}, label %${yes}, label %${no}`);
+      const [yes, no] = [label(), label()];
+      emit(`br i1 ${jsMatches(box, m)}, label %${yes}, label %${no}`);
       startBlock(yes);
-      let v: string;
-      if (m === "string" || m === "f64" || m === "boolean" || isPlainJs(m)) v = fromJs(box, m, what, at);
-      else {
-        emit(`call void @fsh_rt_js_release(ptr ${box})`);
-        v = "zeroinitializer";
-      }
-      emit(`store ${llvm(type)} ${convert(v, m, type)}, ptr ${slot}`);
+      emit(`store ${llvm(type)} ${convert(fromJs(box, m, what, at), m, type)}, ptr ${slot}`);
       emit(`br label %${done}`);
       startBlock(no);
     }
-    unwinding(`call void ${checked("@fsh_rt_js_mismatch")}`);
+    unwinding(`call void @fsh_rt_js_mismatch(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`);
     emit("unreachable");
     startBlock(done);
     const out = temp();
@@ -1366,21 +1411,43 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return out;
   }
 
-  // What `fsh_rt_js_is` takes to test a JS value for a member of a declared union: its kind,
-  // and for a literal, its value.
-  function jsTest(m: Type): string {
-    const kind = (k: number, s = "null", d = "0.0") => `i32 ${k}, ptr ${s}, double ${d}`;
-    if (m === "null") return kind(1);
-    if (m === "string") return kind(2);
-    if (m === "boolean") return kind(4);
-    if (isPlainJs(m)) return kind(0);
-    if (typeof m !== "string" && m.kind === "literal") {
-      const value = m.value;
-      if (typeof value === "string") return kind(5, text(value));
-      if (typeof value === "boolean") return kind(value ? 7 : 6);
-      return kind(8, "null", floatConstant(Number(value), "f64"));
+  // Whether a JS value is of a declared type's kind, as an `i1`: a literal by its value, an
+  // array by being one, and an object, or a handle's shape, by having each property it can't
+  // leave out, its literal properties matching.
+  function jsMatches(box: string, m: Type): string {
+    const is = (kind: number, s = "null", d = "0.0") => {
+      const [r, b] = [temp(), temp()];
+      emit(`${r} = call i32 @fsh_rt_js_is(ptr ${box}, i32 ${kind}, ptr ${s}, double ${d})`);
+      emit(`${b} = icmp ne i32 ${r}, 0`);
+      return b;
+    };
+    if (isPlainJs(m)) return "true";
+    if (m === "null") return is(1);
+    if (m === "string") return is(2);
+    if (m === "boolean") return is(4);
+    if (isFloat(m) || isInteger(m)) return is(3);
+    if (typeof m === "string") return "false";
+    if (m.kind === "literal") return is(...jsLiteral(m.value));
+    if (m.kind === "array" || m.kind === "fixed" || (m.kind === "object" && m.tuple)) return is(10);
+    const shape = m.kind === "block" ? jsShape(m) : m.kind === "object" ? m : undefined;
+    let all = is(9);
+    for (const f of shape?.fields ?? []) {
+      if (isOption(f.type)) continue;
+      const [kind, s, d] = typeof f.type !== "string" && f.type.kind === "literal" ? jsLiteral(f.type.value) : [11, "null", "0.0"] as const;
+      const [r, b, both] = [temp(), temp(), temp()];
+      emit(`${r} = call i32 @fsh_rt_js_field_is(ptr ${box}, ptr ${cString(f.name)}, i32 ${kind}, ptr ${s}, double ${d})`);
+      emit(`${b} = icmp ne i32 ${r}, 0`);
+      emit(`${both} = and i1 ${all}, ${b}`);
+      all = both;
     }
-    return kind(3);
+    return all;
+  }
+
+  // What `fsh_rt_js_is` takes to test for a literal: its kind, and its text or number.
+  function jsLiteral(value: string | bigint | boolean): [number, string, string] {
+    if (typeof value === "string") return [5, text(value), "0.0"];
+    if (typeof value === "boolean") return [value ? 7 : 6, "null", "0.0"];
+    return [8, "null", floatConstant(Number(value), "f64")];
   }
 
   // A JsValue narrowed to a string, number or boolean, read out of JS.
@@ -1399,7 +1466,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = referent(valueType(callee.object)) as BlockType;
     const handle = temp();
     emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
-    if (jsMethods.has(e)) return jsMethod(handle, callee.name, e.args, jsParamsOf.get(e) ?? [], types.get(e), `'${callee.name}' of '${show(t)}' gave`, e);
+    if (jsMethods.has(e)) return jsMethod(handle, callee.name, e.args, types.get(e), `'${callee.name}' of '${show(t)}' gave`, e);
     if (jsAccessors.has(e)) {
       const [made, has] = [temp(), temp()];
       const at = callee.name === "at" ? `i64 ${value(e.args[0]!)}` : `ptr ${value(e.args[0]!)}`;
@@ -6098,12 +6165,19 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function assign(e: Extract<Expr, { kind: "assign" }>): string {
-    // A handle's property is written in JS, with a new JS value of what is assigned.
+    // A handle's property is written in JS, with a new JS value of what is assigned; the
+    // assignment's own value is what the property holds, a handle as the new JS value.
     if (jsMembers.has(e.target) && e.target.kind === "member") {
       const object = jsHandle(e.target.object);
-      const v = jsOperand(e.value);
-      unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${text(e.target.name)}, ptr ${toJs(v, types.get(e.value)!, "undefined")}, ptr ${panicAt(e)})`);
-      return v;
+      const [v, type] = [jsOperand(e.value), types.get(e)!];
+      const box = toJs(v, types.get(e.value)!, "null");
+      const handle = typeof type !== "string" && type.kind === "block";
+      if (handle) {
+        emit(`call void @fsh_rt_block_retain(ptr ${box})`);
+        pending.push({ v: box, type });
+      }
+      unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${text(e.target.name)}, ptr ${box}, ptr ${panicAt(e)})`);
+      return handle ? box : convert(v, types.get(e.value)!, type);
     }
     const op = ASSIGNMENTS[e.op]!;
     // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
@@ -7655,7 +7729,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (made) {
           const c = jsExport(made, e);
           const args = e.args ?? [];
-          const [argv, box] = [jsArgv(args, leftOut(jsParamsOf.get(e)!)), temp()];
+          const [argv, box] = [jsArgv(args, optionalAt(e)), temp()];
           unwinding(`call ptr @fsh_rt_js_new(ptr ${c}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(e)})`, box);
           return fromJs(box, types.get(e)!, `'new ${made.name}' from '${made.module}' gave`, e);
         }

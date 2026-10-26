@@ -271,6 +271,8 @@ export function conversions(b: Slots) {
     if (to === "string" && typeof from !== "string" && from.kind === "literal") return b.text(String(from.value));
     // Code holding a `never` value never runs.
     if (from === "never") return "undef";
+    // An empty array literal holds no element to convert.
+    if (typeof from !== "string" && from.kind === "array" && from.element === "never" && typeof to !== "string" && to.kind === "array") return v;
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     if (typeof from !== "string" && from.kind === "ref") {

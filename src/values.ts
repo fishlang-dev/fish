@@ -356,15 +356,17 @@ export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
 export const jsExports = new WeakMap<Expr, JsName>();
 // The calls of a package's functions, by the export each calls, with the signature checked.
 export const jsCalls = new WeakMap<Expr, JsName>();
+// The values given to JS, converted by the call or write that gives them.
+export const jsGiven = new WeakSet<Expr>();
 // A handle's property reads and writes, and its method calls.
 export const jsMembers = new WeakSet<Expr>();
 export const jsMethods = new WeakSet<Expr>();
 // `new` of a package's class, and its static members read or called, by the class's export.
 export const jsNews = new WeakMap<Expr, JsName>();
 export const jsStatics = new WeakMap<Expr, JsName>();
-// The declared parameters of a handle's method, a constructor or a static method a call takes,
-// a trailing Option being one the JS may leave out.
-export const jsParamsOf = new WeakMap<Expr, Type[]>();
+// Which declared parameters of a handle's method, a constructor or a static method a call takes
+// are optional, written with `?`, which JS may leave out: an empty value is undefined there.
+export const jsOptionalOf = new WeakMap<Expr, boolean[]>();
 // The `get`, `at` and `has` calls on a JsValue.
 export const jsAccessors = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
@@ -979,7 +981,7 @@ export function expressions(ctx: Context) {
       if (m.typeParams.length > 0) throw unsupported("generic methods of a package's types", callee);
       const params = jsParams(m.params);
       params.forEach((p) => crossing(p, `'${jsClass.name}.${callee.name}' takes a`, e));
-      jsArgs(e, params);
+      jsArgs(e, params, m.params.map((p) => p.optional));
       const returns = m.returns ? resolveType(m.returns) : blockType("JsValue");
       return { type: crossing(returns === "void" ? "void" : jsView(returns), `'${jsClass.name}.${callee.name}' gives a`, e), what: `'${callee.name}'` };
     }
@@ -1353,6 +1355,7 @@ export function expressions(ctx: Context) {
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
     calls.set(e, instance);
+    if (target.js) e.args.forEach((a) => givenToJs(a, types.get(a)!));
     // An async function's call only makes its future; its error comes at the `await`.
     const error = errorOf(instance);
     if (error && !target.async) raise(e, error, `'${target.name}'`);
@@ -3112,12 +3115,13 @@ export function expressions(ctx: Context) {
       // An optional parameter left out is undefined, as JS gives it.
       while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ kind: "null", start: e.end, end: e.end });
       jsCrossings.add(e);
+      jsOptionalOf.set(e, method.optional ?? []);
       const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
       e.args.forEach((a) => crossing(types.get(a) ?? "void", `'${callee.name}' of '${show(t)}' is given a`, a));
       return { type: crossing(typed.type === "void" ? "void" : jsView(typed.type), `'${callee.name}' of '${show(t)}' gives a`, e), what: typed.what };
     }
     method.params.forEach((p) => crossing(p, `'${callee.name}' of '${show(t)}' takes a`, e));
-    jsArgs(e, method.params);
+    jsArgs(e, method.params, method.optional ?? []);
     return { type: crossing(method.returns === "void" ? "void" : jsView(method.returns), `'${callee.name}' of '${show(t)}' gives a`, e), what: `'${callee.name}'` };
   }
 
@@ -3146,9 +3150,9 @@ export function expressions(ctx: Context) {
 
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
-  function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[]) {
+  function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[], optional: boolean[]) {
     jsCrossings.add(e);
-    jsParamsOf.set(e, params);
+    jsOptionalOf.set(e, optional);
     const list = e.args ?? [];
     let required = params.length;
     while (required > 0 && isOption(params[required - 1]!)) required--;
@@ -3161,7 +3165,17 @@ export function expressions(ctx: Context) {
       expect(a, params[i]!);
       const given = value(a);
       coerce(a, given, params[i]!, `argument of type '${show(given)}' is not assignable to parameter of type '${show(params[i]!)}'`);
+      givenToJs(a, given);
     });
+  }
+
+  // A value given to JS, which the call or write converts: refused when it has no JS form.
+  function givenToJs(a: Expr, given: Type) {
+    jsGiven.add(a);
+    // A function given to JS is refused where the package declares it takes one.
+    if (typeof given !== "string" && (given.kind === "closure" || given.kind === "function" || given.kind === "dyn")) return;
+    const open = holdsPart(given, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined);
+    if (!open && !jsConverts(given)) throw new CompileError(`a '${show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);
   }
 
   // A package's declared parameters as Fish types: an optional one is an Option.
@@ -3178,7 +3192,7 @@ export function expressions(ctx: Context) {
     const constructor = jsChain(c).find((k) => k.jsClass!.constructors.length > 0)?.jsClass!.constructors[0] ?? [];
     const params = jsParams(constructor);
     params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
-    jsArgs(e, params);
+    jsArgs(e, params, constructor.map((p) => p.optional));
     jsNews.set(e, c.js!);
     return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
@@ -4127,6 +4141,8 @@ export function expressions(ctx: Context) {
           : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
           : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
+        // A handle's property is written in JS, with the value converted.
+        if (jsMembers.has(e.target)) givenToJs(e.value, assigned);
         const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
         if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
         const narrow = local && narrowed(local);

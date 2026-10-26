@@ -595,6 +595,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const returns = m.returns;
         const [params, result] = withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => paramType(p)), resolveType(returns)] as const);
         const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
+        if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
         if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);

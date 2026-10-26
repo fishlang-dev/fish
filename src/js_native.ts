@@ -330,9 +330,9 @@ fsh_js *fsh_rt_js_call(fsh_js *fn, fsh_js *self, int64_t argc, fsh_js **argv, co
 }
 
 // Whether a JS value is of a kind a declared type has: 0 anything, 1 null or undefined, 2 a
-// string, 3 a number, 4 a boolean, 5 the string text, 6 false, 7 true, 8 the number number.
-int32_t fsh_rt_js_is(fsh_js *b, int32_t kind, fsh_str *text, double number) {
-  JSValue v = b->value;
+// string, 3 a number, 4 a boolean, 5 the string text, 6 false, 7 true, 8 the number number, 9
+// an object that isn't an array, 10 an array, 11 anything but undefined. Inside the engine.
+static int32_t fsh_js_is(JSContext *cx, JSValue v, int32_t kind, fsh_str *text, double number) {
   switch (kind) {
     case 0: return 1;
     case 1: return JS_IsNull(v) || JS_IsUndefined(v);
@@ -343,19 +343,51 @@ int32_t fsh_rt_js_is(fsh_js *b, int32_t kind, fsh_str *text, double number) {
     case 7: return JS_IsBool(v) && JS_VALUE_GET_BOOL(v);
     case 8: {
       double d = 0;
-      if (!JS_IsNumber(v)) return 0;
-      JS_ToFloat64(fsh_js_context, &d, v);
-      return d == number;
+      return JS_IsNumber(v) && JS_ToFloat64(cx, &d, v) == 0 && d == number;
     }
+    case 9: return JS_IsObject(v) && !JS_IsArray(v);
+    case 10: return JS_IsArray(v);
+    case 11: return !JS_IsUndefined(v);
   }
   if (!JS_IsString(v)) return 0;
-  JSContext *cx = fsh_js_enter();
   size_t length;
   const char *bytes = JS_ToCStringLen(cx, &length, v);
   int32_t same = bytes && (int64_t)length == text->length && memcmp(bytes, text->bytes, length) == 0;
   JS_FreeCString(cx, bytes);
-  fsh_js_leave();
   return same;
+}
+
+int32_t fsh_rt_js_is(fsh_js *b, int32_t kind, fsh_str *text, double number) {
+  JSContext *cx = fsh_js_enter();
+  int32_t yes = fsh_js_is(cx, b->value, kind, text, number);
+  fsh_js_leave();
+  return yes;
+}
+
+// The same, of an object's property; a property that throws as it is read isn't one.
+int32_t fsh_rt_js_field_is(fsh_js *b, const char *name, int32_t kind, fsh_str *text, double number) {
+  JSContext *cx = fsh_js_enter();
+  int32_t yes = 0;
+  if (JS_IsObject(b->value)) {
+    JSValue v = JS_GetPropertyStr(cx, b->value, name);
+    if (JS_IsException(v)) JS_FreeValue(cx, JS_GetException(cx));
+    else yes = fsh_js_is(cx, v, kind, text, number);
+    JS_FreeValue(cx, v);
+  }
+  fsh_js_leave();
+  return yes;
+}
+
+// A JS number read as an integer type's value, panicking, giving up the box, unless it is a whole
+// number from min up to, but not including, past.
+double fsh_rt_js_as_integer(fsh_js *b, double min, double past, const char *what, const char *declared, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  double d = 0;
+  int whole = JS_IsNumber(b->value) && JS_ToFloat64(cx, &d, b->value) == 0 && d == trunc(d) && d >= min && d < past;
+  fsh_js_expect(cx, b, whole, what, declared, where);
+  fsh_js_drop(cx, b);
+  fsh_js_leave();
+  return d;
 }
 
 // A JS value none of its declaration's types took.
