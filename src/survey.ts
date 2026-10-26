@@ -51,7 +51,7 @@ const RULES: Rule[] = [
   { id: "jsx", action: "unsupported", title: "JSX in .tsx files", feature: "JSX for server-side HTML" },
   { id: "moduleForms", action: "unsupported", title: "namespace imports, 'import x = require()', 'export =' and dynamic import()", feature: "Namespace imports" },
   { id: "pathAliases", action: "unsupported", title: "imports through path aliases such as '@/lib' or '~/lib'", feature: "Path aliases" },
-  { id: "packages", action: "unsupported", title: "imports of npm packages", feature: "npm interop" },
+  { id: "bunModules", action: "unsupported", title: "imports of Bun's own modules such as bun:test" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
   { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
   { id: "localCaptures", action: "guided", title: "a class or enum declared inside a function that uses the function's variables: pass them to its constructor" },
@@ -458,14 +458,18 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
 
 // What an import, export or re-export still needs, if anything: imports and exports between the
 // program's files work, except in the forms Fish refuses; a path alias (`~/`, `@/` or `#`), a
-// Node built-in or an npm package is told apart by how its specifier is written.
+// Node built-in, one of Bun's modules or an npm package is told apart by how its specifier is
+// written. An npm package imported by name runs in the embedded JS engine, bundled while
+// compiling; one imported dynamically isn't bundled.
 function moduleRule(n: Node, specifier: unknown): string | undefined {
   const form = n.kind === "importEquals" || n.kind === "exportAssign" || n.kind === "exportAsNamespace" || n.kind === "import" && (n.namespace !== undefined || !("module" in n)) || (n.kind === "exportAll" && n.alias !== undefined);
   if (typeof specifier !== "string") return form ? "moduleForms" : undefined;
   if (/^[#~]|^@\//.test(specifier)) return "pathAliases";
   if (specifier.startsWith(".")) return form ? "moduleForms" : undefined;
   if (stdHas(n, specifier)) return undefined;
-  return specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!) ? "nodeBuiltins" : "packages";
+  if (specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!)) return "nodeBuiltins";
+  if (specifier === "bun" || specifier.startsWith("bun:")) return "bunModules";
+  return n.kind === "import" && !("module" in n) ? "moduleForms" : undefined;
 }
 
 // Whether an import of a Node built-in is one Fish's std module answers: the module whole, or

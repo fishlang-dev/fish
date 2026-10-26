@@ -246,12 +246,13 @@ test("unread files are left out of the steps but not the shares, and the self cu
   });
 });
 
-test("imports wait on other files, npm packages or Node built-ins by how they are written", () => {
+test("imports wait on other files or Node built-ins by how they are written, and npm packages run", () => {
   project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import cp from \"node:child_process\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["npm interop"], ["Hashing", "Process spawning"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "Process spawning"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["npm interop"], ["Path aliases"], ["npm interop"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Path aliases"], ["Namespace imports"]]);
+    expect(scanFiles(dir)[0]!.rules.map((r) => r.id)).toContain("bunModules");
   });
 });
 
