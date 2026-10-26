@@ -513,7 +513,7 @@ async function main() {
   console.log(a.status, a.value, c.status);
   if (b.status === "rejected") console.log("b", b.reason.message);
   console.log(a);
-  const first = await Promise.any([fail(5, "early"), after(30, 7), after(60, 8)]);
+  const first = await Promise.any([fail(5, "early"), after(30, 7), after(300, 8)]);
   console.log("any", first);
   try {
     const none = await Promise.any([fail(5, "a"), fail(15, "b")]);
@@ -560,7 +560,7 @@ async function after(ms: i64, v: i64): Promise<i64> {
   return v;
 }
 async function main() {
-  const r = await Promise.any([after(30, 1), after(5, 2)]);
+  const r = await Promise.any([after(300, 1), after(5, 2)]);
   console.log(r);
 }
 // case: promise_settled_status_narrows
