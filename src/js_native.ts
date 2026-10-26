@@ -410,4 +410,32 @@ int64_t fsh_rt_js_length(fsh_js *b, const char *what, const char *declared, cons
   fsh_js_leave();
   return length;
 }
+// Writes a property of a JS object, giving up the value's box.
+void fsh_rt_js_set(fsh_js *object, fsh_str *key, fsh_js *part, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  JSAtom name = JS_NewAtomLen(cx, key->bytes, key->length);
+  int done = JS_SetProperty(cx, object->value, name, JS_DupValue(cx, part->value));
+  JS_FreeAtom(cx, name);
+  fsh_js_drop(cx, part);
+  if (done < 0) fsh_js_throw(cx, where);
+  fsh_js_leave();
+}
+
+// new of a JS class, giving up its box and every argument's.
+fsh_js *fsh_rt_js_new(fsh_js *made, int64_t argc, fsh_js **argv, const char *where) {
+  JSContext *cx = fsh_js_enter();
+  JSValue args[argc > 0 ? argc : 1];
+  for (int64_t i = 0; i < argc; i++) {
+    args[i] = JS_DupValue(cx, argv[i]->value);
+    fsh_js_drop(cx, argv[i]);
+  }
+  JSValue c = JS_DupValue(cx, made->value);
+  fsh_js_drop(cx, made);
+  JSValue result = JS_CallConstructor(cx, c, argc, args);
+  JS_FreeValue(cx, c);
+  for (int64_t i = 0; i < argc; i++) JS_FreeValue(cx, args[i]);
+  if (JS_IsException(result)) fsh_js_throw(cx, where);
+  fsh_js_leave();
+  return fsh_js_box(result);
+}
 `;

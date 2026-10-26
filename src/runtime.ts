@@ -128,6 +128,8 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_js_is(ptr, i32, ptr, double)",
   "declare void @fsh_rt_js_mismatch(ptr, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_js_array()",
+  "declare void @fsh_rt_js_set(ptr, ptr, ptr, ptr)",
+  "declare ptr @fsh_rt_js_new(ptr, i64, ptr, ptr)",
   "declare ptr @fsh_rt_js_object()",
   "declare void @fsh_rt_js_push(ptr, ptr)",
   "declare void @fsh_rt_js_put(ptr, ptr, ptr)",

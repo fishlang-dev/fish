@@ -336,7 +336,7 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
 // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
-// The uses of a package's declarations, which a program can't run until Fish has a JS engine.
+// The reads of a package's consts that can't be converted, refused once the program is checked.
 export const jsUses: Expr[] = [];
 // The calls into a package, whose arguments cross by copy, so nothing moves into them.
 export const jsCrossings = new WeakSet<Expr>();
@@ -356,6 +356,15 @@ export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
 export const jsExports = new WeakMap<Expr, JsName>();
 // The calls of a package's functions, by the export each calls, with the signature checked.
 export const jsCalls = new WeakMap<Expr, JsName>();
+// A handle's property reads and writes, and its method calls.
+export const jsMembers = new WeakSet<Expr>();
+export const jsMethods = new WeakSet<Expr>();
+// `new` of a package's class, and its static members read or called, by the class's export.
+export const jsNews = new WeakMap<Expr, JsName>();
+export const jsStatics = new WeakMap<Expr, JsName>();
+// The declared parameters of a handle's method, a constructor or a static method a call takes,
+// a trailing Option being one the JS may leave out.
+export const jsParamsOf = new WeakMap<Expr, Type[]>();
 // The `get`, `at` and `has` calls on a JsValue.
 export const jsAccessors = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
@@ -3065,7 +3074,7 @@ export function expressions(ctx: Context) {
     const shape = jsShape(t);
     const found = shape?.fields.find((f) => f.name === e.name);
     if (found) {
-      jsUses.push(e);
+      jsMembers.add(e);
       return crossing(jsView(found.type), `property '${e.name}' of '${show(t)}' is a`, e);
     }
     const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
@@ -3097,7 +3106,7 @@ export function expressions(ctx: Context) {
       const field = shape?.fields.some((f) => f.name === callee.name);
       throw untyped(shape, callee.name, callee) ?? new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
-    jsUses.push(e);
+    jsMethods.add(e);
     // A generic one is typed for the call's type arguments, written or inferred.
     if (method.generic) {
       // An optional parameter left out is undefined, as JS gives it.
@@ -3139,6 +3148,7 @@ export function expressions(ctx: Context) {
   // as an optional parameter.
   function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[]) {
     jsCrossings.add(e);
+    jsParamsOf.set(e, params);
     const list = e.args ?? [];
     let required = params.length;
     while (required > 0 && isOption(params[required - 1]!)) required--;
@@ -3169,7 +3179,7 @@ export function expressions(ctx: Context) {
     const params = jsParams(constructor);
     params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
     jsArgs(e, params);
-    jsUses.push(e);
+    jsNews.set(e, c.js!);
     return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
 
@@ -3189,7 +3199,7 @@ export function expressions(ctx: Context) {
   function jsStatic(c: Interface, name: string, at: Expr): TypeMember {
     const found = jsChain(c).flatMap((k) => k.jsClass!.statics).find((m) => "name" in m && m.name === name);
     if (!found) throw new CompileError(`property '${name}' does not exist on '${c.name}'`, at.start, at.end);
-    jsUses.push(at);
+    jsStatics.set(at, c.js!);
     return found;
   }
 
@@ -4880,7 +4890,9 @@ export function expressions(ctx: Context) {
     const outer = writing;
     writing = target;
     try {
-      return assignableTo(target, reads);
+      const type = assignableTo(target, reads);
+      if (reads && jsMembers.has(target)) throw unsupported("compound assignments to a package's properties", target);
+      return type;
     } finally {
       writing = outer;
     }

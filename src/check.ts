@@ -673,12 +673,11 @@ export function check(written: Stmt[], library = false, macros = false): Checked
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
-  // A program that type-checks with a package's declarations is stopped at its first use of
-  // one, as nothing can run them yet.
+  // A package's const whose value has no JS form yet stops the program where it is read.
   const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)];
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
-  if (used) throw new CompileError("running a package's code isn't supported yet; the program type-checks, and stops here, its first use of a package", used.start, used.end);
+  if (used) throw new CompileError("reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
   // A package's function called with a value, or giving one, that has no JS form.
   const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;

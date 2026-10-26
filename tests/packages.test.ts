@@ -35,6 +35,14 @@ export function make(n) { return { count: n, label: "made" }; }
 export function relabel(r) { return r.label + r.count; }
 export function identical(a, b) { return a === b; }
 export function strings() { return ["a", 2]; }
+let made = 0;
+export class Box {
+  constructor(size, name) { this.size = size; this.id = (name ?? "box") + (++made); }
+  grow(by) { this.size += by; return this.size; }
+  describe() { return this.id + ":" + this.size; }
+  static make() { return new Box(1, "made"); }
+  static MAX = 10;
+}
 `,
   "node_modules/esm/dist/helper.js": "export function helper(s) { return s.toUpperCase(); }\n",
   "node_modules/esm/index.d.ts": `export declare const VERSION: string;
@@ -62,6 +70,15 @@ export declare function make(n: number): Result;
 export declare function relabel(r: Result): string;
 export declare function identical(a: Result, b: Result): boolean;
 export declare function strings(): string[];
+export declare class Box {
+  constructor(size: number, name?: string);
+  size: number;
+  readonly id: string;
+  grow(by: number): number;
+  describe(): string;
+  static make(): Box;
+  static MAX: number;
+}
 `,
   "node_modules/cjs/package.json": JSON.stringify({ name: "cjs", main: "lib.js", types: "lib.d.ts" }),
   "node_modules/cjs/lib.js": "exports.n = 3;\nexports.name = 'cjs';\n",
@@ -177,4 +194,27 @@ test("an array whose elements aren't what the declaration says panics naming the
   const ran = run(`import { strings } from "esm";\nfunction main() {\n  console.log(strings());\n}\n`);
   expect(ran).toMatchObject({ stdout: "", exitCode: 101 });
   expect((ran as { stderr: string }).stderr).toStartWith("panicked at main.fsh:3:15:\n'strings' from 'esm' gave an array holding a number, where its declaration says 'string'\n");
+});
+
+test("a package's classes are made, their fields read and written, and their methods and statics used", () => {
+  const main = `import { Box, make, relabel } from "esm";
+function main() {
+  const b = new Box(3);
+  console.log(b.size, b.id, b.grow(2), b.size);
+  b.size = 9;
+  b.grow(1);
+  console.log(b.describe());
+  const m = Box.make();
+  console.log(m.describe(), Box.MAX);
+  const r = make(5);
+  r.label = "new";
+  console.log(r.count, r.label, relabel(r), new Box(1, "n").id);
+}
+`;
+  const dir = project(main);
+  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "3 box1 5 5\nbox1:10\nmade2:1 10\n5 new new5 n3\n", stderr: "", exitCode: 0 });
+});
+
+test("a compound assignment to a handle's property waits", () => {
+  expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error: compound assignments to a package's properties are not supported yet");
 });

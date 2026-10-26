@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsParamsOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -1147,22 +1147,83 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // read back as its declaration says.
   function jsCall(e: Extract<Expr, { kind: "call" }>, name: JsName, target: Instance): string | undefined {
     const fn = jsExport(name, e);
-    const args = e.args.map((a, i) => {
-      const v = known.get(a) ?? evaluate(a);
-      if (fresh(a) && !known.has(a)) pending.push({ v, type: types.get(a)! });
-      return toJs(v, types.get(a)!, target.body.params[i]?.optional ? "undefined" : "null");
-    });
-    const argv = alloca(`[${Math.max(args.length, 1)} x ptr]`);
-    args.forEach((box, i) => {
-      const at = temp();
-      emit(`${at} = getelementptr [${args.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
-      emit(`store ptr ${box}, ptr ${at}`);
-    });
+    const argv = jsArgv(e.args, (i) => target.body.params[i]?.optional === true);
     const result = temp();
-    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(e)})`, result);
+    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${panicAt(e)})`, result);
     const gives = types.get(e) ?? (target.returns === "void" ? undefined : target.returns);
     if (gives === undefined) return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
     return fromJs(result, gives, `'${name.name}' from '${name.module}' gave`, e);
+  }
+
+  // Arguments going to JS, each a new JS value in a buffer of boxes the call gives up; `optional`
+  // says which parameters JS may leave out, so an empty value is undefined there.
+  function jsArgv(args: Expr[], optional: (i: number) => boolean): string {
+    const boxes = args.map((a, i) => toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null"));
+    const argv = alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
+    boxes.forEach((box, i) => {
+      const at = temp();
+      emit(`${at} = getelementptr [${boxes.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
+      emit(`store ptr ${box}, ptr ${at}`);
+    });
+    return argv;
+  }
+
+  // A value going to JS, as its own type rather than one it meets, as JS takes any; one made
+  // for the statement is dropped once it ends.
+  function jsOperand(a: Expr): string {
+    const v = known.get(a) ?? evaluate(a);
+    if (fresh(a) && !known.has(a)) pending.push({ v, type: types.get(a)! });
+    return v;
+  }
+
+  // A handle's box, read through a reference to it.
+  function jsHandle(object: Expr): string {
+    const v = value(object);
+    if (!isRef(valueType(object))) return v;
+    const box = temp();
+    emit(`${box} = load ptr, ptr ${v}`);
+    return box;
+  }
+
+  // A trailing Option among a handle's method's or constructor's parameters is one JS may leave out.
+  function leftOut(params: Type[]): (i: number) => boolean {
+    let required = params.length;
+    while (required > 0 && isOption(params[required - 1]!)) required--;
+    return (i) => i >= required;
+  }
+
+  // A property of a JS object read as its declaration says: a handle's, or a class's static.
+  function jsGet(object: string, name: string, type: Type, what: string, at: Expr): string {
+    const box = temp();
+    unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${text(name)}, ptr ${panicAt(at)})`, box);
+    return fromJs(box, type, what, at);
+  }
+
+  // A method of a JS object called with it as `this`, its result read as `gives` says, or
+  // dropped when the call's value goes unused.
+  function jsMethod(object: string, name: string, args: Expr[], params: Type[], gives: Type | undefined, what: string, at: Expr): string | undefined {
+    const fn = temp();
+    unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${text(name)}, ptr ${panicAt(at)})`, fn);
+    emit(`call void @fsh_rt_block_retain(ptr ${object})`);
+    const argv = jsArgv(args, leftOut(params));
+    const result = temp();
+    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr ${object}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(at)})`, result);
+    if (gives === undefined || gives === "void") return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
+    return fromJs(result, gives, what, at);
+  }
+
+  // A package's class's static member, read or called on the class itself.
+  function jsStatic(e: Expr, name: JsName): string | undefined {
+    const c = jsExport(name, e);
+    let result: string | undefined;
+    if (e.kind === "member") result = jsGet(c, e.name, types.get(e)!, `'${name.name}.${e.name}' is`, e);
+    else {
+      const call = e as Extract<Expr, { kind: "call" }>;
+      const method = (call.callee as Extract<Expr, { kind: "member" }>).name;
+      result = jsMethod(c, method, call.args, jsParamsOf.get(call)!, types.get(call), `'${name.name}.${method}' gave`, call);
+    }
+    emit(`call void @fsh_rt_js_release(ptr ${c})`);
+    return result;
   }
 
   // A Fish value as a new JS value, in a box of its own; empty is `undefined` or `null`, as the
@@ -1338,6 +1399,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = referent(valueType(callee.object)) as BlockType;
     const handle = temp();
     emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
+    if (jsMethods.has(e)) return jsMethod(handle, callee.name, e.args, jsParamsOf.get(e) ?? [], types.get(e), `'${callee.name}' of '${show(t)}' gave`, e);
     if (jsAccessors.has(e)) {
       const [made, has] = [temp(), temp()];
       const at = callee.name === "at" ? `i64 ${value(e.args[0]!)}` : `ptr ${value(e.args[0]!)}`;
@@ -5236,7 +5298,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "binary":
         return e.op === "+" || e.op === "??";
       case "member":
-        return calls.has(e) || current.copiesOut.has(e) || computed.has(e);
+        return calls.has(e) || current.copiesOut.has(e) || computed.has(e) || jsMembers.has(e) || jsStatics.has(e);
       // A JsValue read out of JS as a string, or a package's const.
       case "ident":
         return current.copiesOut.has(e) || jsExports.has(e);
@@ -5573,6 +5635,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const target = calls.get(e);
     const js = jsCalls.get(e);
     if (js && target) return jsCall(e, js, target);
+    const statics = jsStatics.get(e);
+    if (statics) return jsStatic(e, statics);
     if (!target) {
       if (formatCalls.has(e)) return formatted(e);
       if (inspectCalls.has(e)) {
@@ -6034,6 +6098,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function assign(e: Extract<Expr, { kind: "assign" }>): string {
+    // A handle's property is written in JS, with a new JS value of what is assigned.
+    if (jsMembers.has(e.target) && e.target.kind === "member") {
+      const object = jsHandle(e.target.object);
+      const v = jsOperand(e.value);
+      unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${text(e.target.name)}, ptr ${toJs(v, types.get(e.value)!, "undefined")}, ptr ${panicAt(e)})`);
+      return v;
+    }
     const op = ASSIGNMENTS[e.op]!;
     // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
     // run it, which matters when the target is a setter.
@@ -6059,6 +6130,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A field read, or a getter's result.
   function member(e: Extract<Expr, { kind: "member" }>): string {
+    const statics = jsStatics.get(e);
+    if (statics) return jsStatic(e, statics)!;
+    if (jsMembers.has(e)) return jsGet(jsHandle(e.object), e.name, types.get(e)!, `property '${e.name}' of '${show(referent(valueType(e.object)))}' is`, e);
     if (current.copiesOut.has(e)) return copyOut(e);
     if (computed.has(e)) return isDyn(referent(types.get(e.object)!)) ? dynField(e) : blockProperty(e);
     const getter = calls.get(e);
@@ -7577,6 +7651,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "new": {
         if (regexNews.has(e)) return regex(types.get(e) as RegexType);
+        const made = jsNews.get(e);
+        if (made) {
+          const c = jsExport(made, e);
+          const args = e.args ?? [];
+          const [argv, box] = [jsArgv(args, leftOut(jsParamsOf.get(e)!)), temp()];
+          unwinding(`call ptr @fsh_rt_js_new(ptr ${c}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(e)})`, box);
+          return fromJs(box, types.get(e)!, `'new ${made.name}' from '${made.module}' gave`, e);
+        }
         if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         if ((types.get(e) as Exclude<Type, string>).kind === "block") return blockNew(e, types.get(e) as BlockType);
         if ((types.get(e) as Exclude<Type, string>).kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
