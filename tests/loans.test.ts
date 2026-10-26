@@ -1,7 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Each test builds a program with clang, which can take past bun's 5 seconds on a busy CI runner.
+setDefaultTimeout(30_000);
 
 // The borrow checker keys each loan by where it is made. Keys derived from offsets must never
 // meet: a `for...of` loop far into a file once took the key of a closure's loan made near its

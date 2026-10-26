@@ -42,8 +42,9 @@ export function fileAt(offset: number): string {
   return loadedFiles.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
-// Loads `entry`, given as `src` when it is already read, and every file it imports.
-export function load(entry: string, src = readFileSync(entry, "utf8"), fish = resolvePackages(entry)): Loaded {
+// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
+// `read`: an editor's unsaved text is newer than the disk's.
+export function load(entry: string, src = readFileSync(entry, "utf8"), read = (path: string) => readFileSync(path, "utf8"), fish = resolvePackages(entry)): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
@@ -79,7 +80,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), fish = re
       // Node also has; `node:` always means the built-in, and any other bare name is npm's.
       const lib = fish && !path.startsWith("std:") && !/^(\.\.?(\/|$)|node:)/.test(specifier) ? dependencyLib(fish, path, specifier, s) : undefined;
       if (lib) {
-        const target = visit(lib, readFileSync(lib, "utf8"), relative(dirname(entry), lib));
+        const target = visit(lib, read(lib), relative(dirname(entry), lib));
         const { manifest, dir } = packageOf(fish!, lib)!;
         target.owner = { name: manifest.name, dir, lib: manifest.lib };
         module.targets.set(s, target);
@@ -106,7 +107,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), fish = re
       // that holds it.
       const holder = fish && !path.startsWith("std:") ? packageOf(fish, target) : undefined;
       if (holder && holder !== packageOf(fish!, path)) throw new CompileError(`'${specifier}' is a file inside the package '${holder.manifest.name}'; import it by name, as '${holder.manifest.name}'`, s.start, s.end);
-      module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
+      module.targets.set(s, visit(target, read(target), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));
     return module;

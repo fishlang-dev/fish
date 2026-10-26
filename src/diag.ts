@@ -2,7 +2,7 @@ import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 
 // How a message reads: without the suffix a top-level name takes to tell it apart from another
 // file's (`helper-fsh2`).
-const shown = (text: string) => text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+export const shown = (text: string) => text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
 
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
