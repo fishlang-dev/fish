@@ -4,7 +4,7 @@ import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
+import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
@@ -352,6 +352,10 @@ export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerCle
 export const jsEvaluations = new WeakSet<Expr>();
 // The `v === null` and `v === undefined` tests of a JsValue: what is tested, and for which.
 export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
+// The reads of a package's consts, by the export each reads.
+export const jsExports = new WeakMap<Expr, JsName>();
+// The types a value from JS can be read as so far.
+const crossesBack = (t: Type) => t === "string" || t === "f64" || t === "boolean" || isPlainJs(t);
 // The `get`, `at` and `has` calls on a JsValue.
 export const jsAccessors = new WeakSet<Expr>();
 export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
@@ -3716,8 +3720,10 @@ export function expressions(ctx: Context) {
         // A package's const, read from JS.
         const jsConst = local ? undefined : byName.get(e.name);
         if (jsConst?.js?.const) {
-          jsUses.push(e);
-          return jsView(resolveType(jsConst.returnType!));
+          const type = jsView(resolveType(jsConst.returnType!));
+          if (crossesBack(type)) jsExports.set(e, jsConst.js);
+          else jsUses.push(e);
+          return type;
         }
         // A top-level const: its value, computed while compiling. An aggregate is read where it
         // lives, through a reference, as a const can't change.

@@ -9,6 +9,7 @@ import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
+import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
@@ -23,7 +24,16 @@ export type Library = "static" | "shared";
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
   const loaded = load(file, src);
-  return withSources(loaded.sources, () => codegen(check(expanded(loaded, library), library), { src, file, release, panic, library, sources: loaded.sources }));
+  return withSources(loaded.sources, () => bundled(codegen(check(expanded(loaded, library), library), { src, file, release, panic, library, sources: loaded.sources }), loaded));
+}
+
+// The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
+function bundled(ir: string, loaded: Loaded): string {
+  const used = [...new Set([...ir.matchAll(/@fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/g)].map((m) => Number(m[1])))].sort((a, b) => a - b);
+  if (used.length === 0) return ir;
+  const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
+  const text = [...bytes].map((c) => (c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`)).join("");
+  return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
 }
 
 // The program's files with their macros expanded, linked into one program.
@@ -48,7 +58,7 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   const src = readFileSync(file, "utf8");
   const loaded = load(file, src);
   const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
-  const ir = withSources(loaded.sources, () => codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }));
+  const ir = withSources(loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
   const at = (f: string) => join(dirname(out), f);

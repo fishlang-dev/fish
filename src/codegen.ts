@@ -1,12 +1,12 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsAccessors, jsEmptyTests, jsEvaluations, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { computed, jsAccessors, jsEmptyTests, jsEvaluations, jsExports, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
-import type { BinaryOp, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
+import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
@@ -1133,6 +1133,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     });
     if (needsDrop(closure)) dispose(unstash(env, closure), closure);
     return undefined;
+  }
+
+  // An export of one of the program's packages, as a JsValue. The bundle is defined once the
+  // packages the program reaches are bundled.
+  function jsExport(name: JsName, at: Expr): string {
+    const box = temp();
+    unwinding(`call ptr @fsh_rt_js_export(ptr @fsh.js.bundle, i64 ${name.package}, ptr ${cString(name.name)}, ptr ${panicAt(at)})`, box);
+    return box;
+  }
+
+  // A JsValue read as the type its declaration gives it, checked, giving up its box: `what` says
+  // what gave it, as "'f' from 'pkg' gave".
+  function fromJs(box: string, type: Type, what: string, at: Expr): string {
+    if (isPlainJs(type)) return box;
+    const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
+    const v = temp();
+    unwinding(`call ${result} @fsh_rt_js_as_${read}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(show(type))}, ptr ${panicAt(at)})`, v);
+    if (type !== "boolean") return v;
+    const yes = temp();
+    emit(`${yes} = icmp ne i32 ${v}, 0`);
+    return yes;
   }
 
   // A JsValue narrowed to a string, number or boolean, read out of JS.
@@ -5050,9 +5071,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return e.op === "+" || e.op === "??";
       case "member":
         return calls.has(e) || current.copiesOut.has(e) || computed.has(e);
-      // A JsValue read out of JS as a string.
+      // A JsValue read out of JS as a string, or a package's const.
       case "ident":
-        return current.copiesOut.has(e);
+        return current.copiesOut.has(e) || jsExports.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
         return !indexes(valueType(e.object));
@@ -7329,6 +7350,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         // A nested function used as a value is its closure, made here.
         const built = current.envs?.get(e);
         if (built) return environment(built.of, built.env);
+        const exported = jsExports.get(e);
+        if (exported) return fromJs(jsExport(exported, e), types.get(e)!, `'${exported.name}' from '${exported.module}' is`, e);
         // `undefined` is the empty value, unless a variable takes the name.
         if (!locals.has(e)) return "zeroinitializer";
         const local = resolved(e);

@@ -247,7 +247,8 @@ export type Interface = Span & { kind: "interface"; name: string; typeParams: Ty
 
 // What a package's declaration names: the package and the name it exports it by. A const is
 // read as a value.
-export type JsName = { module: string; name: string; const?: true;
+// `package` is the specifier's index among the program's, naming it in the bundle.
+export type JsName = { module: string; package: number; name: string; const?: true;
   // A function declared with several signatures: its other signatures, in the order declared.
   overloads?: Func[] };
 

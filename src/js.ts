@@ -14,9 +14,9 @@ const KINDS: Partial<Record<Stmt["kind"], string>> = { enum: "an enum", namespac
 // its types lowered to Fish's and marked as JS. A function stays one, a const becomes a function
 // read as a value, an interface or an object type alias a JS handle's shape, and a class the
 // shape of its instances with its constructors and statics. Its spans stay those of its file.
-export function jsDeclaration(declared: Declared, name: string, specifier: string, at: Span, exported = name): Stmt {
+export function jsDeclaration(declared: Declared, name: string, specifier: string, pkg: number, at: Span, exported = name): Stmt {
   const d = unwrap(structuredClone(declared.at));
-  const js: JsName = { module: specifier, name: exported };
+  const js: JsName = { module: specifier, package: pkg, name: exported };
   lowerTypes(d);
   switch (d.kind) {
     case "function":
@@ -47,14 +47,14 @@ export function jsDeclaration(declared: Declared, name: string, specifier: strin
 
 // The other signatures of a function declared more than once, each as a function of its own,
 // named apart; the first declared is `name`'s, which lists them, as a call tries them in order.
-export function jsOverloads(declared: Declared, made: Stmt, name: string, specifier: string): Stmt[] {
+export function jsOverloads(declared: Declared, made: Stmt, name: string, specifier: string, pkg: number): Stmt[] {
   const first = unwrap(declared.at);
   if (first.kind !== "function" || made.kind !== "function") return [];
   const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
   const signatures = others.map((s, i) => {
     const d = unwrap(structuredClone(s)) as Extract<Stmt, { kind: "function" }>;
     lowerTypes(d);
-    return Object.assign(d, { name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, name } });
+    return Object.assign(d, { name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, package: pkg, name } });
   });
   if (others.length > 0) made.js = { ...made.js!, overloads: signatures };
   return signatures;

@@ -19,7 +19,10 @@ export const FILE_SPAN = 2 ** 24;
 // importing them.
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean };
-export type Loaded = { modules: Module[]; sources: Source[] };
+// `packages`: each package specifier the program imports, by the directory its import resolves
+// from, its index naming it in the bundle.
+export type Package = { specifier: string; dir: string; at: Span };
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[] };
 
 let engineHook = false;
 
@@ -100,8 +103,12 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
   };
   // What an import from a package names, as a module of its own: the declarations of the names it
   // imports, each where the package declares it, as JS declarations.
+  const packages: Package[] = [];
   const packageModule = (from: string, specifier: string, s: Stmt, importing: Stmt[]): Module => {
     const exports = packageExports(from, specifier, s, entry);
+    const dir = dirname(realpathSync(from));
+    let index = packages.findIndex((p) => p.specifier === specifier && p.dir === dir);
+    if (index < 0) index = packages.push({ specifier, dir, at: s }) - 1;
     const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
     if (s.kind === "exportAll") throw new CompileError("re-exporting all of a package isn't supported yet; re-export the names it has by name", s.start, s.end);
     // A package imported whole, or a default export that is a namespace, is reached through its
@@ -127,13 +134,13 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
       declaredHere.set(name, declared);
       let made: Stmt;
       try {
-        made = jsDeclaration(declared, name, specifier, at, as);
+        made = jsDeclaration(declared, name, specifier, index, at, as);
       } catch (e) {
         // A declaration only referred to that Fish can't take is left out, refused where named.
         if (exported || !(e instanceof CompileError)) throw e;
         return;
       }
-      const overloads = jsOverloads(declared, made, name, specifier);
+      const overloads = jsOverloads(declared, made, name, specifier, index);
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
       for (const s of [made, ...overloads]) shiftSpans(s, base);
@@ -165,7 +172,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
     throw e;
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
-  return { modules, sources };
+  return { modules, sources, packages };
 }
 
 // A statement under `declare` or `export`.
