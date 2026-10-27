@@ -1,26 +1,39 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
+import { locking, resolvePackages } from "./dependencies.ts";
+import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
+import { openIndex, registryUrl } from "./registry_index.ts";
+import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
+import { createPackage, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
 import type { Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { serveLsp } from "./lsp.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
-import type { Instance } from "./check.ts";
+import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 
 export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
+
+// Checks the program whose entry is `file`, with text `src`, without building it. The file may be
+// one another imports, so it needs no `main`. `read` reads the files it imports.
+export function analyze(src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
+  const loaded = load(file, src, read);
+  return withSources(loaded.sources, () => ({ checked: check(expanded(loaded, false), false, false, true), sources: loaded.sources }));
+}
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
@@ -186,7 +199,8 @@ function checkProject(dir: string) {
   if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
 }
 
-if (import.meta.main) {
+if (import.meta.main && Bun.argv.length === 3 && Bun.argv[2] === "lsp") serveLsp();
+else if (import.meta.main) {
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {
@@ -205,6 +219,12 @@ if (import.meta.main) {
           self: { type: "string" },
           plan: { type: "string" },
           compare: { type: "string" },
+          locked: { type: "boolean" },
+          "dry-run": { type: "boolean" },
+          "allow-dirty": { type: "boolean" },
+          submit: { type: "boolean" },
+          fork: { type: "string" },
+          yes: { type: "boolean" },
         },
       });
     } catch (e) {
@@ -251,18 +271,126 @@ if (import.meta.main) {
     }
     process.exit(0);
   }
+  if (command === "publish") {
+    const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
+    const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
+    if (positionals.length > 1 || Object.keys(values).some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes) && !values.submit) || (values.submit && values["dry-run"])) fail(usage);
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
+    try {
+      const packed = pack(found, values["allow-dirty"] === true);
+      console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil(packed.bytes.length / 1024)} KiB, sha256 ${packed.sha256}`);
+      for (const f of packed.files) console.log(`  ${f}`);
+      console.log(`wrote ${relative(process.cwd(), packed.file)}`);
+      const deps = unsafeDependencies(packed.manifest);
+      if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
+      for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
+      for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
+      if (!values["dry-run"]) {
+        const prepared = prepare(packed);
+        console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
+        if (!values.submit) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
+        else {
+          // Pushing and opening a pull request reach outside this machine, so they're asked for.
+          const confirm = (question: string) => values.yes === true || /^y(es)?$/i.test((prompt(question) ?? "").trim());
+          console.log(`opened ${submit(prepared, packed.manifest, values.fork, confirm)}`);
+        }
+      }
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        process.exit(1);
+      }
+      fail(`fishc publish: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exit(0);
+  }
+  if (command === "add" || command === "update") {
+    const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
+    if (positionals.length > 2 || (command === "add" && !file) || Object.keys(values).some((k) => k !== "panic")) fail(usage);
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
+    try {
+      const manifest = loadManifest(found);
+      if (command === "add") {
+        const [name, range] = file!.includes("@") ? [file!.slice(0, file!.indexOf("@")), file!.slice(file!.indexOf("@") + 1)] : [file!, undefined];
+        if (!validName(name)) fail(`fishc add: '${name}' isn't a package name: ${NAME_RULE}`);
+        if (manifest.dependencies.some((d) => d.name === name)) fail(`fishc add: '${name}' is already a dependency in ${MANIFEST}`);
+        if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || !parseRange(range))) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
+        const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked);
+        const latest = maxSatisfying(released.map((e) => e.version), parseRange(range ?? "*")!);
+        if (!latest) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
+        const written = range ?? `^${formatVersion(latest)}`;
+        const edited = withDependency(readFileSync(found, "utf8"), `${name} = { version = "${written}" }`);
+        // Written only once the result still reads as the manifest with the new dependency.
+        if (!readManifest(edited, manifest.dir).dependencies.some((d) => d.name === name)) fail(`fishc add: couldn't add '${name}' to ${MANIFEST}; add it by hand`);
+        writeFileSync(found, edited);
+        console.log(`added ${name} ${written}`);
+        const chosen = released.find((e) => e.version === latest);
+        if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
+      } else {
+        if (file && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
+        locking.update = file ? new Set([file]) : "all";
+        resolvePackages(join(manifest.dir, manifest.entry));
+        console.log(`updated ${relative(process.cwd(), join(manifest.dir, "fish.lock")) || "fish.lock"}`);
+      }
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        process.exit(1);
+      }
+      fail(`fishc ${command}: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exit(0);
+  }
+  if (command === "new" || command === "init") {
+    const usage = "usage: fishc new <name>\n       fishc init [<name>]";
+    const flags = Object.keys(values).some((k) => k !== "panic");
+    if (positionals.length > 2 || flags || (command === "new" && !file)) fail(usage);
+    const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
+    const name = file ?? basename(dir);
+    if (!validName(name)) {
+      fail(command === "init" && !file ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
+    }
+    if (command === "new" && !vacant(dir)) fail(`fishc new: '${file}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
+    if (command === "init" && existsSync(join(dir, MANIFEST))) fail(`fishc init: there is already a ${MANIFEST} here`);
+    createPackage(dir, name);
+    console.log(`created the package '${name}'${command === "new" ? ` in ${file}/` : ""}`);
+    process.exit(0);
+  }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  if (command !== "build" || !file || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build <file.fsh> [-o <out>] [--release] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]");
+  locking.locked = values.locked === true;
+  let target = file;
+  let out = values.out;
+  // With no file, the package around the working directory is built, as cargo builds one.
+  if (command === "build" && !file && lib === undefined) {
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc build: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    try {
+      const manifest = loadManifest(found, "entry");
+      // An entry inside a package nested here would build as that package's program.
+      const holder = findManifest(dirname(realpathSync(join(manifest.dir, manifest.entry))));
+      if (holder && realpathSync(holder) !== realpathSync(found)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
+      target = relative(process.cwd(), join(manifest.dir, manifest.entry));
+      out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
+      if (!values["emit-llvm"]) mkdirSync(dirname(out), { recursive: true });
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+      process.exit(1);
+    }
+  }
+  if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(file, "utf8"), file, values.release, panic, lib !== undefined));
-    else if (lib) buildLibrary(file, values.out ?? basename(file, ".fsh"), lib, values.release, panic, values.link ?? []);
-    else build(file, values.out ?? basename(file, ".fsh"), values.release, panic, values.link ?? []);
+    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined));
+    else if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? []);
+    else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? []);
   } catch (e) {
-    if (e instanceof CompileError) console.error(formatError(e, file, readFileSync(file, "utf8")));
+    if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   }

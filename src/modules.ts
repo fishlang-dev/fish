@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
+import { dependencyLib, dependencyOf, packageOf, resolvePackages } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
@@ -18,7 +19,9 @@ export const FILE_SPAN = 2 ** 24;
 // `globals`: the std modules a file names as globals, as `os` in `os.hostname()`, without
 // importing them.
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean };
+// `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
+// `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
+export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
@@ -39,8 +42,9 @@ export function fileAt(offset: number): string {
   return loadedFiles.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
-// Loads `entry`, given as `src` when it is already read, and every file it imports.
-export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
+// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
+// `read`: an editor's unsaved text is newer than the disk's.
+export function load(entry: string, src = readFileSync(entry, "utf8"), read = (path: string) => readFileSync(path, "utf8"), fish = resolvePackages(entry)): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
@@ -61,7 +65,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
       throw e;
     }
     if (base > 0) shiftSpans(statements, base);
-    const module: Module = { path: key, file, base, src: text, statements, targets: new Map(), globals: new Map() };
+    const module: Module = { path: key, file, base, src: text, statements, targets: new Map(), globals: new Map(), pkg: fish && !path.startsWith("std:") ? packageOf(fish, key)?.dir : undefined };
     modules.push(module);
     byPath.set(key, module);
     for (const s of statements) {
@@ -70,6 +74,16 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
       if (specifier === "fish:engine") {
         if (!engineHook) throw new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
         module.targets.set(s, visit("std:fish:engine", ENGINE_HOOK, "fish:engine"));
+        continue;
+      }
+      // A bare name the importing file's own fish.toml depends on is that Fish package, even one
+      // Node also has; `node:` always means the built-in, and any other bare name is npm's.
+      const lib = fish && !path.startsWith("std:") && !/^(\.\.?(\/|$)|node:)/.test(specifier) ? dependencyLib(fish, path, specifier, s) : undefined;
+      if (lib) {
+        const target = visit(lib, read(lib), relative(dirname(entry), lib));
+        const { manifest, dir } = packageOf(fish!, lib)!;
+        target.owner = { name: manifest.name, dir, lib: manifest.lib };
+        module.targets.set(s, target);
         continue;
       }
       const named = stdModule(specifier);
@@ -81,8 +95,19 @@ export function load(entry: string, src = readFileSync(entry, "utf8")): Loaded {
         module.targets.set(s, packageModule(path, specifier, s, statements));
         continue;
       }
+      // A dependency builds from its own files, which its checksum covers, and reaches others by name,
+      // whether the path climbs out as written or through a link.
+      const owner = fish && !path.startsWith("std:") ? dependencyOf(fish, path) : undefined;
+      const outside = (file: string) => owner !== undefined && !file.startsWith(owner.dir + "/");
+      const escape = () => new CompileError(`'${specifier}' leads outside the package '${owner!.manifest.name}'; a package imports its own files by path, and other packages by name`, s.start, s.end);
+      if (outside(join(dirname(realpathSync(path)), specifier))) throw escape();
       const target = resolveSpecifier(path, specifier, s);
-      module.targets.set(s, visit(target, readFileSync(target, "utf8"), relative(dirname(entry), target) || target));
+      if (outside(realpathSync(target))) throw escape();
+      // Another package's files are reached through its lib, by name, even from a directory
+      // that holds it.
+      const holder = fish && !path.startsWith("std:") ? packageOf(fish, target) : undefined;
+      if (holder && holder !== packageOf(fish!, path)) throw new CompileError(`'${specifier}' is a file inside the package '${holder.manifest.name}'; import it by name, as '${holder.manifest.name}'`, s.start, s.end);
+      module.targets.set(s, visit(target, read(target), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));
     return module;
@@ -306,16 +331,24 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
     const imported = l.imports.get(name);
     return l.own.get(name) ?? (imported && exported(imported.from, imported.name, seen));
   };
+  const all = [...linked.values()];
   for (const l of linked.values()) {
     for (const [alias, { from, name, at }] of l.imports) {
       if (l.own.has(alias)) throw new CompileError(`'${alias}' is both imported and declared in this file; rename the import, as in 'import { ${name} as other${alias[0]!.toUpperCase()}${alias.slice(1)} }'`, at.start, at.end);
       if (exported(from, name) || lenient) continue;
       // A std module's own declarations aren't for a program to export.
       const hidden = linked.get(from)!.own.has(name) && !from.path.startsWith("std:") ? `; it declares '${name}' without exporting it, so add 'export' before that declaration` : "";
+      // Reached by a package's name from outside it, the lib is all there is to see.
+      const owner = from.owner && l.module.pkg !== from.owner.dir ? from.owner : undefined;
+      if (owner) {
+        // Only the package's files this build loaded are known; one its lib never imports isn't.
+        const inner = name !== "default" && all.some((m) => m.module !== from && m.module.pkg === owner.dir && m.exports.has(name));
+        const missing = name === "default" ? "no default export" : `no export named '${name}'`;
+        throw new CompileError(inner ? `'${name}' is private to the package '${owner.name}'; only what its lib ${owner.lib} exports is public` : `the package '${owner.name}' has ${missing} in its lib ${owner.lib}${hidden}`, at.start, at.end);
+      }
       throw new CompileError(name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
     }
   }
-  const all = [...linked.values()];
   const taken = new Set<string>();
   for (const l of all) {
     for (const d of l.own.values()) {

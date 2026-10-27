@@ -143,8 +143,8 @@ async function work(ms: i64, v: i64): Promise<i64> {
 }
 async function main() {
   const start = Date.now();
-  const [a, b] = await Promise.all([spawn(work(100, 1)), spawn(work(100, 2))]);
-  console.log(a + b, Date.now() - start < 180);
+  const [a, b] = await Promise.all([spawn(work(300, 1)), spawn(work(300, 2))]);
+  console.log(a + b, Date.now() - start < 550);
 }
 // case: promise_race_first
 // expect: 2
@@ -255,10 +255,10 @@ async function after(ms: i64, v: i64): Promise<i64> {
 }
 async function main() {
   let ps: Promise<i64>[] = [];
-  for (let i = 1; i <= 4; i++) ps.push(after(120 - 20 * i, 10 * i));
+  for (let i = 1; i <= 4; i++) ps.push(after(600 - 100 * i, 10 * i));
   const start = Date.now();
   const all = await Promise.all(ps);
-  console.log(all, Date.now() - start < 200);
+  console.log(all, Date.now() - start < 1000);
   let qs: Promise<i64>[] = [];
   qs.push(after(300, 1));
   qs.push(after(10, 7));
@@ -513,7 +513,7 @@ async function main() {
   console.log(a.status, a.value, c.status);
   if (b.status === "rejected") console.log("b", b.reason.message);
   console.log(a);
-  const first = await Promise.any([fail(5, "early"), after(30, 7), after(60, 8)]);
+  const first = await Promise.any([fail(5, "early"), after(30, 7), after(300, 8)]);
   console.log("any", first);
   try {
     const none = await Promise.any([fail(5, "a"), fail(15, "b")]);
@@ -560,7 +560,7 @@ async function after(ms: i64, v: i64): Promise<i64> {
   return v;
 }
 async function main() {
-  const r = await Promise.any([after(30, 1), after(5, 2)]);
+  const r = await Promise.any([after(300, 1), after(5, 2)]);
   console.log(r);
 }
 // case: promise_settled_status_narrows
