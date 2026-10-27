@@ -4,51 +4,279 @@
 import { CompileError } from "./diag.ts";
 import {
   align, breakParent, conditionalGroup, fill, group, groupId, hardline, ifBreak, indent, indentIfBreak, join, label, line,
-  lineSuffixBoundary, literalline, print, softline, type Doc,
+  lineSuffix, lineSuffixBoundary, literalline, print, softline, type Doc,
 } from "./doc.ts";
-import { lexer, type Token } from "./lexer.ts";
+import { attach, follows, hasNewline, isNextLineEmpty, isPreviousLineEmpty, moveToLeading, type Attachment, type Placed } from "./comments.ts";
+import { lexer, type Comment, type Token } from "./lexer.ts";
 import {
-  parse, parseWithComments, type BinaryOp, type Declarator, type Expr, type ObjectProp, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type MatchArm, type ClassMember, type ClassNode, type Interface, type Specifier,
+  parseWithComments, type BinaryOp, type Declarator, type Expr, type ObjectProp, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type MatchArm, type ClassMember, type ClassNode, type Interface, type Specifier,
   type TypeNode, type TypeParam,
 } from "./parser.ts";
 
-// `src` formatted, ending in one newline; a parse error, or a comment, which would be lost, is a
-// CompileError at its place.
+// `src` formatted, ending in one newline, with line endings as `\n`; a parse error is a
+// CompileError at its place in `src`.
 export function format(src: string): string {
-  const { program, comments } = parseWithComments(src);
-  const first = comments[0];
-  if (first) throw new CompileError("formatting a file with comments isn't supported yet; comments would be lost", first.start, first.end);
-  return printProgram(program, src);
+  const parsed = parseWithComments(src);
+  // Prettier prints `\n` line endings whatever the source used; the source is read the same way.
+  if (!src.includes("\r")) return printProgram(parsed.program, src, parsed.comments);
+  const lf = src.replace(/\r\n?/g, "\n");
+  const { program, comments } = parseWithComments(lf);
+  return printProgram(program, lf, comments);
 }
 
 // The printer underneath `format`: `src` gives what the tree doesn't keep, such as a literal's
-// text as written.
-export function printProgram(program: Stmt[], src: string): string {
+// text as written, and `comments` are placed as Prettier places them.
+export function printProgram(program: Stmt[], src: string, comments: Comment[]): string {
   // Prettier's output isn't always stable: an object it breaks gains a newline after its `{`,
   // which the keep-expanded rule then honors, so a second run can lay a chain out differently.
   // Printing the output again until it stops changing makes formatting idempotent.
-  let out = printOnce(program, src);
+  // Each round's output must still mean what the source did.
+  const meaning = programShape(program);
+  let out = printOnce(program, src, comments);
   for (let round = 0; round < 3; round++) {
-    const again = printOnce(reparse(out), out);
-    if (again === out) return out;
-    out = again;
+    const again = reparse(out);
+    assertSameProgram(meaning, again.program);
+    const reprinted = printOnce(again.program, out, again.comments);
+    if (reprinted === out) return out;
+    out = reprinted;
   }
   throw new Error("the formatter's output kept changing when formatted again");
 }
 
+// The program as its meaning reads, for checking that formatting kept it: the tree with what
+// printing legitimately changes taken out (shared with the corpus test).
+// - `start` and `end`, which move with the layout;
+// - empty statements, which Prettier drops from statement lists (as a body, `;` stays);
+// - `args` of `new C`, which Prettier prints as `new C()`;
+// - a regex's flags, which Prettier sorts and whose order means nothing;
+// - a numeric key's text, as `0X10` and `2.50` print as `0x10` and `2.5` and name the same key;
+// - `a && (b && c)`, and the same for `||`, `??` and `|>`, which Prettier prints without the
+//   parentheses; each of these operators is associative, so the left-nested tree means the same.
+function normalize(v: unknown): unknown {
+  if (Array.isArray(v)) return v.filter((x) => (x as { kind?: string } | undefined)?.kind !== "empty").map(normalize);
+  if (typeof v === "bigint") return `${v}n`;
+  if (!v || typeof v !== "object") return v;
+  const node: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v)) if (k !== "start" && k !== "end") node[k] = normalize(x);
+  if (node.kind === "new" && node.args === undefined) node.args = [];
+  if (node.kind === "regex" && typeof node.flags === "string") node.flags = [...node.flags].sort().join("");
+  for (const k of ["key", "name"]) {
+    const text = node[k];
+    if (typeof text === "string" && /^\.?\d/.test(text)) node[k] = String(Number(text.replace(/_/g, "")));
+  }
+  return leftNested(node);
+}
+
+type Node = Record<string, unknown>;
+
+function leftNested(node: Node): Node {
+  const chain = (outer: Node, inner: unknown): inner is Node =>
+    typeof inner === "object" && inner !== null && (inner as Node).kind === outer.kind &&
+    (outer.kind === "pipe" || ((outer.op === "&&" || outer.op === "||" || outer.op === "??") && (inner as Node).op === outer.op));
+  if (node.kind === "binary" && chain(node, node.right)) {
+    const right = node.right;
+    return leftNested({ ...node, left: leftNested({ ...node, right: right.left }), right: right.right });
+  }
+  if (node.kind === "pipe" && chain(node, node.body)) {
+    const body = node.body;
+    return leftNested({ ...node, value: leftNested({ ...node, body: body.value }), body: body.body });
+  }
+  return node;
+}
+
+
+export function programShape(program: Stmt[]): string {
+  return JSON.stringify(normalize(program));
+}
+
+// Throws an internal error when `after` doesn't mean what `before` does, so a printer bug can't
+// ship a changed program as formatted output.
+export function assertSameProgram(before: string, after: Stmt[]) {
+  const shape = programShape(after);
+  if (shape === before) return;
+  let i = 0;
+  while (shape[i] === before[i]) i++;
+  throw new Error(`the formatter changed the program's meaning: ${before.slice(Math.max(0, i - 80), i + 40)} became ${shape.slice(Math.max(0, i - 80), i + 40)}`);
+}
+
 // The formatter's own output parsed again; failing to parse is the formatter's bug, not the user's.
-function reparse(out: string): Stmt[] {
+function reparse(out: string): { program: Stmt[]; comments: Comment[] } {
   try {
-    return parse(out);
+    return parseWithComments(out);
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     throw new Error(`the formatter produced output that doesn't parse: ${e.message} at offset ${e.start}`);
   }
 }
 
-function printOnce(program: Stmt[], src: string): string {
-  const printedProgram = statements(program, undefined, src, true);
-  return print(printedProgram.length > 0 ? [printedProgram, hardline] : "");
+function printOnce(program: Stmt[], src: string, comments: Comment[]): string {
+  const outer = { attached, visited, printedCache };
+  try {
+    attached = attach(program, comments, src);
+    for (let attempt = 0; ; attempt++) {
+      visited = new Set();
+      printedCache = new WeakMap();
+      for (const p of attached.all) p.printed = false;
+      const out = render(program, src);
+      const lost = attached.all.filter((p) => !p.printed);
+      if (lost.length === 0) return out;
+      if (attempt > 0) throw new Error(`the formatter lost the comment at offset ${lost[0]!.comment.start}: ${lost[0]!.comment.text}`);
+      // A comment on a node that has no place to print it leads the nearest enclosing node that
+      // printed, rather than being lost.
+      moveToLeading(attached, lost.map((p) => [p, p.ancestors.find((a) => a !== p.node && visited.has(a)) ?? attached.root]));
+    }
+  } finally {
+    ({ attached, visited, printedCache } = outer);
+  }
+}
+
+function render(program: Stmt[], src: string): string {
+  const root = attached.root;
+  const body = statements(program, undefined, src, true);
+  const dangling = danglingComments(root, src);
+  const contents = commented(root, [body, body.length > 0 && dangling.length > 0 ? hardline : "", dangling], src);
+  return print(body.length > 0 || dangling.length > 0 || commentsOf(root).length > 0 ? [contents, hardline] : "");
+}
+
+// What the print in progress has: the comments attached to its program, the nodes whose own
+// comments it printed, and each expression's document once printed. `printOnce` saves and
+// restores them, so a print started inside another doesn't disturb it.
+let attached: Attachment = { byNode: new Map(), blocks: new Map(), all: [], root: { kind: "$block", body: [], start: 0, end: 0 }, commentStarts: new Map() };
+let visited = new Set<object>();
+
+const commentsOf = (node: object): Placed[] => attached.byNode.get(node) ?? [];
+
+const hasComments = (node: object, placement?: Placed["placement"]) =>
+  commentsOf(node).some((p) => placement === undefined || p.placement === placement);
+
+// Whether a comment followed by a line break leads `node`, which then can't share a line.
+const ownLineLeading = (node: object, src: string) =>
+  commentsOf(node).some((p) => p.placement === "leading" && hasNewline(src, p.comment.end));
+
+const hasLineComment = (node: object, placement: Placed["placement"]) =>
+  commentsOf(node).some((p) => p.placement === placement && p.comment.kind !== "block");
+
+// Whether the source has a blank line after the `,` that follows an element ending at `end`.
+function blankAfterElement(src: string, end: number): boolean {
+  let i = end;
+  while (i < src.length && src[i] !== ",") {
+    if (src.startsWith("/*", i)) i = src.indexOf("*/", i + 2) + 2 || src.length;
+    else if (src.startsWith("//", i)) while (i < src.length && src[i] !== "\n") i++;
+    else i++;
+  }
+  return isNextLineEmpty(src, i);
+}
+
+// A comment as Prettier prints it: a line comment as written, a block comment shaped like JSDoc
+// re-indented, and any other block comment as written.
+function commentDoc(p: Placed): Doc {
+  p.printed = true;
+  const c = p.comment;
+  if (c.kind !== "block") return c.text.trimEnd();
+  const value = c.text.slice(2, -2);
+  const lines = jsdocLines(value);
+  if (lines.length === 0) return ["/*", join(literalline, value.split("\n")), "*/"];
+  // ponytail: Markdown's two-space line break inside JSDoc isn't kept, as Prettier keeps it.
+  return ["/", lines.map((l, i) => (i === 0 ? [l.trimEnd(), hardline] : i === lines.length - 1 ? [" ", l] : [" ", l.trimEnd(), hardline])), "/"];
+}
+
+// A block comment's lines when every one of them starts with `*`, as JSDoc's do.
+function jsdocLines(value: string): string[] {
+  if (!value.includes("\n")) return [];
+  const lines = `*${value}*`.split("\n").map((l) => l.trimStart());
+  return lines.every((l) => l.startsWith("*")) ? lines : [];
+}
+
+// `doc` with the comments leading and trailing `node` around it, as Prettier's printComments.
+// `withLeading` false leaves the leading comments to the caller, which prints them earlier.
+function commented(node: object | undefined, doc: Doc, src: string, withLeading = true, deferTrailing = false): Doc {
+  if (node !== undefined) visited.add(node);
+  const list = node === undefined ? undefined : attached.byNode.get(node);
+  if (!list) return doc;
+  const leading: Doc[] = [];
+  const trailing: Doc[] = [];
+  let previous: { isBlock: boolean; hasLineSuffix: boolean } | undefined;
+  for (const p of list) {
+    if (p.placement === "leading") {
+      if (withLeading) leading.push(leadingComment(p, src));
+    }
+    else if (p.placement === "trailing") {
+      const t = trailingComment(p, src, previous, deferTrailing);
+      trailing.push(t.doc);
+      previous = t;
+    }
+  }
+  if (leading.length === 0 && trailing.length === 0) return doc;
+  if (typeof doc === "object" && !Array.isArray(doc) && doc.kind === "label") return label(doc.label, [leading, doc.contents, trailing]);
+  return [leading, doc, trailing];
+}
+
+function leadingComment(p: Placed, src: string): Doc {
+  const c = p.comment;
+  // A comment printed here can't come before a line comment still waiting to end the line.
+  const parts: Doc[] = [lineSuffixBoundary, commentDoc(p)];
+  if (c.kind === "block") parts.push(hasNewline(src, c.end) ? (hasNewline(src, c.start, true) ? hardline : line) : " ");
+  else parts.push(hardline);
+  let i = c.end;
+  while (src[i] === " " || src[i] === "\t") i++;
+  if (src[i] === "\r" && src[i + 1] === "\n") i += 2;
+  else if (src[i] === "\n" || src[i] === "\r") i++;
+  if (hasNewline(src, i)) parts.push(hardline);
+  return parts;
+}
+
+function trailingComment(p: Placed, src: string, previous: { isBlock: boolean; hasLineSuffix: boolean } | undefined, defer = false) {
+  const c = p.comment;
+  const printedComment = commentDoc(p);
+  const isBlock = c.kind === "block";
+  if ((previous?.hasLineSuffix && !previous.isBlock) || hasNewline(src, c.start, true)) {
+    return { doc: lineSuffix([hardline, isPreviousLineEmpty(src, c.start) ? hardline : "", printedComment], !isBlock), isBlock, hasLineSuffix: true };
+  }
+  if (!isBlock || previous?.hasLineSuffix) return { doc: [lineSuffix([" ", printedComment], !isBlock), breakParent], isBlock, hasLineSuffix: true };
+  // Before a token that must stay on this line, a comment spanning lines waits for the line's end,
+  // and a one-line comment prints without flushing a pending line comment, either of which would
+  // put a line break before the token.
+  if (defer && c.text.includes("\n")) return { doc: lineSuffix([" ", printedComment]), isBlock, hasLineSuffix: true };
+  if (defer) return { doc: [" ", printedComment], isBlock, hasLineSuffix: false };
+  return { doc: [lineSuffixBoundary, " ", printedComment], isBlock, hasLineSuffix: false };
+}
+
+// `docs` with `separator` between them, and one blank line more after any node the source
+// follows with a blank line, as Prettier keeps them between statements, members and properties.
+function separated(nodes: { end: number }[], docs: Doc[], separator: Doc, blank: Doc, src: string): Doc[] {
+  return docs.flatMap((d, i) => (i === docs.length - 1 ? [d] : [d, separator, isNextLineEmpty(src, pastParens(src, nodes[i]!.end)) ? blank : ""]));
+}
+
+// Past the `)` that close parentheses the tree dropped from around a node's end, such as a
+// parenthesized type ending a type alias.
+function pastParens(src: string, end: number): number {
+  let last = end;
+  for (let i = end; i < src.length && /[\s)]/.test(src[i]!); i++) if (src[i] === ")") last = i + 1;
+  return last;
+}
+
+// A braced list of members: `{}` when empty, else each on its own line, with the comments
+// dangling inside it.
+function membersBlock(list: unknown[], docs: Doc[], nodes: { end: number }[], src: string): Doc {
+  const node = attached.blocks.get(list);
+  const dangling = node ? danglingComments(node, src) : [];
+  if (docs.length === 0 && dangling.length === 0) return "{}";
+  const contents = [separated(nodes, docs, hardline, hardline, src), docs.length > 0 && dangling.length > 0 ? hardline : "", dangling];
+  return commented(node, ["{", indent([hardline, contents]), hardline, "}"], src);
+}
+
+// The comments dangling on `node`, one per line; `beforeArrow` picks those before an arrow's `=>`.
+function danglingComments(node: object, src: string, beforeArrow = false): Doc[] {
+  const list = commentsOf(node).filter((p) => p.placement === "dangling" && (p.beforeArrow === true) === beforeArrow);
+  return list.length === 0 ? [] : [lineSuffixBoundary, join(hardline, list.map(commentDoc))];
+}
+
+// Comments dangling inside an empty `()`, `{}` or `[]`, as Prettier's printDanglingComments
+// with its soft lines: on the line, or each on its own when a line comment is among them.
+function danglingInside(node: object, src: string): Doc {
+  const list = commentsOf(node).filter((p) => p.placement === "dangling" && !p.beforeArrow);
+  if (list.length === 0) return "";
+  return [lineSuffixBoundary, indent([softline, join(hardline, list.map(commentDoc))]), list.some((p) => p.comment.kind !== "block") ? hardline : softline];
 }
 
 // Where a node sits, as Prettier's AstPath gives it: the key it is under in its parent (named as
@@ -77,16 +305,19 @@ const at = (node: Expr, key: string, parent: Path): At<"expr"> =>
 function statements(body: Stmt[], parent: Path | undefined, src: string, prologue: boolean): Doc[] {
   let inPrologue = prologue;
   const printedStmts: Doc[] = [];
+  const kept = body.filter((s) => s.kind !== "empty");
   for (const s of body) {
     const isString = s.kind === "expr" && s.expr.kind === "string" && s.expr.start === s.start;
     inPrologue &&= isString;
     if (s.kind === "empty") continue;
     const path: At<"stmt"> = { sort: "stmt", node: s, key: "body", parent };
-    if (inPrologue && s.kind === "expr") printedStmts.push([directive(src.slice(s.expr.start, s.expr.end)), ";"]);
-    else if (s.kind === "expr" && s.expr.kind === "string") printedStmts.push(["(", expr(s.expr, "expression", path, src), ");"]);
+    if (inPrologue && s.kind === "expr") printedStmts.push(commented(s, [directive(src.slice(s.expr.start, s.expr.end)), ";"], src));
+    else if (s.kind === "expr" && s.expr.kind === "string") printedStmts.push(commented(s, ["(", expr(s.expr, "expression", path, src), ");"], src));
     else printedStmts.push(statement(path, src));
+    // At most one blank line between statements is kept, as Prettier keeps it.
+    if (s !== kept[kept.length - 1]) printedStmts.push(hardline, isNextLineEmpty(src, pastParens(src, s.end)) ? hardline : "");
   }
-  return join(hardline, printedStmts);
+  return printedStmts;
 }
 
 // A directive keeps its quotes, unless it holds no quote of either kind (or is "use strict").
@@ -97,10 +328,16 @@ function directive(raw: string): string {
 
 // A braced block. An empty one prints `{}` as a function's or loop's body, and `{` and `}` on
 // their own lines elsewhere, as Prettier 3 does.
-function block(body: Stmt[], parent: Path, src: string, compact = true, prologue = true): Doc {
+// `holder` is the block statement whose own comments its caller prints; any other block is the
+// one attachment made for the list.
+function block(body: Stmt[], parent: Path, src: string, compact = true, prologue = true, holder?: Stmt): Doc {
+  const node = holder ?? attached.blocks.get(body);
   const printedBody = statements(body, parent, src, prologue);
-  if (printedBody.length === 0) return compact ? "{}" : ["{", hardline, "}"];
-  return ["{", indent([hardline, printedBody]), hardline, "}"];
+  const dangling = node ? danglingComments(node, src) : [];
+  const doc = printedBody.length === 0 && dangling.length === 0
+    ? compact ? "{}" : ["{", hardline, "}"]
+    : ["{", indent([hardline, printedBody, printedBody.length > 0 && dangling.length > 0 ? hardline : "", dangling]), hardline, "}"];
+  return holder ? doc : commented(node, doc, src);
 }
 
 // A loop's or `if`'s body: a block after a space, `;` for an empty statement, or one statement
@@ -108,7 +345,7 @@ function block(body: Stmt[], parent: Path, src: string, compact = true, prologue
 // read from the source: a lone statement written bare follows its `)` or keyword directly.
 function body(list: Stmt[], before: string, key: string, parent: At<"stmt">, src: string, compact: boolean): Doc {
   const only = list[0];
-  const bare = list.length === 1 && only !== undefined && follows(src, only.start, before);
+  const bare = list.length === 1 && only !== undefined && follows(src, only.start, before, attached.commentStarts);
   if (!bare) return [" ", block(list, parent, src, compact, false)];
   if (only.kind === "empty") return ";";
   const doc = statement({ sort: "stmt", node: only, key, parent }, src);
@@ -117,12 +354,6 @@ function body(list: Stmt[], before: string, key: string, parent: At<"stmt">, src
 
 const afterParen = ")";
 
-// Whether `word` ends just before `at`, past whitespace and opening parentheses.
-function follows(src: string, at: number, word: string): boolean {
-  let i = at;
-  while (i > 0 && /[\s(]/.test(src[i - 1]!)) i--;
-  return src.slice(i - word.length, i) === word;
-}
 
 // A condition in `if`, `while` or `do`, broken inside its parentheses unless it is a negated
 // logical expression.
@@ -138,6 +369,10 @@ function condition(e: Expr, parent: At<"stmt">, src: string): Doc {
 }
 
 function statement(path: At<"stmt">, src: string): Doc {
+  return commented(path.node, statementDoc(path, src), src);
+}
+
+function statementDoc(path: At<"stmt">, src: string): Doc {
   const s = path.node;
   switch (s.kind) {
     case "expr":
@@ -148,7 +383,7 @@ function statement(path: At<"stmt">, src: string): Doc {
     case "throw":
       return [s.kind, s.value ? [" ", returned(s.value, path, src)] : "", ";"];
     case "block":
-      return block(s.body, path, src, false, false);
+      return block(s.body, path, src, false, false, s);
     case "function":
       return macroDecorators(s.decorators, [s.macro ? "macro " : "", functionDoc(s, path, src, {})], path, src);
     case "typeAlias":
@@ -164,8 +399,13 @@ function statement(path: At<"stmt">, src: string): Doc {
       return macroDecorators(s.decorators, enumDoc(s, path, src), path, src);
     case "namespace":
       return namespaceDoc(s, path, src);
-    case "declare":
-      return ["declare ", statement({ sort: "stmt", node: s.body, key: "declaration", parent: path }, src)];
+    case "declare": {
+      // A line break after `declare` would end the statement, so the body's leading comments
+      // print before `declare`.
+      const declared: At<"stmt"> = { sort: "stmt", node: s.body, key: "declaration", parent: path };
+      const leading = commentsOf(s.body).filter((p) => p.placement === "leading").map((p) => leadingComment(p, src));
+      return [leading, "declare ", commented(s.body, statementDoc(declared, src), src, false)];
+    }
     case "import":
       return importDoc(s, path, src);
     case "importEquals":
@@ -189,8 +429,21 @@ function statement(path: At<"stmt">, src: string): Doc {
     case "if": {
       const head = group(["if (", condition(s.cond, path, src), ")", body(s.then, afterParen, "consequent", path, src, false)]);
       if (!s.else) return head;
-      const thenIsBlock = !(s.then.length === 1 && follows(src, s.then[0]!.start, afterParen));
-      return [head, thenIsBlock ? " " : hardline, "else", group(body(s.else, "else", "alternate", path, src, false))];
+      const thenIsBlock = !(s.then.length === 1 && follows(src, s.then[0]!.start, afterParen, attached.commentStarts));
+      // Comments before `else` dangle on the `if` and print between the branches.
+      const comments = commentsOf(s).filter((p) => p.placement === "dangling");
+      const parts: Doc[] = [head, thenIsBlock ? "" : hardline];
+      let spaced = thenIsBlock;
+      if (comments.length > 0) {
+        const first = comments[0]!.comment;
+        const last = comments[comments.length - 1]!.comment;
+        if (isPreviousLineEmpty(src, first.start)) parts.push(thenIsBlock ? [hardline, hardline] : hardline);
+        else if (hasNewline(src, first.start, true)) parts.push(thenIsBlock ? hardline : "");
+        else parts.push(" ");
+        parts.push(danglingComments(s, src), last.kind !== "block" || hasNewline(src, last.end) ? hardline : " ");
+        spaced = false;
+      }
+      return [...parts, spaced ? " " : "", "else", group(body(s.else, "else", "alternate", path, src, false))];
     }
     case "while":
       return group(["while (", condition(s.cond, path, src), ")", body(s.body, afterParen, "body", path, src, true)]);
@@ -203,7 +456,7 @@ function statement(path: At<"stmt">, src: string): Doc {
       const loop = body(s.body, afterParen, "body", path, src, true);
       if (!s.init && !s.test && !s.update) return group(["for (;;)", loop]);
       const init = !s.init ? "" : s.init.kind === "expr" ? expr(s.init.expr, "init", path, src)
-        : s.init.kind === "let" ? declarations(s.init.keyword, s.init.declarations, { sort: "stmt", node: s.init, key: "init", parent: path }, src, true)
+        : s.init.kind === "let" ? commented(s.init, declarations(s.init.keyword, s.init.declarations, { sort: "stmt", node: s.init, key: "init", parent: path }, src, true), src)
         : statement({ sort: "stmt", node: s.init, key: "init", parent: path }, src);
       const test = s.test ? expr(s.test, "test", path, src) : "";
       const update = s.update ? [line, expr(s.update, "update", path, src)] : "";
@@ -213,7 +466,7 @@ function statement(path: At<"stmt">, src: string): Doc {
     case "forOf": {
       // The parser gives a declaration or, failing that, a pattern.
       const left = s.left.kind === "let"
-        ? declarations(s.left.keyword, s.left.declarations, { sort: "stmt", node: s.left, key: "left", parent: path }, src, true)
+        ? commented(s.left, declarations(s.left.keyword, s.left.declarations, { sort: "stmt", node: s.left, key: "left", parent: path }, src, true), src)
         : pattern(s.left as Pattern, "left", path, src);
       return group([
         "for", s.await ? " await" : "", " (", left, s.kind === "forOf" ? " of " : " in ", expr(s.right, "right", path, src), ")",
@@ -222,15 +475,17 @@ function statement(path: At<"stmt">, src: string): Doc {
     }
     case "switch": {
       const cases = s.cases.map((c) => {
-        const head = c.test ? ["case ", expr(c.test, "test", path, src), ":"] : "default:";
+        const dangling = danglingComments(c, src);
+        const head = [c.test ? ["case ", expr(c.test, "test", path, src), ":"] : "default:", dangling.length > 0 ? [" ", dangling] : ""];
         const consequent = c.body.filter((x) => x.kind !== "empty");
-        if (consequent.length === 0) return head;
+        if (consequent.length === 0) return commented(c, head, src);
         const printedBody = statements(consequent, path, src, false);
-        return [head, consequent.length === 1 && consequent[0]!.kind === "block" ? [" ", printedBody] : indent([hardline, printedBody])];
+        return commented(c, [head, consequent.length === 1 && consequent[0]!.kind === "block" ? [" ", printedBody] : indent([hardline, printedBody])], src);
       });
+      const dangling = danglingComments(s, src);
       return [
         group(["switch (", indent([softline, expr(s.discriminant, "discriminant", path, src)]), softline, ")"]), " {",
-        cases.length > 0 ? indent([hardline, join(hardline, cases)]) : "", hardline, "}",
+        cases.length > 0 ? indent([hardline, separated(s.cases, cases, hardline, hardline, src)]) : dangling.length > 0 ? indent([hardline, dangling]) : "", hardline, "}",
       ];
     }
     case "try": {
@@ -248,8 +503,23 @@ function statement(path: At<"stmt">, src: string): Doc {
 // A returned or thrown binary chain breaks inside parentheses of its own.
 function returned(e: Expr, parent: At<"stmt">, src: string): Doc {
   const printedValue = expr(e, "argument", parent, src);
+  if (leadingCommentBreaks(e, src)) return keptOnLine(printedValue);
   return e.kind === "binary" ? group([ifBreak("("), indent([softline, printedValue]), softline, ifBreak(")")]) : printedValue;
 }
+
+// Whether a comment leading `e`, or the leftmost part of it, ends its line, so that `return`,
+// `throw` or `yield` before it would end there (Prettier's returnArgumentHasLeadingComment).
+function leadingCommentBreaks(e: Expr, src: string): boolean {
+  for (let n: Expr | undefined = e; n; n = n.kind === "pipe" ? n.value : leftSide(n)?.[0]) {
+    const breaks = commentsOf(n).some((p) => p.placement === "leading" &&
+      (hasNewline(src, p.comment.end) || (p.comment.kind === "block" && p.comment.text.includes("\n"))));
+    if (breaks) return true;
+  }
+  return false;
+}
+
+// A value kept on its keyword's line by parentheses, the value itself on the lines inside them.
+const keptOnLine = (value: Doc): Doc => ["(", indent([hardline, value]), hardline, ")"];
 
 // Declarators after `let`, `const` or `var`, one per line when any has a value, except in a
 // `for` head.
@@ -261,6 +531,10 @@ function declarations(keyword: string, list: Declarator[], parent: At<"stmt">, s
 }
 
 function declarator(path: At<"declarator">, src: string): Doc {
+  return commented(path.node, declaratorDoc(path, src), src);
+}
+
+function declaratorDoc(path: At<"declarator">, src: string): Doc {
   const d = path.node;
   const left = [pattern(d.target, "id", path, src), d.type ? [": ", type(d.type, "typeAnnotation", path, src)] : ""];
   return assignment(path, left, " =", d.init, "init", src);
@@ -272,7 +546,9 @@ type FnNamed = Fn & { name: string | undefined; async: boolean; generator: boole
 
 // How a call argument is being printed: hugged as the first or last one, or as the right side
 // of an assignment laid out a given way.
-type Opts = { expandFirstArg?: boolean; expandLastArg?: boolean; assignmentLayout?: Layout };
+// `deferTrailing` marks a place followed by a token that a line break would cut off, such as a
+// type's `[]` or an expression's `!`: a trailing comment there waits for the end of the line.
+type Opts = { expandFirstArg?: boolean; expandLastArg?: boolean; assignmentLayout?: Layout; deferTrailing?: boolean };
 
 // Thrown when an argument can't be hugged, as Prettier's ArgExpansionBailout: its parameters
 // would have to break.
@@ -300,8 +576,12 @@ function signature(f: Fn, path: Path, src: string, expandParams: boolean): Doc {
 }
 
 // `: T`, and Fish's ` throws E` after it.
-function returnType(f: Fn, path: Path, src: string): Doc {
-  return [f.returnType ? [": ", type(f.returnType, "returnType", path, src)] : "", f.throws ? [" throws ", type(f.throws, "throws", path, src)] : ""];
+// `beforeArrow` marks an arrow's, which `=>` must follow on its line.
+function returnType(f: Fn, path: Path, src: string, beforeArrow = false): Doc {
+  return [
+    f.returnType ? [": ", type(f.returnType, "returnType", path, src, { deferTrailing: beforeArrow })] : "",
+    f.throws ? [" throws ", type(f.throws, "throws", path, src)] : "",
+  ];
 }
 
 // One parameter, at most one plain type parameter, and a return type that is an object type or
@@ -317,8 +597,9 @@ const isObjectType = (t: TypeNode) => t.kind === "object" || t.kind === "mapped"
 // Prettier's printFunctionParameters: one per line when they don't fit, run together inside a
 // hugged argument or a test call, and around a lone destructured parameter. `typeParams` is
 // printed before the `(` where Prettier puts it inside the parameters' group.
-function parameters(f: Fn, path: Path, src: string, expandArg: boolean, typeParams: Doc): Doc {
-  if (f.params.length === 0) return [typeParams, "()"];
+// `holder` is the node empty parentheses' comments dangle on, when it isn't `path`'s.
+function parameters(f: Fn, path: Path, src: string, expandArg: boolean, typeParams: Doc, holder: object = path.node): Doc {
+  if (f.params.length === 0) return [typeParams, "(", danglingInside(holder, src), ")"];
   const p = parentExpr(path);
   const inTestCall = path.key === "arguments" && p !== undefined && isTestCall(p, undefined);
   const hug = shouldHugTheOnlyParameter(f.params);
@@ -367,12 +648,16 @@ function param(x: Param, fn: Path, src: string): Doc {
     x.modifiers.map((m) => [m, " "]), x.comptime ? "comptime " : "", x.rest ? "..." : "", pattern(x.pattern, "pattern", path, src), x.optional ? "?" : "",
     x.type ? [": ", type(x.type, "typeAnnotation", path, src)] : "", x.default ? [" = ", expr(x.default, "right", path, src)] : "",
   ];
-  if (x.decorators.length === 0) return doc;
+  if (x.decorators.length === 0) return commented(x, doc, src);
   const brokenAfter = x.decorators.some((d) => /^\)*[ \t]*\r?\n/.test(src.slice(d.end)));
-  return group([brokenAfter ? breakParent : "", join(line, x.decorators.map((d) => decorator(d, path, src))), line, doc]);
+  return commented(x, group([brokenAfter ? breakParent : "", join(line, x.decorators.map((d) => decorator(d, path, src))), line, doc]), src);
 }
 
 function pattern(p: Pattern, key: string, parent: Path, src: string): Doc {
+  return commented(p, patternDoc(p, key, parent, src), src);
+}
+
+function patternDoc(p: Pattern, key: string, parent: Path, src: string): Doc {
   const path: At<"pattern"> = { sort: "pattern", node: p, key, parent };
   switch (p.kind) {
     case "ident":
@@ -382,7 +667,7 @@ function pattern(p: Pattern, key: string, parent: Path, src: string): Doc {
     case "expr":
       return expr(p.expr, "expression", path, src);
     case "array": {
-      if (p.elements.length === 0 && !p.rest) return "[]";
+      if (p.elements.length === 0 && !p.rest) return group(["[", danglingInside(p, src), "]"]);
       const items: Doc[] = p.elements.map((x, i) => [x ? group(pattern(x, "elements", path, src)) : "", i < p.elements.length - 1 || p.rest ? [",", line] : ""]);
       const last = p.elements[p.elements.length - 1];
       const trailing = p.rest ? "" : last === undefined && p.elements.length > 0 ? "," : ifBreak(",");
@@ -405,11 +690,11 @@ function objectPattern(p: Extract<Pattern, { kind: "object" }>, path: At<"patter
   if (p.props.length === 0 && !p.rest) return "{}";
   const parts = p.props.map((prop) => {
     // Shorthand, as in `{ a }` or `{ a = 1 }`, shares its start with the property.
-    if (prop.value.start === prop.start) return pattern(prop.value, "value", path, src);
+    if (prop.value.start === prop.start) return commented(prop, pattern(prop.value, "value", path, src), src);
     const key = propertyKey(prop.key, prop.start, 0, path, src);
     const keyText = flatText(key);
     const layout = !hasLine(key) && keyText !== undefined && [...keyText].length < 5 ? "never-break-after-operator" : "fluid";
-    return layoutDoc(layout, key, ":", pattern(prop.value, "value", path, src));
+    return commented(prop, layoutDoc(layout, key, ":", pattern(prop.value, "value", path, src)), src);
   });
   if (p.rest) parts.push(["...", pattern(p.rest, "argument", path, src)]);
   const up = path.parent;
@@ -454,7 +739,7 @@ function typeParameter(t: TypeParam, owner: Path, src: string): Doc {
   const parts: Doc[] = [t.modifiers.includes("const") ? "const " : "", t.modifiers.includes("in") ? "in " : "", t.modifiers.includes("out") ? "out " : "", t.name];
   if (t.constraint) parts.push(" extends", ...hangingValue(type(t.constraint, "constraint", owner, src)));
   if (t.default) parts.push(" =", ...hangingValue(type(t.default, "default", owner, src)));
-  return group(parts);
+  return commented(t, group(parts), src);
 }
 
 // A value that moves to the next line, indented, when it doesn't fit after its keyword.
@@ -464,6 +749,11 @@ function hangingValue(doc: Doc): Doc[] {
 }
 
 function type(t: TypeNode, key: string, parent: Path, src: string, opts: Opts = {}): Doc {
+  return commented(t, bareType(t, key, parent, src, { ...opts, deferTrailing: undefined }), src, true, opts.deferTrailing);
+}
+
+// A type without its comments, for a union to place them around its `|`.
+function bareType(t: TypeNode, key: string, parent: Path, src: string, opts: Opts = {}): Doc {
   const path: At<"type"> = { sort: "type", node: t, key, parent };
   const doc = typeDoc(path, src, opts);
   return typeNeedsParens(path) ? ["(", doc, ")"] : doc;
@@ -477,7 +767,7 @@ function typeDoc(path: At<"type">, src: string, opts: Opts): Doc {
     case "literal":
       return expr(t.value, "literal", path, src);
     case "array":
-      return [type(t.element, "elementType", path, src), "[]"];
+      return [type(t.element, "elementType", path, src, { deferTrailing: true }), "[]"];
     case "tuple":
       return tupleType(t, path, src);
     case "object":
@@ -496,7 +786,7 @@ function typeDoc(path: At<"type">, src: string, opts: Opts): Doc {
     case "operator":
       return [t.op, " ", type(t.type, "typeAnnotation", path, src)];
     case "indexed":
-      return [type(t.object, "objectType", path, src), "[", type(t.index, "indexType", path, src), "]"];
+      return [type(t.object, "objectType", path, src, { deferTrailing: true }), "[", type(t.index, "indexType", path, src), "]"];
     case "query":
       return ["typeof ", type(t.target, "exprName", path, src)];
     case "import": {
@@ -559,20 +849,22 @@ function typeArguments(args: TypeNode[], parent: Path, src: string): Doc {
   if (args.length === 0) return "";
   const printedArgs = args.map((t) => type(t, "params", parent, src));
   const only = args[0]!;
-  const keepsTogether = isSimpleType(only) || isObjectType(only) || (only.kind === "union" && simpleUnion(only.types));
+  // Comments that end their line put the arguments on lines of their own.
+  const breakingComments = args.some((t) => commentsOf(t).some((p) => p.comment.kind !== "block" || hasNewline(src, p.comment.end)));
+  const keepsTogether = !breakingComments && (isSimpleType(only) || isObjectType(only) || (only.kind === "union" && simpleUnion(only.types)));
   if (args.length === 1 && keepsTogether) return ["<", printedArgs, ">"];
   return group(["<", indent([softline, join([",", line], printedArgs)]), softline, ">"]);
 }
 
 function tupleType(t: Extract<TypeNode, { kind: "tuple" }>, path: At<"type">, src: string): Doc {
-  if (t.elements.length === 0) return "[]";
+  if (t.elements.length === 0) return group(["[", danglingInside(t, src), "]"]);
   const items = t.elements.map((x, i) => {
     let doc: Doc;
     if (x.name !== undefined) doc = [x.rest ? "..." : "", x.name, x.optional ? "?" : "", ": ", type(x.type, "elementType", path, src)];
     else if (x.rest) doc = ["...", type(x.type, "restType", path, src)];
     else if (x.optional) doc = [type(x.type, "optionalType", path, src), "?"];
     else doc = type(x.type, "elementTypes", path, src);
-    return [group(doc), i < t.elements.length - 1 ? [",", line] : ""];
+    return [group(commented(x, doc, src)), i < t.elements.length - 1 ? [",", line] : ""];
   });
   return group(["[", indent([softline, items, ifBreak(",")]), softline, "]"]);
 }
@@ -587,9 +879,13 @@ function simpleUnion(types: TypeNode[]): boolean {
 // A union broken one member per line with a leading `|`, indented under what holds it unless
 // that already sets it apart.
 function unionType(t: Extract<TypeNode, { kind: "union" | "intersection" }>, path: At<"type">, src: string, opts: Opts): Doc {
-  const printedTypes = t.types.map((x) => type(x, "types", path, src));
-  if (simpleUnion(t.types)) return join(" | ", printedTypes);
-  const members = group(printedTypes.map((d, i) => [i === 0 ? ifBreak("| ") : [line, "| "], align(2, d)]));
+  if (simpleUnion(t.types)) return join(" | ", t.types.map((x) => type(x, "types", path, src)));
+  // A member's leading comments go after its `|`, aligned with it; its trailing ones after it.
+  const members = group(t.types.map((x, i) => {
+    const d = bareType(x, "types", path, src);
+    const prefix = i === 0 ? ifBreak("| ") : [line, "| "];
+    return hasComments(x, "leading") ? [prefix, align(2, commented(x, d, src))] : [prefix, commented(x, align(2, d), src)];
+  }));
   if (typeNeedsParens(path)) return group([indent([softline, members]), softline]);
   const up = path.parent;
   if (path.key === "elementTypes" && up?.sort === "type" && up.node.kind === "tuple" && up.node.elements.length > 1) {
@@ -619,14 +915,24 @@ function intersectionType(t: Extract<TypeNode, { kind: "union" | "intersection" 
 // An object type literal; members end in `;`, and one written with a line break after its `{`
 // stays expanded.
 function objectType(t: Extract<TypeNode, { kind: "object" }>, path: At<"type">, src: string): Doc {
-  if (t.members.length === 0) return "{}";
+  const dangling = danglingComments(t, src);
+  if (t.members.length === 0) {
+    if (dangling.length === 0) return "{}";
+    const lineComment = commentsOf(t).some((p) => p.placement === "dangling" && p.comment.kind !== "block");
+    const around = lineComment ? line : softline;
+    return group(["{", indent([around, dangling]), around, "}"], { shouldBreak: lineComment });
+  }
   const members = t.members.map((m, i) => [typeMember(m, path, src), i === t.members.length - 1 ? ifBreak(";") : ";"]);
-  const doc = ["{", indent([line, join(line, members)]), line, "}"];
+  const doc = ["{", indent([line, separated(t.members, members, line, hardline, src)]), line, "}"];
   const expanded = src.slice(t.start, t.members[0]!.start).includes("\n");
   return huggedParam(path) && path.key === "typeAnnotation" ? doc : group(doc, { shouldBreak: expanded });
 }
 
 function typeMember(m: TypeMember, parent: At<"type">, src: string): Doc {
+  return commented(m, typeMemberDoc(m, parent, src), src);
+}
+
+function typeMemberDoc(m: TypeMember, parent: At<"type">, src: string): Doc {
   switch (m.kind) {
     case "property":
       return [m.readonly ? "readonly " : "", propertyKey(m.name, m.start, m.readonly ? 1 : 0, parent, src), m.optional ? "?" : "",
@@ -650,7 +956,7 @@ function typeMember(m: TypeMember, parent: At<"type">, src: string): Doc {
 // A signature's parameters and return type; a method's return type is grouped on its own.
 function memberSignature(m: { params: Param[]; returns: TypeNode | undefined; typeParams?: TypeParam[] }, parent: At<"type">, src: string, method = false): Doc[] {
   const f: Fn = { params: m.params, typeParams: m.typeParams ?? [], returnType: m.returns };
-  const params = parameters(f, parent, src, false, typeParameters(f.typeParams, parent, src));
+  const params = parameters(f, parent, src, false, typeParameters(f.typeParams, parent, src), m);
   const returned = m.returns ? [": ", type(m.returns, "returnType", parent, src)] : "";
   return [shouldGroupParameters(f, returned) ? group(params) : params, method && m.returns ? group(returned) : returned];
 }
@@ -666,10 +972,16 @@ function mappedType(t: Extract<TypeNode, { kind: "mapped" }>, path: At<"type">, 
   const afterKey = src.indexOf("]", (t.as ?? t.constraint).end) + 1;
   const expanded = /^\s*/.exec(src.slice(t.start + 1))![0].includes("\n");
   const key = group(["[", indent([softline, t.name, " in ", type(t.constraint, "sourceType", path, src), t.as ? [" as ", type(t.as, "nameType", path, src)] : ""]), softline, "]"]);
+  const dangling = commentsOf(t).filter((p) => p.placement === "dangling");
+  const lastDangling = dangling[dangling.length - 1];
+  const before = lastDangling === undefined ? "" : [
+    join(hardline, dangling.slice(0, -1).map(commentDoc)), dangling.length > 1 ? hardline : "",
+    group([commentDoc(lastDangling), lastDangling.comment.kind !== "block" || hasNewline(src, lastDangling.comment.end) ? hardline : line]),
+  ];
   return group([
     "{",
     indent([
-      line, t.readonly ? [signed(t.start + 1, t.readonly, "readonly"), " "] : "", key, signed(afterKey, t.optional, "?"),
+      line, before, t.readonly ? [signed(t.start + 1, t.readonly, "readonly"), " "] : "", key, signed(afterKey, t.optional, "?"),
       t.type ? [": ", type(t.type, "typeAnnotation", path, src)] : "", ifBreak(";"),
     ]),
     line, "}",
@@ -708,7 +1020,7 @@ function conditionalType(t: Extract<TypeNode, { kind: "conditional" }>, path: At
     line, "? ", nested ? ifBreak("", "(") : "", align(2, type(t.then, "trueType", path, src)), nested ? ifBreak("", ")") : "",
     line, ": ", align(2, type(t.else, "falseType", path, src)),
   ];
-  const head = [type(t.check, "checkType", path, src), " extends ", type(t.extends, "extendsType", path, src)];
+  const head = [type(t.check, "checkType", path, src, { deferTrailing: true }), " extends ", type(t.extends, "extendsType", path, src)];
   const contents = [p?.kind === "conditional" && path.key === "falseType" ? align(2, head) : head, forceNoIndent ? parts : indent(parts)];
   const result = current === up ? group(contents) : contents;
   return inCheck ? group([indent([softline, result]), softline]) : result;
@@ -733,13 +1045,13 @@ function expr(e: Expr, key: string, parent: Path, src: string): Doc {
 // An expression with the parentheses its place needs, keeping its label.
 // Each expression's document, printed once per place as Prettier caches it: hugging prints an
 // argument a second time, and without the cache nested callbacks would cost 2^depth.
-const printedCache = new WeakMap<Expr, { parent: unknown; key: string; doc: Doc }>();
+let printedCache = new WeakMap<Expr, { parent: unknown; key: string; doc: Doc }>();
 
 function printed(path: At<"expr">, src: string, opts: Opts = {}): Doc {
-  const plain = opts.expandFirstArg === undefined && opts.expandLastArg === undefined && opts.assignmentLayout === undefined;
+  const plain = opts.expandFirstArg === undefined && opts.expandLastArg === undefined && opts.assignmentLayout === undefined && !opts.deferTrailing;
   const cached = plain ? printedCache.get(path.node) : undefined;
   if (cached && cached.parent === path.parent?.node && cached.key === path.key) return cached.doc;
-  const doc = withParens(path, src, opts);
+  const doc = commented(viewed.get(path.node) ?? path.node, withParens(path, src, { ...opts, deferTrailing: undefined }), src, true, opts.deferTrailing);
   if (plain) printedCache.set(path.node, { parent: path.parent?.node, key: path.key, doc });
   return doc;
 }
@@ -768,8 +1080,10 @@ function expression(path: At<"expr">, src: string, opts: Opts = {}): Doc {
       return expression({ ...path, node: pipeAsBinary(e) }, src, opts);
     case "comptime":
       return ["comptime ", expr(e.expr, "argument", path, src)];
-    case "throw":
-      return ["throw ", expr(e.value, "argument", path, src)];
+    case "throw": {
+      const value = expr(e.value, "argument", path, src);
+      return ["throw ", leadingCommentBreaks(e.value, src) ? keptOnLine(value) : value];
+    }
     case "unsafe":
       return group(["unsafe {", indent([line, expr(e.expr, "expression", path, src)]), line, "}"]);
     case "object":
@@ -812,11 +1126,14 @@ function expression(path: At<"expr">, src: string, opts: Opts = {}): Doc {
     case "unary":
       return e.op === "await" ? awaited(e, path, src) : [e.op, /[a-z]$/.test(e.op) ? " " : "", expr(e.operand, "argument", path, src)];
     case "update": {
-      const operand = expr(e.operand, "argument", path, src);
+      // A postfix `++` can't start a line either.
+      const operand = printed(at(e.operand, "argument", path), src, e.prefix ? {} : { deferTrailing: true });
       return e.prefix ? [e.op, operand] : [operand, e.op];
     }
-    case "yield":
-      return [e.delegate ? "yield*" : "yield", e.value ? [" ", expr(e.value, "argument", path, src)] : ""];
+    case "yield": {
+      const value = e.value && expr(e.value, "argument", path, src);
+      return [e.delegate ? "yield*" : "yield", e.value && value ? [" ", leadingCommentBreaks(e.value, src) ? keptOnLine(value) : value] : ""];
+    }
     case "binary":
       return binary(e, path, src);
     case "assign":
@@ -827,7 +1144,8 @@ function expression(path: At<"expr">, src: string, opts: Opts = {}): Doc {
       return conditional(e, path, src);
     case "as":
     case "satisfies": {
-      const parts = [expr(e.expr, "expression", path, src), " ", e.kind, " ", type(e.type, "typeAnnotation", path, src)];
+      // `as` and `satisfies` must stay on their operand's line.
+      const parts = [printed(at(e.expr, "expression", path), src, { deferTrailing: true }), " ", e.kind, " ", type(e.type, "typeAnnotation", path, src)];
       const p = parentExpr(path);
       const hugged = (path.key === "callee" && (p?.kind === "call" || p?.kind === "new")) || (path.key === "object" && isMember(p));
       return hugged ? group([indent([softline, ...parts]), softline]) : parts;
@@ -840,7 +1158,7 @@ function expression(path: At<"expr">, src: string, opts: Opts = {}): Doc {
       return conditionalGroup([[asserted, operand], [asserted, broken], [asserted, operand]]);
     }
     case "nonNull":
-      return [expr(e.expr, "expression", path, src), "!"];
+      return [printed(at(e.expr, "expression", path), src, { deferTrailing: true }), "!"];
     case "instantiation":
       return [expr(e.expr, "expression", path, src), typeArguments(e.typeArgs, path, src)];
     case "member":
@@ -919,6 +1237,8 @@ function needsParens(path: At<"expr">): boolean {
   if (key === "superClass" && superClassNeedsParens(e)) return true;
   // A guard is read at binary precedence.
   if (key === "guard" && up.sort === "arm") return ["conditional", "arrow", "yield", "assign", "sequence", "throw"].includes(form(e)) || isPipe(e);
+  // An object literal's spread reads its value as an array's or a call's spread does.
+  if (up.sort === "prop" && up.node.kind === "spread") return needsParens({ ...path, parent: at({ kind: "spread", value: e, start: up.node.start, end: up.node.end }, "properties", up) });
   if (up.sort !== "expr") {
     if (stmtKind(up) === "for") return false;
     if (e.kind === "sequence") return true;
@@ -1202,6 +1522,13 @@ function binary(e: Of<"binary">, path: At<"expr">, src: string): Doc {
   return group([...head, indent(parts.slice(head.length))]);
 }
 
+// `parts` with `node`'s comments around them, as a list again.
+function commentedParts(node: object, parts: Doc[], src: string): Doc[] {
+  if (!hasComments(node)) return parts;
+  const doc = commented(node, parts, src);
+  return Array.isArray(doc) ? doc : [doc];
+}
+
 // The operands and operators of a chain, flattening into the same list a left side Prettier
 // prints without parentheses.
 function binaryParts(path: At<"expr">, src: string, inParens: boolean): Doc[] {
@@ -1210,15 +1537,21 @@ function binaryParts(path: At<"expr">, src: string, inParens: boolean): Doc[] {
   const left = at(e.left, "left", path);
   // An `in` in a `for` head keeps its parentheses even where its precedence would let it flatten.
   const flatten = left.node.kind === "binary" && shouldFlatten(e.op, left.node.op) && !(left.node.op === "in" && inForInit(left));
-  const parts = flatten ? binaryParts(left, src, inParens) : [group(printed(left, src))];
-  const isPipe = (e.op as string) === "|>";
+  // A flattened left side prints its own comments around its operands.
+  const leftNode = viewed.get(left.node) ?? left.node;
+  const parts = flatten ? commentedParts(leftNode, binaryParts(left, src, inParens), src) : [group(printed(left, src))];
+  // A pipe stage led by a comment on its own line keeps `|>` at the end of the line before, as
+  // Prettier prints it.
+  const isPipe = (e.op as string) === "|>" && !commentsOf(e.right).some((p) => p.placement === "leading" && hasNewline(src, p.comment.end));
   // A pipeline's right side is flattened too, as Prettier does for hack-style pipes.
   const rightDoc = isPipe ? binaryParts(at(e.right, "right", path), src, inParens) : expr(e.right, "right", path, src);
   const right = isPipe ? [line, e.op, " ", rightDoc] : shouldInline(e) ? [e.op, " ", rightDoc] : [e.op, line, rightDoc];
   const p = parentExpr(path);
   const kind = form(e);
-  const shouldGroup = !(inParens && kind === "logical") && (p === undefined || form(p) !== kind) && form(e.left) !== kind && form(e.right) !== kind;
-  parts.push(isPipe ? "" : " ", shouldGroup ? group(right) : right);
+  // A line comment after the left side breaks before the right.
+  const brokenLeft = hasLineComment(e.left, "trailing");
+  const shouldGroup = brokenLeft || (!(inParens && kind === "logical") && (p === undefined || form(p) !== kind) && form(e.left) !== kind && form(e.right) !== kind);
+  parts.push(isPipe ? "" : " ", shouldGroup ? group(right, { shouldBreak: brokenLeft }) : right);
   return parts;
 }
 
@@ -1426,15 +1759,22 @@ function moreArgumentsThanCaller(e: Expr, path: At<"expr">): boolean {
 // object hugged, as in `arr.map((x) => { ... })`, whichever Prettier's states choose.
 function callArguments(e: Of<"call"> | Of<"new"> | Of<"import">, path: At<"expr">, src: string): Doc {
   const args = e.kind === "import" ? e.args : e.args ?? [];
-  if (args.length === 0) return "()";
+  if (args.length === 0) return group(["(", danglingInside(e, src), ")"]);
   if (isReactHookCall(args)) return ["(", expr(args[0]!, "arguments", path, src), ", ", expr(args[1]!, "arguments", path, src), ")"];
+  let blank = false;
   const printedArgs = args.map((a, i) => {
     const doc = expr(a, "arguments", path, src);
-    return i === args.length - 1 ? doc : [doc, ",", line];
+    if (i === args.length - 1) return doc;
+    // A blank line after an argument is kept, with every argument on its own line.
+    if (isNextLineEmpty(src, a.end)) {
+      blank = true;
+      return [doc, ",", hardline, hardline];
+    }
+    return [doc, ",", line];
   });
   const trailing = e.kind === "import" ? "" : ifBreak(",");
   const allBroken = () => group(["(", indent([line, ...printedArgs]), trailing, line, ")"], { shouldBreak: true });
-  if (functionArguments(args)) return allBroken();
+  if (blank || functionArguments(args)) return allBroken();
   const hugged = (i: number, opts: Opts): Doc | undefined => {
     try {
       return printed(at(args[i]!, "arguments", path), src, opts);
@@ -1549,19 +1889,25 @@ function memberChain(e: Of<"call">, path: At<"expr">, src: string): Doc {
   const callLink = (n: Of<"call">, p: At<"expr">): Link => ({ node: n, printed: [n.optional ? "?." : "", typeArguments(n.typeArgs, p, src), callArguments(n, p, src)] });
   const links: Link[] = [callLink(e, path)];
   let link = at(e.callee, "callee", path);
+  // A link before a `!` keeps a comment holding a line break off that line, as `!` can't start one.
+  let beforeBang = false;
   for (;;) {
     const n = link.node;
     if (n.kind === "call" && (isMember(n.callee) || n.callee.kind === "call") && !needsParens(link)) {
-      links.unshift(callLink(n, link));
+      const linked = callLink(n, link);
+      links.unshift({ node: n, printed: commented(n, linked.printed, src, true, beforeBang) });
       link = at(n.callee, "callee", link);
+      beforeBang = false;
     } else if ((n.kind === "member" || n.kind === "index") && !needsParens(link)) {
-      links.unshift({ node: n, printed: lookup(n, link, src) });
+      links.unshift({ node: n, printed: commented(n, lookup(n, link, src), src, true, beforeBang) });
       link = at(n.object, "object", link);
+      beforeBang = false;
     } else if (n.kind === "nonNull" && !needsParens(link)) {
-      links.unshift({ node: n, printed: "!" });
+      links.unshift({ node: n, printed: commented(n, "!", src, true, beforeBang) });
       link = at(n.expr, "expression", link);
+      beforeBang = true;
     } else {
-      links.unshift({ node: n, printed: printed(link, src) });
+      links.unshift({ node: n, printed: printed(link, src, beforeBang ? { deferTrailing: true } : {}) });
       break;
     }
   }
@@ -1591,6 +1937,12 @@ function memberChain(e: Of<"call">, path: At<"expr">, src: string): Doc {
     }
     if (n.kind === "call" || n.kind === "import") hasSeenCall = true;
     current.push(links[i]!);
+    // A trailing comment ends its group, unless a `!` follows, which can't start a line.
+    if (hasComments(n, "trailing") && links[i + 1]?.node.kind !== "nonNull") {
+      groups.push(current);
+      current = [];
+      hasSeenCall = false;
+    }
   }
   if (current.length > 0) groups.push(current);
 
@@ -1601,13 +1953,17 @@ function memberChain(e: Of<"call">, path: At<"expr">, src: string): Doc {
   const hasComputed = groups[1]?.[0]?.node.kind === "index";
   const first = head[0]!.node;
   const last = head[head.length - 1]!.node;
-  const shouldMerge = groups.length >= 2 && (head.length === 1
+  const shouldMerge = groups.length >= 2 && !hasComments(groups[1]![0]!.node) && (head.length === 1
     ? first.kind === "this" || (first.kind === "ident" && (isFactory(first.name) || (isStatement && first.name.length <= 2) || hasComputed))
     : last.kind === "member" && !last.name.startsWith("#") && (isFactory(last.name) || hasComputed));
 
   const printGroup = (g: Link[]): Doc => g.map((l) => l.printed);
   const oneLine = groups.map(printGroup);
-  if (groups.length <= (shouldMerge ? 3 : 2)) return moreArgumentsThanCaller(e, path) ? oneLine : group(oneLine);
+  const cutoff = shouldMerge ? 3 : 2;
+  // Comments inside the chain put each group on its own line.
+  const commentsInside = links.slice(1, -1).some((l) => hasComments(l.node, "leading")) ||
+    links.slice(0, -1).some((l) => hasComments(l.node, "trailing")) || (groups[cutoff] !== undefined && hasComments(groups[cutoff]![0]!.node, "leading"));
+  if (groups.length <= cutoff && !commentsInside) return moreArgumentsThanCaller(e, path) ? oneLine : group(oneLine);
 
   const rest = groups.slice(shouldMerge ? 2 : 1);
   const expanded = [printGroup(head), shouldMerge ? printGroup(groups[1]!) : "", indent([hardline, join(hardline, rest.map(printGroup))])];
@@ -1616,7 +1972,7 @@ function memberChain(e: Of<"call">, path: At<"expr">, src: string): Doc {
   const lastGroupBreaksAfterFunctions =
     lastGroup[lastGroup.length - 1]!.node.kind === "call" && willBreak(oneLine[oneLine.length - 1]!) &&
     calls.slice(0, -1).some((c) => c.args.some(isFunction));
-  const expand =
+  const expand = commentsInside ||
     (calls.length > 2 && calls.some((c) => c.args.some((a) => !simpleArgument(a)))) ||
     oneLine.slice(0, -1).some(willBreak) ||
     lastGroupBreaksAfterFunctions;
@@ -1702,6 +2058,8 @@ function assignmentLayout(path: At<"expr"> | At<"declarator"> | At<"prop"> | At<
     return value.kind === "arrow" && !Array.isArray(value.body) && value.body.kind === "arrow" ? "chain-tail-arrow-chain" : "chain-tail";
   }
   if ((value.kind === "assign" || value.kind === "destructure") && form(value.value) === "assign") return "break-after-operator";
+  // A comment on its own line before the value moves it to the next line.
+  if (commentsOf(value).some((p) => p.placement === "leading" && hasNewline(src, p.comment.end))) return "break-after-operator";
   if (value.kind === "call" && value.callee.kind === "ident" && value.callee.name === "require") return "never-break-after-operator";
   const canBreakLeft = hasLine(left);
   if (complexDestructuring(path) || (path.sort === "declarator" && ((value.kind === "arrow" && canBreakLeft) || complexTypeAnnotation(path.node)))) {
@@ -1808,7 +2166,9 @@ function arrow(e: Of<"arrow">, path: At<"expr">, src: string, opts: Opts): Doc {
   let node = e;
   let nodePath = path;
   for (;;) {
-    signatures.push(arrowSignature(node, nodePath, src, opts));
+    // An arrow inside the chain prints its own comments around its signature.
+    const signature = arrowSignature(node, nodePath, src, opts);
+    signatures.push(node === e ? signature : commented(node, signature, src));
     if (isChain) {
       shouldBreakChain ||= (node.returnType !== undefined && node.params.length > 0) || node.typeParams.length > 0 ||
         node.params.some((x) => x.pattern.kind !== "ident" || x.rest || x.default !== undefined || x.modifiers.length > 0);
@@ -1820,7 +2180,8 @@ function arrow(e: Of<"arrow">, path: At<"expr">, src: string, opts: Opts): Doc {
   }
   const body = node.body;
   const bodyDoc = Array.isArray(body) ? block(body, nodePath, src) : printed(at(body, "body", nodePath), src, opts);
-  const sameLine = Array.isArray(body) || body.kind === "sequence" || bodyOnSameLine(body, src) || (!shouldBreakChain && conditionalBody(body));
+  const sameLine = Array.isArray(body) ||
+    (!ownLineLeading(body, src) && (body.kind === "sequence" || bodyOnSameLine(body, src) || (!shouldBreakChain && conditionalBody(body))));
   const p = parentExpr(path);
   const isCallee = path.key === "callee" && (isCallOrNew(p) || p?.kind === "import");
   const chainId = groupId("arrow-chain");
@@ -1838,12 +2199,16 @@ function arrow(e: Of<"arrow">, path: At<"expr">, src: string, opts: Opts): Doc {
 
 function arrowSignature(e: Of<"arrow">, path: At<"expr">, src: string, opts: Opts): Doc {
   const expand = opts.expandLastArg === true || opts.expandFirstArg === true;
-  let returned = returnType(e, path, src);
+  let returned = returnType(e, path, src, true);
   if (expand) {
     if (willBreak(returned)) throw bailout;
     returned = group(removeLines(returned));
   }
-  return [e.move ? "move " : "", e.async ? "async " : "", group([parameters(e, path, src, expand, typeParameters(e.typeParams, path, src)), returned])];
+  const beforeArrow = danglingComments(e, src, true);
+  return [
+    e.move ? "move " : "", e.async ? "async " : "", group([parameters(e, path, src, expand, typeParameters(e.typeParams, path, src)), returned]),
+    beforeArrow.length > 0 ? [" ", beforeArrow] : "",
+  ];
 }
 
 function chainSignatures(signatures: Doc[], path: At<"expr">, opts: Opts, shouldBreak: boolean): Doc {
@@ -1877,13 +2242,17 @@ function arrowBody(bodyDoc: Doc, body: Expr | Stmt[], sameLine: boolean, opts: O
 // An object literal: on one line when it fits, unless it was written with a line break after
 // its `{`, which keeps it expanded.
 function object(e: Of<"object">, path: At<"expr">, src: string): Doc {
-  if (e.props.length === 0) return "{}";
+  if (e.props.length === 0) return group(["{", danglingInside(e, src), "}"]);
   const props = e.props.map((prop) => objectProp({ sort: "prop", node: prop, key: "properties", parent: path }, src));
   const expanded = src.slice(e.start, e.props[0]!.start).includes("\n");
-  return group(["{", indent([line, join([",", line], props)]), ifBreak(","), line, "}"], { shouldBreak: expanded });
+  return group(["{", indent([line, separated(e.props, props, [",", line], hardline, src)]), ifBreak(","), line, "}"], { shouldBreak: expanded });
 }
 
 function objectProp(path: At<"prop">, src: string): Doc {
+  return commented(path.node, objectPropDoc(path, src), src);
+}
+
+function objectPropDoc(path: At<"prop">, src: string): Doc {
   const p = path.node;
   switch (p.kind) {
     case "property":
@@ -1933,7 +2302,7 @@ const identifierName = /^[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*$/u;
 // put each on its own line.
 function array(e: Of<"array">, path: At<"expr">, src: string): Doc {
   const elements = e.elements;
-  if (elements.length === 0) return "[]";
+  if (elements.length === 0) return group(["[", danglingInside(e, src), "]"]);
   const last = elements[elements.length - 1];
   const shouldBreak = elements.length > 1 && elements.every((x, i) => {
     if (x?.kind !== "array" && x?.kind !== "object") return false;
@@ -1951,11 +2320,14 @@ function array(e: Of<"array">, path: At<"expr">, src: string): Doc {
     elements.forEach((x, i) => {
       const isLast = i === elements.length - 1;
       parts.push([printedElement(x), isLast ? trailing : ","]);
-      if (!isLast) parts.push(line);
+      const next = elements[i + 1];
+      if (!isLast) parts.push(x && blankAfterElement(src, x.end) ? [hardline, hardline] : next && hasLineComment(next, "leading") ? hardline : line);
     });
     items = fill(parts);
   } else {
-    items = [elements.map((x, i) => [x ? group(printedElement(x)) : "", i < elements.length - 1 ? [",", line] : ""]), trailing];
+    items = [elements.map((x, i) => [
+      x ? group(printedElement(x)) : "", i < elements.length - 1 ? [",", line, x && blankAfterElement(src, x.end) ? softline : ""] : "",
+    ]), trailing];
   }
   return group(["[", indent([softline, items]), softline, "]"], { shouldBreak, id });
 }
@@ -1963,7 +2335,7 @@ function array(e: Of<"array">, path: At<"expr">, src: string): Doc {
 // An array of numbers, possibly signed, which prints filling each line.
 function isConciselyPrintedArray(e: Expr): boolean {
   return e.kind === "array" && e.elements.length > 0 && e.elements.every((x) =>
-    x !== undefined && (x.kind === "int" || x.kind === "float" ||
+    x !== undefined && !commentsOf(x).some((p) => p.placement === "trailing" && p.comment.kind !== "block" && !p.ownLine) && (x.kind === "int" || x.kind === "float" ||
       (x.kind === "unary" && (x.op === "+" || x.op === "-") && (x.operand.kind === "int" || x.operand.kind === "float"))));
 }
 
@@ -2052,7 +2424,7 @@ function classDoc(c: ClassNode, path: Path, src: string, decoratorsPrinted: bool
   const id = groupId("heritageGroup");
   const header = breakHeritage ? [group([...named, indent(heritage)], { id })] : [...named, ...heritage];
   const members = c.members.map((m) => classMember({ sort: "member", node: m, key: "body", parent: path }, src));
-  const classBody = members.length > 0 ? ["{", indent([hardline, join(hardline, members)]), hardline, "}"] : "{}";
+  const classBody = membersBlock(c.members, members, c.members, src);
   const doc = [head, header, breakHeritage && members.length > 0 ? ifBreak(hardline, " ", { groupId: id }) : " ", classBody];
   if (c.decorators.length === 0 || decoratorsPrinted) return doc;
   const exported = path.sort === "stmt" && path.parent?.sort === "stmt" && (path.parent.node.kind === "export" || path.parent.node.kind === "exportDefault");
@@ -2094,6 +2466,10 @@ const methodOrder = ["public", "private", "protected", "static", "abstract", "ov
 const ordered = (modifiers: string[], order: string[]) => order.filter((m) => modifiers.includes(m)).map((m) => `${m} `);
 
 function classMember(path: At<"member">, src: string): Doc {
+  return commented(path.node, classMemberDoc(path, src), src);
+}
+
+function classMemberDoc(path: At<"member">, src: string): Doc {
   const m = path.node;
   const decorators = memberDecorators(m.decorators, path, src);
   // Where the member's name begins: after its decorators, then its modifiers and keywords.
@@ -2149,14 +2525,17 @@ function interfaceDoc(s: Interface, path: At<"stmt">, src: string): Doc {
   // Members print as an object type's do, so they hang off an object type standing for the body.
   const owner: At<"type"> = { sort: "type", node: { kind: "object", members: s.members, start: s.start, end: s.end }, key: "body", parent: path };
   const members = s.members.map((m) => [typeMember(m, owner, src), ";"]);
-  return ["interface", header, " ", members.length > 0 ? ["{", indent([hardline, join(hardline, members)]), hardline, "}"] : "{}"];
+  return ["interface", header, " ", membersBlock(s.members, members, s.members, src)];
 }
 
 function enumDoc(s: Extract<Stmt, { kind: "enum" }>, path: At<"stmt">, src: string): Doc {
-  const members = s.members.map((m) => [
+  const members = s.members.map((m) => commented(m, [
     propertyKey(m.name, m.start, 0, path, src), m.payload ? typeList(m.payload, path, src) : "", m.init ? [" = ", expr(m.init, "initializer", path, src)] : "",
-  ]);
-  const body = members.length > 0 ? group(["{", indent([line, join([",", line], members)]), ifBreak(","), line, "}"], { shouldBreak: true }) : "{}";
+  ], src));
+  const node = attached.blocks.get(s.members);
+  const dangling = node ? danglingComments(node, src) : [];
+  const listed = [separated(s.members, members, [",", line], hardline, src), members.length > 0 ? ifBreak(",") : "", members.length > 0 && dangling.length > 0 ? hardline : "", dangling];
+  const body = members.length > 0 || dangling.length > 0 ? commented(node, group(["{", indent([line, listed]), line, "}"], { shouldBreak: true }), src) : "{}";
   return [s.const ? "const " : "", "enum ", s.name, typeParameters(s.typeParams, path, src), " ", body];
 }
 
@@ -2191,11 +2570,15 @@ function moduleName(s: Stmt, src: string): string {
 function specifierList(list: Specifier[], src: string, alone: boolean): Doc {
   if (list.length === 0) return "{}";
   const printedList = list.map((sp) => specifier(sp, src));
-  if (list.length === 1 && alone) return ["{ ", printedList[0]!, " }"];
+  if (list.length === 1 && alone && !hasComments(list[0]!)) return ["{ ", printedList[0]!, " }"];
   return group(["{", indent([line, join([",", line], printedList)]), ifBreak(","), line, "}"]);
 }
 
 function specifier(sp: Specifier, src: string): Doc {
+  return commented(sp, specifierDoc(sp, src), src);
+}
+
+function specifierDoc(sp: Specifier, src: string): Doc {
   // A name may be a string, as in `{ "a-b" as ab }`, whose quotes the tree doesn't keep.
   const tokens = lexer(src.slice(sp.start, sp.end));
   let t = tokens.next();
@@ -2312,20 +2695,25 @@ function exportDoc(s: Stmt, path: At<"stmt">, src: string): Doc {
 // line, each ending in `,`.
 function matchDoc(e: Of<"match">, path: At<"expr">, src: string): Doc {
   const arms = e.arms.map((arm) => matchArm({ sort: "arm", node: arm, key: "arms", parent: path }, src));
+  const dangling = danglingComments(e, src);
   return [
     group(["match (", indent([softline, expr(e.subject, "subject", path, src)]), softline, ")"]), " {",
-    arms.length > 0 ? indent([hardline, join(hardline, arms)]) : "", hardline, "}",
+    arms.length > 0 ? indent([hardline, separated(e.arms, arms, hardline, hardline, src)]) : dangling.length > 0 ? indent([hardline, dangling]) : "", hardline, "}",
   ];
 }
 
 // `case P if guard => body,`, the body laid out as an arrow function's.
 function matchArm(path: At<"arm">, src: string): Doc {
+  return commented(path.node, matchArmDoc(path, src), src);
+}
+
+function matchArmDoc(path: At<"arm">, src: string): Doc {
   const arm = path.node;
   const head = ["case ", pattern(arm.pattern, "pattern", path, src), arm.guard ? [" if ", expr(arm.guard, "guard", path, src)] : ""];
   const body = arm.body;
-  if (body.kind === "block") return [head, " => ", block(body.body, path, src), ","];
+  if (body.kind === "block") return [head, " => ", commented(body, block(body.body, path, src, true, true, body), src), ","];
   const bodyDoc = printed(at(body, "body", path), src);
-  const sameLine = body.kind === "sequence" || bodyOnSameLine(body, src) || conditionalBody(body);
+  const sameLine = !ownLineLeading(body, src) && (body.kind === "sequence" || bodyOnSameLine(body, src) || conditionalBody(body));
   return [head, group([" =>", group(arrowBody(bodyDoc, body, sameLine, {}))]), ","];
 }
 
@@ -2362,8 +2750,13 @@ function macroDecorators(decorators: Expr[] | undefined, doc: Doc, path: Path, s
 // `|>`. The tree's `pipe` node is read through this view.
 function pipeAsBinary(e: Of<"pipe">): Of<"binary"> {
   // `|>` isn't one of TypeScript's operators, so the view stretches BinaryOp to hold it.
-  return { kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
+  const view: Of<"binary"> = { kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
+  viewed.set(view, e);
+  return view;
 }
+
+// The pipe each binary view stands for, which its comments attach to.
+const viewed = new WeakMap<Expr, Expr>();
 
 // Whether laying `doc` out must break a line: a hard line or a group already broken.
 function willBreak(doc: Doc): boolean {

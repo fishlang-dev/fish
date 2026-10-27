@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import * as prettier from "prettier";
 import { CompileError } from "../src/diag.ts";
-import { parse } from "../src/parser.ts";
-import { format } from "../src/printer.ts";
+import { parse, parseWithComments } from "../src/parser.ts";
+import { assertSameProgram, format, programShape } from "../src/printer.ts";
+import type { Stmt } from "../src/parser.ts";
 
 // Each snippet, valid TypeScript (or JavaScript for the babel parser), is formatted by Fish and
 // by Prettier, and the two must agree.
@@ -34,6 +35,18 @@ function shape(v: unknown): unknown {
 function roundTrip(cases: string[]) {
   for (const code of cases) {
     const out = format(code);
+    expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
+    expect([code, format(out)]).toEqual([code, out]);
+  }
+}
+
+// Each snippet formats keeping its comments, in order and with the same text, to a program that
+// parses back to the same tree and formats again unchanged.
+function keepsComments(cases: string[]) {
+  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text.trim());
+  for (const code of cases) {
+    const out = format(code);
+    expect([code, texts(out)]).toEqual([code, texts(code)]);
     expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
     expect([code, format(out)]).toEqual([code, out]);
   }
@@ -1043,14 +1056,311 @@ test("bare bodies are found in time linear in the file", () => {
   expect(performance.now() - started).toBeLessThan(1000);
 });
 
-test("a comment is refused at its place rather than lost", () => {
-  for (const [src, at] of [["const a = 1; // one\n", 13], ["/* lead */ x;\n", 0], ["#!/usr/bin/env fish\nx;\n", 0]] as const) {
-    let caught: unknown;
-    try {
-      format(src);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toMatchObject({ message: "formatting a file with comments isn't supported yet; comments would be lost", start: at });
+test("comments before, after and between statements, members and declarations print as Prettier prints them", async () => {
+  await agree([
+    "#!/usr/bin/env node\na;",
+    "#!/usr/bin/env node\n\n\n// x\na;",
+    "// only",
+    "a; // end\nb;",
+    "a; /* mid */ b;",
+    "/* lead */ a;",
+    "function f() {\n  // only in block\n}",
+    "function f() { // eol after brace\n  a;\n}",
+    "function f() {\n  a;\n  // after last\n}",
+    "class A {\n    /**\n       * Doc.\n         * more\n     */\n  m() {}\n  // last\n}",
+    "if (a) {\n  // c\n}",
+    "/* a */ /* b */ x;",
+    "\"use strict\";\na();",
+    "a; /* one */ /* two */\nb; // x\n// y\nc;",
+    "const x = 1; /* trailing block */",
+    "if (a) {\n  b; // end\n} // after if",
+    "x = {\n  a: 1, // one\n  b: 2,\n};",
+    "/* only block */",
+    "let a = 1;\n// last comment",
+    "function f() {\n  return; // done\n}",
+    "for (const x of y) {\n  // nothing\n}",
+    "while (x) {\n  // waiting\n}",
+    "try {\n  // trying\n} catch {\n  // caught\n} finally {\n  // done\n}",
+    "label: {\n  // in label\n}",
+    "class D {\n  // only comment\n}",
+    "declare module \"m\" {\n  // inside\n}",
+    "namespace N {\n  // inside\n  export const a = 1;\n}",
+  ]);
+});
+
+test("blank lines collapse to one where Prettier keeps them, and CRLF sources read the same", async () => {
+  await agree([
+    "// one\n\n\n/* two */\n// three",
+    "a;\n\n\n\nb;",
+    "// leading\nconst a = 1; // trailing\n/* block */\nfunction f() {}\n\n/** Doc for g. */\nexport function g() {}",
+    "class A {\n  // before field\n  x = 1; // after field\n\n  /**\n   * Method doc.\n   */\n  m() {}\n\n\n  /* block before */ n() {}\n}",
+    "/**\n * File doc.\n */\n\nimport a from \"a\"; // why\n\n// section\nexport const b = 1;",
+    "interface I {\n  // first\n  a: string; // a's type\n\n\n  b: number;\n}",
+    "enum E {\n  A, // the first\n\n\n  B,\n  // trailing in enum\n}",
+    "const o = {\n  a: 1,\n\n\n  b: 2,\n  // last\n};",
+    "switch (x) {\n  // before case\n  case 1:\n    a();\n\n\n  case 2: // on case\n    b();\n  default:\n    // in default\n}",
+    "\"use strict\";\n\n\na();",
+    "a;\n\n\n// lonely\n\n\nb;",
+    "function f() {\n\n\n  a;\n\n\n  b;\n\n\n}",
+    "type T = {\n  a: string;\n\n  b: number;\n};",
+    "class B {}\n\n\nclass C {}",
+    "a;\r\n\r\n\r\nb; // c\r\n/* x\r\n   y */\r\nc;\r\n",
+    "class A {\r\n  x = 1;\r\n\r\n  /**\r\n   * Doc.\r\n   */\r\n  m() {}\r\n}\r\n",
+    "const t = `a\r\nb`;\r\n",
+    "#!/usr/bin/env node\r\n\r\na;\r\n",
+    "a;\rb;\r\r\rc;",
+  ]);
+});
+
+test("comments inside expressions, types, parameters and arguments print as Prettier prints them", async () => {
+  await agree([
+    "foo(a, // first\n  b);",
+    "foo(/* nothing */);",
+    "foo(\n  // nothing\n);",
+    "const o = { /* empty */ };",
+    "const o = {\n  // empty\n};",
+    "const a = [ /* none */ ];",
+    "const a = [\n  // none\n];",
+    "function f(/* no params */) {}",
+    "function f(\n  a, // the a\n  b,\n) {}",
+    "function f(a /* last */) {}",
+    "const g = (a) => // after arrow\n  a + 1;",
+    "const g = (a) /* before arrow */ => a;",
+    "const g = () => {\n  // empty body\n};",
+    "const x = cond // why\n  ? yes\n  : no;",
+    "const x = cond\n  // explain yes\n  ? yes\n  // explain no\n  : no;",
+    "type U =\n  // first\n  | A\n  // second\n  | B;",
+    "type U = A | /* b */ B;",
+    "type T = {\n  // empty type\n};",
+    "type T = { /* empty */ };",
+    "promise\n  // load\n  .then(a)\n  // parse\n  .then(b);",
+    "promise.then(a) // after then\n  .catch(b);",
+    "const v = a + // plus\n  b;",
+    "const v = // value\n  { a: 1 };",
+    "const v = /* value */ 1;",
+    "let v = {\n  a: 1, // one\n  // before b\n  b: 2,\n};",
+    "import {\n  a, // the a\n  b,\n} from \"m\";",
+    "export {\n  // first\n  a,\n};",
+    "function g(): void /* returns */ {}",
+    "call(a, b /* last */);",
+    "x = [\n  1, // one\n  2,\n];",
+    "foo(a,\n\n  b);",
+    "x = [1,\n\n  2, 3];",
+    "x = [a,\n\n  b];",
+    "if (a) {\n  b;\n} // before else\nelse {\n  c;\n}",
+    "if (a) b;\n// before else\nelse c;",
+    "try {\n  a;\n} // before catch\ncatch (e) {\n  b;\n}",
+    "const fn = function (/* none */) {};",
+    "type M = {\n  // mapped\n  [K in keyof T]: T[K];\n};",
+    "x = a as /* cast */ T;",
+    "const { a, /* b */ b } = c;",
+    "f(() => {\n  // empty callback\n});",
+    "const v = cond ? /* yes */ a : /* no */ b;",
+    "x = a && b // reason\n  && c;",
+    "function f<\n  // the type\n  T,\n>(x: T) {}",
+    "type M = {\n  readonly [K in keyof T]: T[K]; // each\n};",
+    "const o = {\n  // leading key\n  a: 1,\n  b: /* inline */ 2,\n  c: 3, // trailing\n};",
+    "import a, // default\n{ b } from \"m\";",
+    "export const x = 1; // exported",
+    "foo(a, b, c); // done",
+    "foo(veryLongArgumentNumberOne, veryLongArgumentNumberTwo, // why\n  three);",
+    "const sum = values.reduce((a, b) => a + b, 0); // total",
+    "const f = async () => {\n  await x; // wait\n};",
+    "type T = {\n  a: string; // first\n  /** the b */\n  b: number;\n};",
+    "interface I {\n  /**\n   * Method.\n   */\n  m(): void; // trailing\n}",
+    "x = cond\n  ? a // when yes\n  : b; // when no",
+    "const v = [\n  // first\n  a,\n  b, // second\n];",
+    "foo(\n  // leading arg\n  a,\n);",
+    "const x = {\n  a, // short\n  b,\n};",
+    "class A {\n  constructor(\n    private a: string, // first\n    private b: number,\n  ) {}\n}",
+    "switch (a) {\n  case 1: // one\n    break;\n  // before default\n  default:\n}",
+    "function g(\n  a: string,\n  // b next\n  b: number,\n): void {}",
+    "type U = A | B; // union",
+    "type F = (a: string /* the a */) => void;",
+    "@dec // why\nclass A {}",
+    "const value = someFunction(/* inline */ argument);",
+    "a = b /* after b */;",
+    "return; // never",
+    "let x: /* type */ string = \"a\";",
+    "for (const a of b) /* body */ c();",
+    "const fn = (/* nothing */) => 1;",
+    "label: // why\nfor (;;) {}",
+  ]);
+});
+
+test("comments around pipeline stages print as Prettier's babel parser prints them", async () => {
+  await agree([
+    "let r = input\n  // parse it\n  |> parse(%)\n  |> validate(%); // checked",
+    "let r = input |> parse(%) /* parsed */ |> validate(%);",
+    "let r = input // raw\n  |> parse(%);",
+    "let r = input |> f(%); // done",
+  ], "babel");
+});
+
+test("comments in Fish's own syntax print in the place of their nearest TypeScript form", () => {
+  golden([
+    ["let n = match (value) {\n  // the present case\n  case Some(v) => v, // just v\n  /* absent */\n  case None => 0,\n};", "let n = match (value) {\n  // the present case\n  case Some(v) => v, // just v\n  /* absent */\n  case None => 0,\n};\n"],
+    ["let n = match (value) {\n  case Some(v) => {\n    // inside the arm\n    return v;\n  },\n  case _ => 0,\n};", "let n = match (value) {\n  case Some(v) => {\n    // inside the arm\n    return v;\n  },\n  case _ => 0,\n};\n"],
+    ["let n = match (value) {\n  case 1 | // one\n    2 => \"few\",\n  case _ => \"some\",\n};", "let n = match (value) {\n  case 1 // one\n    | 2 => \"few\",\n  case _ => \"some\",\n};\n"],
+    ["let n = match (value) {\n  case { kind: \"a\", // the kind\n    x } => x,\n  case _ => 0,\n};", "let n = match (value) {\n  case {\n    kind: \"a\", // the kind\n    x,\n  } => x,\n  case _ => 0,\n};\n"],
+    ["let n = match (value) {\n  case x if x > 0 => // positive\n    x,\n  case _ => 0,\n};", "let n = match (value) {\n  case x if x > 0 =>\n    // positive\n    x,\n  case _ => 0,\n};\n"],
+    ["let n = match (value) {\n  // nothing yet\n};", "let n = match (value) {\n  // nothing yet\n};\n"],
+    ["comptime {\n  // at compile time\n  const a = 1; // one\n}", "comptime {\n  // at compile time\n  const a = 1; // one\n}\n"],
+    ["comptime {\n  // empty\n}", "comptime {\n  // empty\n}\n"],
+    ["unsafe {\n  free(p); // freed\n}", "unsafe {\n  free(p); // freed\n}\n"],
+    ["const p = unsafe { /* raw */ deref(ptr) };", "const p = unsafe { /* raw */ deref(ptr) };\n"],
+    ["const x = comptime /* now */ fib(10);", "const x = comptime /* now */ fib(10);\n"],
+    ["// the macro\n@derive(Json) // derived\ntype Point = { x: i64 };", "// the macro\n@derive(Json) // derived\ntype Point = { x: i64 };\n"],
+    ["/** Macro doc. */\nmacro function m(a: Ast): Ast {\n  return a; // as is\n}", "/** Macro doc. */\nmacro function m(a: Ast): Ast {\n  return a; // as is\n}\n"],
+    ["enum Shape {\n  // round\n  Circle(f64), // radius\n  Rect(f64, f64),\n}", "enum Shape {\n  // round\n  Circle(f64), // radius\n  Rect(f64, f64),\n}\n"],
+    ["function f(): i64 throws E /* may fail */ {\n  return 1;\n}", "function f(): i64 throws E /* may fail */ {\n  return 1;\n}\n"],
+    ["const f = move (x) => x; // moved", "const f = move (x) => x; // moved\n"],
+  ]);
+});
+
+test("spreads in object literals and blank lines after parenthesized endings print as Prettier prints them", async () => {
+  await agree([
+    "x = { ...(a && { b }), ...(c ? d : e), ...(await f), ...g };",
+    "export type A = Span & (\n  | { kind: \"a\" }\n  | { kind: \"b\" }\n);\n\nexport type B = string;",
+    "type A = (string);\n\ntype B = number;",
+  ]);
+});
+
+test("comments next to return values, substitutions, type annotations and indexes print as Prettier prints them", async () => {
+  await agree([
+    "function f() { return (// c\n a); }",
+    "function f() { return a\n// c\n.b }",
+    "function f() { return (/* a\n b */ x) }",
+    "function f() { return o.\n/*c*/\nn }",
+    "function f() { throw (// c\n a); }",
+    "x = `${a}${// c\nb}`;",
+    "let i: // c2\n usize = 0// c3\n;",
+    "x = xs// c2\n[ // c3\n0];",
+    "for/*c1*/ (let i = 0; i < 1; i++) {}",
+    "for (let i = // c1\n0; i < 50; i++) {}",
+    "const t: [/* c */] = [];",
+    "const [/* c */] = a;",
+    "const f = (a) => // c\n(b) => 1;",
+    "function g</* c */ const U>() {}",
+    "x = `a\\r\\nb`;",
+  ]);
+});
+
+test("a comment spanning lines before a token that can't follow a line break waits for the line's end", () => {
+  keepsComments([
+    "type R = (A /* c\nd */)[];",
+    "let x: (A /* c\nd */)[] = y;",
+    "type R = (A | B /* c\nd */)[];",
+    'type R = (A /* c\nd */)["k"];',
+    "f = (a: T): (U /* c\nd */)[] => 1;",
+    "x = (a /* c\nd */)!;",
+    "x = (a.b() /* c\nd */)!.c.d.e();",
+    "x = (a /* c\nd */)++;",
+    "(a /* c\nd */)--;",
+    "x = (a /* c\nd */) as T;",
+    "x = (a /* c\nd */) satisfies T;",
+    "type R = (A /* c\nd */) extends B ? C : D;",
+    "class A extends B /* c\nd */ implements C {}",
+    "class A extends (B /* c\nd */) {}",
+    "class A implements C /* c\nd */, D {}",
+    "interface I extends J /* c\nd */, K {}",
+    "function f<T extends U /* c\nd */>() {}",
+  ]);
+});
+
+test("a one-line comment before such a token stays in place without flushing a pending line comment", async () => {
+  await agree(["type R = A /* c */[];", "x = a /* c */!;", "x = a /* c */++;", "x = a /* c */ as T;", "type R = A /* c */ extends B ? C : D;"]);
+  // Prettier flushes the line comment here, putting a line break before `[]` and splitting the
+  // declaration; the tree is kept at the cost of the comments' order.
+  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text).sort();
+  for (const code of ["type R = A[ // c2\n] /* c3 */ [];", "const os: (string | null // c1\n)/** c2 */[] = [null];"]) {
+    const out = format(code);
+    expect([code, shape(parse(out)), texts(out)]).toEqual([code, shape(parse(code)), texts(code)]);
+    expect(format(out)).toBe(out);
   }
+});
+
+test("output whose tree differs from the source's is refused as a change of meaning", () => {
+  const meaning = programShape(parse("x = a - (b - c);"));
+  expect(() => assertSameProgram(meaning, parse("x = a - b - c;"))).toThrow("the formatter changed the program's meaning");
+  expect(() => assertSameProgram(meaning, parse("x = (a - (b - c));"))).not.toThrow();
+  expect(() => assertSameProgram(programShape(parse("x = a && (b && c);")), parse("x = a && b && c;"))).not.toThrow();
+});
+
+test("comments that fall back to an enclosing node are moved in time linear in their number", () => {
+  const src = Array.from({ length: 6400 }, (_, i) => `import /* c${i} */ * as m${i} from "m${i}";`).join("\n");
+  const started = performance.now();
+  format(src);
+  expect(performance.now() - started).toBeLessThan(600);
+});
+
+test("comments anywhere are kept, in order, with the tree the same and formatting stable", () => {
+  keepsComments([
+    "print(w!.c /* c2 */ !.next());",
+    "@named( /* c1 */ 1) function f(\n// c2\n\n/* c3 */\n) {}",
+    "type Clash = \n// c1\n{ [K in \"a\" | \"b\" as\n// c2\n \"same\"]: // c3\n i64 };",
+    "function f() { return (// c\n a); }",
+    "function f() { return a\n// c\n.b }",
+    "function f() { return (/* a\n b */ x) }",
+    "function f() { return o.\n/*c*/\nn }",
+    "function f() { throw (// c\n a); }",
+    "x = `${a}${// c\nb}`;",
+    "let i: // c2\n usize = 0// c3\n;",
+    "x = xs// c2\n[ // c3\n0];",
+    "for/*c1*/ (let i = 0; i < 1; i++) {}",
+    "for (const x of// c1\n xs) {}",
+    "for (let i = // c1\n0; i < 50; i++) {}",
+    "import /*c1*/* as fs from \"node:fs\";",
+    "import m = require(\"./other\") /* c1 */ ;",
+    "export * from // c2\n  /* c3 */ \"./doubling\";",
+    "export { add, times3 as /*c3*/triple };",
+    "class // c1\nDog extends Animal {}",
+    "class Dog\n// c1\n extends Animal {}",
+    "class Point  /* c1 */ {}",
+    "interface /* c1 */  Empty {}",
+    "enum /* c */ E { A }",
+    "type U2 = (infer // c1\nU)[];",
+    "const t: [/* c */] = [];",
+    "const [/* c */] = a;",
+    "const f = (a) => // c\n(b) => 1;",
+    "function g</* c */ const U>() {}",
+    "x = Mode./*c*/Off;",
+    "outer: for (;;) { break /*c*/ outer; }",
+    "x = import /*c*/ .meta;",
+    "function* g() { yield (// c\n a); }",
+    "x = a ?? throw (// c\n b);",
+    "x = `a\\r\\nb`;",
+    "function main() {\n  const ch \n/* c1 */\n=// c2\n new Channel<i64>(n);\n}",
+    "const f = (n: i64) => n + (name.length as \n// c2\ni64)/** c3 */;",
+    "function bad(u // c2\n: Ref<A /* c3 */  | B>): Ref<i64> {}",
+    "declare function  // c1\nmain\n// c2\n(): void;",
+    "declare class // c\nA {}",
+    "const ch = new Channel<// c1\n // c2\nstring>(2);",
+    "function /* c1 */  main(/** c2 */) {}",
+    "function main // c2\n(// c3\n) {}",
+    "let n = match (x) {\n  case/*c1*/ _ => /* c2 */ {},\n};",
+    "infer_: { type U2<T> = T extends (infer // c1\nU)[] ? U : never; }",
+    "let n = match (x) { case Seq\n// c2\n.Nil => 0, case _ => 1 };",
+    "const [/* c */] = a;",
+    "x = a ?? throw (// c\n b);",
+    "function* g() { yield (// c\n a); }",
+    "function f(t: [/* c */]) {}",
+    "x = `${a /* c */}`;",
+    "t[0]  // c1\n= \"x\";// c2\nconsole.log(t[ // c3\n1]);",
+    "function deep<T>(x // c1\n:// c2\n T, n: i64) {}",
+    "import React/** c1 */, { useState } from \"react\";\nconst lazy = await import// c2\n(\"./lazy.ts\");",
+  ]);
+});
+
+test("a template's CR and CRLF line endings read as LF, as JavaScript reads them", () => {
+  const template = (src: string) => (parse(src)[0] as Extract<Stmt, { kind: "expr" }>).expr;
+  expect(shape(template("x = `a\rb\r\nc`;"))).toEqual(shape(template("x = `a\nb\nc`;")));
+  expect(format("x = `a\r\nb${c}\rd`;\r\n")).toBe("x = `a\nb${c}\nd`;\n");
+});
+
+test("a long array of numbers fills its lines in time linear in its length", () => {
+  const src = `x = [${Array.from({ length: 64000 }, (_, i) => i).join(", ")}];`;
+  const started = performance.now();
+  format(src);
+  expect(performance.now() - started).toBeLessThan(3000);
 });

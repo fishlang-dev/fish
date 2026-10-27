@@ -10,9 +10,11 @@ export type Doc =
   | { kind: "line"; soft: boolean; hard: boolean; literal: boolean }
   | { kind: "ifBreak"; breakContents: Doc; flatContents: Doc; groupId: string | undefined }
   | { kind: "indentIfBreak"; contents: Doc; groupId: string; negate: boolean }
-  | { kind: "fill"; parts: Doc[] }
+  // `printed` counts the parts already laid out, so a long fill is walked once, not copied.
+  | { kind: "fill"; parts: Doc[]; printed: number }
   | { kind: "breakParent" }
-  | { kind: "lineSuffix"; contents: Doc }
+  // `endsLine` marks a suffix, such as a line comment, after which nothing may follow on its line.
+  | { kind: "lineSuffix"; contents: Doc; endsLine: boolean }
   | { kind: "lineSuffixBoundary" }
   | { kind: "label"; label: string; contents: Doc }
   | { kind: "trim" };
@@ -37,8 +39,8 @@ export function conditionalGroup(states: Doc[], options: { shouldBreak?: boolean
 export const indent = (contents: Doc): Doc => ({ kind: "indent", contents });
 // An `n` of -Infinity goes back to the left margin, as Prettier's dedentToRoot does.
 export const align = (n: number, contents: Doc): Doc => ({ kind: "align", n, contents });
-export const fill = (parts: Doc[]): Doc => ({ kind: "fill", parts });
-export const lineSuffix = (contents: Doc): Doc => ({ kind: "lineSuffix", contents });
+export const fill = (parts: Doc[]): Doc => ({ kind: "fill", parts, printed: 0 });
+export const lineSuffix = (contents: Doc, endsLine = false): Doc => ({ kind: "lineSuffix", contents, endsLine });
 export const label = (name: string, contents: Doc): Doc => ({ kind: "label", label: name, contents });
 
 export function ifBreak(breakContents: Doc, flatContents: Doc = "", options: { groupId?: string } = {}): Doc {
@@ -143,6 +145,8 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
   let restAt = rest.length;
   const cmds: { mode: Mode; doc: Doc }[] = [next];
   const out: string[] = [];
+  // A line's space counts only once something follows it on the line.
+  let pendingSpace = false;
   while (room >= 0) {
     if (cmds.length === 0) {
       if (restAt === 0) return true;
@@ -151,6 +155,11 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
     }
     const { mode, doc } = cmds.pop()!;
     if (typeof doc === "string") {
+      if (doc.length > 0 && pendingSpace) {
+        out.push(" ");
+        room--;
+        pendingSpace = false;
+      }
       out.push(doc);
       room -= width(doc);
       continue;
@@ -161,7 +170,7 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
     }
     switch (doc.kind) {
       case "fill":
-        for (let i = doc.parts.length - 1; i >= 0; i--) cmds.push({ mode, doc: doc.parts[i]! });
+        for (let i = doc.parts.length - 1; i >= doc.printed; i--) cmds.push({ mode, doc: doc.parts[i]! });
         break;
       case "indent":
       case "align":
@@ -186,22 +195,25 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
       }
       case "line":
         if (mode === "break" || doc.hard) return true;
-        if (!doc.soft) {
-          out.push(" ");
-          room--;
-        }
+        if (!doc.soft) pendingSpace = true;
         break;
       case "lineSuffix":
         hasLineSuffix = true;
         break;
       case "lineSuffixBoundary":
-        if (hasLineSuffix) return true;
+        // A pending line suffix, such as a trailing comment, would have to print here.
+        if (hasLineSuffix) return false;
         break;
       case "breakParent":
         break;
     }
   }
   return false;
+}
+
+function startsWithHardLine(doc: Doc): boolean {
+  if (Array.isArray(doc)) return doc.length > 0 && startsWithHardLine(doc[0]!);
+  return typeof doc === "object" && doc.kind === "line" && doc.hard;
 }
 
 // Lays `doc` out at `printWidth` columns with two-space indentation.
@@ -211,6 +223,7 @@ export function print(doc: Doc, printWidth = 80): string {
   const cmds: Command[] = [{ ind: root, mode: "break", doc }];
   const out: string[] = [];
   const suffixes: Command[] = [];
+  const suffixEndsLine: boolean[] = [];
   let pos = 0;
   let remeasure = false;
   while (cmds.length > 0) {
@@ -264,7 +277,9 @@ export function print(doc: Doc, printWidth = 80): string {
         }
         case "fill": {
           const room = printWidth - pos;
-          const [content, whitespace] = doc.parts;
+          const at = doc.printed;
+          const content = doc.parts[at];
+          const whitespace = doc.parts[at + 1];
           if (content === undefined) break;
           const contentFlat: Command = { ind, mode: "flat", doc: content };
           const contentBreak: Command = { ind, mode: "break", doc: content };
@@ -275,13 +290,13 @@ export function print(doc: Doc, printWidth = 80): string {
           }
           const whitespaceFlat: Command = { ind, mode: "flat", doc: whitespace };
           const whitespaceBreak: Command = { ind, mode: "break", doc: whitespace };
-          if (doc.parts.length === 2) {
+          if (doc.parts.length - at === 2) {
             if (contentFits) cmds.push(whitespaceFlat, contentFlat);
             else cmds.push(whitespaceBreak, contentBreak);
             break;
           }
-          const remaining: Command = { ind, mode, doc: fill(doc.parts.slice(2)) };
-          const pairFits = fits({ ind, mode: "flat", doc: [content, whitespace, doc.parts[2]!] }, [], room, suffixes.length > 0, modes, true);
+          const remaining: Command = { ind, mode, doc: { ...doc, printed: at + 2 } };
+          const pairFits = fits({ ind, mode: "flat", doc: [content, whitespace, doc.parts[at + 2]!] }, [], room, suffixes.length > 0, modes, true);
           if (pairFits) cmds.push(remaining, whitespaceFlat, contentFlat);
           else if (contentFits) cmds.push(remaining, whitespaceBreak, contentFlat);
           else cmds.push(remaining, whitespaceBreak, contentBreak);
@@ -299,7 +314,9 @@ export function print(doc: Doc, printWidth = 80): string {
           break;
         }
         case "lineSuffix":
-          suffixes.push({ ind, mode, doc: doc.contents });
+          // A suffix after one that ends its line starts a line of its own.
+          suffixes.push({ ind, mode, doc: suffixEndsLine.at(-1) && !startsWithHardLine(doc.contents) ? [hardline, doc.contents] : doc.contents });
+          suffixEndsLine.push(doc.endsLine);
           break;
         case "lineSuffixBoundary":
           if (suffixes.length > 0) cmds.push({ ind, mode, doc: { kind: "line", soft: false, hard: true, literal: false } });
@@ -316,6 +333,7 @@ export function print(doc: Doc, printWidth = 80): string {
           if (suffixes.length > 0) {
             cmds.push({ ind, mode, doc }, ...suffixes.reverse());
             suffixes.length = 0;
+            suffixEndsLine.length = 0;
             break;
           }
           if (doc.literal) {
@@ -338,6 +356,7 @@ export function print(doc: Doc, printWidth = 80): string {
     if (cmds.length === 0 && suffixes.length > 0) {
       cmds.push(...suffixes.reverse());
       suffixes.length = 0;
+      suffixEndsLine.length = 0;
     }
   }
   return out.join("");

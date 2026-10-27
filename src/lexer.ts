@@ -69,9 +69,10 @@ function template(src: string, i: number): [string, number, boolean] {
       const [escaped, end] = escape(src, i);
       value += escaped;
       i = end;
-    } else if (src.startsWith("\r\n", i)) {
+    } else if (src[i] === "\r") {
+      // JavaScript reads a template's CR and CRLF as LF.
       value += "\n";
-      i += 2;
+      i += src[i + 1] === "\n" ? 2 : 1;
     } else {
       value += src[i++];
     }
@@ -197,7 +198,8 @@ export function lexer(src: string): Lexer {
     } else if (c === "`" || (c === "}" && substitutions.at(-1) === 0)) {
       const [value, end, more] = template(src, i + 1);
       i = end;
-      const raw = src.slice(start + 1, end - (more ? 2 : 1));
+      // The raw text, too, has its line endings read as LF, as JavaScript reads them.
+      const raw = src.slice(start + 1, end - (more ? 2 : 1)).replace(/\r\n?/g, "\n");
       if (c === "`") {
         if (more) substitutions.push(0);
         return { ...token(more ? "templateHead" : "template", value, start), raw };
