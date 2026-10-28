@@ -277,3 +277,19 @@ test("fallible calls and awaits are hinted with what they throw", async () => {
   s.notify("exit");
   expect(await s.proc.exited).toBe(0);
 }, 20_000);
+
+test("a TS-compat document is refused at its directive, pointing at fishc lint", async () => {
+  const src = "// @fish-edition ts-compat\nfunction main() {}\n";
+  const uri = Bun.pathToFileURL(file("compat.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  const [d, ...more] = diagnostics(await s.next(published(uri)));
+  expect(more).toEqual([]);
+  expect(d!.range).toEqual({ start: { line: 0, character: 0 }, end: { line: 0, character: 26 } });
+  expect(d!.message).toContain("run 'fishc lint'");
+  s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: src.replace("ts-compat", "native") }] });
+  expect(diagnostics(await s.next(published(uri)))).toEqual([]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);

@@ -53,6 +53,12 @@ test("each rule counts what the sample shows", () => {
   });
 });
 
+test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
+  expect(counts("function f() {\n  eval(\"1\");\n  const g = new Function(\"x\");\n  A.prototype.m = g;\n  Object.defineProperty(o, \"k\", {});\n  delete o.k;\n}\n")).toEqual({ R1: 2, R2: 2, R3: 1 });
+  expect(counts("function f() {\n  return arguments.length;\n}\nconst s = Symbol(\"s\");\n")).toEqual({ R5: 1, R6: 1 });
+  expect(counts("interface I { a: number }\ninterface I { b: number }\nclass C {}\nnamespace C { export const x = 1; }\n")).toEqual({ R7: 2, namespaces: 1 });
+});
+
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {
   expect(counts("function main() {\n  setTimeout(f, 1);\n  const t = setInterval(f, 2, a, b);\n  clearTimeout(t);\n}\n")).toEqual({});
   expect(counts("function main() {\n  setImmediate(f);\n  setTimeout(f, 1).unref();\n  setTimeout(f, 1, a, b, c);\n}\n")).toEqual({ timerForms: 3 });
@@ -91,7 +97,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("class D { f: <T>(x: T) => T = id; }\nconst xs: (<T>(x: T) => T)[] = [];\nconst u: (<T>(x: T) => T) | number = 1;\n")).toEqual({ genericFunctionsHeld: 3 });
   expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
-  expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
+  expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2, R7: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
 });
@@ -181,7 +187,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(51);
+  expect(r.rules.length + r.waiting.length).toBe(54);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {

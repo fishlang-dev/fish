@@ -11,15 +11,16 @@ import { locking, resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
-import { createPackage, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
+import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { expandMacros } from "./macros.ts";
-import type { Stmt } from "./parser.ts";
+import { parse, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
 import { fishFiles, formatPaths, formatStdin } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
+import { directive, REJECTS, rejects } from "./migrate.ts";
 import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, stripTests, type Test } from "./tests.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
@@ -228,6 +229,63 @@ async function testPackage(dir: string, filter: string | undefined): Promise<num
   }
 }
 
+// Lints the TS-compat files among `paths`, a directory standing for its `.fsh` files as for
+// `fishc fmt`: each reject rule's hit is printed as an error is, then the count. A file named
+// itself that is native is said to have nothing to lint. Gives the exit code: 1 when anything is
+// to change or couldn't be read, else 0.
+function lintPaths(paths: string[]): number {
+  let code = 0;
+  const problem = (message: string) => {
+    console.error(message.replace(/^fishc fmt/, "fishc lint"));
+    code = 1;
+  };
+  const files: { path: string; named: boolean }[] = [];
+  for (const path of paths) {
+    if (!existsSync(path)) problem(`fishc lint: can't find '${path}'`);
+    else if (statSync(path).isDirectory()) files.push(...fishFiles(path, problem).map((f) => ({ path: f, named: false })));
+    else files.push({ path, named: true });
+  }
+  // A manifest that can't be read is reported once, as "broken", and its files are skipped.
+  const editions = new Map<string, Edition | "broken">();
+  const packaged = (file: string) => {
+    const manifest = findManifest(dirname(file));
+    if (!manifest) return undefined;
+    if (!editions.has(manifest)) {
+      try {
+        editions.set(manifest, loadManifest(manifest).edition);
+      } catch (e) {
+        editions.set(manifest, "broken");
+        throw e;
+      }
+    }
+    return editions.get(manifest);
+  };
+  let [hits, changed] = [0, 0];
+  for (const { path, named } of files) {
+    const shown = relative(process.cwd(), path) || path;
+    let src = "";
+    try {
+      src = readFileSync(path, "utf8");
+      const edition = directive(src)?.edition ?? packaged(path) ?? "native";
+      if (edition === "broken") continue;
+      if (edition === "native") {
+        if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
+        continue;
+      }
+      const found = rejects(parse(src)).sort((a, b) => a.start - b.start || a.end - b.end);
+      for (const hit of found) console.log(formatError(new CompileError(REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `reject ${hit.rule}`));
+      hits += found.length;
+      if (found.length > 0) changed++;
+    } catch (e) {
+      if (!(e instanceof CompileError)) problem(`fishc lint: can't read '${shown}': ${e instanceof Error ? e.message : e}`);
+      // A manifest's error carries its own source; any other is in this file.
+      else problem(formatError(e, shown, src));
+    }
+  }
+  console.log(`${hits} to change in ${changed} file${changed === 1 ? "" : "s"}`);
+  return hits > 0 ? 1 : code;
+}
+
 // The vendored JS engine, compiled into a program only when it calls the engine.
 export const ENGINE = join(import.meta.dir, "..", "vendor", "quickjs-ng");
 export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"].map((f) => join(ENGINE, f));
@@ -349,6 +407,16 @@ else if (import.meta.main) {
     }
     process.exit(formatPaths(paths, check));
   }
+  if (command === "lint") {
+    const paths = positionals.slice(1);
+    if (Object.keys(values).some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc lint [<path>...]");
+    if (paths.length === 0) {
+      const found = findManifest(process.cwd());
+      if (!found) fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
+      paths.push(dirname(found));
+    }
+    process.exit(lintPaths(paths));
+  }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
     if (positionals.length > 2 || Object.keys(values).some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
@@ -467,7 +535,7 @@ else if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {

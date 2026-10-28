@@ -58,9 +58,9 @@ export function locate(src: string, offset: number) {
   return { line, col: offset - lineStart + 1, lineStart, lineEnd };
 }
 
-// Renders `file:line:col: error: msg` followed by the source line with a caret underline,
-// then the same for its note.
-export function formatError(e: CompileError, path: string, program: string): string {
+// Renders `file:line:col: error: msg`, or another `kind` than `error`, followed by the source line
+// with a caret underline, then the same for its note.
+export function formatError(e: CompileError, path: string, program: string, kind = "error"): string {
   const lines = (kind: string, note: Note) => {
     const { src, file, offset } = sourceOf(program, path, note.start, e.sources);
     // A position past its text would pad the caret line without end.
@@ -76,7 +76,7 @@ export function formatError(e: CompileError, path: string, program: string): str
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];
   };
-  return [...lines("error", e), ...(e.note ? lines("note", e.note) : [])].join("\n");
+  return [...lines(kind, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
 }
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
