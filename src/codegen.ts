@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -54,9 +54,11 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
   return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
 }
 
-// An instance's name in the IR. A generic class's instance is named by its type arguments,
-// which may hold quotes, so those are escaped as LLVM spells them.
-const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${i.symbol.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`);
+// A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
+// test by its name, which may hold quotes, so those are escaped as LLVM spells them.
+const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
+// An instance's name in the IR.
+const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
 
 // The `Math` functions LLVM's intrinsics compute exactly. The rest call the runtime's
 // correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
@@ -507,6 +509,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${v} = ${line}`);
       return v;
     }
+  }
+
+  // An assertion: a panic at the call, with its message or `assertion failed`, when it is false.
+  function assertCall(e: Extract<Expr, { kind: "call" }>): undefined {
+    const holds = value(e.args[0]!);
+    // The message is made whether or not the condition holds, as TypeScript evaluates any call's
+    // arguments.
+    const message = e.args[1] && operand(e.args[1], []);
+    const [fail, ok] = [label(), label()];
+    emit(`br i1 ${holds}, label %${ok}, label %${fail}`);
+    startBlock(fail);
+    unwinding(message ? `call void @fsh_rt_panic_string(ptr ${panicAt(e)}, ptr ${message})` : `call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nassertion failed\n`)})`);
+    emit("unreachable");
+    startBlock(ok);
+    return undefined;
   }
 
   // A number parsed by the runtime, or null where JavaScript would give NaN.
@@ -6079,6 +6096,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (jsonCalls.get(e) === "stringify") return stringifyCall(e);
       if (jsonCalls.get(e) === "parse") return parseJsonCall(e);
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
+      if (asserts.has(e)) return assertCall(e);
       if (fixedPrints.has(e)) return toFixed(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);
       if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
@@ -7703,7 +7721,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // writes the result into the task's output and says pending (0), ready (1), failed (2) or
   // panicked (3); a drop of the frame where it stopped; and a drop of the output it gave.
   function taskGlue(future: FutureType): [string, string, string] {
-    const name = (kind: string) => `@"task.${kind}.${futureOf.get(future)!.symbol}"`;
+    const name = (kind: string) => `@"task.${kind}.${quoted(futureOf.get(future)!.symbol)}"`;
     if (!glued.has(future)) {
       glued.add(future);
       const [frame, type] = [llvm(future), pollType(future)];

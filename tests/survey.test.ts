@@ -388,7 +388,7 @@ test("dependencies are sorted into std, planned, native, pure and not installed"
       plain: "pure", "@scope/plain": "pure", hoisted: "pure", missing: "unknown", vitest: "planned",
     });
     expect(d.counts).toEqual({ std: 1, planned: 1, native: 5, pure: 3, unknown: 1 });
-    expect(d.list.find((x) => x.name === "vitest")).toMatchObject({ dev: true, kind: "unknown", equivalent: { name: "Test runner", planned: true } });
+    expect(d.list.find((x) => x.name === "vitest")).toMatchObject({ dev: true, kind: "unknown", equivalent: { name: "Jest-style test API", planned: true } });
     const r = survey(join(dir, "app"));
     expect(r.dependencies).toEqual(d);
     const text = formatReport(r);
@@ -464,7 +464,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Test runner", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
 });

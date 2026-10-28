@@ -1,8 +1,18 @@
 import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 
+// Names the compiler made up, as a message should show them: a test's function, `test "x"`, as
+// the test it is. Only names recorded here are rewritten, so text a user wrote is left alone.
+export const madeUpNames = new Map<string, string>();
+
 // How a message reads: without the suffix a top-level name takes to tell it apart from another
-// file's (`helper-fsh2`).
-export const shown = (text: string) => text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+// file's (`helper-fsh2`), and with made-up names shown as the user knows them.
+export function shown(text: string): string {
+  for (const [name, display] of madeUpNames) {
+    const quoted = new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-fsh\\d+)?'`, "g");
+    text = text.replace(quoted, () => display);
+  }
+  return text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+}
 
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
