@@ -69,9 +69,10 @@ function template(src: string, i: number): [string, number, boolean] {
       const [escaped, end] = escape(src, i);
       value += escaped;
       i = end;
-    } else if (src.startsWith("\r\n", i)) {
+    } else if (src[i] === "\r") {
+      // JavaScript reads a template's CR and CRLF as LF.
       value += "\n";
-      i += 2;
+      i += src[i + 1] === "\n" ? 2 : 1;
     } else {
       value += src[i++];
     }
@@ -105,8 +106,13 @@ function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
   return [end, kind];
 }
 
+// A comment as written, markers included, kept for the formatter and doc comments.
+export type Comment = { kind: "line" | "block" | "shebang"; text: string; start: number; end: number };
+
 export type Lexer = {
   next(): Token;
+  // Every comment scanned so far, in source order.
+  comments: Comment[];
   // Scans again from `slash`, a `/` or `/=` token, reading a regular expression instead.
   regex(slash: Token): Token;
 };
@@ -119,6 +125,8 @@ export function lexer(src: string): Lexer {
   // For each template substitution we are inside, how many `{` it has open, so the `}` that
   // closes the substitution can be told from one that closes a block or an object.
   let substitutions: number[] = [];
+  const comments: Comment[] = [];
+  const comment = (kind: Comment["kind"], start: number) => comments.push({ kind, text: src.slice(start, i), start, end: i });
   const token = (kind: Token["kind"], text: string, start: number): Token => {
     const t: Token = { kind, text, start, end: i, newlineBefore };
     newlineBefore = false;
@@ -126,6 +134,7 @@ export function lexer(src: string): Lexer {
   };
 
   return {
+    comments,
     next() {
       for (;;) {
         const t = scan();
@@ -133,6 +142,8 @@ export function lexer(src: string): Lexer {
       }
     },
     regex(slash) {
+      // What was scanned past the slash is read again, and a `//` there may be part of the regex.
+      while (comments.length > 0 && comments.at(-1)!.start > slash.start) comments.pop();
       i = slash.start;
       newlineBefore = slash.newlineBefore;
       substitutions = [...slash.substitutions!];
@@ -162,14 +173,17 @@ export function lexer(src: string): Lexer {
       i++;
     } else if (src.startsWith("//", i)) {
       while (i < src.length && src[i] !== "\n") i++;
+      comment("line", start);
     } else if (src.startsWith("/*", i)) {
       const close = src.indexOf("*/", i + 2);
       if (close < 0) throw new CompileError("unterminated comment", i, i + 2);
       if (src.slice(i, close).includes("\n")) newlineBefore = true;
       i = close + 2;
+      comment("block", start);
     } else if (start === 0 && src.startsWith("#!")) {
       // A shebang line, allowed only at the very start of a file.
       while (i < src.length && src[i] !== "\n") i++;
+      comment("shebang", start);
     } else if (c === "#" && /[\p{ID_Start}_$]/u.test(src[i + 1] ?? "")) {
       i++;
       while (i < src.length && /[\p{ID_Continue}$\u200c\u200d]/u.test(src[i]!)) i++;
@@ -184,7 +198,8 @@ export function lexer(src: string): Lexer {
     } else if (c === "`" || (c === "}" && substitutions.at(-1) === 0)) {
       const [value, end, more] = template(src, i + 1);
       i = end;
-      const raw = src.slice(start + 1, end - (more ? 2 : 1));
+      // The raw text, too, has its line endings read as LF, as JavaScript reads them.
+      const raw = src.slice(start + 1, end - (more ? 2 : 1)).replace(/\r\n?/g, "\n");
       if (c === "`") {
         if (more) substitutions.push(0);
         return { ...token(more ? "templateHead" : "template", value, start), raw };

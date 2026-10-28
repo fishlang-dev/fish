@@ -11,6 +11,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.4.3",
-    "typescript": "^7.0.2"
+    "prettier": "3",
+    "typescript": "^7.0.2",
+    "typescript5": "npm:typescript@5"
   }
 }

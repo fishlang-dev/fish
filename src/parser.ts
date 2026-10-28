@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
-import { isToken, lexer, type Token } from "./lexer.ts";
+import { isToken, lexer, type Comment, type Token } from "./lexer.ts";
 import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
@@ -313,6 +313,8 @@ export type Cursor = {
   regex(): Token;
   // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
   attempt<T>(parse: () => T): T | undefined;
+  // The comments scanned so far.
+  comments: Comment[];
 };
 
 function cursor(src: string): Cursor {
@@ -325,6 +327,7 @@ function cursor(src: string): Cursor {
     return t.kind.startsWith("template") ? "a template literal" : `'${t.text}'`;
   };
   const c: Cursor = {
+    comments: lex.comments,
     pos: 0,
     conditionalAllowed: true,
     inAllowed: true,
@@ -397,10 +400,15 @@ export function allowingIn<T>(c: Cursor, allowed: boolean, parse: () => T): T {
 // A program is a list of statements; which of them may appear at the top level is the
 // checker's call.
 export function parse(src: string): Stmt[] {
+  return parseWithComments(src).program;
+}
+
+// The program, and the comments the lexer kept, for the formatter.
+export function parseWithComments(src: string): { program: Stmt[]; comments: Comment[] } {
   const c = cursor(src);
   const program: Stmt[] = [];
   while (c.peek().kind !== "eof") program.push(statement(c));
-  return program;
+  return { program, comments: c.comments };
 }
 
 // One expression filling the whole text, as a quote's is.

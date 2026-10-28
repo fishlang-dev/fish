@@ -18,6 +18,7 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { formatPaths, formatStdin } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
@@ -225,6 +226,7 @@ else if (import.meta.main) {
           submit: { type: "boolean" },
           fork: { type: "string" },
           yes: { type: "boolean" },
+          check: { type: "boolean" },
         },
       });
     } catch (e) {
@@ -270,6 +272,19 @@ else if (import.meta.main) {
       console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
     }
     process.exit(0);
+  }
+  if (command === "fmt") {
+    const usage = "usage: fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]";
+    const paths = positionals.slice(1);
+    if (Object.keys(values).some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
+    const check = values.check === true;
+    if (paths[0] === "-") process.exit(formatStdin(check));
+    if (paths.length === 0) {
+      const found = findManifest(process.cwd());
+      if (!found) fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
+      paths.push(dirname(found));
+    }
+    process.exit(formatPaths(paths, check));
   }
   if (command === "publish") {
     const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
@@ -382,7 +397,7 @@ else if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {
