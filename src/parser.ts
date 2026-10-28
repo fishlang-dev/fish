@@ -286,6 +286,9 @@ export const RESERVED = new Set([
 
 // The parser's position in the token stream, shared by the grammar modules.
 export type Cursor = {
+  // Every token lexed so far, in source order: once a whole program is parsed, all its tokens,
+  // each `/` read as the parser decided.
+  tokens: Token[];
   pos: number;
   // False only directly inside a conditional type's `extends` clause, as in TypeScript.
   conditionalAllowed: boolean;
@@ -327,6 +330,7 @@ function cursor(src: string): Cursor {
     return t.kind.startsWith("template") ? "a template literal" : `'${t.text}'`;
   };
   const c: Cursor = {
+    tokens,
     comments: lex.comments,
     pos: 0,
     conditionalAllowed: true,
@@ -403,12 +407,12 @@ export function parse(src: string): Stmt[] {
   return parseWithComments(src).program;
 }
 
-// The program, and the comments the lexer kept, for the formatter.
-export function parseWithComments(src: string): { program: Stmt[]; comments: Comment[] } {
+// The program, and the comments the lexer kept, for the formatter, and its tokens.
+export function parseWithComments(src: string): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
   const c = cursor(src);
   const program: Stmt[] = [];
   while (c.peek().kind !== "eof") program.push(statement(c));
-  return { program, comments: c.comments };
+  return { program, comments: c.comments, tokens: c.tokens };
 }
 
 // One expression filling the whole text, as a quote's is.

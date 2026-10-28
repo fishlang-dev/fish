@@ -1,7 +1,7 @@
 // `fishc fmt`: Fish files formatted in place, checked for CI, or piped through.
 
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, fchmodSync, fstatSync, ftruncateSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, fchmodSync, fstatSync, ftruncateSync, linkSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, formatError } from "./diag.ts";
 import { MANIFEST } from "./manifest.ts";
@@ -139,12 +139,15 @@ function writeAll(fd: number, bytes: Buffer) {
 // random name, so it can't be a link planted to redirect the write, then renamed over the file, so
 // a crash never leaves it half written. A file with several hard links is written in place
 // instead, as a rename would cut it off from the others. Gives what went wrong, if anything.
-function rewrite(file: string, text: string, original: Buffer): string | undefined {
+// Given `to`, the new text goes there instead and `file` is removed: the temporary file is linked
+// to `to`, which fails rather than replace a file already there, so `to` appears whole or not at
+// all, and only then is `file` removed.
+export function rewrite(file: string, text: string, original: Buffer, to?: string): string | undefined {
   let temporary: string | undefined;
   try {
     accessSync(file, constants.W_OK);
     const stat = statSync(file);
-    if (stat.nlink > 1) return inPlace(file, Buffer.from(text), original, stat);
+    if (stat.nlink > 1 && to === undefined) return inPlace(file, Buffer.from(text), original, stat);
     // The name is cut short so a long one still leaves room for the suffix.
     const path = join(dirname(file), `.${basename(file).slice(0, 100)}.fmt-${randomBytes(6).toString("hex")}`);
     const fd = openSync(path, "wx", 0o600);
@@ -155,8 +158,19 @@ function rewrite(file: string, text: string, original: Buffer): string | undefin
     } finally {
       closeSync(fd);
     }
-    renameSync(path, file);
+    if (to === undefined) {
+      renameSync(path, file);
+      temporary = undefined;
+      return undefined;
+    }
+    linkSync(path, to);
+    rmSync(path);
     temporary = undefined;
+    try {
+      unlinkSync(file);
+    } catch (e) {
+      return `'${shown(to)}' was written, but '${shown(file)}' couldn't be removed: ${reason(e)}`;
+    }
     return undefined;
   } catch (e) {
     if (temporary) rmSync(temporary, { force: true });
