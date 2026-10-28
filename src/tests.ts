@@ -67,9 +67,10 @@ function placed(v: unknown, at: Span) {
 }
 
 // The harness's text before its tests are known: an import of each of the package's files, so
-// all of them are loaded, and what its `main` reads the arguments with and exits through.
+// all of them are loaded, and what its `main` reads the arguments with and exits through. It is
+// native Fish whatever the package's edition.
 export function harnessImports(dir: string, files: string[]): string {
-  return [...files.map((f) => `import ${JSON.stringify(`./${relative(dir, f)}`)};`), 'import { argv, exit } from "node:process";', ""].join("\n");
+  return ["// @fish-edition native", ...files.map((f) => `import ${JSON.stringify(`./${relative(dir, f)}`)};`), 'import { argv, exit } from "node:process";', ""].join("\n");
 }
 
 // The harness's `main`. Given `--list`, it prints the test names, one per line, in order; given a

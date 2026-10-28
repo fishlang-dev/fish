@@ -3,6 +3,7 @@ import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
+import { isNode, named, rejects, type Node } from "./migrate.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -33,6 +34,9 @@ const RULES: Rule[] = [
   { id: "R1", action: "reject", title: "eval and new Function: a native binary has no compiler to run code made at run time" },
   { id: "R2", action: "reject", title: "prototype edits and Object.defineProperty: Fish types have fixed layouts" },
   { id: "R3", action: "reject", title: "delete: Fish objects have fixed layouts; use an Option field or a Map" },
+  { id: "R5", action: "reject", title: "the arguments object: use rest parameters" },
+  { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
+  { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
   { id: "G1", action: "guided", title: "any: choose a concrete type, a union, or the dynamic Json value" },
   { id: "G4", action: "guided", title: "class extends: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
   { id: "G5", action: "guided", title: "instanceof: match on an interface or an enum instead" },
@@ -91,9 +95,6 @@ const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupp
 const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 
-type Node = { kind: string; start: number; end: number; [key: string]: unknown };
-const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
-const named = (n: unknown, name: string) => isNode(n) && n.kind === "ident" && n.name === name;
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
@@ -142,6 +143,7 @@ function scanFile(path: string, file: string): FileScan {
   try {
     const program = parse(src);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
+    for (const hit of rejects(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
     for (const offset of captures(program)) findings.push(["localCaptures", { file, ...position(src, offset) }]);
   } catch (e) {
     // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
@@ -368,19 +370,16 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       callRules(n, push);
       break;
     case "new":
-      if (named(n.callee, "Function")) push("R1");
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
       if (["Map", "Set"].some((name) => named(n.callee, name)) && numberKey(n.typeArgs)) push("numberKeys");
       break;
     case "member":
-      if (n.name === "prototype") push("R2");
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       if (isPrivate(n.name)) push("classForms");
       break;
     case "unary":
-      if (n.op === "delete") push("R3");
       if (n.op === "delete" && envEntry(n.operand)) push("process");
       break;
     case "assign":
@@ -516,8 +515,6 @@ export const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_p
 
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;
-  if (named(callee, "eval") || named(callee, "Function")) push("R1");
-  if (memberOf(callee, "Object", ["defineProperty", "defineProperties", "setPrototypeOf"])) push("R2");
   if (named(callee, "isNaN") || memberOf(callee, "Number", ["isNaN"])) push("G8");
   if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
