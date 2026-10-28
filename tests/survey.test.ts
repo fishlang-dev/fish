@@ -59,6 +59,10 @@ test("the reject rules are counted through the migration detector, R5 to R7 too"
   expect(counts("interface I { a: number }\ninterface I { b: number }\nclass C {}\nnamespace C { export const x = 1; }\n")).toEqual({ R7: 2, namespaces: 1 });
 });
 
+test("A1, A3 and A8 are counted through the migration detector, as before, fixable or not", () => {
+  expect(counts("var a = 1;\nfor (var i = 0; i < 2; i++) {}\ndeclare var d: number;\nconst b = a == 1 || x != y;\nconst u = JSON.parse(s) as U;\nconst v = JSON.parse<U>(s) as U;\n")).toEqual({ A1: 2, A3: 2, A8: 2 });
+});
+
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {
   expect(counts("function main() {\n  setTimeout(f, 1);\n  const t = setInterval(f, 2, a, b);\n  clearTimeout(t);\n}\n")).toEqual({});
   expect(counts("function main() {\n  setImmediate(f);\n  setTimeout(f, 1).unref();\n  setTimeout(f, 1, a, b, c);\n}\n")).toEqual({ timerForms: 3 });

@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
-import { isNode, named, rejects, type Node } from "./migrate.ts";
+import { isNode, named, surveyHits, type Node } from "./migrate.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -143,7 +143,9 @@ function scanFile(path: string, file: string): FileScan {
   try {
     const program = parse(src);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
-    for (const hit of rejects(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
+    // The reject rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
+    // find only what they can fix, so the survey counts those its own wider way.
+    for (const hit of surveyHits(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
     for (const offset of captures(program)) findings.push(["localCaptures", { file, ...position(src, offset) }]);
   } catch (e) {
     // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
@@ -390,7 +392,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       break;
     case "binary":
       if (n.op === "instanceof") push("G5");
-      if (n.op === "==" || n.op === "!=") push("A3");
       break;
     case "index":
       if (isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template")) push("G6");
@@ -443,7 +444,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     const rest = elements.findIndex((e) => e.rest);
     if (rest >= 0 && (rest < elements.length - 1 || elements.some((e) => e.optional))) push("tuples");
   }
-  if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if ((n.kind === "array" && genericFunctionType(n.element)) || (n.kind === "union" && (n.types as unknown[]).some(genericFunctionType))) push("genericFunctionsHeld");
   if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
   // A dynamic `import("x")` names its module as its first argument.
@@ -551,7 +551,6 @@ function fishPattern(p: Node): boolean {
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; type: unknown; init: unknown }[];
   if (n.keyword === "const") for (const d of declarations) if (isNode(d.init) && d.init.kind === "arrow" && d.target.kind === "ident") heldArrows.add(d.init);
-  if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (!head && !ambient && declarations.some((d) => !d.init && !d.type)) push("declarators");
   // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.
