@@ -34,6 +34,19 @@ test("a type error is thrown at its span", () => {
   expect(src.slice((error as CompileError).start, (error as CompileError).end)).toBe("true");
 });
 
+test("a type error inside a test block is reported, though a build leaves the block out", () => {
+  const src = 'function main() {}\ntest("adds", () => {\n  const n: i64 = "two";\n});\n';
+  let error: unknown;
+  try {
+    analyze(src, file("tested.fsh", src));
+  } catch (e) {
+    error = e;
+  }
+  expect(error).toBeInstanceOf(CompileError);
+  expect(src.slice((error as CompileError).start, (error as CompileError).end)).toBe('"two"');
+  expect(() => analyze('function main() {}\ntest("adds", () => {\n  assert(1 + 1 === 2);\n});\n', file("passing.fsh", ""))).not.toThrow();
+});
+
 test("imported files are read through the reader given", () => {
   file("lib.fsh", "export function two(): i64 { return 2; }\n");
   const src = 'import { three } from "./lib.fsh";\nfunction main() { print(three()); }\n';

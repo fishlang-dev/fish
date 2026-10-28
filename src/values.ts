@@ -263,6 +263,8 @@ export const clocks = new WeakMap<Expr, "Date.now" | "performance.now">();
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+// Calls of the global `assert`, which panics where it is called.
+export const asserts = new WeakSet<Expr>();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
 export const regexStringCalls = new WeakMap<Expr, string>();
@@ -1030,6 +1032,7 @@ export function expressions(ctx: Context) {
     const parser = parserOf(callee);
     if (parser && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError(`'${parser}' is always there, so it is called without '?.'`, e.start, e.end);
     if (parser) return parse(e, parser);
+    if (callee.kind === "ident" && callee.name === "assert" && !lookup("assert") && !classes.has("assert") && !byName.has("assert") && !byName.has("const assert")) return assertion(e);
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
       const made = callee.object;
@@ -2118,6 +2121,20 @@ export function expressions(ctx: Context) {
     }
     parses.set(e, name);
     return { type: unionType([name === "parseInt" ? "i64" : "f64", "null"]), what };
+  }
+
+  // `assert(cond, message?)`, checked here so its panic can name the call's place.
+  function assertion(e: Call): { type: Type; what: string } {
+    if (e.typeArgs.length > 0 || e.args.length < 1 || e.args.length > 2) throw new CompileError("'assert' takes a condition and an optional message, as in 'assert(n > 0, \"n is positive\")'", e.start, e.end);
+    condition(e.args[0]!);
+    const message = e.args[1];
+    if (message) {
+      const t = read(message);
+      if (!stringLike(t)) throw new CompileError(`an assertion's message is a string, not '${show(t)}'`, message.start, message.end);
+      if (t !== "string") coerce(message, t, "string", "");
+    }
+    asserts.add(e);
+    return { type: "void", what: "'assert'" };
   }
 
   // A regex's pattern, parsed and compiled here so its errors come while compiling.

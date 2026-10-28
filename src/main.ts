@@ -18,8 +18,9 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
-import { formatPaths, formatStdin } from "./fmt.ts";
+import { fishFiles, formatPaths, formatStdin } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
+import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, stripTests, type Test } from "./tests.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import type { Checked, Instance } from "./check.ts";
@@ -29,11 +30,15 @@ export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
 
-// Checks the program whose entry is `file`, with text `src`, without building it. The file may be
-// one another imports, so it needs no `main`. `read` reads the files it imports.
+// Checks the program whose entry is `file`, with text `src`, without building it, its package's
+// tests included. The file may be one another imports, so it needs no `main`. `read` reads the
+// files it imports.
 export function analyze(src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
   const loaded = load(file, src, read);
-  return withSources(loaded.sources, () => ({ checked: check(expanded(loaded, false), false, false, true), sources: loaded.sources }));
+  return withSources(loaded.sources, () => {
+    liftTests(loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
+    return { checked: check(expanded(loaded, false), false, false, true), sources: loaded.sources };
+  });
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
@@ -52,8 +57,10 @@ function bundled(ir: string, loaded: Loaded): string {
   return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
 }
 
-// The program's files with their macros expanded, linked into one program.
+// The program's files with their macros expanded, linked into one program. Tests not lifted
+// already are left out.
 function expanded(loaded: Loaded, library: boolean): Stmt[] {
+  stripTests(loaded);
   expandMacros(loaded, library, (macros) => check(macros, false, true));
   return flatten(loaded, library);
 }
@@ -142,7 +149,11 @@ function cType(t: Type): string {
 // C half of the runtime, which is built with unwind tables so a panic can unwind through it.
 // `links` names the C libraries the program's declared functions come from.
 export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const ir = compile(readFileSync(file, "utf8"), file, release, panic);
+  linked(compile(readFileSync(file, "utf8"), file, release, panic), out, release, links);
+}
+
+// Builds the IR `ir` into the executable `out`.
+function linked(ir: string, out: string, release = false, links: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
     const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir, mathObjects()), { stdin: new TextEncoder().encode(ir) });
@@ -162,6 +173,58 @@ export async function buildAsync(file: string, out: string, release = false, pan
     if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
+// them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
+// the harness, whose `main` runs one test by its index.
+export function buildTests(dir: string, out: string): Test[] {
+  const files = fishFiles(dir, (message) => console.error(message.replace(/^fishc fmt/, "fishc test")));
+  // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
+  // the files' names are written from the package's directory.
+  const entry = join(dir, MANIFEST);
+  const src = harnessImports(dir, files);
+  const loaded = load(entry, src);
+  return withSources(loaded.sources, () => {
+    const tests = liftTests(files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
+    if (tests.length === 0) return tests;
+    hideMains(loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
+    loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
+    linked(bundled(codegen(check(expanded(loaded, false)), { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), out);
+    return tests;
+  });
+}
+
+// Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
+// Gives the exit code.
+async function testPackage(dir: string, filter: string | undefined): Promise<number> {
+  const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
+  // Interrupted, the tests running and what they started end, and the build is removed.
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+    process.on(signal, () => {
+      stopTests();
+      rmSync(dirname(out), { recursive: true, force: true });
+      process.exit(code);
+    });
+  }
+  try {
+    const tests = buildTests(dir, out);
+    if (tests.length === 0) {
+      console.log("no tests found");
+      return 0;
+    }
+    const chosen = filter === undefined ? tests : tests.filter((t) => t.name.includes(filter));
+    if (chosen.length > 0) return await runTests(out, chosen, dir);
+    console.error(`fishc test: no test's name contains '${filter}'`);
+    return 1;
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    // The harness's own text is generated, and an error in it would be the compiler's.
+    console.error(formatError(e, relative(process.cwd(), join(dir, MANIFEST)), ""));
+    return 1;
+  } finally {
+    rmSync(dirname(out), { recursive: true, force: true });
   }
 }
 
@@ -286,6 +349,13 @@ else if (import.meta.main) {
     }
     process.exit(formatPaths(paths, check));
   }
+  if (command === "test") {
+    // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
+    if (positionals.length > 2 || Object.keys(values).some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
+    const found = findManifest(process.cwd());
+    if (!found) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
+    process.exit(await testPackage(dirname(found), file));
+  }
   if (command === "publish") {
     const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
     const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
@@ -397,7 +467,7 @@ else if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {

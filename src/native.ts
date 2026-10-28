@@ -1115,6 +1115,15 @@ void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   fsh_rt_panic(reason);
 }
 
+// A panic whose reason is a string the program made, as an assertion's message; at is the
+// "panicked at" line.
+void fsh_rt_panic_string(const char *at, fsh_str *reason) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fwrite(reason->bytes, 1, reason->length, stderr);
+  fsh_rt_panic("\n");
+}
+
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {

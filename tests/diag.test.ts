@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CompileError, formatError } from "../src/diag.ts";
+import { CompileError, formatError, madeUpNames, shown } from "../src/diag.ts";
 
 const src = "let a = 1\nuse(a)\n";
 
@@ -14,4 +14,12 @@ test("a note renders after the error at its own location", () => {
   expect(formatError(e, "f.fsh", src)).toBe(
     ["f.fsh:2:5: error: bad", " 2 | use(a)", "   |     ^", "f.fsh:1:5: note: moved here", " 1 | let a = 1", "   |     ^"].join("\n"),
   );
+});
+
+test("only names the compiler made up are rewritten in messages, never text a user wrote", () => {
+  madeUpNames.set('test "made"', "the test 'made'");
+  expect(shown(`'test "made"-fsh3' throws`)).toBe("the test 'made' throws");
+  expect(shown(`can't find the package 'test "\\x"'`)).toBe(`can't find the package 'test "\\x"'`);
+  expect(shown(`can't find 'test "other"'`)).toBe(`can't find 'test "other"'`);
+  expect(shown("'helper-fsh2' is unused")).toBe("'helper' is unused");
 });
