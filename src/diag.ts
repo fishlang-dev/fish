@@ -1,8 +1,18 @@
 import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 
+// Names the compiler made up, as a message should show them: a test's function, `test "x"`, as
+// the test it is. Only names recorded here are rewritten, so text a user wrote is left alone.
+export const madeUpNames = new Map<string, string>();
+
 // How a message reads: without the suffix a top-level name takes to tell it apart from another
-// file's (`helper-fsh2`).
-export const shown = (text: string) => text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+// file's (`helper-fsh2`), and with made-up names shown as the user knows them.
+export function shown(text: string): string {
+  for (const [name, display] of madeUpNames) {
+    const quoted = new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-fsh\\d+)?'`, "g");
+    text = text.replace(quoted, () => display);
+  }
+  return text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+}
 
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
@@ -48,9 +58,9 @@ export function locate(src: string, offset: number) {
   return { line, col: offset - lineStart + 1, lineStart, lineEnd };
 }
 
-// Renders `file:line:col: error: msg` followed by the source line with a caret underline,
-// then the same for its note.
-export function formatError(e: CompileError, path: string, program: string): string {
+// Renders `file:line:col: error: msg`, or another `kind` than `error`, followed by the source line
+// with a caret underline, then the same for its note.
+export function formatError(e: CompileError, path: string, program: string, kind = "error"): string {
   const lines = (kind: string, note: Note) => {
     const { src, file, offset } = sourceOf(program, path, note.start, e.sources);
     // A position past its text would pad the caret line without end.
@@ -66,7 +76,7 @@ export function formatError(e: CompileError, path: string, program: string): str
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];
   };
-  return [...lines("error", e), ...(e.note ? lines("note", e.note) : [])].join("\n");
+  return [...lines(kind, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
 }
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.

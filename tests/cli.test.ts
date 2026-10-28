@@ -46,7 +46,7 @@ test("a package's entry and its errors are found through the manifest", () => {
   const gone = dir("gone", { "fish.toml": `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n` });
   expect(fishc(gone, "build").err.split("\n")[0]).toBe(`fish.toml:4:9: error: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`);
   const typo = dir("typo", { "fish.toml": `[package]\nname = "typo"\nverison = "1.0.0"\n` });
-  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error: [package] has no key 'verison'; it has name, version, entry, lib");
+  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error: [package] has no key 'verison'; it has name, version, entry, lib, edition");
 });
 
 test("fishc build with no file and no package says how to make one", () => {
@@ -87,4 +87,41 @@ test("new and init refuse bad names and overwriting", () => {
   expect(fishc(odd, "init").err).toBe(`fishc init: this directory's name 'Odd Dir' isn't a package name: ${rule}; give one, as in 'fishc init my-app'\n`);
   expect(fishc(odd, "init", "odd").code).toBe(0);
   expect(fishc(odd, "init", "odd")).toEqual({ code: 2, out: "", err: "fishc init: there is already a fish.toml here\n" });
+});
+
+const COMPAT = "this file is in the TS-compat edition, which Fish doesn't compile; run 'fishc lint' to find what to change, then mark it '// @fish-edition native'";
+const manifestOf = (name: string, extra = "") => `[package]\nname = "${name}"\nversion = "0.1.0"\n${extra}\n[dependencies]\n`;
+
+test("a TS-compat package's files are refused by build and test, at each file's first line", () => {
+  const pkg = dir("compat-pkg", { "fish.toml": manifestOf("compat-pkg", 'edition = "ts-compat"\n'), "src/main.fsh": 'function main() {\n  console.log("hi");\n}\n' });
+  expect(fishc(pkg, "build")).toEqual({ code: 1, out: "", err: `src/main.fsh:1:1: error: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n` });
+  const tested = Bun.spawnSync(["bun", MAIN, "test"], { cwd: pkg });
+  expect(tested.exitCode).toBe(1);
+  expect(tested.stderr.toString()).toBe(`src/main.fsh:1:1: error: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n`);
+});
+
+test("a file's directive sets its edition, over its package's, after any shebang", () => {
+  const pkg = dir("directives", {
+    "fish.toml": manifestOf("directives", 'edition = "ts-compat"\n'),
+    "src/main.fsh": '#!/usr/bin/env fishc\n// @fish-edition native\nimport { two } from "./two.fsh";\nfunction main() {\n  console.log(two());\n}\n',
+    "src/two.fsh": "// @fish-edition native\nexport function two(): i64 {\n  return 2;\n}\n",
+  });
+  expect(fishc(pkg, "build").code).toBe(0);
+  expect(ran(join(pkg, "target", "debug", "directives"))).toBe("2\n");
+  // An imported file marked TS-compat is refused at its directive, in a native package too.
+  const mixed = dir("mixed-editions", {
+    "main.fsh": 'import { two } from "./two.fsh";\nfunction main() {\n  console.log(two());\n}\n',
+    "two.fsh": "// @fish-edition ts-compat\nexport function two(): i64 {\n  return 2;\n}\n",
+  });
+  expect(fishc(mixed, "build", "main.fsh")).toEqual({ code: 1, out: "", err: `two.fsh:1:1: error: ${COMPAT}\n 1 | // @fish-edition ts-compat\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^\n` });
+  const unknown = dir("unknown-edition", { "main.fsh": "#!/usr/bin/env fishc\n// @fish-edition typescript\nfunction main() {}\n" });
+  expect(fishc(unknown, "build", "main.fsh")).toEqual({ code: 1, out: "", err: "main.fsh:2:1: error: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n" });
+});
+
+test("a dependency's TS-compat file is refused where the dependency is built", () => {
+  dir("compat-dep/words", { "fish.toml": manifestOf("words", 'edition = "ts-compat"\n'), "src/lib.fsh": 'export function word(): string {\n  return "fish";\n}\n' });
+  const app = dir("compat-dep/app", { "fish.toml": manifestOf("app", "").replace("[dependencies]\n", '[dependencies]\nwords = { path = "../words" }\n'), "src/main.fsh": 'import { word } from "words";\nfunction main() {\n  console.log(word());\n}\n' });
+  const { code, err } = fishc(app, "build");
+  expect(code).toBe(1);
+  expect(err).toBe(`../../words/src/lib.fsh:1:1: error: ${COMPAT}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`);
 });

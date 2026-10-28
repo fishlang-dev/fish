@@ -40,7 +40,7 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   ...Object.fromEntries(["csv-parse", "papaparse"].map((p) => [p, PLANNED("CSV reading and writing")])),
   nodemailer: PLANNED("SMTP email client"), eventemitter3: PLANNED("EventTarget and EventEmitter"),
   ...Object.fromEntries(["inquirer", "prompts"].map((p) => [p, PLANNED("Interactive prompts")])),
-  ...Object.fromEntries(["jest", "vitest", "mocha"].map((p) => [p, PLANNED("Test runner")])),
+  ...Object.fromEntries(["jest", "vitest", "mocha"].map((p) => [p, PLANNED("Jest-style test API")])),
   "@grpc/grpc-js": PLANNED("gRPC"), "@aws-sdk/client-s3": PLANNED("S3-compatible storage client"),
   ...Object.fromEntries(["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"].map((p) => [p, PLANNED("Auth primitives")])),
 }));

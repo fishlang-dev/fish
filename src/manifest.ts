@@ -9,7 +9,10 @@ export type Dependency = { name: string; start: number; end: number } & ({ path:
 
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
-export type Manifest = { name: string; version: string; entry: string; lib: string; dependencies: Dependency[]; registry?: string; dir: string };
+// `edition`: "ts-compat" marks TypeScript not yet migrated, which a build refuses and `fishc lint`
+// reads.
+export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; dependencies: Dependency[]; registry?: string; dir: string };
+export type Edition = "native" | "ts-compat";
 
 export const MANIFEST = "fish.toml";
 
@@ -161,7 +164,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 // entry, and nothing a manifest doesn't have, so a misspelled key isn't silently ignored.
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib"], dependencies: [], registry: ["url"] };
+  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib", "edition"], dependencies: [], registry: ["url"] };
   for (const [name, found] of tables) {
     const table = Array.isArray(found) ? found[0]! : found;
     if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package], [dependencies] and [registry]`, table.start, table.end);
@@ -193,11 +196,13 @@ export function readManifest(src: string, dir: string): Manifest {
   };
   const entry = file("entry", "src/main.fsh");
   const lib = file("lib", "src/lib.fsh");
+  const edition = text("edition");
+  if (edition && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError(`'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
   const listed = tables.get("dependencies") as Table | undefined;
   const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
   const registry = (tables.get("registry") as Table | undefined)?.keys.get("url")?.value;
   if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
-  return { name: name.value, version: version.value, entry, lib, dependencies, ...(registry && { registry: registry.value as string }), dir };
+  return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(registry && { registry: registry.value as string }), dir };
 }
 
 // A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.

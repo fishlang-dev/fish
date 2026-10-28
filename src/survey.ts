@@ -3,6 +3,7 @@ import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
+import { isNode, named, surveyHits, type Node } from "./migrate.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -33,14 +34,20 @@ const RULES: Rule[] = [
   { id: "R1", action: "reject", title: "eval and new Function: a native binary has no compiler to run code made at run time" },
   { id: "R2", action: "reject", title: "prototype edits and Object.defineProperty: Fish types have fixed layouts" },
   { id: "R3", action: "reject", title: "delete: Fish objects have fixed layouts; use an Option field or a Map" },
+  { id: "R5", action: "reject", title: "the arguments object: use rest parameters" },
+  { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
+  { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
   { id: "G1", action: "guided", title: "any: choose a concrete type, a union, or the dynamic Json value" },
-  { id: "G4", action: "guided", title: "class extends: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
-  { id: "G5", action: "guided", title: "instanceof: match on an interface or an enum instead" },
+  { id: "G2", action: "guided", title: "a promise dropped un-awaited: add await, or spawn() it to run on its own" },
+  { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
+  { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
+  { id: "G5", action: "guided", title: "instanceof a class others extend: match on an interface or an enum instead" },
   { id: "G6", action: "guided", title: "indexing an object with a string key: use a Map" },
-  { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a comptime const" },
+  { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a Lazy<T>" },
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
+  { id: "G11", action: "guided", title: "a value aliased and changed from two names: shared<T>, a .clone(), or restructuring" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },
   { id: "A3", action: "auto", title: "== and !=: === and !==" },
@@ -91,9 +98,6 @@ const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupp
 const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 
-type Node = { kind: string; start: number; end: number; [key: string]: unknown };
-const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
-const named = (n: unknown, name: string) => isNode(n) && n.kind === "ident" && n.name === name;
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
@@ -142,6 +146,9 @@ function scanFile(path: string, file: string): FileScan {
   try {
     const program = parse(src);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
+    // The reject and guided rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
+    // find only what they can fix, so the survey counts those its own wider way.
+    for (const hit of surveyHits(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
     for (const offset of captures(program)) findings.push(["localCaptures", { file, ...position(src, offset) }]);
   } catch (e) {
     // A file the parser can't read, or too deeply nested to walk, adds none of its findings or
@@ -180,7 +187,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["timers/promises", STD("sleep")],
   // `http` is a client as well as a server, and Fish has only the server so far.
   ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
-  ["test", PLANNED("Test runner")], ["sqlite", PLANNED("SQLite binding")],
+  ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
   ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
@@ -278,7 +285,6 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
-    if (top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) note("G7", top.start);
     if (top.kind === "let" && top.keyword === "let" && !(isNode(s) && s.kind === "declare")) note("A4", top.start);
   }
   // A std module imported whole, by its local name, with what it exports: a member it doesn't
@@ -330,13 +336,6 @@ function takesDefault(p: Record<string, unknown>, after: Record<string, unknown>
   return !property && after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
 }
 
-// `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.
-function callsMain(e: unknown): boolean {
-  if (!isNode(e) || e.kind !== "call") return false;
-  if (named(e.callee, "main")) return true;
-  return isNode(e.callee) && e.callee.kind === "member" && ["catch", "then"].includes(e.callee.name as string) && callsMain(e.callee.object);
-}
-
 function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void, arrow: boolean) {
   for (const [i, p] of list.entries()) {
     if (isNode(p.default) && !takesDefault(p, list.slice(i + 1))) note("defaults", p.default.start);
@@ -368,19 +367,16 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       callRules(n, push);
       break;
     case "new":
-      if (named(n.callee, "Function")) push("R1");
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
       if (["Map", "Set"].some((name) => named(n.callee, name)) && numberKey(n.typeArgs)) push("numberKeys");
       break;
     case "member":
-      if (n.name === "prototype") push("R2");
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       if (isPrivate(n.name)) push("classForms");
       break;
     case "unary":
-      if (n.op === "delete") push("R3");
       if (n.op === "delete" && envEntry(n.operand)) push("process");
       break;
     case "assign":
@@ -390,15 +386,11 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       if (envEntry(n.operand)) push("process");
       break;
     case "binary":
-      if (n.op === "instanceof") push("G5");
-      if (n.op === "==" || n.op === "!=") push("A3");
       break;
     case "index":
-      if (isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template")) push("G6");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       break;
     case "ref":
-      if (n.name === "any") push("G1");
       if (n.name === "null" || n.name === "undefined") push("A2");
       if (["WeakMap", "WeakSet"].includes(n.name as string)) push("collections");
       if (["ReadonlyMap", "ReadonlySet"].includes(n.name as string)) push("readonlyCollections");
@@ -444,7 +436,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     const rest = elements.findIndex((e) => e.rest);
     if (rest >= 0 && (rest < elements.length - 1 || elements.some((e) => e.optional))) push("tuples");
   }
-  if (n.kind === "as" && isNode(n.expr) && n.expr.kind === "call" && memberOf(n.expr.callee, "JSON", ["parse"])) push("A8");
   if ((n.kind === "array" && genericFunctionType(n.element)) || (n.kind === "union" && (n.types as unknown[]).some(genericFunctionType))) push("genericFunctionsHeld");
   if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
   // A dynamic `import("x")` names its module as its first argument.
@@ -454,7 +445,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
   if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
   // A class's base is one expression; an interface's are a list, which Fish keeps.
-  if ("members" in n && isNode(n.extends)) push("G4");
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
 }
@@ -516,9 +506,6 @@ export const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_p
 
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;
-  if (named(callee, "eval") || named(callee, "Function")) push("R1");
-  if (memberOf(callee, "Object", ["defineProperty", "defineProperties", "setPrototypeOf"])) push("R2");
-  if (named(callee, "isNaN") || memberOf(callee, "Number", ["isNaN"])) push("G8");
   if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
   if (named(callee, "setImmediate") || named(callee, "clearImmediate")) push("timerForms");
@@ -529,9 +516,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");
   if (!isNode(callee) || callee.kind !== "member") return;
   const name = callee.name as string;
-  if (["call", "apply", "bind"].includes(name)) push("G9");
   const [first] = n.args as Node[];
-  if (name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) push("G10");
 }
 
 // A pattern of names, holes and renames only, with no defaults, rest or nesting.
@@ -554,7 +539,6 @@ function fishPattern(p: Node): boolean {
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; type: unknown; init: unknown }[];
   if (n.keyword === "const") for (const d of declarations) if (isNode(d.init) && d.init.kind === "arrow" && d.target.kind === "ident") heldArrows.add(d.init);
-  if (n.keyword === "var" && !ambient) push("A1");
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (!head && !ambient && declarations.some((d) => !d.init && !d.type)) push("declarators");
   // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.

@@ -49,7 +49,25 @@ test("each rule counts what the sample shows", () => {
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
     classForms: 1, fetch: 1,
-    G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
+    G1: 3, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
+  });
+});
+
+test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
+  expect(counts("function f() {\n  eval(\"1\");\n  const g = new Function(\"x\");\n  A.prototype.m = g;\n  Object.defineProperty(o, \"k\", {});\n  delete o.k;\n}\n")).toEqual({ R1: 2, R2: 2, R3: 1 });
+  expect(counts("function f() {\n  return arguments.length;\n}\nconst s = Symbol(\"s\");\n")).toEqual({ R5: 1, R6: 1 });
+  expect(counts("interface I { a: number }\ninterface I { b: number }\nclass C {}\nnamespace C { export const x = 1; }\n")).toEqual({ R7: 2, namespaces: 1 });
+});
+
+test("A1, A3 and A8 are counted through the migration detector, as before, fixable or not", () => {
+  expect(counts("var a = 1;\nfor (var i = 0; i < 2; i++) {}\ndeclare var d: number;\nconst b = a == 1 || x != y;\nconst u = JSON.parse(s) as U;\nconst v = JSON.parse<U>(s) as U;\n")).toEqual({ A1: 2, A3: 2, A8: 2 });
+});
+
+test("the survey counts G2, G3 and G11 through the migration detector, with rows for each", () => {
+  expect(counts("async function save(): Promise<void> {}\nfunction main(xs: number[], i: number) {\n  const a = { n: 1 };\n  const b = a;\n  b.n = 2;\n  save();\n  return xs[i] + a.n;\n}\n")).toEqual({ G2: 1, G3: 1, G11: 1 });
+  project({ "a.ts": "export const x = 1;\n" }, (dir) => {
+    const ids = [...survey(dir).rules, ...survey(dir).waiting].map((r) => r.id);
+    for (const id of ["G2", "G3", "G11"]) expect(ids).toContain(id);
   });
 });
 
@@ -91,7 +109,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("class D { f: <T>(x: T) => T = id; }\nconst xs: (<T>(x: T) => T)[] = [];\nconst u: (<T>(x: T) => T) | number = 1;\n")).toEqual({ genericFunctionsHeld: 3 });
   expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
-  expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2 });
+  expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2, R7: 2 });
   expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
 });
@@ -181,7 +199,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(51);
+  expect(r.rules.length + r.waiting.length).toBe(57);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -388,7 +406,7 @@ test("dependencies are sorted into std, planned, native, pure and not installed"
       plain: "pure", "@scope/plain": "pure", hoisted: "pure", missing: "unknown", vitest: "planned",
     });
     expect(d.counts).toEqual({ std: 1, planned: 1, native: 5, pure: 3, unknown: 1 });
-    expect(d.list.find((x) => x.name === "vitest")).toMatchObject({ dev: true, kind: "unknown", equivalent: { name: "Test runner", planned: true } });
+    expect(d.list.find((x) => x.name === "vitest")).toMatchObject({ dev: true, kind: "unknown", equivalent: { name: "Jest-style test API", planned: true } });
     const r = survey(join(dir, "app"));
     expect(r.dependencies).toEqual(d);
     const text = formatReport(r);
@@ -464,7 +482,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Test runner", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
 });

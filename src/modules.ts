@@ -7,6 +7,7 @@ import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
 import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
+import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
@@ -58,9 +59,11 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     if (text.length >= FILE_SPAN) throw new CompileError(`'${file}' is larger than the 16 MiB a source file may be`, base, base);
     let statements: Stmt[];
     try {
+      // A TS-compat file isn't compiled, whether or not it parses.
+      if (!path.startsWith("std:")) refuseCompat(text, fish && packageOf(fish, key)?.manifest.edition);
       statements = parse(text);
     } catch (e) {
-      // A parse error's position is in its own file's text.
+      // A parse or edition error's position is in its own file's text.
       if (e instanceof CompileError) shiftSpans(e, base);
       throw e;
     }
@@ -672,7 +675,7 @@ const NAMED = new Set(["ident", "ref", "variant", "function", "class", "enum", "
 // Renames every binding and use of a name, at any depth, to what `to` gives for it; a name it
 // gives nothing for stays. Renaming a name everywhere in a file keeps its scoping, so a local
 // shadowing a top-level name still does. A qualified name renames its first part.
-function renameIn(v: unknown, to: (name: string) => string | undefined, seen = new Set<unknown>()) {
+export function renameIn(v: unknown, to: (name: string) => string | undefined, seen = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   if (Array.isArray(v)) return v.forEach((x) => renameIn(x, to, seen));

@@ -34,6 +34,19 @@ test("a type error is thrown at its span", () => {
   expect(src.slice((error as CompileError).start, (error as CompileError).end)).toBe("true");
 });
 
+test("a type error inside a test block is reported, though a build leaves the block out", () => {
+  const src = 'function main() {}\ntest("adds", () => {\n  const n: i64 = "two";\n});\n';
+  let error: unknown;
+  try {
+    analyze(src, file("tested.fsh", src));
+  } catch (e) {
+    error = e;
+  }
+  expect(error).toBeInstanceOf(CompileError);
+  expect(src.slice((error as CompileError).start, (error as CompileError).end)).toBe('"two"');
+  expect(() => analyze('function main() {}\ntest("adds", () => {\n  assert(1 + 1 === 2);\n});\n', file("passing.fsh", ""))).not.toThrow();
+});
+
 test("imported files are read through the reader given", () => {
   file("lib.fsh", "export function two(): i64 { return 2; }\n");
   const src = 'import { three } from "./lib.fsh";\nfunction main() { print(three()); }\n';
@@ -260,6 +273,22 @@ test("fallible calls and awaits are hinted with what they throw", async () => {
   s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: HINTED.replace("return n;", "return true;") }] });
   const broken = s.request("textDocument/inlayHint", { textDocument: { uri }, range: all });
   expect((await s.next((m) => m.id === broken)).result).toEqual([]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
+test("a TS-compat document is refused at its directive, pointing at fishc lint", async () => {
+  const src = "// @fish-edition ts-compat\nfunction main() {}\n";
+  const uri = Bun.pathToFileURL(file("compat.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  const [d, ...more] = diagnostics(await s.next(published(uri)));
+  expect(more).toEqual([]);
+  expect(d!.range).toEqual({ start: { line: 0, character: 0 }, end: { line: 0, character: 26 } });
+  expect(d!.message).toContain("run 'fishc lint'");
+  s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: src.replace("ts-compat", "native") }] });
+  expect(diagnostics(await s.next(published(uri)))).toEqual([]);
   s.request("shutdown");
   s.notify("exit");
   expect(await s.proc.exited).toBe(0);
