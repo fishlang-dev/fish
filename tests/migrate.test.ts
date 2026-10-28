@@ -88,7 +88,7 @@ function found(src: string): string[] {
 const fixed = (src: string) => fix(src).text;
 
 test("A1 makes a var const when nothing assigns it again, and let otherwise", () => {
-  expect(found("var a = 1;\nvar b = 2;\nb = 3;\nvar c;\nfor (var i = 0; i < 3; i++) {}\n")).toEqual(["auto A1 var", "auto A1 var", "auto A1 var", "auto A1 var"]);
+  expect(found("var a = 1;\nvar b = 2;\nb = 3;\nvar c;\nfor (var i = 0; i < 3; i++) {}\n")).toEqual(["auto A1 var", "auto A1 var", "guided G7 b = 3", "auto A1 var", "auto A1 var"]);
   expect(fixed("var a = 1;\nvar b = 2;\nb = 3;\nvar c;\nfor (var i = 0; i < 3; i++) {}\nvar [d, e] = f;\n[d] = g;\n")).toBe("const a = 1;\nlet b = 2;\nb = 3;\nlet c;\nfor (let i = 0; i < 3; i++) {}\nlet [d, e] = f;\n[d] = g;\n");
   expect(found("declare var g: number;\nlet h = 1;\nconst k = 2;\n")).toEqual([]);
 });
@@ -297,4 +297,141 @@ test("collecting each name's uses is linear in the file", () => {
   const program = parseWithComments(src);
   migrations(program, src);
   expect(performance.now() - started).toBeLessThan(4000);
+});
+
+// Each guided hit in `src` as its rule and the text it spans, in source order, and the messages.
+function guidedIn(src: string): string[] {
+  return migrations(parseWithComments(src), src).filter((h) => h.action === "guided" && h.rule.startsWith("G")).sort((a, b) => a.start - b.start).map((h) => `${h.rule} ${src.slice(h.start, h.end)}`);
+}
+const messageOf = (src: string, rule: string) => migrations(parseWithComments(src), src).find((h) => h.rule === rule)?.message;
+
+test("G1 reports any, suggesting a concrete type, a union or Json", () => {
+  expect(guidedIn("function f(x: any): any[] {\n  return [x];\n}\n")).toEqual(["G1 any", "G1 any"]);
+  expect(messageOf("let x: any;\n", "G1")).toBe("'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, or the dynamic 'Json' value");
+  expect(guidedIn("let x: unknown;\nconst any = 1;\n")).toEqual([]);
+});
+
+test("G4 reports a class extending one used as a type, and leaves a base never named as a type", () => {
+  const src = "class Shape {}\nclass Circle extends Shape {}\nfunction area(s: Shape) {\n  return 1;\n}\n";
+  expect(guidedIn(src)).toEqual(["G4 class Circle extends Shape {}"]);
+  expect(messageOf(src, "G4")).toBe("this class extends one that is also used as a type, so a subclass stands in for its base, which Fish's embedded bases don't allow; extract an interface for what they share, and hold the base as a field");
+  for (const used of ["let s: Shape;", "class Box { s: Shape = new Circle(); }", "function make(): Shape[] {\n  return [];\n}"]) expect(guidedIn(`class Shape {}\nclass Circle extends Shape {}\n${used}\n`)).toEqual(["G4 class Circle extends Shape {}"]);
+  expect(guidedIn("class Animal {}\nclass Dog extends Animal {}\nconst d: Dog = new Dog();\n")).toEqual([]);
+  expect(guidedIn("interface Named {}\nclass Base {}\nclass Thing extends Base implements Named {}\n")).toEqual([]);
+});
+
+test("G5 reports instanceof a class others extend, and leaves Error and classes nothing extends", () => {
+  const src = "class Shape {}\nclass Circle extends Shape {}\nfunction f(x: object) {\n  return x instanceof Shape;\n}\n";
+  expect(guidedIn(src)).toEqual(["G5 x instanceof Shape"]);
+  expect(messageOf(src, "G5")).toBe("'instanceof' tests a class that others extend, and Fish has no subclass checks at run time; 'match' on an interface or an enum instead");
+  expect(guidedIn("class Box {}\nfunction f(e: unknown) {\n  return e instanceof Error || e instanceof Box;\n}\n")).toEqual([]);
+});
+
+test("G6 reports a string key: a literal, a template, a string name or a for...in key; a numeric index is left", () => {
+  const src = 'function f(o: Rec, k: string) {\n  const name = "a";\n  for (const key in o) g(o[key]);\n  return o["x"] + o[`y${1}`] + o[name] + o[k];\n}\n';
+  expect(guidedIn(src)).toEqual(["G6 o[key]", 'G6 o["x"]', "G6 o[`y${1}`]", "G6 o[name]", "G6 o[k]"]);
+  expect(messageOf(src, "G6")).toBe("indexing with a string key reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'");
+  expect(guidedIn("function f(xs: number[], i: number) {\n  const j = 2;\n  return xs[0] + xs[i] + xs[j];\n}\n").filter((h) => h.startsWith("G6"))).toEqual([]);
+});
+
+test("G7 reports top-level code with side effects, suggesting main() or a Lazy", () => {
+  expect(guidedIn('"use strict";\nsetup();\nfunction main() {}\nmain();\nmain().catch(report);\n')).toEqual(["G7 setup()"]);
+  expect(messageOf("setup();\n", "G7")).toBe("top-level code runs when the module loads, which Fish doesn't do; move it into 'main()', or into a 'Lazy<T>' for a value made once");
+});
+
+test("G8 reports isNaN of a parse, direct or through a name, and leaves isNaN of a plain value", () => {
+  const src = "function f(s: string, x: number) {\n  const n = parseInt(s);\n  return isNaN(parseFloat(s)) || Number.isNaN(Number(s)) || isNaN(n) || Number.isNaN(Number.parseInt(s));\n}\n";
+  expect(guidedIn(src)).toEqual(["G8 isNaN(parseFloat(s))", "G8 isNaN(Number(s))", "G8 isNaN(n)", "G8 isNaN(Number.parseInt(s))"]);
+  expect(messageOf(src, "G8")).toBe("parsing gives an 'Option' in Fish rather than NaN; 'match' on the parsed 'Option' instead of checking 'isNaN'");
+  expect(guidedIn("function f(x: number) {\n  const y = x * 2;\n  return isNaN(x) || Number.isNaN(y);\n}\n")).toEqual([]);
+});
+
+test("G9 reports .call, .apply and .bind, and G10 an async forEach callback", () => {
+  const src = "function f(g: Fn, xs: number[]) {\n  g.call(o, 1);\n  g.apply(o, []);\n  const h = g.bind(o);\n  xs.forEach(async (x) => {\n    await h(x);\n  });\n  xs.forEach((x) => h(x));\n}\n";
+  expect(guidedIn(src)).toEqual(["G9 call(o, 1)", "G9 apply(o, [])", "G9 bind(o)", "G10 forEach(async (x) => {\n    await h(x);\n  })"]);
+  expect(messageOf(src, "G9")).toBe("'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure");
+  expect(messageOf(src, "G10")).toBe("'forEach' doesn't wait for an async callback; use 'for...of' with 'await', or spawn a task for each");
+});
+
+test("guided hits are never fixed", () => {
+  const src = "let x: any = 1;\nsetup();\n";
+  expect(fix(src)).toEqual({ text: src, fixed: 0 });
+  expect(migrations(parseWithComments(src), src).filter((h) => h.action === "guided").every((h) => h.edits === undefined)).toBe(true);
+});
+
+test("G2 reports a dropped call to the file's async function or Promise method, and leaves one awaited, returned, assigned or voided", () => {
+  const decls = "async function save(): Promise<void> {}\nconst load = async () => 1;\nclass Store {\n  flush(): Promise<void> {\n    return done;\n  }\n}\n";
+  const src = `${decls}async function main() {\n  const store = new Store();\n  save();\n  load();\n  store.flush();\n  await save();\n  void save();\n  const p = save();\n  later = load();\n  sync();\n  return save();\n}\n`;
+  expect(guidedIn(src).filter((h) => h.startsWith("G2"))).toEqual(["G2 save()", "G2 load()", "G2 store.flush()"]);
+  expect(messageOf(src, "G2")).toBe("the promise this call gives is dropped, and a Fish future runs only when it is awaited; add 'await', or wrap the call in 'spawn()' to run it on its own");
+});
+
+test("G3 reports a number used as an index or as a counter against .length, and leaves one used only in arithmetic", () => {
+  const src = "function f(xs: number[], at: number, scale: number) {\n  let total = 0;\n  for (let i = 0; i < xs.length; i++) total += xs[at] * scale;\n  let k: number = 1;\n  return xs[k] + total * scale;\n}\n";
+  expect(guidedIn(src).filter((h) => h.startsWith("G3"))).toEqual(["G3 at", "G3 i", "G3 k"]);
+  expect(messageOf(src, "G3")).toBe("this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index");
+  expect(guidedIn("function f(a: number, b: number) {\n  let c = a * b;\n  return c + 1;\n}\n").filter((h) => h.startsWith("G3"))).toEqual([]);
+  expect(guidedIn("let i = 0;\nfunction g(xs: string[], i: string) {\n  return xs[0] + i;\n}\n").filter((h) => h.startsWith("G3"))).toEqual([]);
+});
+
+test("G11 reports an alias changed through one name while the other is still used, naming the three fixes", () => {
+  const fixes = "hold one value, changed through one while the other is still used, which Fish's ownership refuses; share it as 'shared<T>', give one its own '.clone()', or restructure so one name is used at a time";
+  const flagged = [
+    "function f() {\n  const a = { n: 1 };\n  const b = a;\n  b.n = 2;\n  return a.n;\n}\n",
+    "function f() {\n  const a = [1];\n  const b = a;\n  a.push(2);\n  return b.length;\n}\n",
+    "function f() {\n  const a = new Box();\n  let b = make();\n  b = a;\n  b.n++;\n  use(a);\n}\n",
+    "function f() {\n  const a = load();\n  const b = a;\n  Object.assign(a, { n: 1 });\n  delete b.k;\n  use(b);\n}\n",
+  ];
+  for (const src of flagged) {
+    expect(guidedIn(src).filter((h) => h.startsWith("G11"))).toHaveLength(1);
+    expect(migrations(parseWithComments(src), src).find((h) => h.rule === "G11")!.message).toMatch(/^'b' and 'a' /);
+  }
+  expect(messageOf(flagged[0]!, "G11")).toBe(`'b' and 'a' ${fixes}`);
+  expect(guidedIn(flagged[0]!).filter((h) => h.startsWith("G11"))).toEqual(["G11 b = a"]);
+  const left = [
+    "function f() {\n  const a = 1;\n  let b = a;\n  b++;\n  return a;\n}\n",
+    "function f() {\n  const a = { n: 1 };\n  const b = a;\n  return a.n + b.n;\n}\n",
+    "function f() {\n  const a = { n: 1 };\n  const b = a;\n  use(a);\n  b.n = 2;\n  return b;\n}\n",
+    "function f(a: Thing) {\n  const b = a;\n  b.n = 2;\n  return a;\n}\n",
+  ];
+  for (const src of left) expect(guidedIn(src).filter((h) => h.startsWith("G11"))).toEqual([]);
+});
+
+test("the guided rules are linear in the file", () => {
+  const src = Array.from({ length: 8000 }, (_, i) => `function f${i}(xs: string, i: number) {\n  const a = { n: i };\n  const b = a;\n  b.n = 2;\n  for (let j = 0; j < xs.length; j++) g(xs[i] + a.n);\n  save();\n}\n`).join("");
+  const started = performance.now();
+  expect(migrations(parseWithComments(src), src).filter((h) => h.rule === "G11")).toHaveLength(8000);
+  expect(performance.now() - started).toBeLessThan(5000);
+});
+
+test("G2 finds async class methods, object-literal methods and interface or type methods giving a Promise", () => {
+  const src = "class Store {\n  async save(): Promise<void> {}\n  async flush() {}\n}\nconst api = {\n  async post() {},\n  put: async () => 1,\n};\ninterface Remote {\n  send(): Promise<void>;\n}\ntype Peer = { ping(): Promise<void> };\nfunction run(s: Store, r: Remote, p: Peer) {\n  s.flush();\n  api.post();\n  api.put();\n  r.send();\n  p.ping();\n}\n";
+  expect(guidedIn(src).filter((h) => h.startsWith("G2"))).toEqual(["G2 s.flush()", "G2 api.post()", "G2 api.put()", "G2 r.send()", "G2 p.ping()"]);
+});
+
+test("G2 ties a method call to its declaration through the receiver, and leaves an unknown receiver or an async generator", () => {
+  const src = "class Cache {\n  async set(k: string, v: string) {}\n  refresh() {\n    this.set(\"a\", \"b\");\n  }\n}\nfunction f(m: Map<string, number>, c: Ref<Cache>, other: Thing) {\n  m.set(\"a\", 1);\n  c.set(\"a\", \"b\");\n  const made = new Cache();\n  made.set(\"a\", \"b\");\n  other.set(\"a\", \"b\");\n  unknown.set(\"a\", \"b\");\n}\n";
+  expect(guidedIn(src).filter((h) => h.startsWith("G2"))).toEqual(['G2 this.set("a", "b")', 'G2 c.set("a", "b")', 'G2 made.set("a", "b")']);
+  expect(guidedIn("async function* lines() {}\nclass A {\n  async *more() {}\n}\nfunction f(a: A) {\n  lines();\n  a.more();\n}\n").filter((h) => h.startsWith("G2"))).toEqual([]);
+  expect(guidedIn("async function save() {}\nfunction f(save: () => void) {\n  save();\n}\n").filter((h) => h.startsWith("G2"))).toEqual([]);
+});
+
+test("G6 reads a name's string-ness from the binding it resolves to, and an index never gets both G6 and G3", () => {
+  const src = "function a(o: Record<string, number>) {\n  for (const i in o) g(o[i]);\n}\nfunction b(xs: number[]) {\n  for (let i = 0; i < xs.length; i++) g(xs[i]);\n}\nfunction c(key: string) {\n  return key;\n}\nfunction d(xs: number[], key: number) {\n  return xs[key];\n}\n";
+  expect(guidedIn(src)).toEqual(["G6 o[i]", "G3 i", "G3 key"]);
+});
+
+test("G4 and G5 see through a generic base", () => {
+  const src = "class Base<T> {}\nclass Sub extends Base<string> {}\nfunction f(b: Base<string>, x: object) {\n  return x instanceof Base;\n}\n";
+  expect(guidedIn(src)).toEqual(["G4 class Sub extends Base<string> {}", "G5 x instanceof Base"]);
+});
+
+test("G3 and G11 are linear in the uses of one name", () => {
+  const n = 16000;
+  const blocks = `function f(xs: number[]) {\n${"  { let k = 0; g(xs[k]); }\n".repeat(n)}}\n`;
+  const aliases = `function h() {\n  const a = { n: 1 };\n${Array.from({ length: n }, (_, i) => `  const b${i} = a;\n  a.n = ${i};\n  use(b${i});\n`).join("")}}\n`;
+  const started = performance.now();
+  expect(migrations(parseWithComments(blocks), blocks).filter((h) => h.rule === "G3")).toHaveLength(n);
+  expect(migrations(parseWithComments(aliases), aliases).filter((h) => h.rule === "G11")).toHaveLength(n);
+  expect(performance.now() - started).toBeLessThan(5000);
 });

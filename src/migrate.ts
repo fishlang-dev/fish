@@ -96,8 +96,8 @@ export type Imported = (specifier: string) => "rename" | "ambiguous" | undefined
 // comment is dropped, its hit reported but not fixed. `fsh` is as for `fix`.
 export function migrations(parsed: Parsed, src: string, fsh: Imported = () => "rename"): Hit[] {
   const nodes = everyNode(parsed.program);
-  const file: File = { src, tokens: parsed.tokens, nodes, up: parents(parsed.program), bound: bindings(nodes), ...byName(nodes) };
-  const hits = [...rejects(parsed.program, nodes), ...autoFixes(parsed.program, file, fsh), ...markers(src, parsed.comments)];
+  const file = fileOf(parsed.program, nodes, src, parsed.tokens);
+  const hits = [...rejects(parsed.program, nodes), ...autoFixes(parsed.program, file, fsh), ...guided(parsed.program, file), ...markers(src, parsed.comments)];
   for (const h of hits) {
     if (!h.edits?.some((e) => parsed.comments.some((c) => c.start >= e.start && c.end <= e.end))) continue;
     delete h.edits;
@@ -106,12 +106,13 @@ export function migrations(parsed: Parsed, src: string, fsh: Imported = () => "r
   return hits;
 }
 
-// The hits `fishc survey` counts: the reject rules, and A1, A3 and A8 wherever they occur, fixable
-// or not, without working out any edits.
+// The hits `fishc survey` counts: the reject and guided rules, and A1, A3 and A8 wherever they
+// occur, fixable or not, without working out any edits.
 export function surveyHits(program: unknown[]): Hit[] {
   const nodes = everyNode(program);
   const ambient = new Set(nodes.filter((n) => n.kind === "declare").flatMap((n) => everyNode([n.body])));
-  const hits = rejects(program, nodes);
+  // The guided rules read no text or tokens.
+  const hits = [...rejects(program, nodes), ...guided(program, fileOf(program, nodes, "", []))];
   const at = (rule: string, n: Node) => hits.push({ rule, action: "auto", start: n.start, end: n.end });
   for (const n of nodes) {
     if (n.kind === "let" && n.keyword === "var" && !ambient.has(n)) at("A1", n);
@@ -120,6 +121,8 @@ export function surveyHits(program: unknown[]): Hit[] {
   }
   return hits;
 }
+
+const fileOf = (program: unknown[], nodes: Node[], src: string, tokens: Token[]): File => ({ src, tokens, nodes, up: parents(program), bound: bindings(nodes), ...byName(nodes) });
 
 // The reject rules' hits in a file's tree, in no particular order. The walk keeps its own stack,
 // so a deeply nested file can't overflow the call stack.
@@ -779,4 +782,262 @@ function markers(src: string, comments: Comment[]): Hit[] {
     const rule = before.lastIndexOf("Mut<") > before.lastIndexOf("Ref<") ? "A6" : "A5";
     return { rule, action: "guided", start: c.start, end: c.end, message: "an ownership type the lint inserted: check it, then remove the marker" };
   });
+}
+
+// What each guided rule suggests, as the hit's message says it.
+const GUIDES: Record<string, string> = {
+  G1: "'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, or the dynamic 'Json' value",
+  G2: "the promise this call gives is dropped, and a Fish future runs only when it is awaited; add 'await', or wrap the call in 'spawn()' to run it on its own",
+  G3: "this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index",
+  G4: "this class extends one that is also used as a type, so a subclass stands in for its base, which Fish's embedded bases don't allow; extract an interface for what they share, and hold the base as a field",
+  G5: "'instanceof' tests a class that others extend, and Fish has no subclass checks at run time; 'match' on an interface or an enum instead",
+  G6: "indexing with a string key reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'",
+  G7: "top-level code runs when the module loads, which Fish doesn't do; move it into 'main()', or into a 'Lazy<T>' for a value made once",
+  G8: "parsing gives an 'Option' in Fish rather than NaN; 'match' on the parsed 'Option' instead of checking 'isNaN'",
+  G9: "'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure",
+  G10: "'forEach' doesn't wait for an async callback; use 'for...of' with 'await', or spawn a task for each",
+  G11: "hold one value, changed through one while the other is still used, which Fish's ownership refuses; share it as 'shared<T>', give one its own '.clone()', or restructure so one name is used at a time",
+};
+
+const PARSERS = ["parseInt", "parseFloat", "Number"];
+// A call that parses a number: `parseInt`, `parseFloat` or `Number`, bare or on `Number`.
+const parsing = (e: unknown) => isNode(e) && e.kind === "call" && (PARSERS.some((p) => named(e.callee, p)) || (isNode(e.callee) && e.callee.kind === "member" && named(e.callee.object, "Number") && ["parseInt", "parseFloat"].includes(e.callee.name as string)));
+// Where a call's rule points: a method's own name rather than the start of a long chain.
+const callAt = (n: Node) => (isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start);
+const typeName = (t: unknown, name: string) => isNode(t) && t.kind === "ref" && t.name === name;
+
+// The guided rules' hits: each a decision left to a person, with what to do, never an edit.
+function guided(program: unknown[], f: File): Hit[] {
+  const hits: Hit[] = [];
+  const hit = (rule: string, start: number, end: number) => hits.push({ rule, action: "guided", start, end, message: GUIDES[rule] });
+  for (const s of program) {
+    const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
+    if (isNode(top) && top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) hit("G7", top.start, top.end);
+  }
+  const scopes = scopesOf(f);
+  const extended = new Set(f.nodes.flatMap((c) => (c.kind === "class" && baseName(c) ? [baseName(c)!] : [])));
+  const typed = new Set(f.nodes.flatMap((n) => (n.kind === "ref" && f.up.get(n)?.key !== "implements" ? [n.name as string] : [])));
+  // What a name used as an index or given to `isNaN` holds, read from the binding it resolves to.
+  const declarator = (use: Node) => {
+    const b = resolve(f, scopes, use);
+    return b?.kind === "let" ? b.declarator : undefined;
+  };
+  const stringy = (use: Node) => {
+    const b = resolve(f, scopes, use);
+    if (b?.kind === "param") return typeName(b.param.type, "string");
+    if (b?.kind !== "let") return false;
+    const holder = f.up.get(b.let)?.holder as Node | undefined;
+    return (holder?.kind === "forIn" && f.up.get(b.let)?.key === "left") || typeName(b.declarator.type, "string") || (isNode(b.declarator.init) && (literalKind(b.declarator.init) === "string" || b.declarator.init.kind === "template"));
+  };
+  hits.push(...dropped(f, scopes), ...counts(f, scopes), ...aliases(f));
+  for (const n of f.nodes) {
+    if (n.kind === "ref" && n.name === "any") hit("G1", n.start, n.end);
+    if (n.kind === "class" && baseName(n) && typed.has(baseName(n)!)) hit("G4", n.start, n.end);
+    if (n.kind === "binary" && n.op === "instanceof" && isNode(n.right) && n.right.kind === "ident" && extended.has(n.right.name as string)) hit("G5", n.start, n.end);
+    if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index)))) hit("G6", n.start, n.end);
+    // A call signature in an interface is a `call` too, without arguments.
+    if (n.kind !== "call" || !Array.isArray(n.args)) continue;
+    const callee = n.callee as Node;
+    const [first] = n.args as Node[];
+    if ((named(callee, "isNaN") || (callee.kind === "member" && named(callee.object, "Number") && callee.name === "isNaN")) && (parsing(first) || (isNode(first) && first.kind === "ident" && parsing(declarator(first)?.init)))) hit("G8", callAt(n), n.end);
+    if (callee.kind !== "member") continue;
+    if (["call", "apply", "bind"].includes(callee.name as string)) hit("G9", callAt(n), n.end);
+    if (callee.name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) hit("G10", callAt(n), n.end);
+  }
+  return hits;
+}
+
+// `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.
+function callsMain(e: unknown): boolean {
+  if (!isNode(e) || e.kind !== "call") return false;
+  if (named(e.callee, "main")) return true;
+  return isNode(e.callee) && e.callee.kind === "member" && ["catch", "then"].includes(e.callee.name as string) && callsMain(e.callee.object);
+}
+
+// A function or method whose call gives a promise: `async`, by its field or a class method's
+// modifier, or declared returning `Promise<...>`; an async generator gives an iterator instead.
+const promised = (n: Node) => n.generator !== true && (n.async === true || (Array.isArray(n.modifiers) && n.modifiers.includes("async")) || typeName(n.returnType, "Promise") || typeName(n.returns, "Promise"));
+
+// The class extended, by name, seeing through type arguments as in `extends Base<string>`.
+const baseName = (n: Node): string | undefined => {
+  const base = isNode(n.extends) && n.extends.kind === "instantiation" ? n.extends.expr : n.extends;
+  return isNode(base) && base.kind === "ident" ? (base.name as string) : undefined;
+};
+
+type Decl = { target: Node; type?: Node; init?: Node };
+// What a name is bound to: a variable's declarator, a parameter, or a declared function.
+type Binding = { kind: "let"; declarator: Decl; let: Node } | { kind: "param"; param: Param; fn: Node } | { kind: "function"; fn: Node };
+const ROOT = {};
+
+// Each scope's bindings by name: a statement list's under what holds it, a loop head's under its
+// loop, the file's under `ROOT`, and a function's parameters under the function.
+function scopesOf(f: File): Map<object, Map<string, Binding>> {
+  const scopes = new Map<object, Map<string, Binding>>();
+  const bind = (scope: object, name: string, b: Binding) => {
+    const names = scopes.get(scope) ?? new Map<string, Binding>();
+    scopes.set(scope, names);
+    if (!names.has(name)) names.set(name, b);
+  };
+  const scopeOf = (n: Node): object => f.up.get(n)?.holder ?? ROOT;
+  for (const n of f.nodes) {
+    if (n.kind === "let") for (const d of n.declarations as Decl[]) for (const x of everyNode([d.target])) if (x.kind === "ident") bind(scopeOf(n), x.name as string, { kind: "let", declarator: d, let: n });
+    if (n.kind === "function" && "macro" in n && typeof n.name === "string") bind(scopeOf(n), n.name, { kind: "function", fn: n });
+    if (isFunction(n) && n.body !== undefined) for (const p of n.params as Param[]) for (const x of everyNode([p.pattern])) if (x.kind === "ident") bind(n, x.name as string, { kind: "param", param: p, fn: n });
+  }
+  return scopes;
+}
+
+// The binding a name's use resolves to: the innermost scope holding it that binds the name.
+function resolve(f: File, scopes: Map<object, Map<string, Binding>>, use: Node): Binding | undefined {
+  const name = use.name as string;
+  for (let at = f.up.get(use); at; at = f.up.get(at.holder)) {
+    const found = scopes.get(at.holder)?.get(name);
+    if (found) return found;
+  }
+  return scopes.get(ROOT)?.get(name);
+}
+
+// G2: a call whose promise is dropped: a statement of its own, not awaited, returned, assigned or
+// given to `void`, of what the file declares giving a promise. A plain call counts through the
+// binding its name resolves to; a method call only when its receiver is known from the syntax:
+// `this` in the method's class, a name annotated with the class, interface or type, or a local
+// made with `new` of the class or with the object literal.
+function dropped(f: File, scopes: Map<object, Map<string, Binding>>): Hit[] {
+  // Each type or object literal's methods that give a promise, by name.
+  const owners = new Map<object, Set<string>>();
+  const types = new Map<string, object>();
+  for (const n of f.nodes) {
+    const members = n.kind === "class" || n.kind === "interface" ? (n.members as Node[]) : n.kind === "typeAlias" && isNode(n.type) && n.type.kind === "object" ? (n.type.members as Node[]) : n.kind === "object" ? (n.props as Node[]) : undefined;
+    if (!members) continue;
+    if (typeof n.name === "string") types.set(n.name, n);
+    const names = new Set(members.flatMap((m) => {
+      const name = (m.name ?? m.key) as unknown;
+      const value = m.kind === "property" && isNode(m.value) ? m.value : m;
+      return typeof name === "string" && (m.kind === "method" || m.kind === "property") && promised(value) ? [name] : [];
+    }));
+    owners.set(n, names);
+  }
+  const ownerOf = (b: Binding | undefined): object | undefined => {
+    let type = b?.kind === "param" ? b.param.type : b?.kind === "let" ? b.declarator.type : undefined;
+    // A borrow of the type is the type for this.
+    if (isNode(type) && type.kind === "ref" && (type.name === "Ref" || type.name === "Mut")) type = (type.args as Node[])[0];
+    if (isNode(type) && type.kind === "ref") return types.get(type.name as string);
+    const init = b?.kind === "let" ? b.declarator.init : undefined;
+    if (init?.kind === "new" && isNode(init.callee) && init.callee.kind === "ident") return types.get(init.callee.name as string);
+    return init?.kind === "object" ? init : undefined;
+  };
+  const gives = (callee: Node, call: Node): boolean => {
+    if (callee.kind === "ident") {
+      const b = resolve(f, scopes, callee);
+      if (b?.kind === "function") return promised(b.fn);
+      return b?.kind === "let" && isNode(b.declarator.init) && (b.declarator.init.kind === "arrow" || b.declarator.init.kind === "function") && promised(b.declarator.init);
+    }
+    if (callee.kind !== "member") return false;
+    const object = callee.object as Node;
+    const owner = object.kind === "this" ? ancestors(f, call).find((x) => x.kind === "class") : object.kind === "ident" ? ownerOf(resolve(f, scopes, object)) : undefined;
+    return owner !== undefined && owners.get(owner)?.has(callee.name as string) === true;
+  };
+  const hits: Hit[] = [];
+  for (const n of f.nodes) {
+    if (n.kind === "expr" && isNode(n.expr) && n.expr.kind === "call" && gives(n.expr.callee as Node, n.expr)) hits.push({ rule: "G2", action: "guided", start: n.expr.start, end: n.expr.end, message: GUIDES.G2 });
+  }
+  return hits;
+}
+
+const COMPARES = new Set(["<", "<=", ">", ">=", "===", "!==", "==", "!="]);
+
+// G3: a binding declared with a number or annotated `number` that the code uses as an array
+// index, or compares with a `.length` as a loop counter does. Each such use is resolved to its
+// binding once, and each binding reported once, at its name.
+function counts(f: File, scopes: Map<object, Map<string, Binding>>): Hit[] {
+  const numeric = (type: unknown, init: unknown) => typeName(type, "number") || (!type && isNode(init) && literalKind(init) === "number");
+  const seen = new Set<Node>();
+  const hits: Hit[] = [];
+  for (const list of f.idents.values()) {
+    for (const use of list) {
+      const at = f.up.get(use);
+      const holder = at?.holder as Node | undefined;
+      const other = at?.key === "left" ? holder?.right : at?.key === "right" ? holder?.left : undefined;
+      const counting = (holder?.kind === "index" && at!.key === "index") || (holder?.kind === "binary" && COMPARES.has(holder.op as string) && isNode(other) && other.kind === "member" && other.name === "length");
+      if (!counting) continue;
+      const b = resolve(f, scopes, use);
+      const target = b?.kind === "let" && numeric(b.declarator.type, b.declarator.init) ? b.declarator.target : b?.kind === "param" && b.fn.body !== undefined && typeName(b.param.type, "number") ? b.param.pattern : undefined;
+      if (target?.kind !== "ident" || seen.has(target)) continue;
+      seen.add(target);
+      hits.push({ rule: "G3", action: "guided", start: target.start, end: target.end, message: GUIDES.G3 });
+    }
+  }
+  return hits;
+}
+
+const VALUES = new Set(["object", "array", "new", "call"]);
+
+// G11: a plain local alias, `const b = a` or `b = a`, of a value that isn't a primitive, after
+// which one name changes it while the other is still used. `a` counts when the file declares it
+// only with an object, an array, a `new` or a call; uses are those in the alias's scope.
+function aliases(f: File): Hit[] {
+  const hits: Hit[] = [];
+  // Worked out once per name, so many aliases of one name stay cheap.
+  const known = new Map<string, boolean>();
+  const valued = (name: string) => {
+    if (known.has(name)) return known.get(name)!;
+    const inits = (f.lets.get(name) ?? []).flatMap((n) => (n.kind === "let" ? (n.declarations as { target: Node; init?: Node }[]).filter((d) => named(d.target, name)).map((d) => d.init) : [undefined]));
+    known.set(name, inits.length > 0 && inits.every((init) => isNode(init) && VALUES.has(init.kind)));
+    return known.get(name)!;
+  };
+  // Each name's changes, in source order, found once per name.
+  const changes = new Map<string, Node[]>();
+  const changesOf = (name: string) => {
+    if (!changes.has(name)) changes.set(name, (f.idents.get(name) ?? []).flatMap((u) => mutation(f, u) ?? []).sort((a, b) => a.start - b.start));
+    return changes.get(name)!;
+  };
+  // The first node of `list`, sorted by start, starting at or after `from` and inside `scope`,
+  // found by binary search and a walk that stops at the first.
+  const first = (list: Node[], from: number, scope: Span) => {
+    let [lo, hi] = [0, list.length];
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]!.start < from) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < list.length && list[i]!.start < scope.end; i++) if (list[i]!.end <= scope.end) return list[i];
+    return undefined;
+  };
+  const check = (alias: string, value: string, at: Span, node: Node) => {
+    if (alias === value || !valued(value)) return;
+    const scope: Span = ancestors(f, node).find(isFunction) ?? { start: 0, end: f.src.length || Infinity };
+    for (const [changing, other] of [[alias, value], [value, alias]] as const) {
+      const change = first(changesOf(changing), at.end, scope);
+      if (change && first(f.idents.get(other) ?? [], change.end, scope)) {
+        hits.push({ rule: "G11", action: "guided", start: at.start, end: at.end, message: `'${alias}' and '${value}' ${GUIDES.G11}` });
+        return;
+      }
+    }
+  };
+  for (const n of f.nodes) {
+    if (n.kind === "let") for (const d of n.declarations as { target: Node; init?: Node }[]) if (d.target.kind === "ident" && d.init?.kind === "ident") check(d.target.name as string, d.init.name as string, { start: d.target.start, end: d.init.end }, n);
+    if (n.kind === "assign" && n.op === "=" && isNode(n.target) && n.target.kind === "ident" && isNode(n.value) && n.value.kind === "ident") check(n.target.name as string, n.value.name as string, n, n);
+  }
+  return hits;
+}
+
+// The node changing what the name at `use` holds, if it does: an assignment, update or `delete`
+// through a member or element of it, a known mutating method called on it, or `Object.assign` onto it.
+function mutation(f: File, use: Node): Node | undefined {
+  let top = use;
+  let at = f.up.get(use);
+  while (at && isNode(at.holder) && (at.holder.kind === "member" || at.holder.kind === "index") && at.key === "object") {
+    top = at.holder;
+    at = f.up.get(top);
+  }
+  const holder = at?.holder as Node | undefined;
+  if (!at || !holder) return undefined;
+  if (top !== use) {
+    if (holder.kind === "assign" && at.key === "target") return holder;
+    if ((holder.kind === "update" || (holder.kind === "unary" && holder.op === "delete")) && at.key === "operand") return holder;
+    if (top.kind === "member" && MUTATORS.has(top.name as string) && holder.kind === "call" && at.key === "callee") return holder;
+  }
+  const callee = holder.callee as Node | undefined;
+  if (holder.kind === "call" && at.key === "args" && (holder.args as unknown[])[0] === use && callee?.kind === "member" && named(callee.object, "Object") && callee.name === "assign") return holder;
+  return undefined;
 }
