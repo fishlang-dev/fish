@@ -24,6 +24,7 @@ function dir(name: string, files: Record<string, string>): string {
   return at;
 }
 
+const GUIDED_G7 = "top-level code runs when the module loads, which Fish doesn't do; move it into 'main()', or into a 'Lazy<T>' for a value made once";
 const COMPAT = '[package]\nname = "ported"\nversion = "0.1.0"\nedition = "ts-compat"\n';
 
 test("a TS-compat package's hits are reported in file and position order, then counted", () => {
@@ -67,7 +68,7 @@ test("directories and the package are searched as fishc fmt searches them, skipp
   const all = lint(join(pkg, "src", "deep"));
   expect(all.code).toBe(1);
   expect(all.out.split("\n").filter((l) => l.includes("reject"))).toEqual([`one.fsh:1:1: reject R1: ${REJECTS.R1}`]);
-  expect(all.out).toEndWith("1 to change in 1 file\n");
+  expect(all.out).toEndWith("2 to change in 1 file\n");
   const named = lint(root, "searched/src");
   expect(named.out.split("\n").filter((l) => l.includes("reject"))).toEqual([`searched/src/deep/one.fsh:1:1: reject R1: ${REJECTS.R1}`]);
 });
@@ -77,7 +78,7 @@ test("a file that doesn't parse is reported as a build reports it, and the rest 
   const { code, out, err } = lint(pkg);
   expect(code).toBe(1);
   expect(err).toBe("src/a.fsh:1:7: error: expected an identifier, found '='\n 1 | const = ;\n   |       ^\n");
-  expect(out).toBe(`src/b.fsh:1:1: reject R3: ${REJECTS.R3}\n 1 | delete o.k;\n   | ^^^^^^^^^^\n1 to change in 1 file\n`);
+  expect(out).toBe(`src/b.fsh:1:1: reject R3: ${REJECTS.R3}\n 1 | delete o.k;\n   | ^^^^^^^^^^\nsrc/b.fsh:1:1: guided G7: ${GUIDED_G7}\n 1 | delete o.k;\n   | ^^^^^^^^^^\n2 to change in 1 file\n`);
 });
 
 test("unknown flags, a missing path and no package are refused", () => {
@@ -126,9 +127,10 @@ test("the auto rules are reported with the change each would make", () => {
     "src/main.fsh:6:15: auto A9: the function expression becomes an arrow function, as it doesn't use its own 'this'",
     "src/main.fsh:9:18: auto A5: 'p' is only read here, so it is borrowed as 'Ref<Point>'; the marker asks you to confirm it",
     `src/main.fsh:12:1: reject R3: ${REJECTS.R3}`,
+    `src/main.fsh:12:1: guided G7: ${GUIDED_G7}`,
   ]);
   expect(out).toContain(" 1 | var total = 0;\n   | ^^^\n");
-  expect(out).toEndWith("7 to change in 1 file\n");
+  expect(out).toEndWith("8 to change in 1 file\n");
 });
 
 test("--fix writes every fix, keeps the rest as written, and reports what is left", () => {
@@ -153,8 +155,9 @@ delete user.age;
     "src/main.fsh:4:15: guided A3: '==' converts between types, which Fish doesn't; compare with '===' once both sides have the same type",
     "src/main.fsh:9:29: guided A5: an ownership type the lint inserted: check it, then remove the marker",
     `src/main.fsh:12:1: reject R3: ${REJECTS.R3}`,
+    `src/main.fsh:12:1: guided G7: ${GUIDED_G7}`,
   ]);
-  expect(out).toEndWith("3 to change in 1 file\n");
+  expect(out).toEndWith("4 to change in 1 file\n");
 });
 
 test("fixes that overlap are settled over rounds", () => {
@@ -229,4 +232,34 @@ test("a settled rename that fails when written says which files already import i
   expect(code).toBe(1);
   expect(readFileSync(join(at, "a.fsh"), "utf8")).toBe('import { b } from "./b.fsh";\nconsole.log(b);\n');
   expect(err).toMatch(/^fishc lint: can't write 'b\.ts': .*; 'a\.fsh' already imports its '\.fsh' name, which isn't there\n$/);
+});
+
+const GUIDED_SRC = `async function save(): Promise<void> {}
+function main(s: string, at: number) {
+  const o = { n: 1 };
+  const p = o;
+  p.n = 2;
+  save();
+  return s[at] + o.n;
+}
+`;
+
+test("guided hits print with their suggestion, and --fix leaves them as written and still reports them", () => {
+  const pkg = dir("guided", { "fish.toml": COMPAT, "src/main.fsh": GUIDED_SRC });
+  const expected = [
+    "src/main.fsh:2:26: guided G3: this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index",
+    " 2 | function main(s: string, at: number) {",
+    "   |                          ^^",
+    "src/main.fsh:4:9: guided G11: 'p' and 'o' hold one value, changed through one while the other is still used, which Fish's ownership refuses; share it as 'shared<T>', give one its own '.clone()', or restructure so one name is used at a time",
+    " 4 |   const p = o;",
+    "   |         ^^^^^",
+    "src/main.fsh:6:3: guided G2: the promise this call gives is dropped, and a Fish future runs only when it is awaited; add 'await', or wrap the call in 'spawn()' to run it on its own",
+    " 6 |   save();",
+    "   |   ^^^^^^",
+    "3 to change in 1 file",
+    "",
+  ].join("\n");
+  expect(lint(pkg)).toEqual({ code: 1, out: expected, err: "" });
+  expect(lint(pkg, "--fix")).toEqual({ code: 1, out: expected, err: "" });
+  expect(readFileSync(join(pkg, "src/main.fsh"), "utf8")).toBe(GUIDED_SRC);
 });

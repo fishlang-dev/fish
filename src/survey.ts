@@ -38,13 +38,16 @@ const RULES: Rule[] = [
   { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
   { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
   { id: "G1", action: "guided", title: "any: choose a concrete type, a union, or the dynamic Json value" },
-  { id: "G4", action: "guided", title: "class extends: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
-  { id: "G5", action: "guided", title: "instanceof: match on an interface or an enum instead" },
+  { id: "G2", action: "guided", title: "a promise dropped un-awaited: add await, or spawn() it to run on its own" },
+  { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
+  { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
+  { id: "G5", action: "guided", title: "instanceof a class others extend: match on an interface or an enum instead" },
   { id: "G6", action: "guided", title: "indexing an object with a string key: use a Map" },
-  { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a comptime const" },
+  { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a Lazy<T>" },
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
+  { id: "G11", action: "guided", title: "a value aliased and changed from two names: shared<T>, a .clone(), or restructuring" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },
   { id: "A3", action: "auto", title: "== and !=: === and !==" },
@@ -143,7 +146,7 @@ function scanFile(path: string, file: string): FileScan {
   try {
     const program = parse(src);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
-    // The reject rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
+    // The reject and guided rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
     // find only what they can fix, so the survey counts those its own wider way.
     for (const hit of surveyHits(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
     for (const offset of captures(program)) findings.push(["localCaptures", { file, ...position(src, offset) }]);
@@ -282,7 +285,6 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
-    if (top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) note("G7", top.start);
     if (top.kind === "let" && top.keyword === "let" && !(isNode(s) && s.kind === "declare")) note("A4", top.start);
   }
   // A std module imported whole, by its local name, with what it exports: a member it doesn't
@@ -332,13 +334,6 @@ function takesDefault(p: Record<string, unknown>, after: Record<string, unknown>
   const empty = d.kind === "null" || (d.kind === "ident" && (d as { name?: string }).name === "undefined");
   const property = Array.isArray(p.modifiers) && p.modifiers.length > 0;
   return !property && after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
-}
-
-// `main()` at the top level, or `main().catch(...)`, which a Fish program's `main` replaces.
-function callsMain(e: unknown): boolean {
-  if (!isNode(e) || e.kind !== "call") return false;
-  if (named(e.callee, "main")) return true;
-  return isNode(e.callee) && e.callee.kind === "member" && ["catch", "then"].includes(e.callee.name as string) && callsMain(e.callee.object);
 }
 
 function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void, arrow: boolean) {
@@ -391,14 +386,11 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       if (envEntry(n.operand)) push("process");
       break;
     case "binary":
-      if (n.op === "instanceof") push("G5");
       break;
     case "index":
-      if (isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template")) push("G6");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       break;
     case "ref":
-      if (n.name === "any") push("G1");
       if (n.name === "null" || n.name === "undefined") push("A2");
       if (["WeakMap", "WeakSet"].includes(n.name as string)) push("collections");
       if (["ReadonlyMap", "ReadonlySet"].includes(n.name as string)) push("readonlyCollections");
@@ -453,7 +445,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
   if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
   // A class's base is one expression; an interface's are a list, which Fish keeps.
-  if ("members" in n && isNode(n.extends)) push("G4");
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
 }
@@ -515,7 +506,6 @@ export const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_p
 
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;
-  if (named(callee, "isNaN") || memberOf(callee, "Number", ["isNaN"])) push("G8");
   if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "fetch")) push("fetch");
   if (named(callee, "setImmediate") || named(callee, "clearImmediate")) push("timerForms");
@@ -526,9 +516,7 @@ function callRules(n: Node, push: (id: string) => void) {
   if (memberOf(callee, "JSON", ["parse", "stringify"]) && (n.args as unknown[]).length > 1) push("json");
   if (!isNode(callee) || callee.kind !== "member") return;
   const name = callee.name as string;
-  if (["call", "apply", "bind"].includes(name)) push("G9");
   const [first] = n.args as Node[];
-  if (name === "forEach" && isNode(first) && (first.kind === "arrow" || first.kind === "function") && first.async) push("G10");
 }
 
 // A pattern of names, holes and renames only, with no defaults, rest or nesting.

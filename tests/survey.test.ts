@@ -49,7 +49,7 @@ test("each rule counts what the sample shows", () => {
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
     classForms: 1, fetch: 1,
-    G1: 3, G4: 1, G5: 1, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
+    G1: 3, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
 
@@ -61,6 +61,14 @@ test("the reject rules are counted through the migration detector, R5 to R7 too"
 
 test("A1, A3 and A8 are counted through the migration detector, as before, fixable or not", () => {
   expect(counts("var a = 1;\nfor (var i = 0; i < 2; i++) {}\ndeclare var d: number;\nconst b = a == 1 || x != y;\nconst u = JSON.parse(s) as U;\nconst v = JSON.parse<U>(s) as U;\n")).toEqual({ A1: 2, A3: 2, A8: 2 });
+});
+
+test("the survey counts G2, G3 and G11 through the migration detector, with rows for each", () => {
+  expect(counts("async function save(): Promise<void> {}\nfunction main(xs: number[], i: number) {\n  const a = { n: 1 };\n  const b = a;\n  b.n = 2;\n  save();\n  return xs[i] + a.n;\n}\n")).toEqual({ G2: 1, G3: 1, G11: 1 });
+  project({ "a.ts": "export const x = 1;\n" }, (dir) => {
+    const ids = [...survey(dir).rules, ...survey(dir).waiting].map((r) => r.id);
+    for (const id of ["G2", "G3", "G11"]) expect(ids).toContain(id);
+  });
 });
 
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {
@@ -191,7 +199,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(54);
+  expect(r.rules.length + r.waiting.length).toBe(57);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
