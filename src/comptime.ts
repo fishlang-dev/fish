@@ -292,7 +292,7 @@ function interpreter() {
     try {
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
-      if (callee.body.foreign) refuse(`the C function '${callee.body.name}'`, at);
+      if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
       if (callee.body.js) refuse(`'${callee.body.name}' from the package '${callee.body.js.module}'`, at);
       if (!ensureChecked(callee)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };

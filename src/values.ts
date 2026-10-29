@@ -1331,7 +1331,7 @@ export function expressions(ctx: Context) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
-    if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
+    if (target.foreign && !target.rust) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
     if (target.js) jsCalls.set(e, target.js);
     if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
     else refuseSpread(e.args);
@@ -1552,7 +1552,7 @@ export function expressions(ctx: Context) {
 
   // A generic function named as a value: its own type, each call of which instantiates it.
   function genericValue(f: Body, e: Expr): Type {
-    if (f.foreign) throw unsupported("C functions used as values", e);
+    if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     return genericFunctionType(f.name, "a generic function");
   }
 
@@ -1598,7 +1598,7 @@ export function expressions(ctx: Context) {
     const name = `'${written}'`;
     // A generic one given as a callback is the instance the callback's types make.
     if (f.typeParams?.some((p) => !isLifetime(p))) return instanceArrow(e);
-    if (f.foreign) throw unsupported("C functions used as values", e);
+    if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     // A package's function Fish couldn't type is refused where it is used as a value too.
     const refused = f.js ? jsUncalled.get(f) : undefined;
     if (refused) {

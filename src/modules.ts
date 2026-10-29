@@ -5,7 +5,10 @@ import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
-import { parse, shiftSpans, type Expr, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { fishFiles } from "./fmt.ts";
+import { MANIFEST, type RustDependency } from "./manifest.ts";
+import { RUST_NAME, rustNames, rustSymbol } from "./rust.ts";
 import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
@@ -26,7 +29,9 @@ export type Module = { path: string; file: string; base: number; src: string; st
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
-export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[] };
+// `rust`: each Rust crate the program imports, with the directory of the Fish package listing it.
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[] };
+export type RustCrate = { dependency: RustDependency; dir: string };
 
 let engineHook = false;
 
@@ -68,6 +73,9 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
       throw e;
     }
     if (base > 0) shiftSpans(statements, base);
+    // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
+    if (!path.startsWith("std:")) rustBlocks.set(key, statements.flatMap((s) => rustBlock(s) ?? []));
+    statements = statements.filter((s) => !rustBlock(s));
     const module: Module = { path: key, file, base, src: text, statements, targets: new Map(), globals: new Map(), pkg: fish && !path.startsWith("std:") ? packageOf(fish, key)?.dir : undefined };
     modules.push(module);
     byPath.set(key, module);
@@ -77,6 +85,10 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
       if (specifier === "fish:engine") {
         if (!engineHook) throw new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
         module.targets.set(s, visit("std:fish:engine", ENGINE_HOOK, "fish:engine"));
+        continue;
+      }
+      if (specifier.startsWith("rust:")) {
+        module.targets.set(s, rustModule(key, specifier.slice("rust:".length), s));
         continue;
       }
       // A bare name the importing file's own fish.toml depends on is that Fish package, even one
@@ -117,12 +129,11 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
   };
   // A declaration file a package's declarations come from: given its own place in the program's
   // offsets, so a message about a declaration shows its line.
-  const declarationFile = (file: string): number => {
+  const declarationFile = (file: string, text = readFileSync(file, "utf8")): number => {
     const key = `dts:${file}`;
     const known = byPath.get(key);
     if (known) return known.base;
     const base = modules.length * FILE_SPAN;
-    const text = readFileSync(file, "utf8");
     sources.push({ base, src: text, file: relative(dirname(entry), file) });
     const holder: Module = { path: key, file: relative(dirname(entry), file), base, src: text, statements: [], targets: new Map(), globals: new Map() };
     modules.push(holder);
@@ -193,6 +204,48 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     byPath.set(module.path, module);
     return module;
   };
+  // Each file's `declare module "rust:<crate>"` blocks, by its real path, and the crates imported.
+  const rustBlocks = new Map<string, Extract<Stmt, { kind: "namespace" }>[]>();
+  const rust: RustCrate[] = [];
+  // The blocks in a file of a package, read for them when the program doesn't import the file.
+  const blocksIn = (file: string) => {
+    const key = realpathSync(file);
+    const known = rustBlocks.get(key);
+    if (known) return known;
+    const text = read(file);
+    rustBlocks.set(key, []);
+    if (!text.includes("rust:")) return [];
+    const base = declarationFile(file, text);
+    let statements: Stmt[];
+    try {
+      statements = parse(text);
+    } catch (e) {
+      if (e instanceof CompileError) shiftSpans(e, base);
+      throw e;
+    }
+    shiftSpans(statements, base);
+    const blocks = statements.flatMap((s) => rustBlock(s) ?? []);
+    rustBlocks.set(key, blocks);
+    return blocks;
+  };
+  // What `import { f } from "rust:<crate>"` names: the functions the importing file's package
+  // declares for the crate, which its fish.toml must list.
+  const rustModule = (from: string, crate: string, s: Stmt): Module => {
+    const pkg = fish && packageOf(fish, from);
+    const dependency = pkg?.manifest.rustDependencies?.find((d) => d.name === crate);
+    if (!pkg || !dependency) throw new CompileError(`'${crate}' isn't a Rust dependency of this package; list it under [rust-dependencies] in ${MANIFEST}, as in ${crate} = "1.0"`, s.start, s.end);
+    const key = `rust:${pkg.dir}:${crate}`;
+    const known = byPath.get(key);
+    if (known) return known;
+    const blocks = fishFiles(pkg.dir, () => {}).flatMap(blocksIn).filter((b) => b.name === `rust:${crate}`);
+    if (blocks.length === 0) throw new CompileError(`no file of this package declares the functions of '${crate}'; declare them in one, as in 'declare module "rust:${crate}" { export function f(x: i64): i64; }'`, s.start, s.end);
+    if (blocks.length > 1) throw new CompileError(`'rust:${crate}' is declared twice in this package; declare its functions in one place`, blocks[1]!.start, blocks[1]!.end);
+    rust.push({ dependency, dir: pkg.dir });
+    const module: Module = { path: key, file: `rust:${crate}`, base: modules.length * FILE_SPAN, src: "", statements: (blocks[0]!.body ?? []).map((st) => rustFunction(crate, st)), targets: new Map(), globals: new Map() };
+    modules.push(module);
+    byPath.set(key, module);
+    return module;
+  };
   try {
     visit(entry, src, entry);
   } catch (e) {
@@ -200,7 +253,32 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     throw e;
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
-  return { modules, sources, packages };
+  return { modules, sources, packages, rust };
+}
+
+// `declare module "rust:<crate>" { ... }`.
+function rustBlock(s: Stmt) {
+  return s.kind === "declare" && s.body.kind === "namespace" && s.body.quoted && s.body.name.startsWith("rust:") ? s.body : undefined;
+}
+
+// A function a Rust module declares, as an exported function whose body is the crate's: under the
+// Fish name, at the Rust path `@rust` gives from the crate's root, or else at the same name there.
+function rustFunction(crate: string, s: Stmt): Stmt {
+  const f = s.kind === "export" ? s.body : s;
+  if (f.kind !== "function") throw new CompileError(`a Rust module declares the crate's functions, as in 'export function f(x: i64): i64;'`, s.start, s.end);
+  if (f.body !== undefined) throw new CompileError("a Rust function is declared without a body; the crate has its body", f.start, f.end);
+  if (!RUST_NAME.test(f.name)) throw new CompileError(`'${f.name}' can't name a Rust function; use letters, digits and '_'`, f.start, f.end);
+  let path = f.name;
+  for (const d of f.decorators ?? []) {
+    if (d.kind !== "call" || d.callee.kind !== "ident" || d.callee.name !== "rust") throw new CompileError("a Rust function takes only '@rust(\"path::to::item\")'", d.start, d.end);
+    const [arg, ...rest] = d.args;
+    if (arg?.kind !== "string" || rest.length > 0) throw new CompileError(`@rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`, d.start, d.end);
+    if (!arg.value.split("::").every((part) => RUST_NAME.test(part))) throw new CompileError("this isn't a Rust path; write one from the crate's root, as in \"util::mul\"", arg.start, arg.end);
+    path = arg.value;
+  }
+  const declared: Func = { ...f, decorators: undefined };
+  rustNames.set(declared, { crate, path, symbol: rustSymbol(crate, path) });
+  return { kind: "export", body: declared, start: s.start, end: s.end };
 }
 
 // A statement under `declare` or `export`.

@@ -1,4 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { trusted } from "./rust.ts";
 import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
@@ -58,7 +59,7 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
 // An instance's name in the IR.
-const symbol = (i: Instance) => (i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
+const symbol = (i: Instance) => (i.body.rust ? `@"${trusted(i.body.rust).symbol}"` : i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
 
 // The `Math` functions LLVM's intrinsics compute exactly. The rest call the runtime's
 // correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
@@ -170,6 +171,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
+  // The shim functions declared, each once however many declarations name its Rust function.
+  const declaredRust = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
   const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
 
@@ -193,7 +196,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (instance.body.foreign) {
       const returns = crossed(instance.returns);
       foreign.add(instance.body.name);
-      if (!DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
+      // A Rust function's shim takes a last parameter, where it puts a panic's message.
+      const params = [...instance.signature!.map(crossing), ...(instance.body.rust ? ["ptr"] : [])];
+      const rust = instance.body.rust && symbol(instance);
+      if (rust && declaredRust.has(rust)) continue;
+      if (rust) declaredRust.add(rust);
+      if (rust || !DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${params.join(", ")})`, "");
       continue;
     }
     current = instance;
@@ -6690,14 +6698,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
     const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
+    const caught = target.body.rust ? alloca("ptr") : undefined;
+    if (caught) {
+      emit(`store ptr null, ptr ${caught}`);
+      passed.push(`ptr ${caught}`);
+    }
     const call = `call ${target.body.foreign ? crossed(type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, cleanup);
+      if (caught) rustPanic(caught, at!);
       after?.();
       return undefined;
     }
     const result = temp();
     unwinding(call, result, cleanup);
+    if (caught) rustPanic(caught, at!);
     if (!target.throws) {
       after?.();
       return result;
@@ -6717,6 +6732,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const got = temp();
     emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
     return got;
+  }
+
+  // A panic a Rust function's shim caught, raised as a Fish panic at the call.
+  function rustPanic(caught: string, at: Expr) {
+    const [message, failed, bad, ok] = [temp(), temp(), label(), label()];
+    emit(`${message} = load ptr, ptr ${caught}`);
+    emit(`${failed} = icmp ne ptr ${message}, null`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(bad);
+    unwinding(`call void @fsh_rt_panic_rust(ptr ${panicAt(at)}, ptr ${message})`);
+    emit("unreachable");
+    startBlock(ok);
   }
 
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
