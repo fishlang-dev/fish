@@ -386,6 +386,14 @@ async function fetch(input: string | Request, init?: RequestInit): Promise<Respo
 type ServeInfo = { hostname: string; port: i64 };
 type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void };
 type ServeHandler = (req: Request) => Promise<Response>;
+// A router's internal names take forms no program can write, so a program's own never hides
+// the HTTP library.
+type __routerNext = (req: Request) => Promise<Response>;
+type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response>;
+// Each route's method, split path and handler, added together under one lock.
+type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[] };
+// A router's routes and middleware, shared so each middleware's next can hold them.
+type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
 // Serves HTTP/1.1 on hostname and port, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
@@ -515,9 +523,27 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 // runs, ':name' segments match any one segment, and a request no route matches gets a 404.
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
-  methods: string[] = [];
-  routes: string[][] = [];
-  handlers: ServeHandler[] = [];
+  private table: shared<__routerTable>;
+  // The innermost next, which runs the routes. Holding a Dyn also keeps a Router from being
+  // cloned, since clones would share one table.
+  private inner: __routerNext;
+
+  constructor() {
+    // Named first: an empty array literal for a field of callables is typed 'never[]'.
+    const handlers: ServeHandler[] = [];
+    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers };
+    const middleware: __routerMiddleware[] = [];
+    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
+    const held = table.clone();
+    this.table = table;
+    this.inner = async (r: Request) => {
+      const res = await Router.dispatch(held.clone(), r);
+      return res;
+    };
+  }
+
+  // Wraps every route and the 404, whenever it is added; the first added runs outermost.
+  use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
   post(this: Mut<this>, path: string, handler: ServeHandler) { this.route("POST", path, handler); }
@@ -529,26 +555,54 @@ class Router {
 
   // A route for a method, in any case; a path without a leading '/' gets one.
   route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
-    this.methods.push(method.toUpperCase());
-    this.routes.push((path.startsWith("/") ? path : "/" + path).split("/"));
-    this.handlers.push(handler);
+    const upper = method.toUpperCase();
+    const split = (path.startsWith("/") ? path : "/" + path).split("/");
+    this.table.routes.update((t) => {
+      t.methods.push(upper);
+      t.paths.push(split);
+      t.handlers.push(handler);
+    });
+  }
+
+  // The response the middleware give around the routes. Each next is built from the one inside
+  // it, innermost first, so no call of the chain awaits itself.
+  async handle(req: Request): Promise<Response> {
+    let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
+    let next = this.inner.clone();
+    while (chain.length > 0) {
+      const m = chain.pop()!;
+      const inner = next;
+      next = async (r: Request) => {
+        const res = await m(r, inner.clone());
+        return res;
+      };
+    }
+    const res = await next(req);
+    return res;
   }
 
   // The first matching route's response; a HEAD request may run a GET route.
-  async handle(req: Request): Promise<Response> {
+  private static async dispatch(table: shared<__routerTable>, req: Request): Promise<Response> {
     const have = req.path.split("/");
-    const head = req.method === "HEAD";
-    for (let i = 0; i < this.routes.length; i++) {
-      const method = this.methods[i];
-      if (method !== "" && method !== req.method && !(head && method === "GET")) continue;
-      const found = Router.match(this.routes[i], have);
-      if (found === null) continue;
-      let routed = req;
-      routed.params = found;
-      const res = await this.handlers[i](routed);
-      return res;
+    const method = req.method;
+    const found = table.routes.update((t) => Router.find(t, method, have));
+    if (found === null) return new Response("Not Found\\n", { status: 404 });
+    let routed = req;
+    routed.params = found.params;
+    const res = await found.handler(routed);
+    return res;
+  }
+
+  // The first route taking a method and path, its handler cloned, with the :params it reads.
+  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>): { handler: ServeHandler; params: string[] } | null {
+    const head = method === "HEAD";
+    for (let i = 0; i < t.paths.length; i++) {
+      const want = t.methods[i];
+      if (want !== "" && want !== method && !(head && want === "GET")) continue;
+      const found = Router.match(t.paths[i], have);
+      if (found !== null) return { handler: t.handlers[i].clone(), params: found };
     }
-    return new Response("Not Found\\n", { status: 404 });
+    return null;
   }
 
   // The router as the handler serve takes; the handler owns it.
@@ -1707,7 +1761,7 @@ function hideHelpers(nodes: unknown) {
   if (Array.isArray(nodes)) return nodes.forEach(hideHelpers);
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
-  if ((node.kind === "function" || node.kind === "ident") && typeof node.name === "string" && /^__(array|promise|timer|timeout)/.test(node.name)) {
+  if ((node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref") && typeof node.name === "string" && /^__(array|promise|timer|timeout|router)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);
