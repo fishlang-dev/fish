@@ -4061,8 +4061,14 @@ void fsh_rt_channel_close(fsh_channel *c) {
 }
 
 // An abort signal's block, shared by its controller and every signal handle: its count, its lock,
-// whether it has aborted, and the tasks waiting on it to.
-typedef struct fsh_signal { int64_t count; pthread_mutex_t lock; int32_t aborted; fsh_waiters waiting; } fsh_signal;
+// whether it has aborted, and the tasks waiting on it to. An 'AbortSignal.any' signal also holds a
+// count on each of its sources, and each source lists it, uncounted, among the dependents its
+// abort aborts: a dependent leaves those lists when it is freed, so a long-lived source doesn't
+// keep every signal ever combined with it.
+typedef struct fsh_signal {
+  int64_t count; pthread_mutex_t lock; int32_t aborted; fsh_waiters waiting;
+  struct fsh_signal **deps; int64_t ndeps, capdeps; struct fsh_signal **sources; int64_t nsources;
+} fsh_signal;
 
 fsh_signal *fsh_rt_signal_new(void) {
   fsh_signal *s = fsh_rt_alloc(sizeof(fsh_signal));
@@ -4070,14 +4076,54 @@ fsh_signal *fsh_rt_signal_new(void) {
   pthread_mutex_init(&s->lock, NULL);
   s->aborted = 0;
   s->waiting = (fsh_waiters){ NULL, 0, 0 };
+  s->deps = s->sources = NULL;
+  s->ndeps = s->capdeps = s->nsources = 0;
   return s;
+}
+
+// A growable stack of signals, so a long chain of 'AbortSignal.any' signals is released or
+// aborted in a loop rather than one C frame per link.
+typedef struct { fsh_signal **at; int64_t n, cap; } fsh_signal_stack;
+
+static void fsh_signal_push(fsh_signal_stack *st, fsh_signal *s) {
+  if (st->n == st->cap) {
+    st->cap = st->cap ? st->cap * 2 : 8;
+    fsh_signal **grown = fsh_rt_alloc(st->cap * (int64_t)sizeof(fsh_signal *));
+    if (st->n) memcpy(grown, st->at, st->n * sizeof(fsh_signal *));
+    fsh_rt_free(st->at);
+    st->at = grown;
+  }
+  st->at[st->n++] = s;
 }
 
 void fsh_rt_signal_release(fsh_signal *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
-  fsh_waiters_free(&s->waiting);
-  pthread_mutex_destroy(&s->lock);
-  fsh_rt_free(s);
+  fsh_signal_stack dead = { NULL, 0, 0 };
+  for (;;) {
+    for (int64_t i = 0; i < s->nsources; i++) {
+      fsh_signal *from = s->sources[i];
+      pthread_mutex_lock(&from->lock);
+      for (int64_t j = 0; j < from->ndeps; j++) {
+        if (from->deps[j] != s) continue;
+        from->deps[j] = from->deps[--from->ndeps];
+        break;
+      }
+      if (from->ndeps == 0) {
+        fsh_rt_free(from->deps);
+        from->deps = NULL;
+        from->capdeps = 0;
+      }
+      pthread_mutex_unlock(&from->lock);
+      if (__atomic_sub_fetch(&from->count, 1, __ATOMIC_ACQ_REL) == 0) fsh_signal_push(&dead, from);
+    }
+    fsh_rt_free(s->sources);
+    fsh_waiters_free(&s->waiting);
+    pthread_mutex_destroy(&s->lock);
+    fsh_rt_free(s);
+    if (dead.n == 0) break;
+    s = dead.at[--dead.n];
+  }
+  fsh_rt_free(dead.at);
 }
 
 int32_t fsh_rt_signal_aborted(fsh_signal *s) {
@@ -4118,15 +4164,60 @@ fsh_signal *fsh_rt_signal_timeout(int64_t ms) {
   return s;
 }
 
-// Aborts once, waking every task waiting on the signal to see it.
+// 'AbortSignal.any(signals)': a signal that aborts with the first of its n sources to, or is
+// aborted already when one of them is.
+fsh_signal *fsh_rt_signal_any(fsh_signal **from, int64_t n) {
+  fsh_signal *s = fsh_rt_signal_new();
+  if (n > 0) s->sources = fsh_rt_alloc(n * (int64_t)sizeof(fsh_signal *));
+  for (int64_t i = 0; i < n; i++) {
+    fsh_signal *f = from[i];
+    __atomic_fetch_add(&f->count, 1, __ATOMIC_RELAXED);
+    s->sources[s->nsources++] = f;
+    pthread_mutex_lock(&f->lock);
+    if (__atomic_load_n(&f->aborted, __ATOMIC_ACQUIRE)) __atomic_store_n(&s->aborted, 1, __ATOMIC_RELEASE);
+    else if (!__atomic_load_n(&s->aborted, __ATOMIC_ACQUIRE)) {
+      if (f->ndeps == f->capdeps) {
+        f->capdeps = f->capdeps ? f->capdeps * 2 : 4;
+        fsh_signal **grown = fsh_rt_alloc(f->capdeps * (int64_t)sizeof(fsh_signal *));
+        if (f->ndeps) memcpy(grown, f->deps, f->ndeps * sizeof(fsh_signal *));
+        fsh_rt_free(f->deps);
+        f->deps = grown;
+      }
+      f->deps[f->ndeps++] = s;
+    }
+    pthread_mutex_unlock(&f->lock);
+  }
+  return s;
+}
+
+// Aborts once, waking every task waiting on the signal to see it, then its dependents the same
+// way. Each signal on the stack holds a count of the loop's own; a dependent whose count already
+// reached zero is being freed, so it is passed over, not revived.
 void fsh_rt_signal_abort(fsh_signal *s) {
-  pthread_mutex_lock(&s->lock);
-  __atomic_store_n(&s->aborted, 1, __ATOMIC_RELEASE);
-  fsh_waiters waiting = s->waiting;
-  s->waiting = (fsh_waiters){ NULL, 0, 0 };
-  pthread_mutex_unlock(&s->lock);
-  for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i].task);
-  fsh_rt_free(waiting.tasks);
+  __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
+  fsh_signal_stack todo = { NULL, 0, 0 };
+  fsh_signal_push(&todo, s);
+  while (todo.n > 0) {
+    s = todo.at[--todo.n];
+    pthread_mutex_lock(&s->lock);
+    __atomic_store_n(&s->aborted, 1, __ATOMIC_RELEASE);
+    fsh_waiters waiting = s->waiting;
+    s->waiting = (fsh_waiters){ NULL, 0, 0 };
+    for (int64_t i = 0; i < s->ndeps; i++) {
+      fsh_signal *d = s->deps[i];
+      int64_t c = __atomic_load_n(&d->count, __ATOMIC_ACQUIRE);
+      while (c > 0 && !__atomic_compare_exchange_n(&d->count, &c, c + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
+      if (c > 0) fsh_signal_push(&todo, d);
+    }
+    fsh_rt_free(s->deps);
+    s->deps = NULL;
+    s->ndeps = s->capdeps = 0;
+    pthread_mutex_unlock(&s->lock);
+    for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i].task);
+    fsh_rt_free(waiting.tasks);
+    fsh_rt_signal_release(s);
+  }
+  fsh_rt_free(todo.at);
 }
 
 // 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the

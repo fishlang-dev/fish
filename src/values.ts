@@ -1008,7 +1008,7 @@ export function expressions(ctx: Context) {
       return call(e);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
-      return signalTimeout(e, callee);
+      return signalStatic(e, callee);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
       return tcpStatic(e, callee, callee.object.name);
@@ -2778,9 +2778,11 @@ export function expressions(ctx: Context) {
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
-  // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
-  function signalTimeout(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
-    if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout'`, callee.start, callee.end);
+  // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
+  // `AbortSignal.any(signals)`: one that aborts with the first of them, each lent to it.
+  function signalStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name === "any") return signalAny(e);
+    if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout' and 'any'`, callee.start, callee.end);
     // The std library's own code is compiled whatever main is; a sync main never reaches it.
     if (!ctx.runtime && e.start < STD_BASE) throw new CompileError("'AbortSignal.timeout' needs the async runtime's timer, which runs when 'main' is an async function", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'AbortSignal.timeout' takes how many milliseconds until it aborts, like 'AbortSignal.timeout(5000)'", e.start, e.end);
@@ -2788,6 +2790,24 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, "i64", `'AbortSignal.timeout' takes milliseconds as an 'i64', not '${show(t)}'`);
     return { type: blockType("AbortSignal"), what: "'AbortSignal.timeout'" };
+  }
+
+  // A literal list lends each signal, as a wait's is, so 'req.signal' stays the request's.
+  function signalAny(e: Call): { type: Type; what: string } {
+    const example = "like 'AbortSignal.any([a, b])'";
+    if (e.args.length !== 1) throw new CompileError(`'AbortSignal.any' takes one list of signals, ${example}`, e.start, e.end);
+    const list = e.args[0]!;
+    const signal = blockType("AbortSignal");
+    if (list.kind === "array") {
+      for (const x of list.elements) {
+        if (!x || x.kind === "spread") throw new CompileError(`'AbortSignal.any' takes its signals listed one by one, ${example}`, (x ?? list).start, (x ?? list).end);
+        signalArgument(x, "'AbortSignal.any'");
+      }
+    } else {
+      const given = value(list);
+      coerce(list, given, refType(arrayType(signal), false), `'AbortSignal.any' takes a list of 'AbortSignal's, not '${show(given)}'`);
+    }
+    return { type: signal, what: "'AbortSignal.any'" };
   }
 
   // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`: futures the async
