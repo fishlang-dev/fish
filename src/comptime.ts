@@ -473,6 +473,8 @@ function interpreter() {
         return isFloat(type) ? fit(Number(e.value), type) : BigInt(e.value);
       case "float":
         return fit(e.value, type as "f32" | "f64");
+      case "bigint":
+        return e.value;
       // A regex is its compiled program, which comptime only hands on; its flags and pattern
       // stand for it, as \`flags/pattern\`.
       case "regex":
@@ -752,10 +754,16 @@ function interpreter() {
 
   function unary(f: Frame, e: Extract<Expr, { kind: "unary" }>): Value {
     if (e.op === "await") refuse("'await'", e);
-    const v = unwrap(expr(f, e.operand));
+    const held = expr(f, e.operand);
+    const v = unwrap(held);
     const type = typeOf(f, e);
     if (e.op === "!") return !v;
-    if (e.op === "typeof") return typeofValue(v);
+    if (e.op === "typeof") {
+      const from = typeOf(f, e.operand);
+      const member = typeof from !== "string" && from.kind === "union" ? memberOf(held, from) : from;
+      return member === "bigint" ? "bigint" : typeofValue(v);
+    }
+    if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
     if (e.op === "-") return typeof v === "number" ? fit(-v, type as "f32" | "f64") : checked(-(v as bigint), type as Integer, "negate", e);
     if (e.op === "~") return wrap(~(v as bigint), type as Integer);
     return unsupported(`'${e.op}'`, e);
@@ -920,6 +928,26 @@ function interpreter() {
   }
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
+  // A bigint's operators as JavaScript has them, panicking where it throws a RangeError.
+  function bigNumeric(op: string, a: bigint, b: bigint, at: Span): Value {
+    if ((op === "/" || op === "%") && b === 0n) panic("Division by zero", at);
+    if (op === "**" && b < 0n) panic("Exponent must be non-negative", at);
+    switch (op) {
+      case "+": return a + b;
+      case "-": return a - b;
+      case "*": return a * b;
+      case "/": return a / b;
+      case "%": return a % b;
+      case "**": return a ** b;
+      case "&": return a & b;
+      case "|": return a | b;
+      case "^": return a ^ b;
+      case "<<": return a << b;
+      case ">>": return a >> b;
+    }
+    return unsupported(`'${op}' on 'bigint'`, at);
+  }
+
   function numeric(op: string, a: bigint | number, b: bigint | number, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
@@ -927,6 +955,7 @@ function interpreter() {
       if (v === undefined) return unsupported(`'${op}' on floats`, at);
       return fit(v, type as "f32" | "f64");
     }
+    if (type === "bigint") return bigNumeric(op, a as bigint, b as bigint, at);
     if (!isInteger(type)) return unsupported(`'${op}' on '${show(type)}'`, at);
     const { bits, signed } = INTEGERS[type];
     switch (op) {
@@ -1196,7 +1225,7 @@ export function memberOf(value: Value, union: UnionType): Type {
   }
   const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);
   if (literal) return literal;
-  if (typeof v === "bigint") return m.find(isInteger)!;
+  if (typeof v === "bigint") return m.find(isInteger) ?? "bigint";
   if (typeof v === "number") return m.find(isFloat)!;
   if (typeof v === "string") return "string";
   return "boolean";

@@ -1075,6 +1075,13 @@ export function expressions(ctx: Context) {
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
+    // A bigint's digits, in base 10 or the radix given.
+    if (callee.kind === "member" && receiver === "bigint") {
+      if (callee.name !== "toString") throw new CompileError(`'bigint' has no method '${callee.name}'`, callee.start, callee.end);
+      if (e.args.length > 1) throw new CompileError("'toString' takes at most a radix", e.start, e.end);
+      if (e.args[0]) coerce(e.args[0], value(e.args[0]), "i64", "a radix is an 'i64' from 2 to 36");
+      return { type: "string", what: "'toString'" };
+    }
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
@@ -1084,7 +1091,11 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
-    if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
+    if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) {
+      const n = lower(receiver);
+      if (isInteger(n) && INTEGERS[n].bits === 128) throw new CompileError(`'toFixed' on a 128-bit integer isn't supported yet; convert it with 'as f64' first`, callee.start, callee.end);
+      return toFixed(e);
+    }
     const rx = receiver === undefined ? undefined : asRegex(receiver);
     if (callee.kind === "member" && rx) return regexCall(e, callee, rx, lower(receiver!) !== rx);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
@@ -1279,6 +1290,14 @@ export function expressions(ctx: Context) {
       needsUnsafe("'nullPtr'", callee);
       if (e.typeArgs.length !== 1 || e.args.length > 0) throw new CompileError("'nullPtr' takes the type it points to, like 'nullPtr<u8>()'", e.start, e.end);
       return { type: pointerType(resolveType(e.typeArgs[0]!), true), what: "'nullPtr'" };
+    }
+    // `BigInt(x)`: an integer of any size as a bigint. A float is refused rather than checked
+    // for a fraction while the program runs.
+    if (callee.kind === "ident" && callee.name === "BigInt" && !byName.has("BigInt")) {
+      if (e.args.length !== 1) throw new CompileError("'BigInt' takes 1 argument", e.start, e.end);
+      const t = operand(e.args[0]!);
+      if (t !== "bigint" && !isInteger(t)) throw new CompileError(`'BigInt' takes an integer, not '${show(t)}'${isFloat(t) ? "; convert the float with 'as i64' first" : ""}`, e.args[0]!.start, e.args[0]!.end);
+      return { type: "bigint", what: "'BigInt'" };
     }
     // `String(x)`: a string, number or boolean written as JavaScript writes it.
     if (callee.kind === "ident" && callee.name === "String" && (!byName.has("String") || inStd)) {
@@ -3787,6 +3806,8 @@ export function expressions(ctx: Context) {
         return "i64";
       case "float":
         return "f64";
+      case "bigint":
+        return "bigint";
       case "regex":
         return regexLiteral(e.pattern, e.flags, e);
       case "destructure":
@@ -4115,6 +4136,10 @@ export function expressions(ctx: Context) {
           }
           return to;
         }
+        // A bigint becomes a number with 'as', truncated to an integer type's bits as
+        // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
+        if (to === "bigint" && from !== "bigint") throw new CompileError(`'${show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
+        if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
         if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
           throw unsupported("'as' conversions other than between numbers", e);
         }
@@ -4203,7 +4228,7 @@ export function expressions(ctx: Context) {
         const type = operand(e.operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
         if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) fitted.add(e.operand);
-        if (e.op === "!" ? type !== "boolean" : e.op === "~" ? !isInteger(type) : !isNumeric(type)) {
+        if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
         }
         if (e.op === "-" && isInteger(type) && !INTEGERS[type].signed) {
@@ -4238,7 +4263,7 @@ export function expressions(ctx: Context) {
       }
       case "update": {
         const target = assignable(e.operand, true);
-        if (!isNumeric(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
+        if (!isNumeric(target) && target !== "bigint") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return target;
       }
       case "conditional": {
@@ -4361,6 +4386,8 @@ export function expressions(ctx: Context) {
   // its own type, like `powf`. A literal base takes its type from the exponent's only when that
   // is a float.
   function power(base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
+    // A bigint's exponent is a bigint, as in JavaScript.
+    if (left === "bigint" || right === "bigint") return binaryType("*", left, right, at);
     if (isFloat(right) && left !== right && adapt(base, right)) left = right;
     // A power of literals alone may still become a float where it is written, so an exponent
     // a u32 can't hold waits to see.
@@ -4549,7 +4576,7 @@ export function expressions(ctx: Context) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
-    if (isNumeric(type) || type === "boolean") return;
+    if (isNumeric(type) || type === "boolean" || type === "bigint") return;
     throw new CompileError(`${into} works with strings, numbers and booleans, not '${show(type)}'`, e.start, e.end);
   }
 

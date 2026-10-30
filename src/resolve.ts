@@ -334,10 +334,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
-    if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string"].includes(t.name)) {
+    if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
-      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string");
+      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string" | "bigint");
     }
     if (t.name === "Array" && t.args.length === 1) return array(resolveType(t.args[0]!), t);
     if (t.name === "FixedArray") return fixedArray(t);
@@ -913,6 +913,9 @@ const I64_MAX = (1n << 63n) - 1n;
 // boolean, which the processor changes in one step.
 export function interior(which: InteriorType["which"], of: Type, at: Span): InteriorType {
   const held = lower(of);
+  if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
+    throw new CompileError(`'Atomic' holds integers of up to 64 bits, not '${show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
+  }
   if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && held.kind === "param")) {
     throw new CompileError(`'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
@@ -974,7 +977,8 @@ export function channel(of: Type, at: Span): BlockType {
 // them, such as an enum's members. A type parameter is checked again in each instance.
 function keyable(t: Type): boolean {
   const k = lower(t);
-  if (k === "string" || isInteger(k)) return true;
+  // A key is hashed as 64 bits, which a 128-bit integer doesn't fit.
+  if (k === "string" || (isInteger(k) && INTEGERS[k].bits <= 64)) return true;
   if (typeof k === "string") return false;
   if (k.kind === "param") return !k.concrete;
   if (k.kind === "literal") return typeof k.value !== "boolean";
@@ -994,7 +998,7 @@ export function collection(key: Type, value: Type, set: boolean, at: Span): MapT
   return mapType(key, stored(value), set);
 }
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

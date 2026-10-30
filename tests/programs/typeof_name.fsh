@@ -2,4 +2,4 @@ function main() {
   const x: i64 | boolean = 1
   print(typeof x === "integer")
 }
-// error: 'typeof' can only be compared with "number", "boolean", "string", "object", "undefined" here
+// error: 'typeof' can only be compared with "number", "boolean", "string", "bigint", "object", "undefined" here

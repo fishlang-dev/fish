@@ -8,8 +8,8 @@ import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, l
 // differently.
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
-  i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
-  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr",
+  i8: "i8", i16: "i16", i32: "i32", i64: "i64", i128: "i128", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", u128: "i128", usize: "i64",
+  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr", bigint: "ptr",
 };
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
@@ -55,7 +55,7 @@ function size(t: Type): [number, number] {
   if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (t === "null" || t === "never") return [0, 1];
-  if (t === "string") return [8, 8];
+  if (t === "string" || t === "bigint") return [8, 8];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
@@ -147,6 +147,11 @@ export function conversions(b: Slots) {
     if (base(aType) === base(bType) && compound(aType) && deep) return deep(a, b, aType);
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
     if (base(aType) === "null") return "true";
+    if (base(aType) === "bigint") {
+      const same = temp();
+      emit(`${same} = call i1 @fsh_rt_big_equal(ptr ${a}, ptr ${b})`);
+      return same;
+    }
     if (base(aType) === "string") {
       const order = temp();
       emit(`${order} = call i32 @fsh_rt_str_compare(ptr ${convert(a, aType, "string")}, ptr ${convert(b, bType, "string")})`);
@@ -354,7 +359,8 @@ export function conversions(b: Slots) {
     if (typeof member === "string" || member.kind !== "literal") {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(to)}, ptr ${slot}, i32 0, i32 1`);
-      emit(`store ${llvm(member)} ${value}, ptr ${at}`);
+      // The payload is i64 words, aligned to 8 however wide a member is.
+      emit(`store ${llvm(member)} ${value}, ptr ${at}, align 8`);
     }
     const result = temp();
     emit(`${result} = load ${llvm(to)}, ptr ${slot}`);
@@ -369,7 +375,7 @@ export function conversions(b: Slots) {
     const at = temp();
     emit(`${at} = getelementptr ${llvm(from)}, ptr ${slot}, i32 0, i32 1`);
     const result = temp();
-    emit(`${result} = load ${llvm(to)}, ptr ${at}`);
+    emit(`${result} = load ${llvm(to)}, ptr ${at}, align 8`);
     return result;
   }
 

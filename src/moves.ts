@@ -744,6 +744,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         }
         return;
       case "float":
+      case "bigint":
       case "regex":
       case "null":
         return;
@@ -1606,6 +1607,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made }:
         return expr(e.body, call);
       case "int":
       case "float":
+      case "bigint":
       case "regex":
       case "bool":
       case "string":

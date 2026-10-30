@@ -105,14 +105,14 @@ export type FunctionType = { kind: "function"; name: string; names: string[]; pa
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
 
 // The sized numbers. `isize` and `usize` are 64 bits on every target Fish supports.
-export type Integer = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize";
+export type Integer = "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize";
 export type Numeric = Integer | "f32" | "f64";
 
 export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
   i8: { bits: 8, signed: true }, i16: { bits: 16, signed: true }, i32: { bits: 32, signed: true },
-  i64: { bits: 64, signed: true }, isize: { bits: 64, signed: true },
+  i64: { bits: 64, signed: true }, i128: { bits: 128, signed: true }, isize: { bits: 64, signed: true },
   u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
-  u64: { bits: 64, signed: false }, usize: { bits: 64, signed: false },
+  u64: { bits: 64, signed: false }, u128: { bits: 128, signed: false }, usize: { bits: 64, signed: false },
 };
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
@@ -220,7 +220,7 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
@@ -840,7 +840,8 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
 // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
 // `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
 export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
-  if (typeof t === "string") return t === "void" || t === "never" ? t : undefined;
+  // JavaScript throws for a bigint, which JSON has no number for.
+  if (typeof t === "string") return t === "void" || t === "never" || t === "bigint" ? t : undefined;
   if (seen.has(t)) return undefined;
   seen.add(t);
   const part = (u: Type) => unjson(u, json, seen);

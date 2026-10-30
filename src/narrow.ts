@@ -32,7 +32,7 @@ export function ofKind(t: Type, kind: Kind): boolean {
 }
 
 // The names a `typeof` comparison can check for, and for a JsValue, all JS gives.
-export const TYPEOF = new Set(["number", "boolean", "string", "object", "undefined"]);
+export const TYPEOF = new Set(["number", "boolean", "string", "bigint", "object", "undefined"]);
 export const JS_TYPEOF = new Set(["number", "boolean", "string", "object", "undefined", "function", "bigint", "symbol"]);
 const JS_READS: Record<string, Type> = { string: "string", number: "f64", boolean: "boolean" };
 
