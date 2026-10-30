@@ -320,3 +320,195 @@ async function main(): Promise<void> throws AbortError {
   const got = await full.receive(other.signal);
   console.log("done", 7, got!.length + 2);
 }
+// case: abort_any
+// expect: false false false
+// expect: true false true
+// expect: true
+function main() {
+  const a = new AbortController();
+  const b = new AbortController();
+  const s = a.signal;
+  const both = AbortSignal.any([s, b.signal]);
+  console.log(s.aborted, b.signal.aborted, both.aborted);
+  a.abort();
+  console.log(s.aborted, b.signal.aborted, both.aborted);
+  const again = AbortSignal.any([both, s]);
+  b.abort();
+  console.log(again.aborted);
+}
+// case: abort_any_already
+// expect: true
+// expect: false
+// expect: caught
+function main() {
+  const a = new AbortController();
+  a.abort();
+  const b = new AbortController();
+  console.log(AbortSignal.any([b.signal, a.signal]).aborted);
+  const none = AbortSignal.any([]);
+  console.log(none.aborted);
+  try {
+    AbortSignal.any([a.signal]).throwIfAborted();
+  } catch (e) {
+    console.log("caught");
+  }
+}
+// case: abort_any_array
+// expect: false
+// expect: true
+// expect: 3
+function main() {
+  const cs = [new AbortController(), new AbortController(), new AbortController()];
+  let signals: AbortSignal[] = [];
+  for (const c of cs) signals.push(c.signal);
+  const any = AbortSignal.any(signals);
+  console.log(any.aborted);
+  cs[1].abort();
+  console.log(any.aborted);
+  console.log(signals.length);
+}
+// case: abort_any_wait
+// expect: timed out
+// expect: stopped
+async function stop(c: AbortController): Promise<i64> {
+  await sleep(20);
+  c.abort();
+  return 0;
+}
+async function main() {
+  const c = new AbortController();
+  try {
+    await sleep(10000, AbortSignal.any([c.signal, AbortSignal.timeout(20)]));
+  } catch (e) {
+    console.log("timed out");
+  }
+  const d = new AbortController();
+  const t = spawn(stop(d.clone()));
+  try {
+    await sleep(10000, AbortSignal.any([AbortSignal.timeout(60000), d.signal]));
+  } catch (e) {
+    console.log("stopped");
+  }
+  await t;
+}
+// case: abort_any_lends
+// expect: false
+type Req = { signal: AbortSignal };
+function f(r: Ref<Req>): AbortSignal {
+  return AbortSignal.any([r.signal]);
+}
+function main() {
+  const r = { signal: new AbortController().signal };
+  const s = f(r);
+  console.log(s.aborted || r.signal.aborted);
+}
+// case: abort_any_arity
+// error: 'AbortSignal.any' takes one list of signals, like 'AbortSignal.any([a, b])'
+function main() {
+  const a = new AbortController();
+  AbortSignal.any(a.signal, a.signal);
+}
+// case: abort_any_spread
+// error: 'AbortSignal.any' takes its signals listed one by one
+function main() {
+  const xs: AbortSignal[] = [];
+  AbortSignal.any([...xs]);
+}
+// case: abort_any_not_signals
+// error: 'AbortSignal.any' takes a list of 'AbortSignal's, not 'i64[]'
+function main() {
+  const xs = [1, 2];
+  AbortSignal.any(xs);
+}
+// case: abort_any_element
+// error: 'AbortSignal.any' takes an 'AbortSignal' to stop waiting early, not 'i64'
+function main() {
+  AbortSignal.any([1]);
+}
+// case: abort_static_unknown
+// error: 'AbortSignal' has no static method 'all'; it has 'timeout' and 'any'
+function main() {
+  AbortSignal.all([]);
+}
+// case: abort_any_stress
+// expect: 0
+// expect: true
+function main() {
+  const long = new AbortController();
+  let n = 0;
+  for (let i = 0; i < 100000; i++) {
+    const fresh = new AbortController();
+    const s = AbortSignal.any([long.signal, fresh.signal]);
+    if (s.aborted) n++;
+  }
+  console.log(n);
+  const kept = AbortSignal.any([long.signal]);
+  long.abort();
+  console.log(kept.aborted);
+}
+// case: abort_any_deep
+// expect: false
+// expect: true
+// expect: dropped
+function main() {
+  const root = new AbortController();
+  let s = AbortSignal.any([root.signal]);
+  for (let i = 0; i < 200000; i++) s = AbortSignal.any([s]);
+  console.log(s.aborted);
+  root.abort();
+  console.log(s.aborted);
+  let t = AbortSignal.any([new AbortController().signal]);
+  for (let i = 0; i < 200000; i++) t = AbortSignal.any([t]);
+  console.log("dropped");
+}
+// case: abort_any_shutdown
+// expect: false
+function main() {
+  const s = AbortSignal.any([process.shutdown, new AbortController().signal]);
+  console.log(s.aborted);
+}
+// case: abort_any_kept
+// expect: false false
+// expect: true
+function made(c: Ref<AbortController>): AbortSignal[] {
+  return [c.signal, AbortSignal.any([])];
+}
+function main() {
+  const c = new AbortController();
+  const x = c.signal;
+  const s = AbortSignal.any([x]);
+  const t = AbortSignal.any(made(c));
+  console.log(x.aborted, t.aborted);
+  c.abort();
+  console.log(s.aborted && t.aborted && x.aborted);
+}
+// case: abort_any_threads
+// expect: true
+// expect: true
+// expect: true
+async function churn(c: AbortController): Promise<i64> {
+  let i = 0;
+  while (true) {
+    const s = AbortSignal.any([c.signal, AbortSignal.any([c.signal])]);
+    if (s.aborted) return 1;
+    i++;
+    if (i % 1000 === 0) await sleep(0);
+  }
+}
+async function killer(c: AbortController): Promise<i64> {
+  await sleep(5);
+  c.abort();
+  return 0;
+}
+async function main() {
+  for (let round = 0; round < 3; round++) {
+    const c = new AbortController();
+    const a = spawn(churn(c.clone()));
+    const b = spawn(churn(c.clone()));
+    const k = spawn(killer(c.clone()));
+    const x = await a;
+    const y = await b;
+    await k;
+    console.log(x + y === 2);
+  }
+}
