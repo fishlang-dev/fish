@@ -83,7 +83,6 @@ const RULES: Rule[] = [
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
-  { id: "fetch", action: "unsupported", title: "fetch (HTTP client)", feature: "HTTP client" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
@@ -507,7 +506,6 @@ export const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_p
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;
   if (memberOf(callee, "Math", ["random"])) push("math");
-  if (named(callee, "fetch")) push("fetch");
   if (named(callee, "setImmediate") || named(callee, "clearImmediate")) push("timerForms");
   if ((named(callee, "setTimeout") || named(callee, "setInterval")) && (n.args as unknown[]).length > 4) push("timerForms");
   if (isNode(callee) && callee.kind === "member" && callee.name === "unref") push("timerForms");

@@ -47,6 +47,44 @@ async function main(): Promise<void> throws IoError | AbortError {
     else console.log("io:", e.message);
   }
 }
+// case: tcp_lookup
+// expect: got 2
+// expect: ENOTFOUND getaddrinfo getaddrinfo ENOTFOUND no-such-host.invalid
+// expect: lookup: This operation was aborted
+// Host names are looked up on the blocking pool, and an abort reaches a lookup still pending:
+// the attempt's first poll waits on the pool, then the second future aborts it.
+async function attempt(what: string, host: string, port: i64, signal: AbortSignal): Promise<string> {
+  try {
+    const conn = await TcpStream.connect(host, port, signal);
+    return what + ": connected";
+  } catch (e) {
+    if (e instanceof AbortError) return what + ": " + e.message;
+    return what + ": io " + e.message;
+  }
+}
+
+async function abortNow(ctl: AbortController): Promise<i64> {
+  ctl.abort();
+  return 0;
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const listener = await TcpListener.bind("127.0.0.1", 0);
+  const c = await TcpStream.connect("localhost", listener.port);
+  const server = await listener.accept();
+  await c.write(new TextEncoder().encode("hi"));
+  const got = await server.read(10);
+  console.log("got", got.length);
+  try {
+    const nowhere = await TcpStream.connect("no-such-host.invalid", 80);
+  } catch (e) {
+    if (e instanceof AbortError) console.log("aborted");
+    else console.log(e.code, e.syscall, e.message);
+  }
+  const first = new AbortController();
+  const [looked, a] = await Promise.all([attempt("lookup", "localhost", listener.port, first.signal.clone()), abortNow(first)]);
+  console.log(looked);
+}
 // case: tcp_accept
 // expect: accepted 50 50
 // expect: refused true
