@@ -8277,9 +8277,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const type = types.get(e) as ClassType;
         const instance = alloca(llvm(type));
         emit(`store ${llvm(type)} zeroinitializer, ptr ${instance}`);
-        const values = argValues(e.args ?? [], calls.get(e)!).map((v) => `, ${v}`);
-        // A panic in the constructor drops the fields it has set.
-        unwinding(`call void ${symbol(calls.get(e)!)}(ptr ${instance}${values.join("")})`, undefined, () => dispose(unstash(instance, type), type));
+        // A panic in the constructor drops the fields it has set. One that throws has set none.
+        invoke(calls.get(e)!, instance, argValues(e.args ?? [], calls.get(e)!), e, undefined, () => dispose(unstash(instance, type), type));
         const result = temp();
         emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
         return result;

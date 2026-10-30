@@ -68,10 +68,12 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: header: can't fetch 'http://127.0.0.1:PORT/': header 'x-a' holds a line break or isn't a header name
 // expect: ftp: can't fetch 'ftp://example.test/': only http: URLs are supported
 // expect: https: can't fetch 'https://example.test/': https: needs TLS, which isn't supported yet
-// expect: no host: can't fetch 'http:///x': it names no host
+// expect: no host: can't fetch 'http://': it isn't a valid URL
 // expect: user: can't fetch 'http://me@example.test/': a URL can't hold a user name or password
-// expect: port: can't fetch 'http://example.test:99999/': the port isn't a number from 1 to 65535
-// expect: relative: can't fetch '/x': only http: URLs are supported
+// expect: port: can't fetch 'http://example.test:0/': the port isn't a number from 1 to 65535
+// expect: big port: can't fetch 'http://example.test:99999/': it isn't a valid URL
+// expect: relative: can't fetch '/x': it isn't a valid URL
+// expect: idn: can't fetch 'http://café.test/': international domain names aren't supported yet
 // Each raw reply answers one connection; anything that goes wrong comes back as an IoError.
 async function answer(listener: TcpListener, replies: string[]): Promise<void> {
   for (const reply of replies) {
@@ -136,10 +138,12 @@ async function main(): Promise<void> throws IoError {
   await attempt("header", url, { headers: h }, port);
   await attempt("ftp", "ftp://example.test/", {}, port);
   await attempt("https", "https://example.test/", {}, port);
-  await attempt("no host", "http:///x", {}, port);
+  await attempt("no host", "http://", {}, port);
   await attempt("user", "http://me@example.test/", {}, port);
-  await attempt("port", "http://example.test:99999/", {}, port);
+  await attempt("port", "http://example.test:0/", {}, port);
+  await attempt("big port", "http://example.test:99999/", {}, port);
   await attempt("relative", "/x", {}, port);
+  await attempt("idn", "http://café.test/", {}, port);
 }
 // case: fetch_framing
 // expect: length|hello
@@ -215,6 +219,27 @@ async function main(): Promise<void> throws IoError | AbortError | JsonError {
   console.log("from a request: " + text);
   const built = new Response("x");
   console.log("built:", built.status - 200, JSON.stringify(built.url));
+}
+// case: fetch_url
+// expect: GET /caf%C3%A9 http://127.0.0.1:PORT/caf%C3%A9?q=%C3%BC
+// expect: http://127.0.0.1:PORT/caf%C3%A9?q=%C3%BC
+// expect: GET /a%20b http://127.0.0.1:PORT/a%20b
+// A URL given to fetch, and a string parsed as one, sent with its path percent-encoded.
+async function main(): Promise<void> throws IoError | AbortError | TypeError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    return new Response(req.method + " " + req.path + " " + req.url);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const port = String(found.port.load());
+  const res = await fetch(new URL("/caf\u00e9?q=\u00fc", "http://127.0.0.1:" + port));
+  const text = await res.text();
+  console.log(text.replaceAll(port, "PORT"));
+  console.log(res.url.replace(port, "PORT"));
+  const spaced = await fetch("http://127.0.0.1:" + port + "/a b#frag");
+  const said = await spaced.text();
+  console.log(said.replaceAll(port, "PORT"));
 }
 // case: fetch_post
 // expect: POST /submit

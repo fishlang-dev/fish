@@ -437,7 +437,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   const pkg = (extra: object = {}) => JSON.stringify({ name: "p", version: "1.0.0", ...extra });
   project({
     "package.json": "﻿" + JSON.stringify({
-      dependencies: { constructor: "1", toString: "1", bench: "1", utils: "1", crypto: "1", shared: "1", "async-mutex": "1", bcryptjs: "1", odd: 1 },
+      dependencies: { constructor: "1", toString: "1", bench: "1", utils: "1", crypto: "1", shared: "1", "async-mutex": "1", bcryptjs: "1", "query-string": "1", odd: 1 },
       devDependencies: { shared: "1", "socket.io": "1" },
     }),
     "a.ts": "const x = 1;\n",
@@ -451,7 +451,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
     expect(Object.fromEntries(d.list.map((x) => [x.name, [x.group, x.equivalent?.name, x.dev]]))).toEqual({
       constructor: ["unknown", undefined, false], toString: ["unknown", undefined, false],
       bench: ["pure", undefined, false], utils: ["pure", undefined, false], crypto: ["native", undefined, false], shared: ["pure", undefined, false],
-      "async-mutex": ["std", "Semaphore", false], bcryptjs: ["planned", "Auth primitives", false], "socket.io": ["pure", undefined, true],
+      "async-mutex": ["std", "Semaphore", false], bcryptjs: ["planned", "Auth primitives", false], "query-string": ["std", "URL and URLSearchParams", false], "socket.io": ["pure", undefined, true],
     });
   });
   project({ "package.json": JSON.stringify({ dependencies: ["express"] }), "a.ts": "const x = 1;\n" }, (dir) => {
@@ -488,6 +488,18 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
   }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
+  });
+  // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
+  // querystring has no std module.
+  project({
+    "a.ts": "const u = new URL(\"http://h/?a=1\");\nconst p = new URLSearchParams(u.search);\n",
+    "b.ts": "import { URL } from \"node:url\";\nimport qs from \"querystring\";\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["URL and query strings"]]);
+    expect(survey(dir).builtins).toEqual([
+      { module: "querystring", files: 1, equivalent: { name: "URL and query strings", planned: true } },
+      { module: "url", files: 1, equivalent: { name: "URL and query strings", planned: true } },
+    ]);
   });
 });
 
