@@ -304,6 +304,19 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   }
   function writtenReturn(f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
+    // `x is T` is a boolean that tells a caller's condition what x is.
+    if (f.returnType.kind === "predicate") {
+      const p = f.returnType;
+      if (p.asserts) throw unsupported("assertion signatures", p);
+      if (p.name === "this") throw unsupported("'this' type predicates", p);
+      const param = f.params.find((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
+      if (!param) throw new CompileError(`a type predicate names one of the function's parameters, and '${p.name}' isn't one`, p.start, p.end);
+      const [narrowed, declared] = withScope(scope, () => [p.type && resolveType(p.type), param.type && resolveType(param.type)]);
+      // A predicate on a borrowed parameter says what the value it points to is.
+      const held = declared && typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
+      if (narrowed && held && !fits(narrowed, held)) throw new CompileError(`a type predicate's type must be assignable to its parameter's type, and '${show(narrowed)}' isn't a '${show(held)}'`, p.type!.start, p.type!.end);
+      return "boolean";
+    }
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
     // as an async function's own result, which its `Promise<T>` describes.
     const written = withScope(scope, () => resolveType(f.returnType!));

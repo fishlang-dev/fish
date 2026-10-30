@@ -84,7 +84,7 @@ for (const [decl, what, part] of CLASSES) {
 
 // Function signatures: the rejected part is the second column's text.
 const SIGNATURES: [string, string, string][] = [
-  ["(x: i64): x is i64", "type predicates", "x is i64"],
+  ["(x: i64): asserts x is i64", "assertion signatures", "asserts x is i64"],
   ["(this: i64)", "'this' parameters", "this: i64"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
   ["(@inject x: i64)", "decorators", "@inject x: i64"],

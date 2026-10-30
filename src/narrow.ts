@@ -1,6 +1,6 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
-import { holdsPlainJs, isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
+import { fits, holdsPlainJs, isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -53,9 +53,15 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 
 // What a condition proves when it is true and when it is false. `narrowable` says which
 // variables may narrow; `types` gives each expression's type as checked.
-export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>, narrowable: (l: Local) => boolean): Guard {
+// What a call of a function with a type predicate proves: which argument is narrowed, and to what.
+export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type } | undefined;
+
+export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const nothing: Guard = { yes: new Map(), no: new Map() };
-  const of = (x: Expr) => guard(x, types, locals, narrowable);
+  const of = (x: Expr) => guard(x, types, locals, narrowable, predicate);
+  // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
+  const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
+  if (proved && e.kind === "call" && e.args[proved.index]) return split(e.args[proved.index]!, (m) => (fits(m, proved.type) ? "yes" : "no"), true);
   if (e.kind === "unary" && e.op === "!") {
     const inner = of(e.operand);
     return { yes: inner.no, no: inner.yes };
