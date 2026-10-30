@@ -19,7 +19,8 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   ...Object.fromEntries(["express", "hono", "fastify", "koa", "polka", "restify", "@hono/node-server"].map((p) => [p, IN_STD("serve and Router")])),
   // async-mutex holds its lock across `await`, which a Semaphore's permit can and a Lock can't.
   "async-mutex": IN_STD("Semaphore"), "p-limit": IN_STD("Semaphore"), "abort-controller": IN_STD("AbortController"),
-  ...Object.fromEntries(["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"].map((p) => [p, PLANNED("HTTP client")])),
+  ...Object.fromEntries(["url-parse", "whatwg-url", "query-string", "querystringify"].map((p) => [p, IN_STD("URL and URLSearchParams")])),
+  ...Object.fromEntries(["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"].map((p) => [p, IN_STD("fetch")])),
   ...Object.fromEntries(["commander", "yargs", "minimist", "meow", "cac"].map((p) => [p, PLANNED("Typed CLI arguments")])),
   ...Object.fromEntries(["dotenv", "env-var"].map((p) => [p, PLANNED("Typed configuration from the environment")])),
   ws: PLANNED("WebSockets"),

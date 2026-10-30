@@ -48,9 +48,13 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
-    classForms: 1, fetch: 1,
+    classForms: 1,
     G1: 3, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
+});
+
+test("fetch counts as available", () => {
+  expect(counts("async function f(): Promise<string> {\n  const res = await fetch(\"http://localhost/\");\n  return await res.text();\n}\n")).toEqual({});
 });
 
 test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
@@ -199,7 +203,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(57);
+  expect(r.rules.length + r.waiting.length).toBe(56);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -237,14 +241,14 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
   next(0);
 }
 
-const big = "const xs = fetch(f, 1);\n".repeat(10);
+const big = "const xs = Math.random(f, 1);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
   projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "abstract class A {}\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
-      ["HTTP client", 1, 10, 78.5],
+      ["Randomness", 1, 10, 78.5],
       ["for...in", 1, 1, 85.7],
       ["Abstract classes and #private fields", 1, 2, 100],
     ]);
@@ -257,7 +261,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
   projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
     expect(r.repos[0]!.unread).toEqual({ files: 2, lines: 3 });
-    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["HTTP client", 76.9]]);
+    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["Randomness", 76.9]]);
     expect(r.curve.unread).toEqual([{ feature: "JSX for server-side HTML", files: 1, lines: 2 }, { feature: "parser gaps", files: 1, lines: 1 }]);
     expect(formatRanking(r)).toContain("also waiting, in files Fish couldn't read");
     expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
@@ -292,10 +296,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **HTTP client** - fetch\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **Randomness** - Math.random\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "HTTP client": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
+      "Randomness": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
@@ -311,7 +315,7 @@ test("a plan names each feature's item and whether it is done", () => {
 test("fishc survey --rank prints and gives JSON, and refuses what it can't read", () => {
   projects([{ "a.ts": big }, { "s.ts": "const o = { ...p };\n" }], ([a, s]) => {
     const text = fishc("survey", "--rank", a!, "--self", s!).stdout.toString();
-    expect(text).toContain("1. HTTP client");
+    expect(text).toContain("1. Randomness");
     expect(text).toContain(`self-hosting (${s})`);
     expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString())).toEqual(JSON.parse(JSON.stringify(rank([a!]))));
     expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
@@ -328,16 +332,16 @@ test("fishc survey --rank prints and gives JSON, and refuses what it can't read"
 });
 
 test("a comparison lists the rules that moved, the furthest first, a new rule from nothing", () => {
-  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = fetch(f, 1);\n" }, (dir) => {
+  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = Math.random(f, 1);\n" }, (dir) => {
     const then = readReport(JSON.stringify(survey(dir)));
-    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = fetch(f, 1) && fetch(g, 2) && fetch(h, 3);\ndelete o.k;\n");
+    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = Math.random(f, 1) && Math.random(g, 2) && Math.random(h, 3);\ndelete o.k;\n");
     const c = compare(then, survey(dir));
-    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["fetch", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
+    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["math", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
     expect(c.then.counts.reject).toBe(0);
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("      +2  fetch (HTTP client) (1 -> 3)");
+    expect(text).toContain("      +2  Math.random (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
     expect(formatComparison(compare(then, then))).toContain("no rule's count changed");
   });
@@ -433,7 +437,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   const pkg = (extra: object = {}) => JSON.stringify({ name: "p", version: "1.0.0", ...extra });
   project({
     "package.json": "﻿" + JSON.stringify({
-      dependencies: { constructor: "1", toString: "1", bench: "1", utils: "1", crypto: "1", shared: "1", "async-mutex": "1", bcryptjs: "1", odd: 1 },
+      dependencies: { constructor: "1", toString: "1", bench: "1", utils: "1", crypto: "1", shared: "1", "async-mutex": "1", bcryptjs: "1", "query-string": "1", odd: 1 },
       devDependencies: { shared: "1", "socket.io": "1" },
     }),
     "a.ts": "const x = 1;\n",
@@ -447,7 +451,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
     expect(Object.fromEntries(d.list.map((x) => [x.name, [x.group, x.equivalent?.name, x.dev]]))).toEqual({
       constructor: ["unknown", undefined, false], toString: ["unknown", undefined, false],
       bench: ["pure", undefined, false], utils: ["pure", undefined, false], crypto: ["native", undefined, false], shared: ["pure", undefined, false],
-      "async-mutex": ["std", "Semaphore", false], bcryptjs: ["planned", "Auth primitives", false], "socket.io": ["pure", undefined, true],
+      "async-mutex": ["std", "Semaphore", false], bcryptjs: ["planned", "Auth primitives", false], "query-string": ["std", "URL and URLSearchParams", false], "socket.io": ["pure", undefined, true],
     });
   });
   project({ "package.json": JSON.stringify({ dependencies: ["express"] }), "a.ts": "const x = 1;\n" }, (dir) => {
@@ -484,6 +488,18 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
   }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "Process spawning"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
+  });
+  // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
+  // querystring has no std module.
+  project({
+    "a.ts": "const u = new URL(\"http://h/?a=1\");\nconst p = new URLSearchParams(u.search);\n",
+    "b.ts": "import { URL } from \"node:url\";\nimport qs from \"querystring\";\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["URL and query strings"]]);
+    expect(survey(dir).builtins).toEqual([
+      { module: "querystring", files: 1, equivalent: { name: "URL and query strings", planned: true } },
+      { module: "url", files: 1, equivalent: { name: "URL and query strings", planned: true } },
+    ]);
   });
 });
 

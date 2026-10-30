@@ -3,6 +3,7 @@ import type { Body } from "./classes.ts";
 import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
+import { rustClassOf } from "./rust.ts";
 import { kindTests } from "./narrow.ts";
 import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
@@ -698,8 +699,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         return;
       }
       case "binary": {
-        // `a ?? b` hands over whichever it gives.
-        const given = e.op === "??" ? consume : undefined;
+        // `a ?? b` hands over whichever it gives; a Rust value, which is never copied, always.
+        const given = e.op === "??" ? (consume ?? (holdsPart(types.get(e)!, (u) => rustClassOf(u) !== undefined) ? (place: string) => `'${place}' moved here: '??' hands over the Rust value it holds` : undefined)) : undefined;
         if (e.op === "??") outOfBorrow(e.left, e, consume);
         expr(e.left, given);
         // The right side of `&&`, `||` and `??` may not run.

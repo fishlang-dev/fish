@@ -1,4 +1,5 @@
 import { fileAt } from "./modules.ts";
+import { rustClassOf, type RustClass } from "./rust.ts";
 import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -966,6 +967,8 @@ export function expressions(ctx: Context) {
       const instance = instantiate(base.constructor, [], e.args, argTypes, e);
       args(e.args, argTypes, instance, e);
       calls.set(e, instance);
+      const error = errorOf(instance);
+      if (error) raise(e, error, "'super'");
       return { type: "void", what: "'super'" };
     }
     // A program's own `console` or `print` keeps its meaning.
@@ -1264,6 +1267,8 @@ export function expressions(ctx: Context) {
     if (callee.kind === "ident" && callee.name === "httpDate" && e.start >= STD_BASE && e.args.length === 0) return { type: "string", what: "'httpDate'" };
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
+    // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
+    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(e.start).startsWith("node:")) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
@@ -1331,7 +1336,7 @@ export function expressions(ctx: Context) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
     }
-    if (target.foreign) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
+    if (target.foreign && !target.rust) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
     if (target.js) jsCalls.set(e, target.js);
     if (target.params.at(-1)?.rest && !tagCalls.has(e)) packRest(e, e.args, target.params);
     else refuseSpread(e.args);
@@ -1552,7 +1557,7 @@ export function expressions(ctx: Context) {
 
   // A generic function named as a value: its own type, each call of which instantiates it.
   function genericValue(f: Body, e: Expr): Type {
-    if (f.foreign) throw unsupported("C functions used as values", e);
+    if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     return genericFunctionType(f.name, "a generic function");
   }
 
@@ -1598,7 +1603,7 @@ export function expressions(ctx: Context) {
     const name = `'${written}'`;
     // A generic one given as a callback is the instance the callback's types make.
     if (f.typeParams?.some((p) => !isLifetime(p))) return instanceArrow(e);
-    if (f.foreign) throw unsupported("C functions used as values", e);
+    if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     // A package's function Fish couldn't type is refused where it is used as a value too.
     const refused = f.js ? jsUncalled.get(f) : undefined;
     if (refused) {
@@ -3315,6 +3320,11 @@ export function expressions(ctx: Context) {
     const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
     if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
     if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
+    // A Rust value is reached only under the lock, and a read here would copy its handle out.
+    let rust: RustClass | undefined;
+    if (holdsPart(found.type, (u) => (rust ??= rustClassOf(u)) !== undefined)) {
+      throw new CompileError(`'${e.name}' holds a Rust '${rust!.name}', which a shared value gives only inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
+    }
     if (!interiorMutable(found.type)) ctx.copiesOut.add(e);
     return found.type;
   }
@@ -3410,6 +3420,8 @@ export function expressions(ctx: Context) {
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
     if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
+    // A Rust type is Send, which the shim asserts.
+    if (rustClassOf(t)) return undefined;
     const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
       : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
     for (const part of parts) {
@@ -3531,6 +3543,13 @@ export function expressions(ctx: Context) {
     const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
     const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
     if (permit) throw say("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead");
+    let rust: ClassType | undefined;
+    holdsPart(isRefType(stored) ? stored.to : stored, (u) => (rustClassOf(u) ? ((rust = u as ClassType), true) : false));
+    if (rust) {
+      const name = rustClassOf(rust)!.name;
+      if (classOf(rust).methods.has("clone")) throw say(`can't clone a value holding a Rust '${name}' as a whole; clone each '${name}' with its 'clone()'`);
+      throw say(`can't clone a Rust '${name}'${rustClassOf(isRefType(stored) ? stored.to : stored) ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`);
+    }
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
     if (!dyns && (typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
@@ -4141,10 +4160,14 @@ export function expressions(ctx: Context) {
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+        const rust = rustClassOf(c.type);
+        if (rust && !c.constructor.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
         constructs(c.constructor, list, argTypes);
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
+        const error = errorOf(constructor);
+        if (error) raise(e, error, `'new ${c.type.name}'`);
         // An instance holding references borrows from what it was built from.
         if (holdsRef(c.type)) borrowsFrom.set(e, list.filter(lends));
         return c.type;
@@ -4467,6 +4490,8 @@ export function expressions(ctx: Context) {
 
   // Why values of a type can't be compared.
   function uncomparable(t: Type): string {
+    const rust = rustClassOf(t);
+    if (rust) return `a Rust '${rust.name}' isn't compared from Fish; compare what its methods give`;
     if (typeof t !== "string" && t.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${t.name}' doesn't have; add one, or '@derive(Eq)'`;
     if (typeof t !== "string" && t.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
     if (typeof t !== "string" && t.kind === "map") return `a ${t.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
@@ -4476,6 +4501,7 @@ export function expressions(ctx: Context) {
   // Whether a class or a data enum's values compare: a class through its `equals`, an enum
   // when it derives Eq.
   function comparesAsValue(t: ClassType | VariantType): boolean {
+    if (rustClassOf(t)) return false;
     if (t.kind === "variant") return [...enums.values()].some((e) => e.data?.name === t.enum && e.data.eq);
     const known = equalities.get(t);
     if (known) return true;
@@ -4501,6 +4527,7 @@ export function expressions(ctx: Context) {
   function shown(args: Expr[]) {
     for (const a of args) {
       const type = a.kind === "string" ? "void" : read(a);
+      if (holdsPart(type, (u) => rustClassOf(u) !== undefined, true)) throw new CompileError(`printing a '${show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
       if (printable(type)) continue;
       printed.add(a);
       const part = uninspectable(type);
@@ -4852,6 +4879,7 @@ export function expressions(ctx: Context) {
         throw new CompileError(`'...' in an object literal spreads an object or an instance, not '${show(t)}'`, p.start, p.end);
       }
       if (holdsRef(held)) throw unsupported("spreads of values holding references", p);
+      if (rustClassOf(held)) throw new CompileError(`a Rust '${rustClassOf(held)!.name}' has no fields Fish can read, so it can't be spread; call its methods for what it holds`, p.start, p.end);
       const parts = held.kind === "class" ? allFields(held).filter((f) => (f.access ?? "public") === "public") : held.fields;
       const place = copiesPlace(p.value);
       for (const f of parts) {
@@ -5153,6 +5181,8 @@ export function expressions(ctx: Context) {
     else if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = lower(type);
     if (typeof held !== "string" && held.kind === "dyn") throw new CompileError(`a '${show(held)}' can't become a '${show(to)}' yet; box the value it was made from`, e.start, e.end);
+    let rust: RustClass | undefined;
+    if (holdsPart(held, (u) => (rust ??= rustClassOf(u)) !== undefined)) throw new CompileError(`a Rust '${rust!.name}' can't become a '${show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
     const reason = callableOf.has(to.of) ? undefined : unsatisfied(type, to.of, members, e);
     if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     const blocker = unsent(held);

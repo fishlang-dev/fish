@@ -182,7 +182,7 @@ export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } &
   | { kind: "field"; name: PropertyName; optional: boolean; definite: boolean; type: TypeNode | undefined; init: Expr | undefined }
   | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
       params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
-  | { kind: "constructor"; params: Param[]; body: Stmt[] | undefined }
+  | { kind: "constructor"; params: Param[]; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
   | { kind: "index"; params: Param[]; type: TypeNode }
   | { kind: "staticBlock"; body: Stmt[] }

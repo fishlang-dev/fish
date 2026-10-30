@@ -1,5 +1,6 @@
 import { defaulted, prologues } from "./defaults.ts";
 import { CompileError } from "./diag.ts";
+import { rustNames, type RustName } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
@@ -23,6 +24,8 @@ export type Body = Span & {
   foreign?: boolean;
   // A package's function, or a const read as one, typed from its declaration.
   js?: JsName;
+  // A Rust function, a foreign one called through the shim generated for its crate.
+  rust?: RustName;
   // Whether an `export` names it, so a library builds it into a C function too.
   exported?: boolean;
   // A top-level `const`, as a function giving its value, or a `comptime { }` block, as one giving
@@ -160,6 +163,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     owner: type,
     start: (ctor ?? node).start,
     end: (ctor ?? node).end,
+    ...(ctor && rustOf(ctor)),
+    ...(ctor?.throws && { throws: ctor.throws }),
   };
   const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
@@ -220,6 +225,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       access,
       start: m.start,
       end: m.end,
+      ...rustOf(m),
     });
   }
 
@@ -240,6 +246,12 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     fields.push(f);
     return f;
   }
+}
+
+// A Rust type's member is a foreign function, called through the shim.
+function rustOf(m: ClassMember): { foreign?: true; rust?: RustName } {
+  const rust = rustNames.get(m);
+  return rust ? { foreign: true, rust } : {};
 }
 
 // The spans of `equals` methods `@derive(Eq)` wrote over a base class. Their `super.equals(other)`

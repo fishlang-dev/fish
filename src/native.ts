@@ -37,10 +37,12 @@ export const NATIVE = String.raw`
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ftw.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #ifdef __APPLE__
 #include <sys/event.h>
 #include <mach-o/dyld.h>
@@ -85,10 +87,14 @@ void fsh_rt_constants(void (*drop)(void)) {
 // the engine from being torn down.
 static void (*fsh_engine_end)(void) = NULL;
 static int32_t fsh_panic_began = 0;
+// What frees the list of tasks that waited on the shutdown signal, when the program asked for it:
+// the signal itself lives to the end, so nothing else frees it.
+static void (*fsh_shutdown_end)(void) = NULL;
 
 __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
+  if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
   const char *check = getenv("FISH_LEAKS");
   if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
@@ -1122,6 +1128,45 @@ void fsh_rt_panic_string(const char *at, fsh_str *reason) {
   fputs(at, stderr);
   fwrite(reason->bytes, 1, reason->length, stderr);
   fsh_rt_panic("\n");
+}
+
+// A Rust panic's message, which may hold NULs.
+typedef struct { size_t length; char bytes[]; } fsh_rust_message;
+
+// A panic a Rust function's shim caught: its message, kept where the call that raises it reads it.
+void fsh_rt_rust_panicked(fsh_rust_message **out, const char *message, size_t length) {
+  fsh_rust_message *copy = malloc(sizeof(fsh_rust_message) + length);
+  if (!copy) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  copy->length = length;
+  memcpy(copy->bytes, message, length);
+  *out = copy;
+}
+
+// The Fish panic a Rust panic becomes at its call; at is the "panicked at" line.
+void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fwrite(reason->bytes, 1, reason->length, stderr);
+  fsh_rt_panic("\n");
+}
+
+// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form.
+const char *fsh_rt_rust_str_bytes(fsh_str *s, int64_t *length) {
+  *length = s ? s->length : 0;
+  return s ? s->bytes : "";
+}
+
+// A string Rust gives Fish, its bytes UTF-8, copied into a Fish string.
+fsh_str *fsh_rt_rust_str(const char *bytes, int64_t length) {
+  return fsh_str_of(bytes, length);
+}
+
+// After a Rust value's drop: a panic in it, which the shim handed back, raised as a Fish panic.
+void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
+  if (*caught) fsh_rt_panic_rust(at, *caught);
 }
 
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
@@ -4084,6 +4129,93 @@ void fsh_rt_signal_abort(fsh_signal *s) {
   fsh_rt_free(waiting.tasks);
 }
 
+// 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the
+// first time a program asks for it, so one that never does dies at Ctrl-C as usual. A handler
+// only writes the signal's number to a nonblocking pipe, as async-signal-safe code must; a thread
+// of its own reads it, aborting the signal the first time and exiting with 128 plus the number the
+// second, flushing output but running no drops. The block is static and the runtime holds a count
+// on it, so it is never freed.
+static fsh_signal fsh_shutdown;
+static pthread_once_t fsh_shutdown_once = PTHREAD_ONCE_INIT;
+static int fsh_shutdown_pipe[2];
+
+static void fsh_shutdown_caught(int sig) {
+  int saved = errno;
+  unsigned char number = (unsigned char)sig;
+  (void)!write(fsh_shutdown_pipe[1], &number, 1);
+  errno = saved;
+}
+
+// The second signal's exit flushes what output it can. A stream another thread holds, as one
+// blocked writing a line to a full pipe does, is skipped; a flush that blocks itself is cut off
+// by the watcher's exit a second later.
+static int32_t fsh_shutdown_code;
+
+static void *fsh_shutdown_flush(void *arg) {
+  FILE *streams[2] = { stdout, stderr };
+  for (int i = 0; i < 2; i++) {
+    if (ftrylockfile(streams[i]) != 0) continue;
+    fflush(streams[i]);
+    funlockfile(streams[i]);
+  }
+  _exit(fsh_shutdown_code);
+}
+
+static void *fsh_shutdown_watch(void *arg) {
+  int32_t seen = 0;
+  for (;;) {
+    unsigned char number;
+    ssize_t got = read(fsh_shutdown_pipe[0], &number, 1);
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) return NULL;
+    if (seen++ == 0) {
+      fsh_rt_signal_abort(&fsh_shutdown);
+      continue;
+    }
+    fsh_shutdown_code = 128 + number;
+    pthread_t flusher;
+    if (pthread_create(&flusher, NULL, fsh_shutdown_flush, NULL) == 0) {
+      struct timespec bound = { 1, 0 };
+      nanosleep(&bound, NULL);
+    }
+    _exit(fsh_shutdown_code);
+  }
+}
+
+static void fsh_shutdown_waiters_free(void) {
+  pthread_mutex_lock(&fsh_shutdown.lock);
+  fsh_waiters_free(&fsh_shutdown.waiting);
+  fsh_shutdown.waiting = (fsh_waiters){ NULL, 0, 0 };
+  pthread_mutex_unlock(&fsh_shutdown.lock);
+}
+
+static void fsh_shutdown_start(void) {
+  fsh_shutdown.count = 1;
+  pthread_mutex_init(&fsh_shutdown.lock, NULL);
+  fsh_shutdown_end = fsh_shutdown_waiters_free;
+  const char *failed = "fish: the shutdown signal couldn't be set up, so SIGINT and SIGTERM end the program at once\n";
+  if (pipe(fsh_shutdown_pipe) != 0) return (void)fputs(failed, stderr);
+  fcntl(fsh_shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_shutdown_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_shutdown_pipe[1], F_SETFL, O_NONBLOCK);
+  pthread_t watcher;
+  if (pthread_create(&watcher, NULL, fsh_shutdown_watch, NULL) != 0) return (void)fputs(failed, stderr);
+  pthread_detach(watcher);
+  struct sigaction caught;
+  memset(&caught, 0, sizeof caught);
+  caught.sa_handler = fsh_shutdown_caught;
+  sigemptyset(&caught.sa_mask);
+  caught.sa_flags = SA_RESTART;
+  sigaction(SIGINT, &caught, NULL);
+  sigaction(SIGTERM, &caught, NULL);
+}
+
+fsh_signal *fsh_rt_signal_shutdown(void) {
+  pthread_once(&fsh_shutdown_once, fsh_shutdown_start);
+  __atomic_fetch_add(&fsh_shutdown.count, 1, __ATOMIC_RELAXED);
+  return &fsh_shutdown;
+}
+
 // The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
 // on. Each interest is one task waiting for one socket to be readable or writable, once; the
 // list holds a count on each task, so shutdown can give back those never woken.
@@ -4234,8 +4366,12 @@ static void fsh_io_stop(void) {
 #endif
 }
 
-// A socket's block: its count and its file descriptor, closed with the last count.
-typedef struct { int64_t count; int fd; } fsh_socket;
+struct fsh_file_job;
+void fsh_rt_file_job_release(struct fsh_file_job *job);
+
+// A socket's block: its count and its file descriptor, closed with the last count. A connect
+// waiting on a host name's lookup has no descriptor yet, only the lookup's job.
+typedef struct { int64_t count; int fd; struct fsh_file_job *lookup; } fsh_socket;
 
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -4248,13 +4384,17 @@ static fsh_socket *fsh_socket_new(int fd) {
   fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
   s->count = 1;
   s->fd = fd;
+  s->lookup = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
-  if (fsh_poller >= 0) fsh_io_forget(s->fd);
-  close(s->fd);
+  if (s->fd >= 0) {
+    if (fsh_poller >= 0) fsh_io_forget(s->fd);
+    close(s->fd);
+  }
+  fsh_rt_file_job_release(s->lookup);
   fsh_rt_free(s);
 }
 
@@ -4330,8 +4470,8 @@ static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, c
   return failed;
 }
 
-// A file read or write on the blocking pool: threads of their own, apart from the executor's
-// workers, so a slow disk never stalls other tasks. A job is counted by the future polling it and
+// A file read or write, or a host name's lookup, on the blocking pool: threads of their own,
+// apart from the executor's workers, so a slow disk or resolver never stalls other tasks. A job is counted by the future polling it and
 // by the thread working on it; the thread wakes the task when done, and a future dropped first
 // leaves the job to the thread to free.
 typedef struct fsh_file_job {
@@ -4425,6 +4565,21 @@ static void fsh_file_read(fsh_file_job *job) {
 
 static void fsh_file_write(fsh_file_job *job) {
   fsh_write_whole(job->path, &job->data, &job->error, &job->syscall);
+}
+
+// A host name's first IPv4 address, into the job's data, or getaddrinfo's error code.
+static void fsh_host_lookup(fsh_file_job *job) {
+  struct addrinfo hints, *found = NULL;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  job->error = getaddrinfo(job->path, NULL, &hints, &found);
+  job->syscall = "getaddrinfo";
+  if (job->error) return;
+  job->data.data = fsh_rt_alloc(sizeof(struct in_addr));
+  memcpy(job->data.data, &((struct sockaddr_in *)found->ai_addr)->sin_addr, sizeof(struct in_addr));
+  job->data.length = job->data.capacity = sizeof(struct in_addr);
+  freeaddrinfo(found);
 }
 
 // readFileSync, writeFileSync and existsSync: the same reads and writes, on the calling thread.
@@ -4661,7 +4816,8 @@ static void *fsh_pool_work(void *arg) {
     if (!fsh_pool_head) fsh_pool_tail = NULL;
     pthread_mutex_unlock(&fsh_pool_lock);
     if (job->op == 0) fsh_file_read(job);
-    else fsh_file_write(job);
+    else if (job->op == 1) fsh_file_write(job);
+    else fsh_host_lookup(job);
     fsh_task *task = job->task;
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
     fsh_rt_wake(task);
@@ -4738,7 +4894,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
     snprintf(reason, sizeof reason, "'%.200s' is not an IPv4 address like 127.0.0.1; host names aren't looked up", text ? text : "");
   }
   fsh_rt_free(text);
-  if (reason[0]) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
+  if (reason[0] && message) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
   return !reason[0];
 }
 
@@ -4849,19 +5005,70 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
   return 1;
 }
 
+// Starts connecting a new socket to an address, into *socket_at, or 5 with the reason.
+static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_in *at, fsh_str **message) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
+  *socket_at = fsh_socket_new(fd);
+  // Interrupted, it goes on connecting all the same.
+  if (connect(fd, (struct sockaddr *)at, sizeof *at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
+  return 0;
+}
+
 // Polls 'TcpStream.connect(host, port)': the frame keeps the socket while it connects; once
-// writable, the connection either stands, moving the socket out, or failed.
+// writable, the connection either stands, moving the socket out, or failed. A host that isn't an
+// IPv4 address is looked up on the blocking pool first, the socket waiting with no descriptor; a
+// connect dropped mid-lookup leaves the job to the pool's thread, which drops its result.
 int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
   fsh_socket *s = *socket_at;
   if (!s) {
     struct sockaddr_in at;
-    if (!fsh_address(host, port, &at, message)) return 5;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
-    s = *socket_at = fsh_socket_new(fd);
-    // Interrupted, it goes on connecting all the same.
-    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
+    if (fsh_address(host, port, &at, NULL)) {
+      if (fsh_connect_start(socket_at, &at, message)) return 5;
+    } else {
+      char *name = fsh_rt_str_cstring(host);
+      if (port < 0 || port > 65535 || !name) {
+        fsh_rt_free(name);
+        fsh_address(host, port, &at, message);
+        return 5;
+      }
+      fsh_file_job *job = fsh_rt_alloc(sizeof(fsh_file_job));
+      memset(job, 0, sizeof *job);
+      job->refs = 2;
+      job->op = 2;
+      job->path = name;
+      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+      job->task = task;
+      s = *socket_at = fsh_rt_alloc(sizeof(fsh_socket));
+      s->count = 1;
+      s->fd = -1;
+      s->lookup = job;
+      fsh_pool_submit(job);
+      return 0;
+    }
+  } else if (s->fd < 0) {
+    fsh_file_job *job = s->lookup;
+    if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+    if (job->error) {
+      // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
+      const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
+      size_t size = strlen(job->path) + 32;
+      char *text = fsh_rt_alloc(size);
+      snprintf(text, size, "getaddrinfo %s %s", code, job->path);
+      fsh_io_parts(message, text, code, "getaddrinfo", NULL);
+      fsh_rt_free(text);
+      return 5;
+    }
+    struct sockaddr_in at;
+    memset(&at, 0, sizeof at);
+    at.sin_family = AF_INET;
+    at.sin_port = htons((uint16_t)port);
+    memcpy(&at.sin_addr, job->data.data, sizeof at.sin_addr);
+    fsh_rt_socket_release(s);
+    *socket_at = NULL;
+    if (fsh_connect_start(socket_at, &at, message)) return 5;
   }
+  s = *socket_at;
   int error = 0;
   socklen_t size = sizeof error;
   getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);

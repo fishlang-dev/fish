@@ -62,6 +62,16 @@ class Error {
     this.cause = options?.cause ?? null;
   }
 }
+// What JavaScript throws for a value of the wrong kind, as 'new URL' does for one that isn't a URL.
+class TypeError {
+  name: string = "TypeError";
+  message: string;
+  cause: Dyn<ErrorLike> | null = null;
+  constructor(message?: string, options?: ErrorOptions) {
+    this.message = message ?? "";
+    this.cause = options?.cause ?? null;
+  }
+}
 // Error's fields of its own, printing as an Error does, until a generic class can extend one.
 class AggregateError<E> {
   name: string = "AggregateError";
@@ -272,7 +282,7 @@ class Request {
 
   constructor(url: string, init?: RequestInit) {
     this.url = url;
-    this.path = Http1.pathOf(url);
+    this.path = __urlRequestPath(url);
     let method = "GET";
     let headers = new Headers();
     let body = "";
@@ -320,6 +330,8 @@ class Response {
   statusText: string;
   headers: Headers;
   body: string;
+  // The URL fetch got it from, or "" for one the program built.
+  url: string = "";
 
   constructor(body?: string | null, init?: ResponseInit) {
     let status: i64 = 200;
@@ -360,11 +372,38 @@ class Response {
   async text(): Promise<string> {
     return this.body;
   }
+
+  // The body read as JSON into a T.
+  async json<T>(): Promise<T> throws JsonError {
+    return JSON.parse<T>(this.body);
+  }
+}
+
+// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
+// is a response, not an error, and a redirect is returned rather than followed.
+async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const req = Http1.fetched(input, init);
+  const signal = req.signal.clone();
+  const to = Http1.target(req.url);
+  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  let res = await Http1.receive(conn, req.method === "HEAD", signal);
+  res.url = to.url;
+  return res;
 }
 
 type ServeInfo = { hostname: string; port: i64 };
 type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void };
 type ServeHandler = (req: Request) => Promise<Response>;
+// A router's internal names take forms no program can write, so a program's own never hides
+// the HTTP library.
+type __routerNext = (req: Request) => Promise<Response>;
+type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response>;
+// Each route's method, split path and handler, added together under one lock.
+type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[] };
+// A router's routes and middleware, shared so each middleware's next can hold them.
+type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
 // Serves HTTP/1.1 on hostname and port, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
@@ -374,9 +413,9 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
-  let stop = new AbortController().signal;
+  // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
-  if (given !== null) stop = given;
+  const stop = given ?? shutdownSignal();
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
@@ -494,9 +533,27 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 // runs, ':name' segments match any one segment, and a request no route matches gets a 404.
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
-  methods: string[] = [];
-  routes: string[][] = [];
-  handlers: ServeHandler[] = [];
+  private table: shared<__routerTable>;
+  // The innermost next, which runs the routes. Holding a Dyn also keeps a Router from being
+  // cloned, since clones would share one table.
+  private inner: __routerNext;
+
+  constructor() {
+    // Named first: an empty array literal for a field of callables is typed 'never[]'.
+    const handlers: ServeHandler[] = [];
+    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers };
+    const middleware: __routerMiddleware[] = [];
+    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
+    const held = table.clone();
+    this.table = table;
+    this.inner = async (r: Request) => {
+      const res = await Router.dispatch(held.clone(), r);
+      return res;
+    };
+  }
+
+  // Wraps every route and the 404, whenever it is added; the first added runs outermost.
+  use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
   post(this: Mut<this>, path: string, handler: ServeHandler) { this.route("POST", path, handler); }
@@ -508,26 +565,81 @@ class Router {
 
   // A route for a method, in any case; a path without a leading '/' gets one.
   route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
-    this.methods.push(method.toUpperCase());
-    this.routes.push((path.startsWith("/") ? path : "/" + path).split("/"));
-    this.handlers.push(handler);
+    const upper = method.toUpperCase();
+    const split = (path.startsWith("/") ? path : "/" + path).split("/");
+    this.table.routes.update((t) => {
+      t.methods.push(upper);
+      t.paths.push(split);
+      t.handlers.push(handler);
+    });
+  }
+
+  // The response the middleware give around the routes. Each next is built from the one inside
+  // it, innermost first, so no call of the chain awaits itself.
+  async handle(req: Request): Promise<Response> {
+    // The route is found and its :params decoded once, before any middleware runs, so one that
+    // isn't percent-encoded UTF-8 is refused before middleware sees the request.
+    const path = req.path.clone();
+    const method = req.method.clone();
+    const have = path.split("/");
+    const found = this.table.routes.update((t) => Router.find(t, method, have));
+    let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
+    let params: string[] = [];
+    if (found !== null) {
+      const decoded = Router.decoded(found.params);
+      if (decoded === null) return new Response("Bad Request\\n", { status: 400 });
+      params = decoded;
+      handler = found.handler;
+    }
+    // A middleware that changed the path or method has its request routed again.
+    const again = this.inner.clone();
+    let next: __routerNext = async (r: Request) => {
+      if (r.path !== path || r.method !== method) {
+        const res = await again(r);
+        return res;
+      }
+      let routed = r;
+      routed.params = params.clone();
+      const res = await handler(routed);
+      return res;
+    };
+    let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
+    while (chain.length > 0) {
+      const m = chain.pop()!;
+      const inner = next;
+      next = async (r: Request) => {
+        const res = await m(r, inner.clone());
+        return res;
+      };
+    }
+    const res = await next(req);
+    return res;
   }
 
   // The first matching route's response; a HEAD request may run a GET route.
-  async handle(req: Request): Promise<Response> {
+  private static async dispatch(table: shared<__routerTable>, req: Request): Promise<Response> {
     const have = req.path.split("/");
-    const head = req.method === "HEAD";
-    for (let i = 0; i < this.routes.length; i++) {
-      const method = this.methods[i];
-      if (method !== "" && method !== req.method && !(head && method === "GET")) continue;
-      const found = Router.match(this.routes[i], have);
-      if (found === null) continue;
-      let routed = req;
-      routed.params = found;
-      const res = await this.handlers[i](routed);
-      return res;
+    const method = req.method;
+    const found = table.routes.update((t) => Router.find(t, method, have));
+    if (found === null) return new Response("Not Found\\n", { status: 404 });
+    const params = Router.decoded(found.params);
+    if (params === null) return new Response("Bad Request\\n", { status: 400 });
+    let routed = req;
+    routed.params = params;
+    const res = await found.handler(routed);
+    return res;
+  }
+
+  // The first route taking a method and path, its handler cloned, with the :params it reads.
+  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>): { handler: ServeHandler; params: string[] } | null {
+    const head = method === "HEAD";
+    for (let i = 0; i < t.paths.length; i++) {
+      const want = t.methods[i];
+      if (want !== "" && want !== method && !(head && want === "GET")) continue;
+      const found = Router.match(t.paths[i], have);
+      if (found !== null) return { handler: t.handlers[i].clone(), params: found };
     }
-    return new Response("Not Found\\n", { status: 404 });
+    return null;
   }
 
   // The router as the handler serve takes; the handler owns it.
@@ -537,6 +649,18 @@ class Router {
       const res = await router.handle(req);
       return res;
     };
+  }
+
+  // The :params with their values percent-decoded, or null when one doesn't decode.
+  static decoded(params: Ref<string[]>): string[] | null {
+    let out: string[] = [];
+    for (let i: usize = 0; i + 1 < params.length; i += 2) {
+      const value = __urlDecodeStrict(params[i + 1]);
+      if (value === null) return null;
+      out.push(params[i]);
+      out.push(value);
+    }
+    return out;
   }
 
   // The :params a route's segments take from a path's, or null when they don't match.
@@ -597,25 +721,6 @@ class Http1 {
     await conn.write(new TextEncoder().encode(Http1.responseText(res, false, true, "HTTP/1.1")), AbortSignal.timeout(30000));
   }
 
-  // A URL's path: after the scheme and host, up to its query or fragment.
-  static pathOf(url: string): string {
-    let start = 0;
-    const scheme = url.indexOf("://");
-    if (scheme >= 0) {
-      const slash = url.indexOf("/", scheme + 3);
-      if (slash < 0) return "/";
-      start = slash;
-    }
-    let end = url.length as i64;
-    const query = url.indexOf("?", start);
-    if (query >= 0) end = query;
-    const hash = url.indexOf("#", start);
-    if (hash >= 0 && hash < end) end = hash;
-    const path = url.slice(start, end);
-    if (path.length === 0) return "/";
-    return path;
-  }
-
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
   // starts at from, since what was searched before held no end.
   static headEnd(buffer: Ref<u8[]>, from: i64): i64 {
@@ -650,6 +755,13 @@ class Http1 {
     if (parts.length !== 3 || !Http1.isToken(parts[0]) || !parts[1].startsWith("/")) return null;
     const version = parts[2];
     if (version !== "HTTP/1.1" && version !== "HTTP/1.0") return null;
+    const headers = Http1.parseFields(lines);
+    if (headers === null) return null;
+    return new HttpHead(parts[0], parts[1], version, headers);
+  }
+
+  // The header lines after a head's first, or null when one isn't a header.
+  static parseFields(lines: Ref<string[]>): Headers | null {
     let headers = new Headers();
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
@@ -659,7 +771,166 @@ class Http1 {
       if (!Http1.isToken(name)) return null;
       headers.append(name, line.slice(colon + 1).trim());
     }
-    return new HttpHead(parts[0], parts[1], version, headers);
+    return headers;
+  }
+
+  // fetch's request: a Request given, with what init sets in place of its own.
+  static fetched(input: string | Request | URL, init?: RequestInit): Request {
+    if (typeof input === "string") return new Request(input, init);
+    if (input instanceof URL) return new Request(input.href, init);
+    let req = input;
+    if (init !== null) {
+      const m = init.method;
+      if (m !== null) req.method = m.toUpperCase();
+      const h = init.headers;
+      if (h !== null) req.headers = h;
+      const b = init.body;
+      if (b !== null) req.body = b;
+      const s = init.signal;
+      if (s !== null) req.signal = s;
+    }
+    return req;
+  }
+
+  // Where an http: URL points: host and port to connect to, the Host header, the path and query
+  // sent, and the URL without its fragment.
+  static target(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+    const parsed = __urlFetchTarget(url);
+    if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
+    const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
+    const query = parsed.hasQuery ? "?" + parsed.query : "";
+    return { host: parsed.host.clone(), port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+  }
+
+  // A request's line, headers and body, as fetch sends it: the caller's headers in their order,
+  // the framing and Host its own.
+  static requestText(req: Ref<Request>, authority: string, path: string): string throws IoError {
+    if (!Http1.isToken(req.method)) throw new IoError("can't fetch '" + req.url + "': '" + req.method + "' isn't a method name");
+    let text = req.method + " " + path + " HTTP/1.1\\r\\nhost: " + authority + "\\r\\n";
+    let bad = "";
+    req.headers.forEach((value: string, name: string) => {
+      if (!Http1.isToken(name) || Http1.hasBreak(value)) bad = name;
+      else if (name !== "host" && name !== "connection" && name !== "content-length" && name !== "transfer-encoding") text = text + name + ": " + value + "\\r\\n";
+    });
+    if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
+    if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
+    if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
+    const size = new TextEncoder().encode(req.body).length as i64;
+    if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
+    return text + "connection: close\\r\\n\\r\\n" + req.body;
+  }
+
+  // The next bytes of a response, which must come before the connection ends.
+  static async more(conn: Ref<TcpStream>, signal: Ref<AbortSignal>, before: string): Promise<u8[]> throws IoError | AbortError {
+    const got = await conn.read(16384, signal.clone());
+    if (got.length === 0) throw new IoError("the connection closed before " + before);
+    return got;
+  }
+
+  // A response read whole from a connection that closes after it. Interim 1xx responses are
+  // skipped; the body is framed by chunks, by Content-Length, or by the connection's end.
+  static async receive(conn: TcpStream, head: boolean, signal: AbortSignal): Promise<Response> throws IoError | AbortError {
+    let buffer: u8[] = [];
+    while (true) {
+      let end = Http1.headEnd(buffer, 0);
+      while (end < 0) {
+        if ((buffer.length as i64) > 65536) throw new IoError("the response's status line and headers are over 64 KiB");
+        const from = buffer.length as i64 - 3;
+        const got = await Http1.more(conn, signal, "the response's headers ended");
+        for (const b of got) buffer.push(b);
+        end = Http1.headEnd(buffer, from < 0 ? 0 : from);
+      }
+      if (end > 65536) throw new IoError("the response's status line and headers are over 64 KiB");
+      const lines = new TextDecoder().decode(Http1.take(buffer, 0, end)).split("\\r\\n");
+      buffer = Http1.take(buffer, end + 4, buffer.length as i64);
+      const parts = lines[0].split(" ");
+      const status = parts.length >= 2 ? Http1.digits(parts[1]) : -1;
+      if (!lines[0].startsWith("HTTP/1.") || status < 100 || status > 999 || parts[1].length !== 3 || Http1.hasBreak(lines[0])) {
+        throw new IoError("the response's status line '" + lines[0] + "' isn't HTTP/1.x");
+      }
+      const headers = Http1.parseFields(lines);
+      if (headers === null) throw new IoError("the response's headers are malformed");
+      if (status < 200 && status !== 101) continue;
+      let body: u8[] = [];
+      const coding = headers.get("transfer-encoding");
+      if (head || status < 200 || status === 204 || status === 304) {
+        body = [];
+      } else if (coding !== null && Http1.hasToken(coding, "chunked")) {
+        body = await Http1.chunked(conn, buffer, signal);
+      } else if (coding === null && headers.has("content-length")) {
+        const length = Http1.contentLength(headers);
+        if (length < 0) throw new IoError("the response's Content-Length isn't a number");
+        while ((buffer.length as i64) < length) {
+          const got = await Http1.more(conn, signal, "the response's body ended");
+          for (const b of got) buffer.push(b);
+        }
+        body = Http1.take(buffer, 0, length);
+      } else {
+        body = buffer;
+        while (true) {
+          const got = await conn.read(16384, signal.clone());
+          if (got.length === 0) break;
+          for (const b of got) body.push(b);
+        }
+      }
+      let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
+      res.body = new TextDecoder().decode(body);
+      return res;
+    }
+  }
+
+  // A chunked body, decoded; trailers after the last chunk are left unread.
+  static async chunked(conn: Ref<TcpStream>, start: u8[], signal: Ref<AbortSignal>): Promise<u8[]> throws IoError | AbortError {
+    let buffer = start;
+    let body: u8[] = [];
+    let at: i64 = 0;
+    while (true) {
+      // The scan goes on from where the last read ended, and a size line may take 1 KiB.
+      let line = Http1.lineEnd(buffer, at);
+      while (line < 0) {
+        if ((buffer.length as i64) - at > 1024) throw new IoError("the response's chunk size line is over 1 KiB");
+        const from = buffer.length as i64 - 1;
+        const got = await Http1.more(conn, signal, "the response's chunked body ended");
+        for (const b of got) buffer.push(b);
+        line = Http1.lineEnd(buffer, from < at ? at : from);
+      }
+      if (line - at > 1024) throw new IoError("the response's chunk size line is over 1 KiB");
+      let sizeText = new TextDecoder().decode(Http1.take(buffer, at, line));
+      const ext = sizeText.indexOf(";");
+      if (ext >= 0) sizeText = sizeText.slice(0, ext);
+      const size = Http1.hex(sizeText.trim());
+      if (size < 0) throw new IoError("the response's chunk size '" + sizeText + "' isn't a hexadecimal number");
+      at = line + 2;
+      if (size === 0) return body;
+      while ((buffer.length as i64) < at + size + 2) {
+        const got = await Http1.more(conn, signal, "the response's chunked body ended");
+        for (const b of got) buffer.push(b);
+      }
+      if (buffer[(at + size) as usize] !== 13 || buffer[(at + size + 1) as usize] !== 10) throw new IoError("the response's chunk of " + String(size) + " bytes isn't followed by CR LF");
+      for (let i = at as usize; i < ((at + size) as usize); i++) body.push(buffer[i]);
+      at = at + size + 2;
+    }
+  }
+
+  // Where the line starting at from ends: the index of its CR LF, or -1.
+  static lineEnd(buffer: Ref<u8[]>, from: i64): i64 {
+    for (let i = from as usize; i + 1 < buffer.length; i++) {
+      if (buffer[i] === 13 && buffer[i + 1] === 10) return i as i64;
+    }
+    return -1;
+  }
+
+  // A whole number written in hexadecimal digits, or -1.
+  static hex(text: string): i64 {
+    if (text.length === 0 || text.length > 15) return -1;
+    let n: i64 = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i) as i64;
+      const d = c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : c >= 65 && c <= 70 ? c - 55 : -1;
+      if (d < 0) return -1;
+      n = n * 16 + d;
+    }
+    return n;
   }
 
   // The body's length from Content-Length, 0 without one, or -1 when it isn't a number.
@@ -719,14 +990,14 @@ class Http1 {
   }
 
   // Whether a Host header names a host and port only: no path, query, fragment, user, space,
-  // or list of hosts.
+  // or list of hosts, and a host and port the URL parser takes, so the request's URL parses.
   static isHost(text: string): boolean {
     if (text.length === 0) return false;
     for (let i = 0; i < text.length; i++) {
       const c = text.charCodeAt(i) as i64;
       if (c <= 32 || c === 47 || c === 63 || c === 35 || c === 64 || c === 44 || c === 92 || c === 127) return false;
     }
-    return true;
+    return typeof __urlParse("http://" + text + "/", null) !== "string";
   }
 
   // Whether a response can go out as it stands: a status the Fetch API allows, and a status
@@ -788,7 +1059,1170 @@ class Http1 {
 }
 `;
 
-const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+// The URL Standard's URL and URLSearchParams.
+const URL_LIB = String.raw`
+// The URL Standard's URL record, as the parser builds it. A part that may be missing has a flag
+// saying whether it is there; a port of -1 is none.
+type __urlRecord = { scheme: string; username: string; password: string; host: string; hasHost: boolean; port: i64; path: string[]; opaque: boolean; query: string; hasQuery: boolean; fragment: string; hasFragment: boolean };
+
+function __urlEmpty(): __urlRecord {
+  const path: string[] = [];
+  return { scheme: "", username: "", password: "", host: "", hasHost: false, port: -1, path: path, opaque: false, query: "", hasQuery: false, fragment: "", hasFragment: false };
+}
+
+// A string's code points, read from its bytes in one pass, a lone surrogate as U+FFFD, as a URL
+// reads its input.
+function __urlPoints(s: string): i64[] {
+  const bytes = new TextEncoder().encode(s);
+  const n = bytes.length;
+  let out: i64[] = [];
+  out.reserve(n as i64);
+  let i: usize = 0;
+  while (i < n) {
+    const b = bytes[i] as i64;
+    let c = b;
+    let k: usize = 1;
+    if (b >= 0xF0 && i + 3 < n) {
+      c = ((b & 7) << 18) | (((bytes[i + 1] as i64) & 63) << 12) | (((bytes[i + 2] as i64) & 63) << 6) | ((bytes[i + 3] as i64) & 63);
+      k = 4;
+    } else if (b >= 0xE0 && i + 2 < n) {
+      c = ((b & 15) << 12) | (((bytes[i + 1] as i64) & 63) << 6) | ((bytes[i + 2] as i64) & 63);
+      k = 3;
+    } else if (b >= 0xC0 && i + 1 < n) {
+      c = ((b & 31) << 6) | ((bytes[i + 1] as i64) & 63);
+      k = 2;
+    }
+    out.push(c >= 0xD800 && c <= 0xDFFF ? 0xFFFD : c);
+    i += k;
+  }
+  return out;
+}
+
+function __urlAt(points: Ref<i64[]>, i: i64): i64 {
+  return i >= 0 && i < (points.length as i64) ? points[i as usize] : -1;
+}
+
+function __urlSpecial(scheme: string): boolean {
+  return scheme === "http" || scheme === "https" || scheme === "ws" || scheme === "wss" || scheme === "ftp" || scheme === "file";
+}
+
+function __urlDefaultPort(scheme: string): i64 {
+  if (scheme === "http" || scheme === "ws") return 80;
+  if (scheme === "https" || scheme === "wss") return 443;
+  if (scheme === "ftp") return 21;
+  return -1;
+}
+
+function __urlAlpha(c: i64): boolean {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+function __urlDigit(c: i64): boolean {
+  return c >= 48 && c <= 57;
+}
+
+function __urlHexValue(c: i64): i64 {
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 102) return c - 87;
+  if (c >= 65 && c <= 70) return c - 55;
+  return -1;
+}
+
+// Whether a percent-encode set of the URL Standard holds a code point.
+function __urlInSet(c: i64, set: string): boolean {
+  if (set === "none") return false;
+  if (set === "form") return true;
+  if (c < 32 || c > 126) return true;
+  if (set === "c0") return false;
+  if (set === "fragment") return c === 32 || c === 34 || c === 60 || c === 62 || c === 96;
+  // The query set, then those adding to it.
+  if (c === 32 || c === 34 || c === 35 || c === 60 || c === 62) return true;
+  if (set === "query") return false;
+  if (set === "specialQuery") return c === 39;
+  if (c === 63 || c === 94 || c === 96 || c === 123 || c === 125) return true;
+  if (set === "path") return false;
+  return c === 47 || c === 58 || c === 59 || c === 61 || c === 64 || (c >= 91 && c <= 93) || c === 124;
+}
+
+// Appends a code point to UTF-8 bytes, percent-encoded when the set holds it. Output is built
+// as bytes and made a string once, so a URL is read in linear time.
+function __urlPut(out: Mut<u8[]>, c: i64, set: string) {
+  const escape = __urlInSet(c, set);
+  if (c < 0x80) __urlPutByte(out, c, escape);
+  else if (c < 0x800) {
+    __urlPutByte(out, 0xC0 | (c >> 6), escape);
+    __urlPutByte(out, 0x80 | (c & 63), escape);
+  } else if (c < 0x10000) {
+    __urlPutByte(out, 0xE0 | (c >> 12), escape);
+    __urlPutByte(out, 0x80 | ((c >> 6) & 63), escape);
+    __urlPutByte(out, 0x80 | (c & 63), escape);
+  } else {
+    __urlPutByte(out, 0xF0 | (c >> 18), escape);
+    __urlPutByte(out, 0x80 | ((c >> 12) & 63), escape);
+    __urlPutByte(out, 0x80 | ((c >> 6) & 63), escape);
+    __urlPutByte(out, 0x80 | (c & 63), escape);
+  }
+}
+
+function __urlPutByte(out: Mut<u8[]>, b: i64, escape: boolean) {
+  if (!escape) {
+    out.push(b as u8);
+    return;
+  }
+  const high = b >> 4;
+  const low = b & 15;
+  out.push(37);
+  out.push((high < 10 ? 48 + high : 55 + high) as u8);
+  out.push((low < 10 ? 48 + low : 55 + low) as u8);
+}
+
+// Code points as a string.
+function __urlString(points: Ref<i64[]>): string {
+  let out: u8[] = [];
+  for (const c of points) __urlPut(out, c, "none");
+  return __urlText(out);
+}
+
+// Bytes with each '%' and two hex digits read as the byte they name.
+function __urlPercentDecode(bytes: Ref<u8[]>): u8[] {
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    const b = bytes[i];
+    if (b === 37 && i + 2 < bytes.length + 0 && __urlHexValue(bytes[i + 1] as i64) >= 0 && __urlHexValue(bytes[i + 2] as i64) >= 0) {
+      out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
+      i += 3;
+    } else {
+      out.push(b);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// UTF-8 bytes as text, each malformed sequence as U+FFFD, and a leading byte order mark kept.
+function __urlText(bytes: Ref<u8[]>): string {
+  const bom = bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF;
+  const text = new TextDecoder().decode(bytes);
+  return bom ? "\u{FEFF}" + text : text;
+}
+
+// Whether a string is a Windows drive letter: a letter, then ':' or, unless normalized, '|'.
+function __urlDrive(s: string, normalized: boolean): boolean {
+  if (s.length !== 2 || !__urlAlpha(s.charCodeAt(0) as i64)) return false;
+  const c = s.charCodeAt(1) as i64;
+  return c === 58 || (!normalized && c === 124);
+}
+
+// Whether the code points from i start with a Windows drive letter ending there or before a
+// '/', '\', '?' or '#'.
+function __urlStartsWithDrive(input: Ref<i64[]>, i: i64): boolean {
+  const second = __urlAt(input, i + 1);
+  if (!__urlAlpha(__urlAt(input, i)) || (second !== 58 && second !== 124)) return false;
+  const third = __urlAt(input, i + 2);
+  return third === -1 || third === 47 || third === 92 || third === 63 || third === 35;
+}
+
+// Drops a path's last segment, except a file URL's drive letter.
+function __urlShorten(url: Mut<__urlRecord>) {
+  if (url.scheme === "file" && url.path.length === 1 && __urlDrive(url.path[0], true)) return;
+  url.path.pop();
+}
+
+function __urlSingleDot(s: string): boolean {
+  return s === "." || s.toLowerCase() === "%2e";
+}
+
+function __urlDoubleDot(s: string): boolean {
+  const l = s.toLowerCase();
+  return l === ".." || l === ".%2e" || l === "%2e." || l === "%2e%2e";
+}
+
+// A host as the parser makes it, or an error saying why there is none.
+type __urlHost = { host: string; error: string };
+
+function __urlHostOf(points: Ref<i64[]>, special: boolean): __urlHost {
+  const failed = { host: "", error: "Invalid URL" };
+  const n = points.length as i64;
+  if (n > 0 && points[0] === 91) {
+    if (points[(n - 1) as usize] !== 93) return failed;
+    const address = __urlIpv6(points.slice(1, n - 1));
+    if (address.length === 0) return failed;
+    return { host: "[" + __urlIpv6Text(address) + "]", error: "" };
+  }
+  let raw: u8[] = [];
+  for (const c of points) {
+    if (!special && __urlForbiddenHost(c)) return failed;
+    __urlPut(raw, c, special ? "none" : "c0");
+  }
+  if (!special) return { host: __urlText(raw), error: "" };
+  const decoded = __urlPercentDecode(raw);
+  const domain = __urlText(decoded);
+  for (const c of __urlPoints(domain)) {
+    if (c > 127) return { host: "", error: "Invalid URL: international domain names aren't supported yet" };
+  }
+  const ascii = domain.toLowerCase();
+  for (const label of ascii.split(".")) {
+    if (label.startsWith("xn--")) return { host: "", error: "Invalid URL: international domain names aren't supported yet" };
+  }
+  if (ascii.length === 0) return failed;
+  for (const c of __urlPoints(ascii)) {
+    if (__urlForbiddenHost(c) || c <= 31 || c === 37 || c === 127) return failed;
+  }
+  if (__urlEndsInNumber(ascii)) {
+    const v4 = __urlIpv4(ascii);
+    if (v4 < 0) return failed;
+    return { host: __urlIpv4Text(v4), error: "" };
+  }
+  return { host: ascii, error: "" };
+}
+
+function __urlForbiddenHost(c: i64): boolean {
+  return c === 0 || c === 9 || c === 10 || c === 13 || c === 32 || c === 35 || c === 47 || c === 58 || c === 60 || c === 62 || c === 63 || c === 64 || c === 91 || c === 92 || c === 93 || c === 94 || c === 124;
+}
+
+// Whether a domain's last label is a number, which makes the domain an IPv4 address.
+function __urlEndsInNumber(domain: string): boolean {
+  let parts = domain.split(".");
+  if (parts[parts.length - 1].length === 0) {
+    if (parts.length === 1) return false;
+    parts.pop();
+  }
+  const last = parts[parts.length - 1];
+  if (last.length === 0) return false;
+  let digits = true;
+  for (let i = 0; i < last.length; i++) {
+    if (!__urlDigit(last.charCodeAt(i) as i64)) digits = false;
+  }
+  return digits || __urlIpv4Number(last) >= 0;
+}
+
+// A part of an IPv4 address in decimal, octal after '0' or hexadecimal after '0x', or -1.
+// Values past 2^40 stay there, as any of them is too large.
+function __urlIpv4Number(text: string): i64 {
+  if (text.length === 0) return -1;
+  let radix: i64 = 10;
+  let digits = text;
+  if (text.startsWith("0x") || text.startsWith("0X")) {
+    radix = 16;
+    digits = text.slice(2);
+  } else if (text.length >= 2 && text.startsWith("0")) {
+    radix = 8;
+    digits = text.slice(1);
+  }
+  let n: i64 = 0;
+  for (let i = 0; i < digits.length; i++) {
+    const d = __urlHexValue(digits.charCodeAt(i) as i64);
+    if (d < 0 || d >= radix) return -1;
+    if (n < 1099511627776) n = n * radix + d;
+  }
+  return n;
+}
+
+// An IPv4 address as a number, or -1.
+function __urlIpv4(text: string): i64 {
+  let parts = text.split(".");
+  if (parts[parts.length - 1].length === 0 && parts.length > 1) parts.pop();
+  if (parts.length > 4) return -1;
+  let numbers: i64[] = [];
+  for (const part of parts) {
+    const n = __urlIpv4Number(part);
+    if (n < 0) return -1;
+    numbers.push(n);
+  }
+  const count = numbers.length as i64;
+  for (let i: i64 = 0; i + 1 < count; i++) {
+    if (numbers[i as usize] > 255) return -1;
+  }
+  const last = numbers[(count - 1) as usize];
+  let limit: i64 = 1;
+  for (let i: i64 = 0; i < 5 - count; i++) limit = limit * 256;
+  if (last >= limit) return -1;
+  let address = last;
+  let scale: i64 = 16777216;
+  for (let i: i64 = 0; i + 1 < count; i++) {
+    address = address + numbers[i as usize] * scale;
+    scale = scale / 256;
+  }
+  return address;
+}
+
+function __urlIpv4Text(address: i64): string {
+  return String(address >> 24) + "." + String((address >> 16) & 255) + "." + String((address >> 8) & 255) + "." + String(address & 255);
+}
+
+// An IPv6 address's eight pieces, or none when the text isn't one.
+function __urlIpv6(input: Ref<i64[]>): i64[] {
+  const none: i64[] = [];
+  let address: i64[] = [0, 0, 0, 0, 0, 0, 0, 0];
+  let piece: i64 = 0;
+  let compress: i64 = -1;
+  let p: i64 = 0;
+  if (__urlAt(input, p) === 58) {
+    if (__urlAt(input, p + 1) !== 58) return none;
+    p += 2;
+    piece++;
+    compress = piece;
+  }
+  while (__urlAt(input, p) !== -1) {
+    if (piece === 8) return none;
+    if (__urlAt(input, p) === 58) {
+      if (compress !== -1) return none;
+      p++;
+      piece++;
+      compress = piece;
+      continue;
+    }
+    let value: i64 = 0;
+    let length: i64 = 0;
+    while (length < 4 && __urlHexValue(__urlAt(input, p)) >= 0) {
+      value = value * 16 + __urlHexValue(__urlAt(input, p));
+      p++;
+      length++;
+    }
+    if (__urlAt(input, p) === 46) {
+      if (length === 0) return none;
+      p -= length;
+      if (piece > 6) return none;
+      let seen: i64 = 0;
+      while (__urlAt(input, p) !== -1) {
+        let v4: i64 = -1;
+        if (seen > 0) {
+          if (__urlAt(input, p) === 46 && seen < 4) p++;
+          else return none;
+        }
+        if (!__urlDigit(__urlAt(input, p))) return none;
+        while (__urlDigit(__urlAt(input, p))) {
+          const d = __urlAt(input, p) - 48;
+          if (v4 === -1) v4 = d;
+          else if (v4 === 0) return none;
+          else v4 = v4 * 10 + d;
+          if (v4 > 255) return none;
+          p++;
+        }
+        address[piece as usize] = address[piece as usize] * 256 + v4;
+        seen++;
+        if (seen === 2 || seen === 4) piece++;
+      }
+      if (seen !== 4) return none;
+      break;
+    } else if (__urlAt(input, p) === 58) {
+      p++;
+      if (__urlAt(input, p) === -1) return none;
+    } else if (__urlAt(input, p) !== -1) return none;
+    address[piece as usize] = value;
+    piece++;
+  }
+  if (compress !== -1) {
+    let swaps = piece - compress;
+    piece = 7;
+    while (piece !== 0 && swaps > 0) {
+      const held = address[piece as usize];
+      address[piece as usize] = address[(compress + swaps - 1) as usize];
+      address[(compress + swaps - 1) as usize] = held;
+      piece--;
+      swaps--;
+    }
+  } else if (piece !== 8) return none;
+  return address;
+}
+
+// An IPv6 address written with its longest run of zero pieces, if two or more, as '::'.
+function __urlIpv6Text(address: Ref<i64[]>): string {
+  let compress: i64 = -1;
+  let best: i64 = 1;
+  let i: i64 = 0;
+  while (i < 8) {
+    let j = i;
+    while (j < 8 && address[j as usize] === 0) j++;
+    if (j - i > best) {
+      best = j - i;
+      compress = i;
+    }
+    i = j > i ? j : i + 1;
+  }
+  const digits = "0123456789abcdef";
+  let out = "";
+  let skipping = false;
+  for (let k: i64 = 0; k < 8; k++) {
+    const v = address[k as usize];
+    if (skipping && v === 0) continue;
+    skipping = false;
+    if (compress === k) {
+      out = out + (k === 0 ? "::" : ":");
+      skipping = true;
+      continue;
+    }
+    let hex = "";
+    let n = v;
+    while (true) {
+      hex = digits.charAt(n & 15) + hex;
+      n = n >> 4;
+      if (n === 0) break;
+    }
+    out = out + hex;
+    if (k !== 7) out = out + ":";
+  }
+  return out;
+}
+
+// The URL Standard's basic URL parser, without a state override: a URL record, or the message
+// of the TypeError for an input that isn't a URL.
+function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string {
+  const failure = "Invalid URL";
+  const all = __urlPoints(raw);
+  // Leading and trailing C0 controls and spaces go, then every tab and newline.
+  let first: i64 = 0;
+  let end = all.length as i64;
+  while (first < end && all[first as usize] <= 32) first++;
+  while (end > first && all[(end - 1) as usize] <= 32) end--;
+  let input: i64[] = [];
+  input.reserve(end - first);
+  for (let i = first; i < end; i++) {
+    const c = all[i as usize];
+    if (c !== 9 && c !== 10 && c !== 13) input.push(c);
+  }
+  const hasBase = base !== null;
+  const b = base ?? __urlEmpty();
+  let url = __urlEmpty();
+  // The parser's states, as the URL Standard names them.
+  const SCHEME_START = 0;
+  const SCHEME = 1;
+  const NO_SCHEME = 2;
+  const FILE = 3;
+  const SPECIAL_RELATIVE_OR_AUTHORITY = 4;
+  const SPECIAL_AUTHORITY_SLASHES = 5;
+  const PATH_OR_AUTHORITY = 6;
+  const OPAQUE_PATH = 7;
+  const FRAGMENT = 8;
+  const RELATIVE = 9;
+  const SPECIAL_AUTHORITY_IGNORE_SLASHES = 10;
+  const AUTHORITY = 11;
+  const PATH = 12;
+  const RELATIVE_SLASH = 13;
+  const QUERY = 14;
+  const HOST = 15;
+  const PORT = 16;
+  const PATH_START = 17;
+  const FILE_SLASH = 18;
+  const FILE_HOST = 19;
+  let state = SCHEME_START;
+  // The code points read for a scheme, authority, host or port.
+  let buffer: i64[] = [];
+  // What the parser writes, as bytes, made strings at the end: the path segment being read, an
+  // opaque path, the query, the fragment, and the user name and password.
+  let segment: u8[] = [];
+  let opaque: u8[] = [];
+  let query: u8[] = [];
+  let fragment: u8[] = [];
+  let username: u8[] = [];
+  let password: u8[] = [];
+  let opaqueRead = false;
+  let queryRead = false;
+  let atSign = false;
+  let brackets = false;
+  let passwordToken = false;
+  let special = false;
+  let p: i64 = 0;
+  while (true) {
+    const c = __urlAt(input, p);
+    // '/', or '\' in a special URL, which the parser takes for one.
+    const slash = c === 47 || (special && c === 92);
+    if (state === SCHEME_START) {
+      if (__urlAlpha(c)) {
+        buffer.push(c | 32);
+        state = SCHEME;
+      } else {
+        state = NO_SCHEME;
+        p--;
+      }
+    } else if (state === SCHEME) {
+      if (__urlAlpha(c) || __urlDigit(c) || c === 43 || c === 45 || c === 46) {
+        buffer.push(__urlAlpha(c) ? c | 32 : c);
+      } else if (c === 58) {
+        url.scheme = __urlString(buffer);
+        special = __urlSpecial(url.scheme);
+        buffer = [];
+        if (url.scheme === "file") state = FILE;
+        else if (__urlSpecial(url.scheme) && hasBase && b.scheme === url.scheme) state = SPECIAL_RELATIVE_OR_AUTHORITY;
+        else if (__urlSpecial(url.scheme)) state = SPECIAL_AUTHORITY_SLASHES;
+        else if (__urlAt(input, p + 1) === 47) {
+          state = PATH_OR_AUTHORITY;
+          p++;
+        } else {
+          url.opaque = true;
+          opaqueRead = true;
+          state = OPAQUE_PATH;
+        }
+      } else {
+        buffer = [];
+        state = NO_SCHEME;
+        p = -1;
+      }
+    } else if (state === NO_SCHEME) {
+      if (!hasBase || (b.opaque && c !== 35)) return failure;
+      if (b.opaque) {
+        url.scheme = b.scheme.clone();
+      special = __urlSpecial(url.scheme);
+        special = __urlSpecial(url.scheme);
+        url.path = b.path.clone();
+        url.opaque = true;
+        url.query = b.query.clone();
+        url.hasQuery = b.hasQuery;
+        url.hasFragment = true;
+        state = FRAGMENT;
+      } else {
+        state = b.scheme === "file" ? FILE : RELATIVE;
+        p--;
+      }
+    } else if (state === SPECIAL_RELATIVE_OR_AUTHORITY) {
+      if (c === 47 && __urlAt(input, p + 1) === 47) {
+        state = SPECIAL_AUTHORITY_IGNORE_SLASHES;
+        p++;
+      } else {
+        state = RELATIVE;
+        p--;
+      }
+    } else if (state === PATH_OR_AUTHORITY) {
+      if (c === 47) state = AUTHORITY;
+      else {
+        state = PATH;
+        p--;
+      }
+    } else if (state === RELATIVE) {
+      url.scheme = b.scheme.clone();
+      special = __urlSpecial(url.scheme);
+      if (c === 47 || (__urlSpecial(url.scheme) && c === 92)) state = RELATIVE_SLASH;
+      else {
+        url.username = b.username.clone();
+        url.password = b.password.clone();
+        url.host = b.host.clone();
+        url.hasHost = b.hasHost;
+        url.port = b.port;
+        url.path = b.path.clone();
+        url.query = b.query.clone();
+        url.hasQuery = b.hasQuery;
+        if (c === 63) {
+          queryRead = true;
+          state = QUERY;
+        } else if (c === 35) {
+          url.hasFragment = true;
+          state = FRAGMENT;
+        } else if (c !== -1) {
+          url.query = "";
+          url.hasQuery = false;
+          __urlShorten(url);
+          state = PATH;
+          p--;
+        }
+      }
+    } else if (state === RELATIVE_SLASH) {
+      if (special && (c === 47 || c === 92)) state = SPECIAL_AUTHORITY_IGNORE_SLASHES;
+      else if (c === 47) state = AUTHORITY;
+      else {
+        url.username = b.username.clone();
+        url.password = b.password.clone();
+        url.host = b.host.clone();
+        url.hasHost = b.hasHost;
+        url.port = b.port;
+        state = PATH;
+        p--;
+      }
+    } else if (state === SPECIAL_AUTHORITY_SLASHES) {
+      state = SPECIAL_AUTHORITY_IGNORE_SLASHES;
+      if (c === 47 && __urlAt(input, p + 1) === 47) p++;
+      else p--;
+    } else if (state === SPECIAL_AUTHORITY_IGNORE_SLASHES) {
+      if (c !== 47 && c !== 92) {
+        state = AUTHORITY;
+        p--;
+      }
+    } else if (state === AUTHORITY) {
+      if (c === 64) {
+        // A second '@' was part of the user info.
+        if (atSign) {
+          if (passwordToken) __urlPut(password, 64, "userinfo");
+          else __urlPut(username, 64, "userinfo");
+        }
+        atSign = true;
+        for (const point of buffer) {
+          if (point === 58 && !passwordToken) {
+            passwordToken = true;
+            continue;
+          }
+          if (passwordToken) __urlPut(password, point, "userinfo");
+          else __urlPut(username, point, "userinfo");
+        }
+        buffer = [];
+      } else if (c === -1 || slash || c === 63 || c === 35) {
+        if (atSign && buffer.length === 0) return failure;
+        p -= (buffer.length as i64) + 1;
+        buffer = [];
+        state = HOST;
+      } else buffer.push(c);
+    } else if (state === HOST) {
+      if (c === 58 && !brackets) {
+        if (buffer.length === 0) return failure;
+        const host = __urlHostOf(buffer, special);
+        if (host.error.length > 0) return host.error;
+        url.host = host.host;
+        url.hasHost = true;
+        buffer = [];
+        state = PORT;
+      } else if (c === -1 || slash || c === 63 || c === 35) {
+        p--;
+        if (special && buffer.length === 0) return failure;
+        const host = __urlHostOf(buffer, special);
+        if (host.error.length > 0) return host.error;
+        url.host = host.host;
+        url.hasHost = true;
+        buffer = [];
+        state = PATH_START;
+      } else {
+        if (c === 91) brackets = true;
+        if (c === 93) brackets = false;
+        buffer.push(c);
+      }
+    } else if (state === PORT) {
+      if (__urlDigit(c)) buffer.push(c);
+      else if (c === -1 || slash || c === 63 || c === 35) {
+        if (buffer.length > 0) {
+          let port: i64 = 0;
+          for (const d of buffer) {
+            port = port * 10 + (d - 48);
+            if (port > 65535) return failure;
+          }
+          url.port = port === __urlDefaultPort(url.scheme) ? -1 : port;
+          buffer = [];
+        }
+        state = PATH_START;
+        p--;
+      } else return failure;
+    } else if (state === FILE) {
+      url.scheme = "file";
+      special = __urlSpecial(url.scheme);
+      url.host = "";
+      url.hasHost = true;
+      if (c === 47 || c === 92) state = FILE_SLASH;
+      else if (hasBase && b.scheme === "file") {
+        url.host = b.host.clone();
+        url.hasHost = b.hasHost;
+        url.path = b.path.clone();
+        url.query = b.query.clone();
+        url.hasQuery = b.hasQuery;
+        if (c === 63) {
+          queryRead = true;
+          state = QUERY;
+        } else if (c === 35) {
+          url.hasFragment = true;
+          state = FRAGMENT;
+        } else if (c !== -1) {
+          url.query = "";
+          url.hasQuery = false;
+          if (!__urlStartsWithDrive(input, p)) __urlShorten(url);
+          else url.path = [];
+          state = PATH;
+          p--;
+        }
+      } else {
+        state = PATH;
+        p--;
+      }
+    } else if (state === FILE_SLASH) {
+      if (c === 47 || c === 92) state = FILE_HOST;
+      else {
+        if (hasBase && b.scheme === "file") {
+          url.host = b.host.clone();
+          url.hasHost = b.hasHost;
+          if (!__urlStartsWithDrive(input, p) && b.path.length > 0 && __urlDrive(b.path[0], true)) url.path.push(b.path[0].clone());
+        }
+        state = PATH;
+        p--;
+      }
+    } else if (state === FILE_HOST) {
+      if (c === -1 || c === 47 || c === 92 || c === 63 || c === 35) {
+        p--;
+        // A drive letter isn't a host: it starts the path.
+        if (buffer.length === 2 && __urlAlpha(buffer[0]) && (buffer[1] === 58 || buffer[1] === 124)) {
+          for (const d of buffer) segment.push(d as u8);
+          buffer = [];
+          state = PATH;
+        } else if (buffer.length === 0) {
+          url.host = "";
+          url.hasHost = true;
+          state = PATH_START;
+        } else {
+          const host = __urlHostOf(buffer, true);
+          if (host.error.length > 0) return host.error;
+          url.host = host.host === "localhost" ? "" : host.host;
+          url.hasHost = true;
+          buffer = [];
+          state = PATH_START;
+        }
+      } else buffer.push(c);
+    } else if (state === PATH_START) {
+      if (special) {
+        state = PATH;
+        if (c !== 47 && c !== 92) p--;
+      } else if (c === 63) {
+        queryRead = true;
+        state = QUERY;
+      } else if (c === 35) {
+        url.hasFragment = true;
+        state = FRAGMENT;
+      } else if (c !== -1) {
+        state = PATH;
+        if (c !== 47) p--;
+      }
+    } else if (state === PATH) {
+      if (c === -1 || slash || c === 63 || c === 35) {
+        let text = __urlText(segment);
+        segment = [];
+        if (__urlDoubleDot(text)) {
+          __urlShorten(url);
+          if (!slash) url.path.push("");
+        } else if (__urlSingleDot(text) && !slash) url.path.push("");
+        else if (!__urlSingleDot(text)) {
+          if (url.scheme === "file" && url.path.length === 0 && __urlDrive(text, false)) text = text.slice(0, 1) + ":";
+          url.path.push(text);
+        }
+        if (c === 63) {
+          queryRead = true;
+          state = QUERY;
+        } else if (c === 35) {
+          url.hasFragment = true;
+          state = FRAGMENT;
+        }
+      } else __urlPut(segment, c, "path");
+    } else if (state === OPAQUE_PATH) {
+      if (c === 63) {
+        queryRead = true;
+        state = QUERY;
+      } else if (c === 35) {
+        url.hasFragment = true;
+        state = FRAGMENT;
+      } else if (c === 32) {
+        const next = __urlAt(input, p + 1);
+        if (next === 63 || next === 35) __urlPutByte(opaque, 32, true);
+        else opaque.push(32);
+      } else if (c !== -1) __urlPut(opaque, c, "c0");
+    } else if (state === QUERY) {
+      if (c === 35) {
+        url.hasFragment = true;
+        state = FRAGMENT;
+      } else if (c !== -1) __urlPut(query, c, special ? "specialQuery" : "query");
+    } else if (state === FRAGMENT) {
+      if (c !== -1) __urlPut(fragment, c, "fragment");
+    }
+    if (p >= (input.length as i64)) break;
+    p++;
+  }
+  if (opaqueRead) url.path = [__urlText(opaque)];
+  if (queryRead) {
+    url.query = __urlText(query);
+    url.hasQuery = true;
+  }
+  url.fragment = __urlText(fragment);
+  if (atSign) {
+    url.username = __urlText(username);
+    url.password = __urlText(password);
+  }
+  return url;
+}
+
+// A request's path: its URL's pathname, with a relative URL read against http://localhost. One
+// that isn't a URL has the empty path, which no route matches; the server answers such a
+// request 400 before making it.
+function __urlRequestPath(url: string): string {
+  const base = __urlParse("http://localhost/", null);
+  const parsed = __urlParse(url, typeof base === "string" ? null : base);
+  return typeof parsed === "string" ? "" : __urlPathText(parsed);
+}
+
+// Where an http: URL points, for fetch: its record, or why it can't be fetched.
+function __urlFetchTarget(url: string): __urlRecord | string {
+  const parsed = __urlParse(url, null);
+  if (typeof parsed === "string") return parsed.startsWith("Invalid URL: ") ? parsed.slice(13) : "it isn't a valid URL";
+  if (parsed.scheme === "https") return "https: needs TLS, which isn't supported yet";
+  if (parsed.scheme !== "http") return "only http: URLs are supported";
+  if (parsed.username.length > 0 || parsed.password.length > 0) return "a URL can't hold a user name or password";
+  if (parsed.host.startsWith("[")) return "IPv6 hosts aren't supported yet";
+  if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
+  return parsed;
+}
+
+// Percent-encoded UTF-8 decoded, as decodeURIComponent does, or null for a '%' without two hex
+// digits after it or bytes that aren't UTF-8.
+function __urlDecodeStrict(text: string): string | null {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] !== 37) {
+      out.push(bytes[i]);
+      i += 1;
+      continue;
+    }
+    if (i + 2 >= bytes.length + 0 || __urlHexValue(bytes[i + 1] as i64) < 0 || __urlHexValue(bytes[i + 2] as i64) < 0) return null;
+    out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
+    i += 3;
+  }
+  if (!__urlUtf8Valid(out)) return null;
+  return new TextDecoder().decode(out);
+}
+
+// Whether bytes are well-formed UTF-8: no overlong forms, surrogates or code points past U+10FFFF.
+function __urlUtf8Valid(bytes: Ref<u8[]>): boolean {
+  const n = bytes.length as i64;
+  let i: i64 = 0;
+  while (i < n) {
+    const b = bytes[i as usize] as i64;
+    let need: i64 = 0;
+    let low: i64 = 0x80;
+    let high: i64 = 0xBF;
+    if (b < 0x80) need = 0;
+    else if (b >= 0xC2 && b <= 0xDF) need = 1;
+    else if (b === 0xE0) { need = 2; low = 0xA0; }
+    else if (b === 0xED) { need = 2; high = 0x9F; }
+    else if (b >= 0xE1 && b <= 0xEF) need = 2;
+    else if (b === 0xF0) { need = 3; low = 0x90; }
+    else if (b === 0xF4) { need = 3; high = 0x8F; }
+    else if (b >= 0xF1 && b <= 0xF3) need = 3;
+    else return false;
+    if (i + need >= n) return false;
+    for (let k: i64 = 1; k <= need; k++) {
+      const c = bytes[(i + k) as usize] as i64;
+      if (c < (k === 1 ? low : 0x80) || c > (k === 1 ? high : 0xBF)) return false;
+    }
+    i += need + 1;
+  }
+  return true;
+}
+
+// A URL's path as its pathname gives it.
+function __urlPathText(url: Ref<__urlRecord>): string {
+  if (url.opaque) return url.path[0];
+  if (url.path.length === 0) return "";
+  return "/" + url.path.join("/");
+}
+
+// A URL written out, with the query its params hold now.
+function __urlHref(url: Ref<__urlRecord>, query: string | null, fragment: boolean): string {
+  let out = url.scheme + ":";
+  if (url.hasHost) {
+    out = out + "//";
+    if (url.username.length > 0 || url.password.length > 0) {
+      out = out + url.username;
+      if (url.password.length > 0) out = out + ":" + url.password;
+      out = out + "@";
+    }
+    out = out + url.host;
+    if (url.port >= 0) out = out + ":" + String(url.port);
+  } else if (!url.opaque && url.path.length > 1 && url.path[0].length === 0) out = out + "/.";
+  out = out + __urlPathText(url);
+  if (query !== null) out = out + "?" + query;
+  if (fragment && url.hasFragment) out = out + "#" + url.fragment;
+  return out;
+}
+
+function __urlOrigin(url: Ref<__urlRecord>): string {
+  const s = url.scheme;
+  if (s === "blob") {
+    const inner = __urlParse(__urlPathText(url), null);
+    if (typeof inner === "string" || (inner.scheme !== "http" && inner.scheme !== "https")) return "null";
+    return __urlOrigin(inner);
+  }
+  if (s !== "http" && s !== "https" && s !== "ws" && s !== "wss" && s !== "ftp") return "null";
+  return s + "://" + url.host + (url.port >= 0 ? ":" + String(url.port) : "");
+}
+
+// A WHATWG URL. Its parts are read through getters. Its query is the one parsed until its
+// searchParams change, and then theirs, so a change made there shows in search and href.
+class URL {
+  private url: __urlRecord;
+  readonly searchParams: URLSearchParams;
+
+  constructor(url: string, base?: string | URL) throws TypeError {
+    let from: __urlRecord | null = null;
+    if (base !== null) {
+      if (typeof base === "string") {
+        const parsed = __urlParse(base, null);
+        if (typeof parsed === "string") throw new TypeError(parsed);
+        from = parsed;
+      } else from = base.record();
+    }
+    const parsed = __urlParse(url, from);
+    if (typeof parsed === "string") throw new TypeError(parsed);
+    const params = new URLSearchParams(parsed.query.clone());
+    this.url = parsed;
+    this.searchParams = params;
+  }
+
+  static parse(url: string, base?: string | URL): URL | null {
+    try {
+      return new URL(url, base);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  static canParse(url: string, base?: string | URL): boolean {
+    return URL.parse(url, base) !== null;
+  }
+
+  // The query now: none once changed params are empty.
+  private query(): string | null {
+    if (this.searchParams.__urlChanged.get()) {
+      const text = this.searchParams.toString();
+      return text.length === 0 ? null : text;
+    }
+    return this.url.hasQuery ? this.url.query.clone() : null;
+  }
+
+  // The record with the query it has now.
+  private record(): __urlRecord {
+    let r = this.url.clone();
+    const q = this.query();
+    r.hasQuery = q !== null;
+    r.query = q ?? "";
+    return r;
+  }
+
+  get href(): string { return __urlHref(this.url, this.query(), true); }
+  get origin(): string { return __urlOrigin(this.url); }
+  get protocol(): string { return this.url.scheme + ":"; }
+  get username(): string { return this.url.username; }
+  get password(): string { return this.url.password; }
+  get host(): string { return this.url.port >= 0 ? this.url.host + ":" + String(this.url.port) : this.url.host; }
+  get hostname(): string { return this.url.host; }
+  get port(): string { return this.url.port >= 0 ? String(this.url.port) : ""; }
+  get pathname(): string { return __urlPathText(this.url); }
+  get search(): string {
+    const q = this.query();
+    if (q === null || q.length === 0) return "";
+    return "?" + q;
+  }
+  get hash(): string { return this.url.fragment.length > 0 ? "#" + this.url.fragment : ""; }
+  toString(): string { return this.href; }
+  toJSON(): string { return this.href; }
+
+  // A copy with params of its own. The standard makes a URL's href parse back to the same URL.
+  clone(): URL {
+    return URL.parse(this.href)!;
+  }
+}
+
+// Appends text as application/x-www-form-urlencoded writes a name or value.
+function __urlFormPut(out: Mut<u8[]>, text: string) {
+  for (const c of __urlPoints(text)) {
+    if (c === 32) out.push(43);
+    else __urlPut(out, c, __urlAlpha(c) || __urlDigit(c) || c === 42 || c === 45 || c === 46 || c === 95 ? "none" : "form");
+  }
+}
+
+// A form-urlencoded name or value read back: '+' as a space, then percent escapes as UTF-8.
+function __urlFormDecode(text: string): string {
+  const bytes = new TextEncoder().encode(text.replaceAll("+", " "));
+  return __urlText(__urlPercentDecode(bytes));
+}
+
+// Whether a sorts before b by UTF-16 code units, as JavaScript compares strings.
+function __urlBefore(a: string, b: string): boolean {
+  const n = a.length < b.length ? a.length : b.length;
+  for (let i = 0; i < n; i++) {
+    const x = a.charCodeAt(i);
+    const y = b.charCodeAt(i);
+    if (x !== y) return x < y;
+  }
+  return a.length < b.length;
+}
+
+// A URL's query as name and value pairs, or form data on its own. The pairs sit in a Cell, so
+// a URL's searchParams change in place while the URL keeps them read-only.
+class URLSearchParams {
+  // Each name, then its value.
+  private pairs: Cell<string[]> = new Cell<string[]>([]);
+  // Whether the pairs have changed, which makes them the query of the URL they belong to.
+  __urlChanged: Cell<boolean> = new Cell<boolean>(false);
+
+  constructor(init?: string | [string, string][]) {
+    let pairs: string[] = [];
+    if (init !== null) {
+      if (typeof init === "string") {
+        const text = init.startsWith("?") ? init.slice(1) : init;
+        for (const pair of text.split("&")) {
+          if (pair.length === 0) continue;
+          const eq = pair.indexOf("=");
+          pairs.push(__urlFormDecode(eq >= 0 ? pair.slice(0, eq) : pair));
+          pairs.push(eq >= 0 ? __urlFormDecode(pair.slice(eq + 1)) : "");
+        }
+      } else {
+        for (const [name, value] of init) {
+          pairs.push(name);
+          pairs.push(value);
+        }
+      }
+    }
+    this.pairs.set(pairs);
+  }
+
+  get size(): i64 {
+    const pairs = this.pairs.replace([]);
+    const n = (pairs.length / 2) as i64;
+    this.pairs.set(pairs);
+    return n;
+  }
+
+  append(name: string, value: string) {
+    let pairs = this.pairs.replace([]);
+    pairs.push(name);
+    pairs.push(value);
+    this.changed(pairs);
+  }
+
+  // Drops every pair with the name, or only those also holding the value given.
+  delete(name: string, value?: string) {
+    const pairs = this.pairs.replace([]);
+    let kept: string[] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (pairs[i] === name && (value === null || pairs[i + 1] === value)) continue;
+      kept.push(pairs[i]);
+      kept.push(pairs[i + 1]);
+    }
+    this.changed(kept);
+  }
+
+  get(name: string): string | null {
+    const pairs = this.pairs.replace([]);
+    let found: string | null = null;
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (pairs[i] === name) {
+        found = pairs[i + 1];
+        break;
+      }
+    }
+    this.pairs.set(pairs);
+    return found;
+  }
+
+  getAll(name: string): string[] {
+    const pairs = this.pairs.replace([]);
+    let out: string[] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (pairs[i] === name) out.push(pairs[i + 1]);
+    }
+    this.pairs.set(pairs);
+    return out;
+  }
+
+  has(name: string, value?: string): boolean {
+    const pairs = this.pairs.replace([]);
+    let found = false;
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (pairs[i] === name && (value === null || pairs[i + 1] === value)) found = true;
+    }
+    this.pairs.set(pairs);
+    return found;
+  }
+
+  // The first pair with the name takes the value, and the rest with it go.
+  set(name: string, value: string) {
+    const pairs = this.pairs.replace([]);
+    let kept: string[] = [];
+    let found = false;
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (pairs[i] !== name) {
+        kept.push(pairs[i]);
+        kept.push(pairs[i + 1]);
+      } else if (!found) {
+        found = true;
+        kept.push(name.clone());
+        kept.push(value.clone());
+      }
+    }
+    if (!found) {
+      kept.push(name);
+      kept.push(value);
+    }
+    this.changed(kept);
+  }
+
+  // Orders the pairs by name, by UTF-16 code units, keeping pairs of one name in their order.
+  sort() {
+    const pairs = this.pairs.replace([]);
+    const count = (pairs.length / 2) as i64;
+    let order: i64[] = [];
+    for (let i: i64 = 0; i < count; i++) {
+      let j = i;
+      while (j > 0 && __urlBefore(pairs[(2 * i) as usize], pairs[(2 * order[(j - 1) as usize]) as usize])) j--;
+      order.splice(j, 0, i);
+    }
+    let sorted: string[] = [];
+    for (const i of order) {
+      sorted.push(pairs[(2 * i) as usize]);
+      sorted.push(pairs[(2 * i + 1) as usize]);
+    }
+    this.changed(sorted);
+  }
+
+  toString(): string {
+    const pairs = this.pairs.replace([]);
+    let out: u8[] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      if (i > 0) out.push(38);
+      __urlFormPut(out, pairs[i]);
+      out.push(61);
+      __urlFormPut(out, pairs[i + 1]);
+    }
+    this.pairs.set(pairs);
+    return __urlText(out);
+  }
+
+  forEach(callback: (value: string, name: string) => void) {
+    const pairs = this.pairs.replace([]);
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) callback(pairs[i + 1], pairs[i]);
+    this.pairs.set(pairs);
+  }
+
+  entries(): [string, string][] {
+    const pairs = this.pairs.replace([]);
+    let out: [string, string][] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) out.push([pairs[i], pairs[i + 1]]);
+    this.pairs.set(pairs);
+    return out;
+  }
+
+  keys(): string[] { return this.every(0); }
+  values(): string[] { return this.every(1); }
+
+  // Every name, or every value.
+  private every(at: usize): string[] {
+    const pairs = this.pairs.replace([]);
+    let out: string[] = [];
+    for (let i: usize = at; i < pairs.length; i += 2) out.push(pairs[i]);
+    this.pairs.set(pairs);
+    return out;
+  }
+
+  // A copy whose pairs change apart from these.
+  clone(): URLSearchParams {
+    const pairs = this.pairs.replace([]);
+    const copy = new URLSearchParams();
+    copy.pairs.set(pairs.clone());
+    copy.__urlChanged.set(this.__urlChanged.get());
+    this.pairs.set(pairs);
+    return copy;
+  }
+
+  private changed(pairs: string[]) {
+    this.pairs.set(pairs);
+    this.__urlChanged.set(true);
+  }
+}
+`;
+
+const URL_NAMES = ["URL", "URLSearchParams"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
@@ -1411,6 +2845,11 @@ export function env(name: string): string | null {
   return unsafe { fromCString(value) };
 }
 
+// Aborted by the first SIGINT or SIGTERM; a second exits at once with 130 or 143.
+export function shutdown(): AbortSignal {
+  return shutdownSignal();
+}
+
 export function exit(code: i64 = 0): never {
   unsafe { fsh_rt_exit(code) };
   // The C call never returns.
@@ -1423,7 +2862,7 @@ export function exit(code: i64 = 0): never {
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table" },
+  process: { argv: "value", env: "table", shutdown: "value" },
 };
 
 // The compiler's own tests run JS through this module, which no program may import: Fish has no
@@ -1455,7 +2894,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
+export const STD_SOURCE = PRELUDE + HTTP + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
 export const STD_FILE = "<fish std>";
 
 // The std statements a program is checked with, their spans moved past its own.
@@ -1468,7 +2907,9 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const at = (s: Stmt) => s.start - STD_BASE;
   const prelude = all.filter((s) => at(s) < PRELUDE.length);
   const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
-  const jsonAt = PRELUDE.length + HTTP.length;
+  const urlAt = PRELUDE.length + HTTP.length;
+  const url = all.filter((s) => at(s) >= urlAt && at(s) < urlAt + URL_LIB.length);
+  const jsonAt = urlAt + URL_LIB.length;
   const json = all.filter((s) => at(s) >= jsonAt && at(s) < jsonAt + JSON_VALUE.length);
   const jsonName = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length && at(s) < jsonAt + JSON_VALUE.length + JSON_NAME.length);
   renameValue([...json, ...jsonName]);
@@ -1476,9 +2917,15 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length && at(s) < jsAt);
   const js = all.filter((s) => at(s) >= jsAt);
   const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  const parts = [[http, HTTP_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
+  const parts = [[http, HTTP_NAMES], [url, URL_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
   const packages = written.some(fromPackage);
-  return [...prelude, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []))];
+  // The HTTP library parses its URLs with the URL library's parser, which comes with it. A
+  // program's own URL or URLSearchParams keeps its name, and std's takes one no program can write.
+  const httpUsed = uses(written, http, HTTP_NAMES);
+  const urlWanted = httpUsed || uses(written, [], URL_NAMES);
+  const own = new Set(URL_NAMES.filter((n) => written.some((s) => "name" in s && s.name === n)));
+  if (urlWanted && own.size > 0) hideNames([...http, ...url], own);
+  return [...prelude, ...parts.flatMap(([part, names]) => (part === url ? urlWanted : uses(written, part, [...names]) || (part === js && packages)) ? part : [])];
 }
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
@@ -1487,10 +2934,20 @@ function hideHelpers(nodes: unknown) {
   if (Array.isArray(nodes)) return nodes.forEach(hideHelpers);
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
-  if ((node.kind === "function" || node.kind === "ident") && typeof node.name === "string" && /^__(array|promise|timer|timeout)/.test(node.name)) {
+  const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
+  if (hidden && typeof node.name === "string" && /^__(array|promise|timer|timeout|router|url)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);
+}
+
+// Renames std's classes a program declares its own of to names no program can write.
+function hideNames(nodes: unknown, names: Set<string>) {
+  if (Array.isArray(nodes)) return nodes.forEach((n) => hideNames(n, names));
+  if (typeof nodes !== "object" || nodes === null) return;
+  const node = nodes as Record<string, unknown>;
+  if ((node.kind === "class" || node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && names.has(node.name)) node.name = `std ${node.name}`;
+  Object.values(node).forEach((n) => hideNames(n, names));
 }
 
 // Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.
