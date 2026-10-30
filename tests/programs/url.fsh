@@ -225,3 +225,11 @@ function main() {
     console.log(e.name, e.message, TypeError);
   }
 }
+// case: url_search_params_from_pairs
+// expect: a=1&b=2
+// expect: 2
+function main() {
+  const p = new URLSearchParams([["a", "1"], ["b", "2"]]);
+  console.log(p.toString());
+  console.log(p.get("b"));
+}

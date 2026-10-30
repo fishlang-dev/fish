@@ -434,3 +434,23 @@ function main() { const t: [i64, ...i64[]] = [1, 2]; t[1] = 5; }
 // error: 't' can't be used as a whole here because 't[1...]' was moved out of it
 class C { constructor(public n: i64) {} }
 function main() { const t: [i64, ...C[]] = [1, new C(1)]; const [a, ...r] = t; console.log(a, r, t); }
+// case: tuple_array_in_union_param
+// expect: [ [ 'a', 1 ], [ 'b', 2 ] ]
+// expect: s
+function f(x: string | [string, i64][]): void { console.log(x); }
+function main() { f([["a", 1], ["b", 2]]); f("s"); }
+// case: tuple_array_in_union_let
+// expect: [ [ 'a', 1 ] ]
+function main() {
+  const v: string | [string, i64][] = [["a", 1]];
+  console.log(v);
+}
+// case: tuple_or_array_union
+// expect: [ 1, 2, 3 ]
+// expect: [ 'a', 'b' ]
+function g(x: i64[] | [string, string]): void { console.log(x); }
+function main() { g([1, 2, 3]); g(["a", "b"]); }
+// case: tuple_array_in_union_no_fit
+// error: type 'i64' is not assignable to type '[string, i64]'
+function f(x: string | [string, i64][]): void { console.log(x); }
+function main() { f([1, 2]); }
