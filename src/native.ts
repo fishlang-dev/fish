@@ -4423,7 +4423,7 @@ static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {EINVAL, "EINVAL", "invalid argument"}, {EIO, "EIO", "i/o error"}, {EBUSY, "EBUSY", "resource busy or locked"},
   {EAGAIN, "EAGAIN", "resource temporarily unavailable"}, {ENOTEMPTY, "ENOTEMPTY", "directory not empty"},
   {EXDEV, "EXDEV", "cross-device link not permitted"}, {EFBIG, "EFBIG", "file too large"},
-  {EBADF, "EBADF", "bad file descriptor"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
+  {EBADF, "EBADF", "bad file descriptor"}, {ECHILD, "ECHILD", "no child processes"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
   {ECONNRESET, "ECONNRESET", "connection reset by peer"}, {EPIPE, "EPIPE", "broken pipe"},
   {ETIMEDOUT, "ETIMEDOUT", "connection timed out"}, {EADDRINUSE, "EADDRINUSE", "address already in use"},
   {EADDRNOTAVAIL, "EADDRNOTAVAIL", "address not available"}, {ENOTCONN, "ENOTCONN", "socket is not connected"},
@@ -4847,6 +4847,7 @@ static int fsh_pipe(int fds[2]) {
       int failure = errno;
       close(fds[0]);
       close(fds[1]);
+      fds[0] = fds[1] = -1;
       errno = failure;
       return -1;
     }
@@ -4929,6 +4930,7 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
       if (poll(fds, 3, -1) < 0) {
         if (errno == EINTR) continue;
         // Closed, a child blocked writing ends with SIGPIPE rather than waiting forever.
+        failure = errno;
         for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
         break;
       }
