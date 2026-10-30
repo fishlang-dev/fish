@@ -419,3 +419,35 @@ async function main() {
   setTimeout(async () => { throw "boom" }, 1)
 }
 // error: this async closure throws 'string', but it is given as '() => Promise<void>', whose Promise throws nothing; catch it inside the closure with try/catch
+// case: closures_throw_relay_borrowed
+function make(s: string): () => string {
+  return move () => s + "!";
+}
+function main() {
+  const fs: (() => string)[] = [make("a")];
+  for (const f of fs) {
+    const t: () => string throws string = f;
+    try {
+      console.log(t());
+    } catch (e) {
+      console.log(e);
+    }
+  }
+}
+// error: can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy
+// case: closures_throw_relay_cloned
+function make(s: string): () => string {
+  return move () => s + "!";
+}
+function main() {
+  const fs: (() => string)[] = [make("a")];
+  for (const f of fs) {
+    const t: () => string throws string = f.clone();
+    try {
+      console.log(t());
+    } catch (e) {
+      console.log(e);
+    }
+  }
+}
+// expect: a!

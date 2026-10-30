@@ -5223,6 +5223,7 @@ export function expressions(ctx: Context) {
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
     if (promiseElement(to.of) !== undefined) return boxingFuture(e, lower(type), to, message);
     if (relaying(lower(type), to)) {
+      if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
       dynMembers.set(`${keyOf(lower(type))} ${keyOf(lower(to))}`, { methods: [], fields: [], clone: "copy" });
       return void coercions.set(e, to);
     }
