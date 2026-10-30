@@ -789,6 +789,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
   }
 
+  // 'AbortSignal.any's handles and their count: a literal's, lent one by one, in a stack array,
+  // and otherwise the borrowed array's own buffer.
+  function signalList(list: Expr): string {
+    if (list.kind !== "array") {
+      const [array, whole, buffer, length] = [value(list), temp(), temp(), temp()];
+      emit(`${whole} = load ${ARRAY}, ptr ${array}`);
+      emit(`${buffer} = extractvalue ${ARRAY} ${whole}, 0`);
+      emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
+      return `ptr ${buffer}, i64 ${length}`;
+    }
+    const n = list.elements.length;
+    const handles = alloca(`[${Math.max(n, 1)} x ptr]`);
+    list.elements.forEach((x, i) => {
+      const [handle, at] = [temp(), temp()];
+      emit(`${handle} = load ptr, ptr ${value(x!)}`);
+      emit(`${at} = getelementptr [${Math.max(n, 1)} x ptr], ptr ${handles}, i32 0, i32 ${i}`);
+      emit(`store ptr ${handle}, ptr ${at}`);
+    });
+    return `ptr ${handles}, i64 ${n}`;
+  }
+
   // A wait's frame given an AbortSignal, its last argument: a count on it goes in the frame.
   function signalled(e: Extract<Expr, { kind: "call" }>, future: FutureType, frame: string): string {
     if (!leafOf.get(future)?.signal) return frame;
@@ -6267,7 +6288,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !types.has(e.callee.object)) {
         const made = temp();
-        emit(`${made} = call ptr @fsh_rt_signal_timeout(i64 ${value(e.args[0]!)})`);
+        if (e.callee.name === "any") emit(`${made} = call ptr @fsh_rt_signal_any(${signalList(e.args[0]!)})`);
+        else emit(`${made} = call ptr @fsh_rt_signal_timeout(i64 ${value(e.args[0]!)})`);
         if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
         return made;
       }
