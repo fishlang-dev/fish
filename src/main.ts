@@ -17,7 +17,7 @@ import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
-import { mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
@@ -97,26 +97,21 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
   const at = (f: string) => join(dirname(out), f);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
-  const [native, fish, runtime] = [join(dir, "native.c"), join(dir, "fish.o"), join(dir, "native.o")];
-  const js = callsEngine(ir);
-  writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
-  const engine = js ? ENGINE_SOURCES : [];
+  const fish = join(dir, "fish.o");
   const optimize = release ? "-O2" : "-O0";
   const run = (args: string[], stdin?: string) => {
     const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
     if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
   };
   try {
+    const objects = [...runtimeUnits(ir, release, true).map(cachedObject), ...mathObjects()];
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-x", "none", ...mathObjects(), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
+      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
     } else {
       run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
-      run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", ...(js ? ["-I", ENGINE] : []), native, "-o", runtime, optimize]);
-      const objects = engine.map((source, i) => join(dir, `engine${i}.o`));
-      engine.forEach((source, i) => run(["clang", "-c", "-fPIC", "-I", ENGINE, source, "-o", objects[i]!, optimize]));
       const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
-      run(["ar", "rcs", archive, fish, runtime, ...objects, ...mathObjects()]);
+      run(["ar", "rcs", archive, fish, ...objects]);
       // The shim's archive is merged in, so the library is still one file to link.
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
@@ -160,8 +155,8 @@ function cType(t: Type): string {
   return "void";
 }
 
-// Compiles `file` to a native executable at `out`, piping the IR through clang along with the
-// C half of the runtime, which is built with unwind tables so a panic can unwind through it.
+// Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
+// cached runtime objects.
 // `links` names the C libraries the program's declared functions come from.
 export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
   const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
@@ -170,26 +165,18 @@ export function build(file: string, out: string, release = false, panic: Panic =
 
 // Builds the IR `ir` into the executable `out`.
 function linked(ir: string, out: string, release = false, links: string[] = [], shim?: Shim) {
-  const dir = mkdtempSync(join(tmpdir(), "fishc-"));
-  try {
-    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir, mathObjects(), shim), { stdin: new TextEncoder().encode(ir) });
-    if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const objects = [...runtimeUnits(ir, release).map(cachedObject), ...mathObjects()];
+  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim), { stdin: new TextEncoder().encode(ir) });
+  if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
 export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
   const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
-  const dir = mkdtempSync(join(tmpdir(), "fishc-"));
-  try {
-    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir, await mathObjectsAsync(), shim()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
-    const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
-    if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const objects = (await Promise.all([...runtimeUnits(ir, release).map(cachedObjectAsync), mathObjectsAsync()])).flat();
+  const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+  const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
+  if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
 }
 
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
@@ -388,15 +375,20 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
 
-// Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
-// the engine's glue and sources with it when the program's IR calls the engine, and the prebuilt
-// `Math` objects.
-function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string, maths: string[], shim?: Shim): string[] {
-  const native = join(dir, "native.c");
+// The C half of the runtime as cached objects, with the engine's glue and sources when the
+// program's IR calls the engine. They are built with unwind tables so a panic can unwind through
+// them, and position-independent when `pic`, for a library.
+export function runtimeUnits(ir: string, release: boolean, pic = false): Unit[] {
   const js = callsEngine(ir);
-  writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
-  const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
-  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-x", "none", ...maths, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
+  const flags = ["-funwind-tables", "-pthread", release ? "-O2" : "-O0", ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
+  const runtime: Unit = { name: js ? "runtime-js" : "runtime", args: ["-x", "c", "-", ...flags], stdin: js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE, inputs: js ? files(ENGINE) : [] };
+  const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
+  return [runtime, ...engine];
+}
+
+// Clang's command line for a program read from stdin, linked with `objects`.
+function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim): string[] {
+  return ["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
 function fail(message: string): never {
