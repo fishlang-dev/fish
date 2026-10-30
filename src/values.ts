@@ -4154,6 +4154,9 @@ export function expressions(ctx: Context) {
         // Between other types, 'as' only widens, which nothing needs to check at run time; a
         // narrower type is reached by a check that narrows.
         if (!isNumeric(to) || !isNumeric(from)) {
+          // A reference widened to what it points to would be a copy nobody wrote.
+          const read = types.get(e.expr) ?? from;
+          if ((isRefType(from) || isRefType(read)) && !isCopy(lower(from)) && !isRefType(to) && !optionRef(to)) throw new CompileError(`'as' can't take the value out of '${show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
           if (!(from === "boolean" && isInteger(to)) && fits(from, to)) {
             coerce(e.expr, from, to, "");
             return to;

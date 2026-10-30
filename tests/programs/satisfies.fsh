@@ -43,3 +43,14 @@ function main(): void {
   const s = "x" as boolean;
 }
 // error: '"x"' can't be converted to 'boolean' with 'as', since neither fits the other
+// case: as_refuses_copy_out_of_reference
+class Item {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function main(): void {
+  const items = [new Item("a")];
+  const r: Ref<Item> = items[0];
+  const it = r as Item;
+}
+// error: 'as' can't take the value out of 'Ref<Item>', which only borrows it; use '.clone()' for a copy
