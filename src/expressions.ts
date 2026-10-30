@@ -6,7 +6,7 @@ import {
 } from "./parser.ts";
 import { classNode, decoratorList } from "./declarations.ts";
 import { matchPattern, toPattern } from "./patterns.ts";
-import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
+import { isPropertyName, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters } from "./types.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -80,6 +80,7 @@ function arrowHead(c: Cursor) {
   let typeParams: TypeParam[] = [];
   let params: Param[];
   let returnType: TypeNode | undefined;
+  let throws: TypeNode | undefined;
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
     const name = c.ident();
     const pattern: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
@@ -88,11 +89,12 @@ function arrowHead(c: Cursor) {
     typeParams = typeParameters(c);
     params = parameters(c);
     returnType = returnAnnotation(c);
+    throws = throwsClause(c);
   }
   // No line break may come before `=>`, as in JavaScript.
   if (c.peek().newlineBefore) throw c.error("expected '=>'");
   c.expect("=>");
-  return { move, async, typeParams, params, returnType };
+  return { move, async, typeParams, params, returnType, ...(throws && { throws }) };
 }
 
 // Hack-style pipes, as in the TC39 proposal: left-associative, looser than `? :`, with `%`

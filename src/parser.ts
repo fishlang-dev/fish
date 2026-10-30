@@ -15,7 +15,7 @@ export type TypeNode = Span & (
   | { kind: "array"; element: TypeNode }
   | { kind: "tuple"; elements: TupleElement[] }
   | { kind: "object"; members: TypeMember[] }
-  | { kind: "function"; typeParams: TypeParam[]; params: Param[]; returns: TypeNode; construct: boolean; abstract: boolean }
+  | { kind: "function"; typeParams: TypeParam[]; params: Param[]; returns: TypeNode; throws?: TypeNode; construct: boolean; abstract: boolean }
   | { kind: "union" | "intersection"; types: TypeNode[] }
   | { kind: "operator"; op: "keyof" | "readonly" | "unique"; type: TypeNode }
   | { kind: "indexed"; object: TypeNode; index: TypeNode }
@@ -54,7 +54,7 @@ export type Expr = Span & (
       typeParams: TypeParam[]; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] }
   // `body` is an expression, or the statements of a braced block.
   | { kind: "arrow"; move: boolean; async: boolean; typeParams: TypeParam[]; params: Param[];
-      returnType: TypeNode | undefined; body: Expr | Stmt[] }
+      returnType: TypeNode | undefined; throws?: TypeNode; body: Expr | Stmt[] }
   // `optional` marks the link written `?.`; later links in the same chain short-circuit with it.
   | { kind: "member"; object: Expr; name: string; optional: boolean }
   | { kind: "index"; object: Expr; index: Expr; optional: boolean }

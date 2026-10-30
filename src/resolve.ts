@@ -238,6 +238,17 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return typeof t !== "string" && t.kind === "function" && !t.generic ? stored(t) : t;
   }
 
+  // What a function type's `throws` clause names, as a declared function's may name.
+  function thrownBy(t: Extract<TypeNode, { kind: "function" }>, returns: Type): Type | undefined {
+    if (!t.throws) return undefined;
+    // An async function's error comes at the `await`, with its future, not from the call.
+    if (promiseElement(returns) !== undefined) throw unsupported("function types giving a Promise that throw", t.throws);
+    const error = resolveType(t.throws);
+    if (error === "void") throw new CompileError("a function can't throw 'void'; throw a value", t.throws.start, t.throws.end);
+    if (holdsRef(error)) throw unsupported("errors holding references", t.throws);
+    return error;
+  }
+
   // An array of an element type. Arrays of references, and of functions, which would need their
   // calls boxed, aren't supported yet.
   function array(element: Type, at: TypeNode): Type {
@@ -298,6 +309,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       if (rest) throw unsupported("rest parameters in function types", rest);
       // A generic one is shown and compared with its own parameters standing for themselves.
       if (t.typeParams.length > 0) {
+        if (t.throws) throw unsupported("generic function types that throw", t.throws);
         const around = new Map(scope);
         const own = placeholders(t.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n)));
         const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map(callbackParam), resolveType(t.returns)));
@@ -305,7 +317,8 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
         return fn;
       }
-      const fn = functionType(t.params.map(paramName), t.params.map(callbackParam), resolveType(t.returns));
+      const returns = resolveType(t.returns);
+      const fn = functionType(t.params.map(paramName), t.params.map(callbackParam), returns, thrownBy(t, returns));
       if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
       return fn;
     }

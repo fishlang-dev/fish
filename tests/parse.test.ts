@@ -31,7 +31,7 @@ function show(t: TypeNode): string {
     case "function": {
       const prefix = t.construct ? `${t.abstract ? "abstract " : ""}new ` : "";
       const typeParams = t.typeParams.length ? `<${t.typeParams.map((p) => p.name).join(", ")}>` : "";
-      return `(${prefix}${typeParams}(${showParams(t.params)}) => ${show(t.returns)})`;
+      return `(${prefix}${typeParams}(${showParams(t.params)}) => ${show(t.returns)}${t.throws ? ` throws ${show(t.throws)}` : ""})`;
     }
     case "import":
       return `import("${t.module}")${t.name ? `.${t.name}` : ""}${t.args.length ? `<${t.args.map(show).join(", ")}>` : ""}`;
@@ -134,6 +134,8 @@ const SHAPES: [string, string][] = [
   ["new () => T", "(new () => T)"],
   ["abstract new (...args: A) => T", "(abstract new (...args: A) => T)"],
   ["(() => A)[]", "((() => A)[])"],
+  ["(x: string) => i64 throws ParseError", "((x: string) => i64 throws ParseError)"],
+  ["(() => void throws A | B)[]", "((() => void throws (A | B))[])"],
   ["(x: unknown) => x is string", "((x: unknown) => x is string)"],
   ["(x: unknown) => asserts x is string", "((x: unknown) => asserts x is string)"],
   ["(x: unknown) => asserts x", "((x: unknown) => asserts x)"],
@@ -261,7 +263,7 @@ function showExpr(e: Expr): string {
       return showClass(e);
     case "arrow": {
       const typeParams = e.typeParams.length ? `<${e.typeParams.map((p) => p.name).join(", ")}>` : "";
-      const returns = e.returnType ? `: ${show(e.returnType)}` : "";
+      const returns = `${e.returnType ? `: ${show(e.returnType)}` : ""}${e.throws ? ` throws ${show(e.throws)}` : ""}`;
       const body = Array.isArray(e.body) ? `{ ${e.body.length} statements }` : showExpr(e.body);
       return `(${e.async ? "async " : ""}${typeParams}(${showParams(e.params)})${returns} => ${body})`;
     }
@@ -411,6 +413,8 @@ const EXPRESSIONS: [string, string][] = [
   ["<T>x", "(<T>x)"],
   ["async <T>(x: T): Promise<T> => x", "(async <T>(x: T): Promise<T> => x)"],
   ["() => {}", "(() => { 0 statements })"],
+  ["(x: string): i64 throws ParseError => f(x)", "((x: string): i64 throws ParseError => f(x))"],
+  ["(x) throws E => f(x)", "((x) throws E => f(x))"],
   ["() => ({})", "(() => {})"],
   ["(x = 1, ...rest: A[]) => { f(); g() }", "((x = 1, ...rest: (A[])) => { 2 statements })"],
   ["(x): x is T => true", "((x): x is T => true)"],

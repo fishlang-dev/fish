@@ -11,7 +11,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { allFields, arrayType, callableOf, sameCallable, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -25,6 +25,7 @@ const indexes = (t: Type): boolean => {
 
 // What a reference points to, or the type itself.
 const isDyn = (t: Type): t is DynType => typeof t !== "string" && t.kind === "dyn";
+const relays = (from: Type, to: DynType) => isDyn(from) && callableOf.has(from.of) && callableOf.has(to.of) && !sameCallable(from, to);
 const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -2081,6 +2082,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       cancelled.add(instance);
       return [symbol(instance), cancelSymbol(instance)];
     }
+    if (isDyn(type)) return [relayThunk(`@"fsh.dyn.${n}.call"`, type, to.of.methods[0]!)];
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
@@ -2089,9 +2091,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A method's slot: the type's method run on the block, its result as the interface gives it.
   // Through a method declaring `this: Own<this>` the Dyn is given up: its block is freed after,
   // and its value dropped first unless the type's method took it over.
+  // A throwing callable's slot gives whether the call failed, then its value and its error, as
+  // its function type has them; a closure throwing nothing never fails.
   function methodThunk(name: string, type: Type, m: Method, target: Instance): string {
     if (promiseElement(m.returns) !== undefined) return futureThunk(name, type, m, target);
-    const returns = m.returns === "void" ? "void" : llvm(m.returns);
+    const returns = m.throws ? throwing(m.returns, m.throws) : m.returns === "void" ? "void" : llvm(m.returns);
     thunk(name, returns, () => {
       const owner = target.body.owner;
       const upcasts = typeof type !== "string" && type.kind === "class" && owner !== undefined && owner !== type;
@@ -2120,18 +2124,77 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = target.body.closure ? target.body.params.length : m.params.length;
       m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
-      const result = invoke(target, self, m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
+      const args = m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`);
+      const give = (v: string | undefined) => (m.throws ? succeeded(m, v) : emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
+      let result: string | undefined;
+      if (m.throws && target.throws) {
+        const shape = resultType(target);
+        const raw = temp();
+        unwinding(`call ${shape} ${symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw);
+        result = failedOut(shape, raw, target.returns, target.throws, m);
+      } else result = invoke(target, self, args, undefined, giveUp);
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) dispose(result, target.returns);
-        return emit("ret void");
+        return give(undefined);
       }
       // A result narrowed to what the interface gives drops the parts it leaves out.
       if (needsDrop(target.returns) && !keepsAll(target.returns, m.returns)) {
         const kept = copied(convert(result, target.returns, m.returns), m.returns);
         dispose(result, target.returns);
-        return emit(`ret ${returns} ${kept}`);
+        return give(kept);
       }
-      emit(`ret ${returns} ${convert(result, target.returns, m.returns)}`);
+      give(convert(result, target.returns, m.returns));
+    }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+    return name;
+  }
+
+  // A throwing slot's result once its call gave `raw`, of `shape`: a failure returns at once,
+  // its error converted to the slot's; otherwise its value is left for the slot to give.
+  function failedOut(shape: string, raw: string, gives: Type, thrown: Type, m: Method): string | undefined {
+    const returns = throwing(m.returns, m.throws!);
+    const [failed, bad, ok, error, failure, made] = [temp(), label(), label(), temp(), temp(), temp()];
+    emit(`${failed} = extractvalue ${shape} ${raw}, 0`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(bad);
+    emit(`${error} = extractvalue ${shape} ${raw}, 2`);
+    emit(`${failure} = insertvalue ${returns} undef, i1 true, 0`);
+    emit(`${made} = insertvalue ${returns} ${failure}, ${llvm(m.throws!)} ${convert(error, thrown, m.throws!)}, 2`);
+    emit(`ret ${returns} ${made}`);
+    startBlock(ok);
+    if (gives === "void") return undefined;
+    const got = temp();
+    emit(`${got} = extractvalue ${shape} ${raw}, 1`);
+    return got;
+  }
+
+  // Returns from a throwing slot with a value, or none, that didn't fail.
+  function succeeded(m: Method, v: string | undefined) {
+    const returns = throwing(m.returns, m.throws!);
+    let made = temp();
+    emit(`${made} = insertvalue ${returns} undef, i1 false, 0`);
+    if (v !== undefined) {
+      const next = temp();
+      emit(`${next} = insertvalue ${returns} ${made}, ${llvm(m.returns)} ${v}, 1`);
+      made = next;
+    }
+    emit(`ret ${returns} ${made}`);
+  }
+
+  // The slot of a stored callable held in one that throws more: the held one's call, its result
+  // or its error passed on as this one's.
+  function relayThunk(name: string, inner: DynType, m: Method): string {
+    const held = inner.of.methods[0]!;
+    thunk(name, throwing(m.returns, m.throws!), () => {
+      const [dyn, data, table] = [temp(), temp(), temp()];
+      emit(`${dyn} = load ${DYN}, ptr %p`);
+      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      const fn = vslot(table, 0);
+      const shape = held.throws ? throwing(held.returns, held.throws) : held.returns === "void" ? "void" : llvm(held.returns);
+      const raw = shape === "void" ? undefined : temp();
+      unwinding(`call ${shape} ${fn}(ptr ${data}${m.params.map((p, i) => `, ${llvm(p)} %a${i}`).join("")})`, raw);
+      const got = held.throws ? failedOut(shape, raw!, held.returns, held.throws, m) : raw;
+      succeeded(m, got === undefined || m.returns === "void" ? undefined : convert(got, held.returns, m.returns));
     }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
     return name;
   }
@@ -2241,9 +2304,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
     // A `Promise<T>` comes back as its boxed future.
     const gives = promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
-    const returns = gives === "void" ? "void" : llvm(gives);
-    const result = gives === "void" ? undefined : temp();
-    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, result);
+    const returns = m.throws ? throwing(gives, m.throws) : gives === "void" ? "void" : llvm(gives);
+    const made = returns === "void" ? undefined : temp();
+    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
+    const result = m.throws ? unpacked(returns, made!, gives, e) : made;
     if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
     return result;
   }
@@ -5830,7 +5894,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it.
-    if (to && isDyn(to) && !isDyn(types.get(e)!)) {
+    // So is a stored callable held in one that throws more.
+    if (to && isDyn(to) && (!isDyn(types.get(e)!) || relays(types.get(e)!, to))) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
       if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
@@ -6930,20 +6995,25 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       after?.();
       return result;
     }
-    // A call that failed raises its error where this function sends it.
+    return unpacked(resultType(target), result, type, at!, after);
+  }
+
+  // A throwing call's result: a call that failed raises its error where this function sends
+  // it; one that didn't gives its value.
+  function unpacked(shape: string, result: string, type: Type, at: Expr, after?: () => void): string | undefined {
     const [failed, bad, ok] = [temp(), label(), label()];
-    emit(`${failed} = extractvalue ${resultType(target)} ${result}, 0`);
+    emit(`${failed} = extractvalue ${shape} ${result}, 0`);
     emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     startBlock(bad);
     const error = temp();
-    emit(`${error} = extractvalue ${resultType(target)} ${result}, 2`);
+    emit(`${error} = extractvalue ${shape} ${result}, 2`);
     after?.();
-    raised(at!, error);
+    raised(at, error);
     startBlock(ok);
     after?.();
     if (type === "void") return undefined;
     const got = temp();
-    emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
+    emit(`${got} = extractvalue ${shape} ${result}, 1`);
     return got;
   }
 
@@ -7095,7 +7165,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (i.generator) return llvm(nextResult(i.generator.yields));
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
-    return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
+    return throwing(i.returns, i.throws);
+  }
+
+  function throwing(returns: Type, throws: Type): string {
+    return `{ i1, ${returns === "void" ? "{}" : llvm(returns)}, ${llvm(throws)} }`;
   }
 
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way

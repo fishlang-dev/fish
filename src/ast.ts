@@ -6,7 +6,7 @@ type AstType =
   | { start: i64; end: i64; kind: "array"; element: AstType }
   | { start: i64; end: i64; kind: "tuple"; elements: AstTupleElement[] }
   | { start: i64; end: i64; kind: "object"; members: AstTypeMember[] }
-  | { start: i64; end: i64; kind: "function"; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType; construct: boolean; abstract: boolean }
+  | { start: i64; end: i64; kind: "function"; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType; throws?: AstType; construct: boolean; abstract: boolean }
   | { start: i64; end: i64; kind: "union"; types: AstType[] }
   | { start: i64; end: i64; kind: "intersection"; types: AstType[] }
   | { start: i64; end: i64; kind: "operator"; op: "keyof" | "readonly" | "unique"; type: AstType }
@@ -35,7 +35,7 @@ type AstExpr =
   | { start: i64; end: i64; kind: "array"; elements: (AstExpr | null)[] }
   | { start: i64; end: i64; kind: "object"; props: AstObjectProp[] }
   | { start: i64; end: i64; kind: "function"; name: string | null; async: boolean; generator: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; body: AstStmt[] }
-  | { start: i64; end: i64; kind: "arrow"; move: boolean; async: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; body: AstExpr | AstStmt[] }
+  | { start: i64; end: i64; kind: "arrow"; move: boolean; async: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstExpr | AstStmt[] }
   | { start: i64; end: i64; kind: "member"; object: AstExpr; name: string; optional: boolean }
   | { start: i64; end: i64; kind: "index"; object: AstExpr; index: AstExpr; optional: boolean }
   | { start: i64; end: i64; kind: "call"; callee: AstExpr; typeArgs: AstType[]; args: AstExpr[]; optional: boolean }

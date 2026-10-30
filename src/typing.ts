@@ -35,7 +35,8 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // A generic method, `map<U>(f: (x: T) => U): U`, keeps its type parameters' names and the node it
 // was written as, as a generic function type does, each call resolving it.
 // `optional`: which parameters are written with `?`, kept for JS, which tells left out from null.
-export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
+// `throws`: what a stored callable's call may throw.
+export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 
@@ -90,7 +91,8 @@ export type MapType = { kind: "map"; key: Type; value: Type; set: boolean; field
 // closure made in a generic body's definition check is never compiled, so it isn't concrete.
 // A generic function used as a value, `generic` naming it, is a closure capturing nothing whose
 // calls each instantiate that function, as calls of it by name do.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
+// `throws` is what a call of it may throw; an async arrow's error is its future's instead.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; throws?: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -99,7 +101,11 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 // The type parameters around it, `scope`, are those it was written among; `own` are its type
 // parameters' placeholders, in order, for comparing it with another.
 export type Family = { names: string[]; node: unknown; scope: Map<string, Type>; own: Type[] };
-export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: Family };
+export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; throws?: Type; fields: Field[]; generic?: Family };
+
+// Function types whose error is a type parameter the call hasn't decided: an arrow given as one
+// infers what it throws, which then decides that parameter.
+export const openThrows = new WeakSet<FunctionType>();
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
@@ -333,6 +339,7 @@ function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | u
         if (fn.params.some((p) => holdsPart(p, (u) => kept(u) || (typeof u !== "string" && (u.kind === "function" || (u.kind === "interface" && promiseElement(u) !== undefined)))))) {
           return "a callback that is given a function or a Promise isn't supported yet";
         }
+        if (fn.throws) return "a callback that throws isn't supported yet; catch inside it";
         return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
       }
       {
@@ -383,14 +390,14 @@ export const timerCallback = (): DynType => callableType(functionType([], [], pr
 
 export function callableType(fn: FunctionType): DynType {
   // In an instance, what its type parameters stand for decides the layout.
-  const [params, returns] = [fn.params.map(lower), lower(fn.returns)];
-  const key = `${fn.name} ${params.map(keyOf).join(", ")} => ${keyOf(returns)}`;
+  const [params, returns, throws] = [fn.params.map(lower), lower(fn.returns), fn.throws && lower(fn.throws)];
+  const key = `${fn.name} ${params.map(keyOf).join(", ")} => ${keyOf(returns)}${throws ? ` throws ${keyOf(throws)}` : ""}`;
   let i = callables.get(key);
   if (!i) {
     i = interfaceType(fn.name);
-    i.methods.push({ name: "call", params, returns });
+    i.methods.push({ name: "call", params, returns, ...(throws && { throws }) });
     callables.set(key, i);
-    callableOf.set(i, { ...fn, params, returns });
+    callableOf.set(i, { ...fn, params, returns, throws });
   }
   return dynType(i);
 }
@@ -398,7 +405,8 @@ export function callableType(fn: FunctionType): DynType {
 // Whether two stored callables take and give the same types, so either holds the other's value.
 export function sameCallable(a: Type, b: Type): boolean {
   const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
-  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
+  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns)
+    && (f.throws && lower(f.throws)) === (g.throws && lower(g.throws));
 }
 
 // A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside
@@ -441,6 +449,7 @@ export function jsConverts(t: Type, within = new Set<Type>()): boolean {
   if (t.kind === "block") return t.which === "JsValue";
   if (t.kind === "dyn" && callableOf.has(t.of)) {
     const fn = callableOf.get(t.of)!;
+    if (fn.throws) return false;
     return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].every((u) => jsConverts(u, within));
   }
   if (t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of) === "void" || jsConverts(promiseElement(t.of)!, within);
@@ -961,14 +970,17 @@ export function generatorElement(t: Type): Type | undefined {
   return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;
 }
 
-export function functionType(names: string[], params: Type[], returns: Type): FunctionType {
-  const t: FunctionType = { kind: "function", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, names, params, returns, fields: [] };
+export function functionType(names: string[], params: Type[], returns: Type, throws?: Type): FunctionType {
+  const t: FunctionType = { kind: "function", name: signatureName(names, params, returns, throws), names, params, returns, ...(throws && { throws }), fields: [] };
   keys.set(t, `function ${declared++}`);
   return t;
 }
 
-export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean): ClosureType {
-  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once, concrete };
+const signatureName = (names: string[], params: Type[], returns: Type, throws: Type | undefined) =>
+  `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}${throws ? ` throws ${show(throws)}` : ""}`;
+
+export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean, throws?: Type): ClosureType {
+  const t: ClosureType = { kind: "closure", name: signatureName(names, params, returns, throws), params, returns, ...(throws && { throws }), fields, once, concrete };
   keys.set(t, `closure ${declared++}`);
   return t;
 }
@@ -1348,8 +1360,9 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   if (typeof t !== "string" && t.kind === "function") {
     const params = t.params.map((p) => replaced(p, swap));
     const returns = replaced(t.returns, swap);
-    if (!params.some((p, i) => p !== t.params[i]) && returns === t.returns) return t;
-    const made = functionType(t.names, params, returns);
+    const throws = t.throws && replaced(t.throws, swap);
+    if (!params.some((p, i) => p !== t.params[i]) && returns === t.returns && throws === t.throws) return t;
+    const made = functionType(t.names, params, returns, throws);
     // A generic one stays generic, the types around it it was written among replaced too.
     if (t.generic) {
       made.name = `<${t.generic.names.join(", ")}>${made.name}`;
@@ -1605,8 +1618,11 @@ export function fits(from: Type, to: Type): boolean {
     const sig = callable ? callableOf.get(given.of)! : given;
     // A stored callable's call passes all its parameters, so it takes exactly as many.
     if (callable && typeof sig !== "string" && sig.kind === "function" && sig.params.length !== to.params.length) return false;
+    // What it throws fits what the type throws, and one throwing nothing fits any.
+    const throws = typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") ? sig.throws : undefined;
+    const caught = throws === undefined || (to.throws !== undefined && fits(throws, to.throws));
     return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
-      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!) || sameCallable(p, to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
+      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!) || sameCallable(p, to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns)) && caught;
   }
   if (typeof from !== "string" && from.kind === "ref") return false;
   // A tuple fits only a tuple of its length, element by element.

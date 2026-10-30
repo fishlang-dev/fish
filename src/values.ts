@@ -1711,6 +1711,9 @@ export function expressions(ctx: Context) {
     });
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
+    // The closure it runs throws what it throws, which its function type may only widen.
+    const error = typeof given !== "string" && given.kind === "closure" ? given.throws : type.throws;
+    if (error) raise(e, error, name);
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
     const returns = typeof given !== "string" && given.kind === "closure" && promiseElement(type.returns) !== undefined ? given.returns : type.returns;
     // An async arrow's future holds a copy of what it captured, references too.
@@ -4991,7 +4994,7 @@ export function expressions(ctx: Context) {
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
     if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
-      const own = storedType({ kind: "function", name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, fields: [] });
+      const own = storedType({ kind: "function", name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, ...(field.type.throws && { throws: field.type.throws }), fields: [] });
       coerce(p.value, field.type, own, `type '${show(field.type)}' is not assignable to type '${show(own)}'`);
       return { ...field, type: own };
     }
@@ -5219,6 +5222,11 @@ export function expressions(ctx: Context) {
   // cross to another thread.
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
     if (promiseElement(to.of) !== undefined) return boxingFuture(e, lower(type), to, message);
+    if (relaying(lower(type), to)) {
+      if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+      dynMembers.set(`${keyOf(lower(type))} ${keyOf(lower(to))}`, { methods: [], fields: [], clone: "copy" });
+      return void coercions.set(e, to);
+    }
     if (callableOf.has(to.of)) storing(e, lower(type), to, message);
     else if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = lower(type);
@@ -5235,6 +5243,14 @@ export function expressions(ctx: Context) {
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.
     if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(lower(to))}`, dynTable(e, held, lower(to) as DynType));
     coercions.set(e, to);
+  }
+
+  // A stored callable held in one taking and giving the same, that throws what it throws or
+  // more: its calls are passed on through a slot of their own.
+  function relaying(from: Type, to: DynType): boolean {
+    const [f, g] = [typeof from !== "string" && from.kind === "dyn" ? callableOf.get(from.of) : undefined, callableOf.get(to.of)];
+    if (!f || !g || !g.throws || f.params.length !== g.params.length || lower(f.returns) !== lower(g.returns)) return false;
+    return f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && (!f.throws || fits(f.throws, g.throws));
   }
 
   // A future stored as a `Promise<T>`: one an async function's call made, giving T, throwing
@@ -5378,6 +5394,7 @@ export function expressions(ctx: Context) {
     });
     if (holdsRef(fn.returns)) borrowsFrom.set(e, [callee]);
     dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
+    if (fn.throws) raise(e, fn.throws, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
     // One returning a Promise gives its future boxed, owning what it holds.
     return { type: storedType(fn.returns), what: "this function" };
   }
