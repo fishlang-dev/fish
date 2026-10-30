@@ -775,7 +775,7 @@ function typeDoc(path: At<"type">, src: string, opts: Opts): Doc {
     case "function": {
       const f: Fn = { ...t, returnType: t.returns };
       const params = parameters(f, path, src, false, typeParameters(t.typeParams, path, src));
-      const returned = [" => ", type(t.returns, "returnType", path, src)];
+      const returned = [" => ", type(t.returns, "returnType", path, src), t.throws ? [" throws ", type(t.throws, "throws", path, src)] : ""];
       const head = [t.abstract ? "abstract " : "", t.construct ? "new " : ""];
       return group([head, shouldGroupParameters(f, returned) ? group(params) : params, returned]);
     }

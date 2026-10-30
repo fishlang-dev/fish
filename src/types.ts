@@ -139,7 +139,8 @@ function functionType(c: Cursor): TypeNode {
   const params = parameters(c);
   c.expect("=>");
   const returns = returnType(c);
-  return { kind: "function", typeParams, params, returns, construct, abstract, start, end: returns.end };
+  const throws = throwsClause(c);
+  return { kind: "function", typeParams, params, returns, ...(throws && { throws }), construct, abstract, start, end: (throws ?? returns).end };
 }
 
 // A union or intersection; a leading separator is allowed, as in a multi-line union.

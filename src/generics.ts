@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -93,6 +93,7 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   if (node.kind === "function" && typeof arg !== "string" && arg.kind === "closure") {
     node.params.forEach((p, i) => p.type && arg.params[i] !== undefined && infer(p.type, arg.params[i]!, names, bindings, at));
     if (arg.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(node.returns, arg.returns, names, bindings, at);
+    if (node.throws && arg.throws) infer(node.throws, arg.throws, names, bindings, at);
     return;
   }
   // `Ptr<T>` against a raw pointer points at a T.
@@ -288,8 +289,13 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const undecided = [...explicitPlaceholders(f)].filter(([n]) => !bindings.has(n)).map(([, p]) => p);
     if (t.params.some((p) => holdsPart(p, (u) => undecided.includes(u), true))) return undefined;
     // What it gives is left open while it names a type parameter the call hasn't decided.
-    const open = holdsPart(t.returns, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined, true);
-    return functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns);
+    const undecidedIn = (u: Type) => holdsPart(u, (v) => typeof v !== "string" && v.kind === "param" && v.concrete === undefined, true);
+    const open = undecidedIn(t.returns);
+    // So is what it throws, which the arrow then infers.
+    const openError = t.throws !== undefined && undecidedIn(t.throws);
+    const made = functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns, openError ? undefined : t.throws);
+    if (openError) openThrows.add(made);
+    return made;
   }
 
   // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.

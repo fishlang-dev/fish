@@ -1711,6 +1711,9 @@ export function expressions(ctx: Context) {
     });
     const given = lower(held);
     if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
+    // The closure it runs throws what it throws, which its function type may only widen.
+    const error = typeof given !== "string" && given.kind === "closure" ? given.throws : type.throws;
+    if (error) raise(e, error, name);
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
     const returns = typeof given !== "string" && given.kind === "closure" && promiseElement(type.returns) !== undefined ? given.returns : type.returns;
     // An async arrow's future holds a copy of what it captured, references too.
@@ -5378,6 +5381,7 @@ export function expressions(ctx: Context) {
     });
     if (holdsRef(fn.returns)) borrowsFrom.set(e, [callee]);
     dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
+    if (fn.throws) raise(e, fn.throws, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
     // One returning a Promise gives its future boxed, owning what it holds.
     return { type: storedType(fn.returns), what: "this function" };
   }

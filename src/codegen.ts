@@ -2089,9 +2089,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A method's slot: the type's method run on the block, its result as the interface gives it.
   // Through a method declaring `this: Own<this>` the Dyn is given up: its block is freed after,
   // and its value dropped first unless the type's method took it over.
+  // A throwing callable's slot gives whether the call failed, then its value and its error, as
+  // its function type has them; a closure throwing nothing never fails.
   function methodThunk(name: string, type: Type, m: Method, target: Instance): string {
     if (promiseElement(m.returns) !== undefined) return futureThunk(name, type, m, target);
-    const returns = m.returns === "void" ? "void" : llvm(m.returns);
+    const returns = m.throws ? throwing(m.returns, m.throws) : m.returns === "void" ? "void" : llvm(m.returns);
     thunk(name, returns, () => {
       const owner = target.body.owner;
       const upcasts = typeof type !== "string" && type.kind === "class" && owner !== undefined && owner !== type;
@@ -2120,18 +2122,48 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = target.body.closure ? target.body.params.length : m.params.length;
       m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
-      const result = invoke(target, self, m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`), undefined, giveUp);
+      const args = m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`);
+      const give = (v: string | undefined) => {
+        if (!m.throws) return emit(v === undefined ? "ret void" : `ret ${returns} ${v}`);
+        let made = temp();
+        emit(`${made} = insertvalue ${returns} undef, i1 false, 0`);
+        if (v !== undefined) {
+          const next = temp();
+          emit(`${next} = insertvalue ${returns} ${made}, ${llvm(m.returns)} ${v}, 1`);
+          made = next;
+        }
+        emit(`ret ${returns} ${made}`);
+      };
+      let result: string | undefined;
+      if (m.throws && target.throws) {
+        const shape = resultType(target);
+        const raw = temp();
+        unwinding(`call ${shape} ${symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw);
+        const [failed, bad, ok, error, failure, made] = [temp(), label(), label(), temp(), temp(), temp()];
+        emit(`${failed} = extractvalue ${shape} ${raw}, 0`);
+        emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+        startBlock(bad);
+        emit(`${error} = extractvalue ${shape} ${raw}, 2`);
+        emit(`${failure} = insertvalue ${returns} undef, i1 true, 0`);
+        emit(`${made} = insertvalue ${returns} ${failure}, ${llvm(m.throws)} ${convert(error, target.throws, m.throws)}, 2`);
+        emit(`ret ${returns} ${made}`);
+        startBlock(ok);
+        if (target.returns !== "void") {
+          result = temp();
+          emit(`${result} = extractvalue ${shape} ${raw}, 1`);
+        }
+      } else result = invoke(target, self, args, undefined, giveUp);
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) dispose(result, target.returns);
-        return emit("ret void");
+        return give(undefined);
       }
       // A result narrowed to what the interface gives drops the parts it leaves out.
       if (needsDrop(target.returns) && !keepsAll(target.returns, m.returns)) {
         const kept = copied(convert(result, target.returns, m.returns), m.returns);
         dispose(result, target.returns);
-        return emit(`ret ${returns} ${kept}`);
+        return give(kept);
       }
-      emit(`ret ${returns} ${convert(result, target.returns, m.returns)}`);
+      give(convert(result, target.returns, m.returns));
     }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
     return name;
   }
@@ -2241,9 +2273,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
     // A `Promise<T>` comes back as its boxed future.
     const gives = promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
-    const returns = gives === "void" ? "void" : llvm(gives);
-    const result = gives === "void" ? undefined : temp();
-    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, result);
+    const returns = m.throws ? throwing(gives, m.throws) : gives === "void" ? "void" : llvm(gives);
+    const made = returns === "void" ? undefined : temp();
+    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
+    const result = m.throws ? unpacked(returns, made!, gives, e) : made;
     if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
     return result;
   }
@@ -6930,20 +6963,25 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       after?.();
       return result;
     }
-    // A call that failed raises its error where this function sends it.
+    return unpacked(resultType(target), result, type, at!, after);
+  }
+
+  // A throwing call's result: a call that failed raises its error where this function sends
+  // it; one that didn't gives its value.
+  function unpacked(shape: string, result: string, type: Type, at: Expr, after?: () => void): string | undefined {
     const [failed, bad, ok] = [temp(), label(), label()];
-    emit(`${failed} = extractvalue ${resultType(target)} ${result}, 0`);
+    emit(`${failed} = extractvalue ${shape} ${result}, 0`);
     emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     startBlock(bad);
     const error = temp();
-    emit(`${error} = extractvalue ${resultType(target)} ${result}, 2`);
+    emit(`${error} = extractvalue ${shape} ${result}, 2`);
     after?.();
-    raised(at!, error);
+    raised(at, error);
     startBlock(ok);
     after?.();
     if (type === "void") return undefined;
     const got = temp();
-    emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
+    emit(`${got} = extractvalue ${shape} ${result}, 1`);
     return got;
   }
 
@@ -7095,7 +7133,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (i.generator) return llvm(nextResult(i.generator.yields));
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
-    return `{ i1, ${i.returns === "void" ? "{}" : llvm(i.returns)}, ${llvm(i.throws)} }`;
+    return throwing(i.returns, i.throws);
+  }
+
+  function throwing(returns: Type, throws: Type): string {
+    return `{ i1, ${returns === "void" ? "{}" : llvm(returns)}, ${llvm(throws)} }`;
   }
 
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way

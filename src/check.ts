@@ -17,7 +17,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { madeFor, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { madeFor, openThrows, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -1291,8 +1291,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // A call leaves out only the last parameters, so none may be required after an optional one.
     const late = f.params.find((p, i) => !p.optional && !p.rest && f.params.slice(0, i).some((q) => q.optional));
     if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
-    // What the function may throw: any value's type.
-    const errorType = f.throws && resolveType(f.throws);
+    // What the function may throw: any value's type. An arrow with none written takes it from the
+    // function type it is given as, as it does its parameters' types, or else from what its body
+    // can throw; a nested function declares its own.
+    const contextual = f.closure && !f.throws && f.closure.self === undefined && !f.async && f.closure.expected && !openThrows.has(f.closure.expected) ? f.closure.expected : undefined;
+    const inferring = f.closure !== undefined && !f.throws && f.closure.self === undefined && !contextual ? [] as [Expr | Stmt, Type][] : undefined;
+    let errorType = f.throws ? resolveType(f.throws) : contextual?.throws;
     if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
@@ -1313,6 +1317,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
       return after;
     });
     finish();
+    // An inferred error is every one the body lets out, widened as a `let` is.
+    if (inferring && inferring.length > 0) {
+      errorType = unionType(inferring.map(([, t]) => widenLet(t)));
+      for (const [at, from] of inferring) instance.raises.set(at, { from, to: errorType });
+      instance.throws = errorType;
+    }
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
@@ -1817,7 +1827,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
+        name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
         body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -1878,7 +1888,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
-      const type = madeBy(closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete), inner);
+      // An async arrow's call only makes its future, which carries what it throws.
+      const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
+      const type = madeBy(closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
+      // One throwing what the function type it is given as doesn't take can't be given as it.
+      if (expected && throws && e.throws && !openThrows.has(expected) && !(expected.throws && fits(throws, expected.throws))) {
+        const takes = expected.throws ? `which throws '${show(expected.throws)}'` : "which throws nothing";
+        throw new CompileError(`this closure throws '${show(throws)}', but it is given as '${show(expected)}', ${takes}; catch it inside the closure with try/catch`, e.throws.start, e.throws.end);
+      }
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {
@@ -2022,12 +2039,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
           if (s.generator) throw unsupported("nested generator functions", s);
           if (s.macro) throw unsupported("nested macros", s);
           const at = { start: s.start, end: s.end };
-          const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, body: s.body, ...at };
+          const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, ...(s.throws && { throws: s.throws }), body: s.body, ...at };
           nestedFunctions.set(arrow, s.name);
           Object.assign(s, { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
           // The body is the arrow's now; left here too, walks over the statement would find it twice,
           // as an async function's frame did, taking the function's loops and awaits for its own.
-          for (const key of ["body", "params", "returnType", "typeParams"] as const) delete (s as Partial<Func>)[key];
+          for (const key of ["body", "params", "returnType", "throws", "typeParams"] as const) delete (s as Partial<Func>)[key];
           return statement(s);
         }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
@@ -2481,7 +2498,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     function thrown(at: Expr | Stmt, thrownValue: Expr) {
       const type = value(thrownValue);
       const into = errorType && handlers.length === 0 && (fits(type, errorType) || adapt(thrownValue, errorType));
-      if (into) coerce(thrownValue, type, errorType!, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+      if (into) coerce(thrownValue, type, errorType!, `type '${show(type)}' can't be thrown here: ${who()} throws '${show(errorType!)}'`);
       raise(at, into ? errorType! : types.get(thrownValue)!, "'throw'");
     }
 
@@ -2494,10 +2511,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
       if (f.comptime || comptimeDepth > 0) return;
       if (built) throw new CompileError("a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
-      if (f.closure) throw unsupported("closures that throw", at);
+      if (inferring) return void inferring.push([at, type]);
+      if (!errorType && contextual) {
+        const does = "kind" in at && at.kind === "throw" ? `this closure throws '${show(widenLet(type))}'` : `${what} can throw '${show(widenLet(type))}'`;
+        throw new CompileError(`${does}, but the closure is given as '${show(contextual)}', which throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+      }
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
-        throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
+        throw new CompileError(`${who()} must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
       }
       if (fits(type, errorType)) return void instance.raises.set(at, { from: type, to: errorType });
       // An error the declared type doesn't take may be wrapped by a class of it that
@@ -2508,12 +2529,17 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${classes[0]!.name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
-        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that '${f.name}' throws; ${hint}`, at.start, at.end);
+        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that ${who()} throws; ${hint}`, at.start, at.end);
       }
       if (wrappers.length > 1) {
         throw new CompileError(`${does}, which ${wrappers.map((w) => `'${w.wrapper.name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
       }
       instance.raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
+    }
+
+    // Who throws, in messages: the function, or the closure or nested function it is in.
+    function who(): string {
+      return f.closure?.self !== undefined ? `'${f.closure.self}'` : f.closure ? "this closure" : `'${f.name}'`;
     }
 
     function noteThis(e: Expr) {
