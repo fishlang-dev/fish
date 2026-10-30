@@ -16,7 +16,7 @@ function compare(name: string, imports: string, body: string, throws = "") {
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: tmp, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const { spawnSync, execFileSync, execSync } = require("node:child_process"); (() => {${body}\n})();`;
+  const script = `const cp = require("node:child_process"); const { spawnSync, execFileSync, execSync } = cp; (() => {${body}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: tmp });
   expect(fish.stderr.toString()).toBe(node.stderr.toString());
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
@@ -42,4 +42,24 @@ test("spawnSync gives node's status, signal, output and error", () => {
   const early = spawnSync("true", [], { input: "x".repeat(1000000) });
   console.log(early.status);`);
   expect(out).toContain("SIGTERM");
+});
+
+test("spawnSync with a utf8 encoding gives text, keeping its other options", () => {
+  compare("text", `import * as cp from "child_process";`, `
+  const r = cp.spawnSync("sh", ["-c", "printf 'héllo'; printf 'wörld' >&2"], { encoding: "utf8" });
+  console.log(r.stdout, r.stderr, r.stdout.length);
+  const c = cp.spawnSync("cat", [], { input: "été", cwd: "/", encoding: "utf-8" });
+  console.log(c.stdout, c.status);`);
+});
+
+test("spawnSync's encoding must be a literal UTF-8", () => {
+  for (const [options, message] of [
+    [`{ encoding: e }`, `'spawnSync' takes its encoding as a literal, like { encoding: "utf8" }`],
+    [`{ encoding: "latin1" }`, `'spawnSync' knows the "utf8" encoding so far, not "latin1"`],
+  ]) {
+    const program = join(tmp, "bad.fsh");
+    writeFileSync(program, `import { spawnSync } from "node:child_process";\nfunction main(): void {\n  const e = "utf8";\n  spawnSync("true", [], ${options});\n}\n`);
+    const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", join(tmp, "bad")]);
+    expect(built.stderr.toString()).toContain(message!);
+  }
 });

@@ -2864,6 +2864,12 @@ export function spawnSync(command: string, args: string[] = [], options: SpawnSy
     return new SpawnSyncReturns<u8[]>(0, null, null, [], [], e);
   }
 }
+
+export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {
+  const r = spawnSync(command, args, options);
+  const text = new TextDecoder();
+  return new SpawnSyncReturns<string>(r.pid, r.status, r.signal, text.decode(r.stdout), text.decode(r.stderr), r.error);
+}
 `,
   process: String.raw`
 declare function fsh_rt_argc(): i64;

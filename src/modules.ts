@@ -724,7 +724,8 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
 }
 
 // `readFile(path, "utf8")` and `readFile(path, { encoding: "utf8" })` give a string, which
-// `readFileText` gives; without an encoding, bytes. A write's "utf8" is what it writes anyway.
+// `readFileText` gives; without an encoding, bytes. A write's "utf8" is what it writes anyway. A
+// call taking other options, as `spawnSync`, keeps them and drops only the encoding.
 // The encoding is read while compiling, so it must be a literal, and UTF-8 is the one known.
 function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: string, from: Module, name: string, at: Span) => void) {
   const file = (name: string) => {
@@ -737,13 +738,16 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
     if (!target) return false;
     const args = n.args as Expr[];
     const role = ENCODED[target.from.path]![target.name]!;
-    const at = role === "read" ? 1 : 2;
+    const at = role === "read" ? 1 : role === "write" ? 2 : role;
     const given = args[at];
     if (!given) return false;
-    const encoding = given.kind === "string" ? given.value : given.kind === "object" ? encodingOf(given) : undefined;
-    if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like "utf8" or { encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
+    const options = typeof role === "number";
+    if (options && (given.kind !== "object" || !given.props.some(isEncoding))) return false;
+    const encoding = given.kind === "string" && !options ? given.value : given.kind === "object" ? encodingOf(given, options) : undefined;
+    if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like ${options ? "" : `"utf8" or `}{ encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
     if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
-    args.splice(at, 1);
+    if (options) (given as Extract<Expr, { kind: "object" }>).props = (given as Extract<Expr, { kind: "object" }>).props.filter((p) => !isEncoding(p));
+    else args.splice(at, 1);
     if (role === "write" || encoding === null) return false;
     const alias = `${callee!.name}:text`;
     if (!imports.has(alias)) bind(alias, target.from, `${target.name}Text`, given);
@@ -753,17 +757,23 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
   walk(body, new Set());
 }
 
-// The std file calls typed by their encoding, by module: which read and which write.
-const ENCODED: Record<string, Record<string, "read" | "write">> = {
+// The std calls typed by their encoding, by module: which read, which write, and which take it
+// among other options, at the argument given.
+const ENCODED: Record<string, Record<string, "read" | "write" | number>> = {
   "std:fs/promises": { readFile: "read", writeFile: "write" },
   "std:fs": { readFileSync: "read", writeFileSync: "write" },
+  "std:child_process": { spawnSync: 2, execFileSync: 2, execSync: 1 },
 };
 
+const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][number]) => p.kind === "property" && p.key === "encoding";
+
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
-// it isn't a literal or the object holds anything else.
-function encodingOf(o: Extract<Expr, { kind: "object" }>): string | null | undefined {
-  const [prop, ...rest] = o.props;
-  if (!prop || rest.length > 0 || prop.kind !== "property" || prop.key !== "encoding") return undefined;
+// it isn't a literal, or the object holds anything else and `others` doesn't allow it.
+function encodingOf(o: Extract<Expr, { kind: "object" }>, others = false): string | null | undefined {
+  const named = o.props.filter(isEncoding);
+  if (named.length !== 1 || (!others && o.props.length > 1)) return undefined;
+  const prop = named[0]!;
+  if (prop.kind !== "property") return undefined;
   if (prop.value.kind === "null") return null;
   return prop.value.kind === "string" ? prop.value.value : undefined;
 }
