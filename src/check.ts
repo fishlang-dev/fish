@@ -1174,6 +1174,9 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // After its parameters' defaults, which `super(...)` may read.
     const superCall = f.self?.constructor && f.self.type.base ? (f.body.find((s) => !prologues.has(s)) as Extract<Stmt, { kind: "expr" }>).expr : undefined;
     if (superCall) unset.add(SUPER);
+    // Whether the constructor has assigned a field, an initializer's or its base's included. A
+    // `new` that fails drops nothing, so from then on nothing in the constructor may throw.
+    let built = false;
 
     // In a member of a generic class's instance, `this` is the class made from the type
     // parameters as this body sees them, so it reads through their bounds as the definition did.
@@ -1292,6 +1295,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       hidden = false;
       if (assigned) unset.delete(assigned.name);
       if (s.kind === "expr" && s.expr === superCall) unset.delete(SUPER);
+      if (assigned || (s.kind === "expr" && s.expr === superCall)) built = true;
       return after;
     });
     finish();
@@ -2475,6 +2479,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (handler) return void handler.push([at, type]);
       // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
       if (f.comptime || comptimeDepth > 0) return;
+      if (built) throw new CompileError("a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
       if (f.closure) throw unsupported("closures that throw", at);
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;

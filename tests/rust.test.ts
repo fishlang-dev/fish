@@ -769,7 +769,8 @@ test("a fallible Rust call needs a throws clause or a catch, and throws only Err
     .toBe("src/main.fsh:3:15: error: 'main' must declare 'throws Error' after its return type since 'parse' can throw 'Error', or catch it with try/catch");
   expect(refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export function f(): i64 throws string;\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` })))
     .toBe("rust.fsh:2:35: error: the Rust function 'f' throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a 'string'");
-  expect(refused(pkg({ "src/main.fsh": `class A {\n  constructor() throws Error {}\n}\nfunction main() {}\n` }))).toBe("src/main.fsh:2:24: error: constructors that throw are not supported yet");
+  expect(refused(pkg({ "src/main.fsh": `class A {\n  n: i64 = 0;\n  constructor() throws Error {\n    throw new Error("no");\n  }\n}\nfunction main() {}\n` })))
+    .toBe("src/main.fsh:4:5: error: a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields");
 });
 
 const VECTORS = `declare module "rust:demo" {

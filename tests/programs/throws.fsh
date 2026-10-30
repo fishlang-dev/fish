@@ -130,3 +130,105 @@ function g(): i64 throws u8 {
 }
 function main() {}
 // error: this 'throw' throws 'boolean', which isn't the 'u8' that 'g' throws; convert it to 'u8'
+// case: throws_constructor
+// A constructor checks its arguments and throws before it assigns a field, so a failed 'new'
+// leaves nothing built; 'new' is then a fallible call, caught or propagated.
+class RangeError {
+  constructor(public message: string) {}
+}
+class Port {
+  n: i64;
+  label: string;
+  constructor(n: i64) throws RangeError {
+    if (n < 1 || n > 65535) throw new RangeError("port " + String(n) + " is out of range");
+    const label = ":" + String(n);
+    this.n = n;
+    this.label = label;
+    // Caught inside, an error after the fields are set never leaves.
+    try {
+      if (n === 80) throw new RangeError("default");
+    } catch (e) {
+      this.label = "";
+    }
+  }
+}
+class Named extends Port {
+  name: string;
+  constructor(name: string, n: i64) throws RangeError {
+    super(n);
+    this.name = name;
+  }
+}
+function open(n: i64): Port throws RangeError {
+  const p = new Port(n);
+  return p;
+}
+function main() {
+  try {
+    const p = new Port(8080);
+    print(p.n, p.label);
+    const q = new Port(0);
+    print(q.n);
+  } catch (e) {
+    print(e.message);
+  }
+  try {
+    print(open(80).label.length);
+    print(open(70000).n);
+  } catch (e) {
+    if (e instanceof RangeError) print("open:", e.message);
+  }
+  try {
+    const s = new Named("web", 443);
+    print(s.name, s.n);
+    const t = new Named("bad", -1);
+    print(t.name);
+  } catch (e) {
+    print("named:", e.message);
+  }
+}
+// expect: 8080 :8080
+// expect: port 0 is out of range
+// expect: 0
+// expect: open: port 70000 is out of range
+// expect: web 443
+// expect: named: port -1 is out of range
+// case: throws_constructor_after_field
+// Once a field is assigned, nothing in the constructor may throw out of it.
+class A {
+  n: i64;
+  m: i64;
+  constructor(n: i64) throws string {
+    this.n = n;
+    if (n < 0) throw "negative";
+    this.m = n;
+  }
+}
+function main() {}
+// error: a constructor can only throw before it assigns its first field
+// case: throws_constructor_initializer
+// A field initializer counts as assigned before the constructor's body runs.
+class A {
+  label: string = "a";
+  n: i64;
+  constructor(n: i64) throws string {
+    if (n < 0) throw "negative";
+    this.n = n;
+  }
+}
+function main() {}
+// error: field initializers count as assigned first
+// case: throws_constructor_unhandled
+// 'new' of a constructor that throws is a fallible call like any other.
+class A {
+  n: i64;
+  constructor(n: i64) throws string {
+    if (n < 0) throw "negative";
+    this.n = n;
+  }
+}
+function main() {
+  const a = new A(1);
+  print(a.n);
+}
+// error: 'main' must declare 'throws string' after its return type since 'new A' can throw 'string'

@@ -231,3 +231,76 @@ function main() {
   let app = new Router();
   const copy = app.clone();
 }
+// case: router_decoded_params
+// expect: 200 café /users/caf%C3%A9
+// expect: 400 Bad Request
+// expect: 400 Bad Request
+// expect: middleware ran
+// expect: 200 100% /users/100%25
+// A :param arrives percent-decoded as UTF-8; one that isn't is answered 400 before any
+// middleware or handler runs.
+async function main(): Promise<void> {
+  let app = new Router();
+  app.use(async (req, next) => {
+    if (req.path !== "/users/caf%C3%A9") console.log("middleware ran");
+    const res = await next(req);
+    return res;
+  });
+  app.get("/users/:name", async (req) => new Response(req.param("name") + " " + req.path));
+  for (const path of ["/users/caf%C3%A9", "/users/%E9", "/users/%zz", "/users/100%25"]) {
+    const res = await app.handle(new Request("http://h" + path));
+    const body = await res.text();
+    console.log(res.status, body.trim());
+  }
+}
+// case: router_bad_host
+// expect: h 200 admin x
+// expect: h:8080 200 admin x
+// expect: h:abc 400 Bad Request
+// expect: a^b 400 Bad Request
+// expect: [::1 400 Bad Request
+// expect: a%zz 400 Bad Request
+// A Host header the URL parser refuses is answered 400, never routed with some other path.
+async function ask(port: i64, host: string): Promise<string> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", port, AbortSignal.timeout(2000));
+  await conn.write(new TextEncoder().encode("GET /admin/x HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"), AbortSignal.timeout(2000));
+  let got: u8[] = [];
+  while (true) {
+    const more = await conn.read(4096, AbortSignal.timeout(2000));
+    if (more.length === 0) break;
+    for (const b of more) got.push(b);
+  }
+  const text = new TextDecoder().decode(got);
+  const parts = text.split("\r\n\r\n");
+  return parts[0].split(" ")[1] + " " + parts[parts.length - 1].trim();
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  let app = new Router();
+  app.get("/", async (req) => new Response("root"));
+  app.get("/admin/:x", async (req) => new Response("admin " + req.param("x")));
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, app.handler()));
+  while (found.port.load() === 0) await sleep(1);
+  for (const host of ["h", "h:8080", "h:abc", "a^b", "[::1", "a%zz"]) {
+    const said = await ask(found.port.load(), host);
+    console.log(host, said);
+  }
+}
+// case: router_own_url
+// expect: 200 mine: /x
+// A program's own URL and URLSearchParams classes work beside the HTTP library, which keeps
+// std's under names no program can write.
+class URL {
+  constructor(public text: string) {}
+  describe(): string { return "mine: " + this.text; }
+}
+class URLSearchParams {}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/x", async (req) => new Response(new URL(req.path).describe()));
+  const res = await app.handle(new Request("http://h/x"));
+  const body = await res.text();
+  console.log(res.status, body);
+}

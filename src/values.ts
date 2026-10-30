@@ -967,6 +967,8 @@ export function expressions(ctx: Context) {
       const instance = instantiate(base.constructor, [], e.args, argTypes, e);
       args(e.args, argTypes, instance, e);
       calls.set(e, instance);
+      const error = errorOf(instance);
+      if (error) raise(e, error, "'super'");
       return { type: "void", what: "'super'" };
     }
     // A program's own `console` or `print` keeps its meaning.
