@@ -1666,10 +1666,13 @@ static fsh_big *fsh_big_trim(fsh_big *b, int negative) {
   return b;
 }
 
-void fsh_rt_big_retain(fsh_big *b) { __atomic_fetch_add(&b->count, 1, __ATOMIC_RELAXED); }
+// A count below zero marks a constant the compiler made, never counted or freed.
+void fsh_rt_big_retain(fsh_big *b) {
+  if (__atomic_load_n(&b->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&b->count, 1, __ATOMIC_RELAXED);
+}
 
 void fsh_rt_big_release(fsh_big *b) {
-  if (b && __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) == 0) fsh_rt_free(b);
+  if (b && __atomic_load_n(&b->count, __ATOMIC_RELAXED) >= 0 && __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) == 0) fsh_rt_free(b);
 }
 
 static _Noreturn void fsh_big_panic(const char *where, const char *reason) {
@@ -1686,30 +1689,6 @@ fsh_big *fsh_rt_big_from_u128(unsigned __int128 magnitude, int32_t negative) {
 
 fsh_big *fsh_rt_big_from_i128(__int128 v) {
   return fsh_rt_big_from_u128(v < 0 ? -(unsigned __int128)v : (unsigned __int128)v, v < 0);
-}
-
-// Multiplies a magnitude by m and adds a, in place, growing it by a limb when it carries out.
-static fsh_big *fsh_big_mul_add(fsh_big *b, uint32_t m, uint32_t a) {
-  uint64_t carry = a;
-  for (int64_t i = 0; i < b->length; i++) {
-    uint64_t t = (uint64_t)b->limbs[i] * m + carry;
-    b->limbs[i] = (uint32_t)t;
-    carry = t >> 32;
-  }
-  if (!carry) return b;
-  fsh_big *grown = fsh_big_new(b->length + 1);
-  memcpy(grown->limbs, b->limbs, b->length * sizeof(uint32_t));
-  grown->limbs[b->length] = (uint32_t)carry;
-  fsh_rt_free(b);
-  return grown;
-}
-
-// A literal's decimal digits, an optional '-' first.
-fsh_big *fsh_rt_big_from_text(const char *text) {
-  int negative = *text == '-';
-  fsh_big *b = fsh_big_new(0);
-  for (const char *p = text + negative; *p; p++) b = fsh_big_mul_add(b, 10, (uint32_t)(*p - '0'));
-  return fsh_big_trim(b, negative);
 }
 
 static int fsh_mag_cmp(const fsh_big *a, const fsh_big *b) {
@@ -1969,6 +1948,12 @@ fsh_str *fsh_rt_big_text(const fsh_big *a, int64_t radix) {
   fsh_str *s = fsh_rt_str_from_cstring(digits + at);
   fsh_rt_free(digits);
   return s;
+}
+
+// toString(radix), with JavaScript's RangeError for a radix it has no digits for.
+fsh_str *fsh_rt_big_to_string(const fsh_big *a, int64_t radix, const char *where) {
+  if (radix < 2 || radix > 36) fsh_big_panic(where, "toString() radix must be between 2 and 36\n");
+  return fsh_rt_big_text(a, radix);
 }
 
 // The low 128 bits of the value's two's complement, which 'as' truncates to its type.

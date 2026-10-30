@@ -757,7 +757,8 @@ function interpreter() {
     const v = unwrap(expr(f, e.operand));
     const type = typeOf(f, e);
     if (e.op === "!") return !v;
-    if (e.op === "typeof") return typeofValue(v);
+    if (e.op === "typeof") return typeOf(f, e.operand) === "bigint" ? "bigint" : typeofValue(v);
+    if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
     if (e.op === "-") return typeof v === "number" ? fit(-v, type as "f32" | "f64") : checked(-(v as bigint), type as Integer, "negate", e);
     if (e.op === "~") return wrap(~(v as bigint), type as Integer);
     return unsupported(`'${e.op}'`, e);
@@ -922,6 +923,26 @@ function interpreter() {
   }
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
+  // A bigint's operators as JavaScript has them, panicking where it throws a RangeError.
+  function bigNumeric(op: string, a: bigint, b: bigint, at: Span): Value {
+    if ((op === "/" || op === "%") && b === 0n) panic("Division by zero", at);
+    if (op === "**" && b < 0n) panic("Exponent must be non-negative", at);
+    switch (op) {
+      case "+": return a + b;
+      case "-": return a - b;
+      case "*": return a * b;
+      case "/": return a / b;
+      case "%": return a % b;
+      case "**": return a ** b;
+      case "&": return a & b;
+      case "|": return a | b;
+      case "^": return a ^ b;
+      case "<<": return a << b;
+      case ">>": return a >> b;
+    }
+    return unsupported(`'${op}' on 'bigint'`, at);
+  }
+
   function numeric(op: string, a: bigint | number, b: bigint | number, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
@@ -929,6 +950,7 @@ function interpreter() {
       if (v === undefined) return unsupported(`'${op}' on floats`, at);
       return fit(v, type as "f32" | "f64");
     }
+    if (type === "bigint") return bigNumeric(op, a as bigint, b as bigint, at);
     if (!isInteger(type)) return unsupported(`'${op}' on '${show(type)}'`, at);
     const { bits, signed } = INTEGERS[type];
     switch (op) {

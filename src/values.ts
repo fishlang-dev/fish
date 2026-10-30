@@ -1075,6 +1075,13 @@ export function expressions(ctx: Context) {
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
+    // A bigint's digits, in base 10 or the radix given.
+    if (callee.kind === "member" && receiver === "bigint") {
+      if (callee.name !== "toString") throw new CompileError(`'bigint' has no method '${callee.name}'`, callee.start, callee.end);
+      if (e.args.length > 1) throw new CompileError("'toString' takes at most a radix", e.start, e.end);
+      if (e.args[0]) coerce(e.args[0], value(e.args[0]), "i64", "a radix is an 'i64' from 2 to 36");
+      return { type: "string", what: "'toString'" };
+    }
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
@@ -1279,6 +1286,14 @@ export function expressions(ctx: Context) {
       needsUnsafe("'nullPtr'", callee);
       if (e.typeArgs.length !== 1 || e.args.length > 0) throw new CompileError("'nullPtr' takes the type it points to, like 'nullPtr<u8>()'", e.start, e.end);
       return { type: pointerType(resolveType(e.typeArgs[0]!), true), what: "'nullPtr'" };
+    }
+    // `BigInt(x)`: an integer of any size as a bigint. A float is refused rather than checked
+    // for a fraction while the program runs.
+    if (callee.kind === "ident" && callee.name === "BigInt" && !byName.has("BigInt")) {
+      if (e.args.length !== 1) throw new CompileError("'BigInt' takes 1 argument", e.start, e.end);
+      const t = operand(e.args[0]!);
+      if (t !== "bigint" && !isInteger(t)) throw new CompileError(`'BigInt' takes an integer, not '${show(t)}'${isFloat(t) ? "; convert the float with 'as i64' first" : ""}`, e.args[0]!.start, e.args[0]!.end);
+      return { type: "bigint", what: "'BigInt'" };
     }
     // `String(x)`: a string, number or boolean written as JavaScript writes it.
     if (callee.kind === "ident" && callee.name === "String" && (!byName.has("String") || inStd)) {
@@ -4117,6 +4132,10 @@ export function expressions(ctx: Context) {
           }
           return to;
         }
+        // A bigint becomes a number with 'as', truncated to an integer type's bits as
+        // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
+        if (to === "bigint" && from !== "bigint") throw new CompileError(`'${show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
+        if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
         if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
           throw unsupported("'as' conversions other than between numbers", e);
         }

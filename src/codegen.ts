@@ -501,6 +501,26 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
+  // A bigint as a number: an integer from its low bits, a float rounded to the nearest; another
+  // bigint is another reference to it.
+  function bigTo(v: string, to: Type): string {
+    if (to === "bigint") return v;
+    const result = temp();
+    if (isFloat(to)) {
+      emit(`${result} = call double @fsh_rt_big_f64(ptr ${v})`);
+      if (to === "f64") return result;
+      const narrow = temp();
+      emit(`${narrow} = fptrunc double ${result} to float`);
+      return narrow;
+    }
+    emit(`${result} = call i128 @fsh_rt_big_low(ptr ${v})`);
+    const { bits } = INTEGERS[to as Integer];
+    if (bits === 128) return result;
+    const narrow = temp();
+    emit(`${narrow} = trunc i128 ${result} to i${bits}`);
+    return narrow;
+  }
+
   // A new bigint from an operator on two, made by the runtime.
   function bigOperate(op: BinaryOp, a: string, b: string, at: Expr): string {
     const result = temp();
@@ -5767,9 +5787,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "pipe":
         return true;
       // An awaited future gives its value over.
-      // A bigint's literal and every operator on one make a new one.
-      case "bigint":
-        return true;
+      // Every operator on a bigint makes a new one; a literal is a constant.
       case "unary":
         return e.op === "await" || types.get(e) === "bigint";
       case "binary":
@@ -6368,6 +6386,29 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         const lock = temp();
         emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
         return lockUpdate(e, interiorType("Lock", t.of), lock);
+      }
+      // `BigInt(x)`: a new bigint of an integer, extended to 128 bits by its sign.
+      if (e.callee.kind === "ident" && e.callee.name === "BigInt" && !calls.has(e)) {
+        const from = valueType(e.args[0]!);
+        const v = value(e.args[0]!);
+        if (from === "bigint") return copied(v, from);
+        const { bits, signed } = INTEGERS[from as Integer];
+        let wide = v;
+        if (bits < 128) {
+          wide = temp();
+          emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i128`);
+        }
+        const made = temp();
+        emit(signed ? `${made} = call ptr @fsh_rt_big_from_i128(i128 ${wide})` : `${made} = call ptr @fsh_rt_big_from_u128(i128 ${wide}, i32 0)`);
+        if (!types.has(e)) pending.push({ v: made, type: "bigint" });
+        return made;
+      }
+      if (e.callee.kind === "member" && e.callee.name === "toString" && valueType(e.callee.object) === "bigint") {
+        const radix = e.args[0] ? value(e.args[0]) : "10";
+        const made = temp();
+        unwinding(`call ptr @fsh_rt_big_to_string(ptr ${value(e.callee.object)}, i64 ${radix}, ptr ${panicAt(e)})`, made);
+        if (!types.has(e)) pending.push({ v: made, type: "string" });
+        return made;
       }
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
@@ -8198,15 +8239,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "float":
         return floatConstant(e.value, types.get(e) as "f32" | "f64");
-      case "bigint": {
-        const made = temp();
-        emit(`${made} = call ptr @fsh_rt_big_from_text(ptr ${cString(String(e.value))})`);
-        return made;
-      }
+      case "bigint":
+        return bigConstant(e.value);
       case "regex":
         return regex(types.get(e) as RegexType);
       case "as": {
         const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
+        if (from === "bigint") return bigTo(value(e.expr), to);
         const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
         if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
         // A raw pointer is an address: another pointer is the same one, and an integer is its
@@ -8433,10 +8472,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           const type = types.get(e)!;
           if (type === "bigint") {
             // The old value outlives the store that releases the place's hold on it.
-            const [one, kept] = [temp(), copied(old, type)];
-            emit(`${one} = call ptr @fsh_rt_big_from_text(ptr ${cString("1")})`);
-            const result = bigOperate(e.op === "++" ? "+" : "-", old, one, e);
-            emit(`call void @fsh_rt_big_release(ptr ${one})`);
+            const kept = copied(old, type);
+            const result = bigOperate(e.op === "++" ? "+" : "-", old, bigConstant(1n), e);
             store(e.operand, result);
             if (e.prefix) {
               emit(`call void @fsh_rt_big_release(ptr ${kept})`);
@@ -8862,6 +8899,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof v === "string") return text(v);
     if (typeof v === "boolean") return String(v);
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
+    if (typeof v === "bigint" && type === "bigint") return bigConstant(v);
     if (typeof v === "bigint") return String(v);
     // An Atomic is its value; an atomic boolean a byte. A Lock is its word, free, then its value.
     if (v && typeof type !== "string" && v.kind === "interior" && type.kind === "interior") {
@@ -9138,6 +9176,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const name = `@.regex.${stableId("regex", key)}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);
+    return name;
+  }
+
+  // A bigint known while compiling, as a constant the runtime never counts or frees.
+  function bigConstant(value: bigint): string {
+    const key = String(value);
+    const made = texts.get(`bigint ${key}`);
+    if (made) return made;
+    const limbs: bigint[] = [];
+    for (let m = value < 0n ? -value : value; m > 0n; m >>= 32n) limbs.push(m & 0xffffffffn);
+    const name = `@.bigint.${stableId("bigint constant", key, key)}`;
+    texts.set(`bigint ${key}`, name);
+    const words = limbs.length === 0 ? "i32 0" : limbs.map((l) => `i32 ${BigInt.asIntN(32, l)}`).join(", ");
+    globals.push(`${name} = private unnamed_addr constant { i64, i32, i64, [${Math.max(limbs.length, 1)} x i32] } { i64 -1, i32 ${value < 0n ? 1 : 0}, i64 ${limbs.length}, [${Math.max(limbs.length, 1)} x i32] [${words}] }`);
     return name;
   }
 

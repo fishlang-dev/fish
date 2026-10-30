@@ -840,7 +840,8 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
 // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
 // `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
 export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
-  if (typeof t === "string") return t === "void" || t === "never" ? t : undefined;
+  // JavaScript throws for a bigint, which JSON has no number for.
+  if (typeof t === "string") return t === "void" || t === "never" || t === "bigint" ? t : undefined;
   if (seen.has(t)) return undefined;
   seen.add(t);
   const part = (u: Type) => unjson(u, json, seen);
