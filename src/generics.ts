@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -349,6 +349,16 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     return found;
   }
 
+  // A concrete instance's symbol: its name and a hash of its type arguments, rather than a count,
+  // so it is the same in every program using it. Arguments shown alike get numbered suffixes.
+  function instanceSymbol(name: string, bindings: Map<string, Type>, others: Map<string, Instance>): string {
+    const stem = `${name}#${digest([...bindings].map(([k, t]) => `${k}=${described(t)}`).join(","))}`;
+    const symbols = new Set([...others.values()].map((i) => i.symbol));
+    let symbol = stem;
+    for (let n = 1; symbols.has(symbol); n++) symbol = `${stem}.${n}`;
+    return symbol;
+  }
+
   // A member of a generic class's instance runs with the class's type arguments in scope.
   function instanceOf(f: Body, bindings = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
@@ -360,9 +370,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
-      const count = [...byKey.values()].filter((i) => i.concrete).length;
       found = {
-        body: f, symbol: generic && isConcrete ? `${f.name}#${count}` : f.name, bindings, concrete: isConcrete,
+        body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
         types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(), copiesOut: new Set(),
       };

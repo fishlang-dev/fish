@@ -1,4 +1,9 @@
+import { deserialize, serialize } from "bun:jsc";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { AST } from "./ast.ts";
+import { cacheDir, partial } from "./mathlib.ts";
 import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -2897,9 +2902,49 @@ class JsError extends Error {
 export const STD_SOURCE = PRELUDE + HTTP + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
 export const STD_FILE = "<fish std>";
 
+// A hash of the std source, the compiler's own sources and Bun's version, which decides the
+// serialization format, so no other parser's tree is ever loaded.
+export function stdKey(source: string, dir: string): string {
+  const hash = createHash("sha256").update(Bun.version).update("\0").update(source);
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".ts")).sort()) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
+  return hash.digest("hex").slice(0, 16);
+}
+
+// How many times this process has parsed std rather than loading its tree.
+export const stdParses = { count: 0 };
+
+let stdTree: { path: string; bytes: Uint8Array } | undefined;
+let key: string | undefined;
+
+// std's parsed tree, serialized: kept in memory, else read from the cache, else parsed and
+// written there. A cache that can't be read or written only costs the parse.
+function stdBytes(): Uint8Array {
+  const path = join(cacheDir(), "std", `ast-${(key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
+  if (stdTree?.path === path) return stdTree.bytes;
+  let bytes: Uint8Array | undefined;
+  try {
+    bytes = readFileSync(path);
+    if (!Array.isArray(deserialize(bytes))) bytes = undefined;
+  } catch {
+    bytes = undefined;
+  }
+  if (bytes === undefined) {
+    stdParses.count++;
+    bytes = new Uint8Array(serialize(parse(STD_SOURCE)));
+    try {
+      const temp = partial(path);
+      writeFileSync(temp, bytes);
+      renameSync(temp, path);
+    } catch {}
+  }
+  stdTree = { path, bytes };
+  return bytes;
+}
+
 // The std statements a program is checked with, their spans moved past its own.
 export function stdFor(written: Stmt[]): Stmt[] {
-  const all = parse(STD_SOURCE);
+  // Each call takes its own copy, since the passes below change the tree.
+  const all: Stmt[] = deserialize(stdBytes());
   shiftSpans(all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
