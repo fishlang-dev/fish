@@ -149,6 +149,33 @@ function main() {
   const Headers = 0;
   console.log(Headers);
 }
+// case: http_own_fetch
+// expect: mine /a
+// expect: listening
+// A program's own fetch beside serve is the one it calls, and the HTTP library stays.
+function fetch(path: string): string { return "mine " + path; }
+async function main(): Promise<void> {
+  console.log(fetch("/a"));
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req) => new Response("hi")));
+  while (found.port.load() === 0) await sleep(1);
+  console.log("listening");
+}
+// case: http_own_fetch_const
+// expect: mine 200
+// A program's own fetch constant beside the HTTP library is the one it reads.
+const fetch = "mine";
+async function main(): Promise<void> {
+  console.log(fetch, new Response("hi").status);
+}
+// case: http_own_fetch_const_alone
+// expect: mine
+// A program's own fetch constant, with no HTTP library, is the one it reads.
+const fetch = "mine";
+function main() {
+  console.log(fetch);
+}
 // case: http_own_names
 // expect: mine /a
 // A program declaring its own Request doesn't get the std HTTP library, so nothing clashes.

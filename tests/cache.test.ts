@@ -236,6 +236,15 @@ test("a change to std or to a compiler source is a new key for std's tree", () =
   expect(stdKey(STD_SOURCE, src)).not.toBe(before);
 });
 
+test("std's tree has no key where no compiler source can be read", () => {
+  const bare = join(root, "no-sources");
+  mkdirSync(bare, { recursive: true });
+  writeFileSync(join(bare, "fishc"), "a single-file executable");
+  expect(stdKey(STD_SOURCE, bare)).toBeNull();
+  expect(stdKey(STD_SOURCE, join(root, "missing"))).toBeNull();
+  expect(stdKey(STD_SOURCE, join(import.meta.dir, "..", "src"))).toMatch(/^[0-9a-f]{16}$/);
+});
+
 // Runs `run` with the cache at `cache`.
 async function cachedInAsync(cache: string, run: () => Promise<void>) {
   const was = process.env.FISH_CACHE_DIR;
@@ -313,6 +322,36 @@ async function bothWays(file: string, src: string) {
   };
   return [await run(split), await run(whole)];
 }
+
+// Each compile in a process starts from the same type state, so a program compiled again after
+// others gives the same IR: union order, tags and glue names don't depend on what came before.
+test("compiling the same programs again in one process gives identical IR", () => {
+  const json = readFileSync(join(import.meta.dir, "programs", "json.fsh"), "utf8");
+  const failures = join(root, "json_parse_failures.fsh");
+  writeFileSync(failures, json.split(/^\/\/ case: json_parse_failures$/m)[1]!.split(/^\/\/ case: /m)[0]!);
+  const programs = [{ file: failures, src: readFileSync(failures, "utf8") }, ...sampled()];
+  const rounds = [0, 1, 2].map(() => programs.map((p) => compile(p.src, p.file)));
+  for (const [i, p] of programs.entries()) {
+    expect({ file: p.file, ir: rounds[1]![i] }).toEqual({ file: p.file, ir: rounds[0]![i] });
+    expect({ file: p.file, ir: rounds[2]![i] }).toEqual({ file: p.file, ir: rounds[0]![i] });
+  }
+});
+
+// A process that builds many times, as a test runner or a daemon does, gives std's part the same
+// text each time a program is built again, so it links the object it cached the first time.
+test("a long-lived process reuses std's object when it builds a program again", async () => {
+  const cache = join(root, "long-lived");
+  const file = join(root, "long-lived.fsh");
+  writeFileSync(file, readFileSync(HTTP_PROGRAM, "utf8"));
+  const others = sampled().slice(0, 5);
+  await cachedInAsync(cache, async () => {
+    await buildAsync(file, join(root, "long-lived-1"));
+    const first = stdObjects(cache);
+    for (const p of others) compile(p.src, p.file);
+    await buildAsync(file, join(root, "long-lived-2"));
+    expect(stdObjects(cache)).toEqual(first);
+  });
+});
 
 test("split and one-module dev builds of sampled test programs behave alike", async () => {
   const programs = sampled();

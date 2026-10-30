@@ -53,8 +53,13 @@ function dataEnum(node: EnumNode): EnumInfo {
 
 const I64_MAX = (1n << 63n) - 1n;
 
-// Tells enums of one name in different programs apart, since literal types are shared.
+// Tells enums of one name apart, since literal types are shared within a compile.
 let enums = 0;
+
+// Numbers a compile's enums from the start, as its types are.
+export function resetEnums() {
+  enums = 0;
+}
 
 function constant(e: Expr): bigint | string {
   if (e.kind === "int" || e.kind === "string") return e.value;

@@ -908,6 +908,27 @@ const unions = new Map<string, UnionType>();
 const keys = new Map<Exclude<Type, string>, string>();
 let declared = 0;
 
+// The type tables as the compiler's modules left them once loaded, before any compile: the types
+// their tables of built-in signatures hold.
+let loaded: { declared: number; tables: [Map<unknown, unknown>, [unknown, unknown][]][] } | undefined;
+
+// Starts a compile's types from the state every compile starts from. Keys number types in the
+// order they are declared and order unions' members, so a compile numbering on from an earlier
+// one's would lay its unions out differently; and the tables, keyed by those numbers, would
+// otherwise grow in a process that compiles many times.
+export function resetTypes() {
+  const tables: Map<unknown, unknown>[] = [patterns, interiors, shareds, dyns, callables, blocks, leaves, handles, promises, lent, regexes, pointers, interned, literals, unions, keys, generators, genericValues, refs, fixeds, arrays, maps, variants, wrappers];
+  if (loaded === undefined) {
+    loaded = { declared, tables: tables.map((table) => [table, [...table]]) };
+    return;
+  }
+  declared = loaded.declared;
+  for (const [table, entries] of loaded.tables) {
+    table.clear();
+    for (const [k, v] of entries) table.set(k, v);
+  }
+}
+
 // A class's key is unique to its declaration, since two programs may reuse a class name.
 export function classType(name: string, generic?: ClassType["generic"]): ClassType {
   const t: ClassType = { kind: "class", name, fields: [], generic };

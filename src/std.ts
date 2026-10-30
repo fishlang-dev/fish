@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
-import { parse, shiftSpans, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type Pattern, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -382,20 +382,6 @@ class Response {
   async json<T>(): Promise<T> throws JsonError {
     return JSON.parse<T>(this.body);
   }
-}
-
-// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
-// is a response, not an error, and a redirect is returned rather than followed.
-async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
-  const req = Http1.fetched(input, init);
-  const signal = req.signal.clone();
-  const to = Http1.target(req.url);
-  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
-  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
-  await conn.write(sent, signal.clone());
-  let res = await Http1.receive(conn, req.method === "HEAD", signal);
-  res.url = to.url;
-  return res;
 }
 
 type ServeInfo = { hostname: string; port: i64 };
@@ -779,34 +765,6 @@ class Http1 {
     return headers;
   }
 
-  // fetch's request: a Request given, with what init sets in place of its own.
-  static fetched(input: string | Request | URL, init?: RequestInit): Request {
-    if (typeof input === "string") return new Request(input, init);
-    if (input instanceof URL) return new Request(input.href, init);
-    let req = input;
-    if (init !== null) {
-      const m = init.method;
-      if (m !== null) req.method = m.toUpperCase();
-      const h = init.headers;
-      if (h !== null) req.headers = h;
-      const b = init.body;
-      if (b !== null) req.body = b;
-      const s = init.signal;
-      if (s !== null) req.signal = s;
-    }
-    return req;
-  }
-
-  // Where an http: URL points: host and port to connect to, the Host header, the path and query
-  // sent, and the URL without its fragment.
-  static target(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
-    const parsed = __urlFetchTarget(url);
-    if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
-    const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
-    const query = parsed.hasQuery ? "?" + parsed.query : "";
-    return { host: parsed.host.clone(), port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
-  }
-
   // A request's line, headers and body, as fetch sends it: the caller's headers in their order,
   // the framing and Host its own.
   static requestText(req: Ref<Request>, authority: string, path: string): string throws IoError {
@@ -1002,7 +960,8 @@ class Http1 {
       const c = text.charCodeAt(i) as i64;
       if (c <= 32 || c === 47 || c === 63 || c === 35 || c === 64 || c === 44 || c === 92 || c === 127) return false;
     }
-    return typeof __urlParse("http://" + text + "/", null) !== "string";
+    let url = __urlEmpty();
+    return __urlHostPort(__urlPoints(text), url, true).length === 0;
   }
 
   // Whether a response can go out as it stands: a status the Fetch API allows, and a status
@@ -1064,8 +1023,69 @@ class Http1 {
 }
 `;
 
-// The URL Standard's URL and URLSearchParams.
-const URL_LIB = String.raw`
+// fetch, whose URLs the URL library's parser reads.
+const FETCH = `
+// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
+// is a response, not an error, and a redirect is returned rather than followed.
+async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const req = __urlFetchRequest(input, init);
+  const signal = req.signal.clone();
+  const to = __urlFetchAddress(req.url);
+  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  let res = await Http1.receive(conn, req.method === "HEAD", signal);
+  res.url = to.url;
+  return res;
+}
+
+// fetch's request: a Request given, with what init sets in place of its own.
+function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): Request {
+  if (typeof input === "string") return new Request(input, init);
+  if (input instanceof URL) return new Request(input.href, init);
+  let req = input;
+  if (init !== null) {
+    const m = init.method;
+    if (m !== null) req.method = m.toUpperCase();
+    const h = init.headers;
+    if (h !== null) req.headers = h;
+    const b = init.body;
+    if (b !== null) req.body = b;
+    const s = init.signal;
+    if (s !== null) req.signal = s;
+  }
+  return req;
+}
+
+// Where an http: URL points: host and port to connect to, the Host header, the path and query
+// sent, and the URL without its fragment.
+function __urlFetchAddress(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+  const parsed = __urlFetchTarget(url);
+  if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
+  const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
+  const query = parsed.hasQuery ? "?" + parsed.query : "";
+  return { host: parsed.host.clone(), port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+}
+`;
+
+// A request's path in a program without the URL library, whose requests all come from the server.
+const SERVED = String.raw`
+// A request's path, read with the parser's path rules from its URL as the server writes it:
+// "http://", a Host header the server checked, and a target starting with '/'.
+function __urlRequestPath(url: string): string {
+  const input = __urlInput(url);
+  let p: i64 = 7;
+  while (p < (input.length as i64) && input[p as usize] !== 47) p++;
+  let record = __urlEmpty();
+  record.scheme = "http";
+  const begun: u8[] = [];
+  __urlReadPath(input, p + 1, record, begun, true);
+  return __urlPathText(record);
+}
+`;
+
+// The URL Standard's pieces the HTTP server reads requests with: hosts, paths and decoding.
+const URL_CORE = String.raw`
 // The URL Standard's URL record, as the parser builds it. A part that may be missing has a flag
 // saying whether it is there; a port of -1 is none.
 type __urlRecord = { scheme: string; username: string; password: string; host: string; hasHost: boolean; port: i64; path: string[]; opaque: boolean; query: string; hasQuery: boolean; fragment: string; hasFragment: boolean };
@@ -1105,10 +1125,6 @@ function __urlPoints(s: string): i64[] {
 
 function __urlAt(points: Ref<i64[]>, i: i64): i64 {
   return i >= 0 && i < (points.length as i64) ? points[i as usize] : -1;
-}
-
-function __urlSpecial(scheme: string): boolean {
-  return scheme === "http" || scheme === "https" || scheme === "ws" || scheme === "wss" || scheme === "ftp" || scheme === "file";
 }
 
 function __urlDefaultPort(scheme: string): i64 {
@@ -1181,13 +1197,6 @@ function __urlPutByte(out: Mut<u8[]>, b: i64, escape: boolean) {
   out.push((low < 10 ? 48 + low : 55 + low) as u8);
 }
 
-// Code points as a string.
-function __urlString(points: Ref<i64[]>): string {
-  let out: u8[] = [];
-  for (const c of points) __urlPut(out, c, "none");
-  return __urlText(out);
-}
-
 // Bytes with each '%' and two hex digits read as the byte they name.
 function __urlPercentDecode(bytes: Ref<u8[]>): u8[] {
   let out: u8[] = [];
@@ -1217,15 +1226,6 @@ function __urlDrive(s: string, normalized: boolean): boolean {
   if (s.length !== 2 || !__urlAlpha(s.charCodeAt(0) as i64)) return false;
   const c = s.charCodeAt(1) as i64;
   return c === 58 || (!normalized && c === 124);
-}
-
-// Whether the code points from i start with a Windows drive letter ending there or before a
-// '/', '\', '?' or '#'.
-function __urlStartsWithDrive(input: Ref<i64[]>, i: i64): boolean {
-  const second = __urlAt(input, i + 1);
-  if (!__urlAlpha(__urlAt(input, i)) || (second !== 58 && second !== 124)) return false;
-  const third = __urlAt(input, i + 2);
-  return third === -1 || third === 47 || third === 92 || third === 63 || third === 35;
 }
 
 // Drops a path's last segment, except a file URL's drive letter.
@@ -1471,12 +1471,65 @@ function __urlIpv6Text(address: Ref<i64[]>): string {
   return out;
 }
 
-// The URL Standard's basic URL parser, without a state override: a URL record, or the message
-// of the TypeError for an input that isn't a URL.
-function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string {
-  const failure = "Invalid URL";
+// Percent-encoded UTF-8 decoded, as decodeURIComponent does, or null for a '%' without two hex
+// digits after it or bytes that aren't UTF-8.
+function __urlDecodeStrict(text: string): string | null {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] !== 37) {
+      out.push(bytes[i]);
+      i += 1;
+      continue;
+    }
+    if (i + 2 >= bytes.length + 0 || __urlHexValue(bytes[i + 1] as i64) < 0 || __urlHexValue(bytes[i + 2] as i64) < 0) return null;
+    out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
+    i += 3;
+  }
+  if (!__urlUtf8Valid(out)) return null;
+  return new TextDecoder().decode(out);
+}
+
+// Whether bytes are well-formed UTF-8: no overlong forms, surrogates or code points past U+10FFFF.
+function __urlUtf8Valid(bytes: Ref<u8[]>): boolean {
+  const n = bytes.length as i64;
+  let i: i64 = 0;
+  while (i < n) {
+    const b = bytes[i as usize] as i64;
+    let need: i64 = 0;
+    let low: i64 = 0x80;
+    let high: i64 = 0xBF;
+    if (b < 0x80) need = 0;
+    else if (b >= 0xC2 && b <= 0xDF) need = 1;
+    else if (b === 0xE0) { need = 2; low = 0xA0; }
+    else if (b === 0xED) { need = 2; high = 0x9F; }
+    else if (b >= 0xE1 && b <= 0xEF) need = 2;
+    else if (b === 0xF0) { need = 3; low = 0x90; }
+    else if (b === 0xF4) { need = 3; high = 0x8F; }
+    else if (b >= 0xF1 && b <= 0xF3) need = 3;
+    else return false;
+    if (i + need >= n) return false;
+    for (let k: i64 = 1; k <= need; k++) {
+      const c = bytes[(i + k) as usize] as i64;
+      if (c < (k === 1 ? low : 0x80) || c > (k === 1 ? high : 0xBF)) return false;
+    }
+    i += need + 1;
+  }
+  return true;
+}
+
+// A URL's path as its pathname gives it.
+function __urlPathText(url: Ref<__urlRecord>): string {
+  if (url.opaque) return url.path[0];
+  if (url.path.length === 0) return "";
+  return "/" + url.path.join("/");
+}
+
+// The code points a URL is parsed from: its leading and trailing C0 controls and spaces gone,
+// then every tab and newline.
+function __urlInput(raw: string): i64[] {
   const all = __urlPoints(raw);
-  // Leading and trailing C0 controls and spaces go, then every tab and newline.
   let first: i64 = 0;
   let end = all.length as i64;
   while (first < end && all[first as usize] <= 32) first++;
@@ -1487,6 +1540,94 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
     const c = all[i as usize];
     if (c !== 9 && c !== 10 && c !== 13) input.push(c);
   }
+  return input;
+}
+
+// The parser's path state: reads segments into url from p, the first begun in segment, up to the
+// '?', '#' or end that ends the path, and gives where that is.
+function __urlReadPath(input: Ref<i64[]>, start: i64, url: Mut<__urlRecord>, begun: u8[], special: boolean): i64 {
+  let segment = begun;
+  let p = start;
+  while (true) {
+    const c = __urlAt(input, p);
+    // '/', or '\' in a special URL, which the parser takes for one.
+    const slash = c === 47 || (special && c === 92);
+    if (c === -1 || slash || c === 63 || c === 35) {
+      let text = __urlText(segment);
+      segment = [];
+      if (__urlDoubleDot(text)) {
+        __urlShorten(url);
+        if (!slash) url.path.push("");
+      } else if (__urlSingleDot(text) && !slash) url.path.push("");
+      else if (!__urlSingleDot(text)) {
+        if (url.scheme === "file" && url.path.length === 0 && __urlDrive(text, false)) text = text.slice(0, 1) + ":";
+        url.path.push(text);
+      }
+      if (!slash) return p;
+    } else __urlPut(segment, c, "path");
+    p++;
+  }
+}
+
+// The parser's host and port states over the code points between an authority's user info and
+// its end: the URL's host and port set, or the message of the failure.
+function __urlHostPort(points: Ref<i64[]>, url: Mut<__urlRecord>, special: boolean): string {
+  const failure = "Invalid URL";
+  const n = points.length as i64;
+  // The host ends at the first ':' outside brackets.
+  let end = n;
+  let brackets = false;
+  for (let i: i64 = 0; i < n && end === n; i++) {
+    const c = points[i as usize];
+    if (c === 58 && !brackets) end = i;
+    else if (c === 91) brackets = true;
+    else if (c === 93) brackets = false;
+  }
+  if (end === 0 && (end < n || special)) return failure;
+  const host = __urlHostOf(points.slice(0, end), special);
+  if (host.error.length > 0) return host.error;
+  url.host = host.host;
+  url.hasHost = true;
+  if (end + 1 >= n) return "";
+  let port: i64 = 0;
+  for (let i = end + 1; i < n; i++) {
+    const d = points[i as usize];
+    if (!__urlDigit(d)) return failure;
+    port = port * 10 + (d - 48);
+    if (port > 65535) return failure;
+  }
+  url.port = port === __urlDefaultPort(url.scheme) ? -1 : port;
+  return "";
+}
+`;
+
+// The URL Standard's parser, URL and URLSearchParams.
+const URL_LIB = String.raw`
+function __urlSpecial(scheme: string): boolean {
+  return scheme === "http" || scheme === "https" || scheme === "ws" || scheme === "wss" || scheme === "ftp" || scheme === "file";
+}
+
+// Code points as a string.
+function __urlString(points: Ref<i64[]>): string {
+  let out: u8[] = [];
+  for (const c of points) __urlPut(out, c, "none");
+  return __urlText(out);
+}
+
+// Whether the code points from i start with a Windows drive letter ending there or before a
+// '/', '\', '?' or '#'.
+function __urlStartsWithDrive(input: Ref<i64[]>, i: i64): boolean {
+  const second = __urlAt(input, i + 1);
+  if (!__urlAlpha(__urlAt(input, i)) || (second !== 58 && second !== 124)) return false;
+  const third = __urlAt(input, i + 2);
+  return third === -1 || third === 47 || third === 92 || third === 63 || third === 35;
+}
+
+// The URL Standard's basic URL parser, without a state override: a URL record, or the message
+// of the TypeError for an input that isn't a URL.
+function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string {
+  const failure = "Invalid URL";
+  const input = __urlInput(raw);
   const hasBase = base !== null;
   const b = base ?? __urlEmpty();
   let url = __urlEmpty();
@@ -1506,8 +1647,6 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
   const PATH = 12;
   const RELATIVE_SLASH = 13;
   const QUERY = 14;
-  const HOST = 15;
-  const PORT = 16;
   const PATH_START = 17;
   const FILE_SLASH = 18;
   const FILE_HOST = 19;
@@ -1525,7 +1664,6 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
   let opaqueRead = false;
   let queryRead = false;
   let atSign = false;
-  let brackets = false;
   let passwordToken = false;
   let special = false;
   let p: i64 = 0;
@@ -1661,48 +1799,12 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
         buffer = [];
       } else if (c === -1 || slash || c === 63 || c === 35) {
         if (atSign && buffer.length === 0) return failure;
-        p -= (buffer.length as i64) + 1;
+        const error = __urlHostPort(buffer, url, special);
+        if (error.length > 0) return error;
         buffer = [];
-        state = HOST;
+        state = PATH_START;
+        p--;
       } else buffer.push(c);
-    } else if (state === HOST) {
-      if (c === 58 && !brackets) {
-        if (buffer.length === 0) return failure;
-        const host = __urlHostOf(buffer, special);
-        if (host.error.length > 0) return host.error;
-        url.host = host.host;
-        url.hasHost = true;
-        buffer = [];
-        state = PORT;
-      } else if (c === -1 || slash || c === 63 || c === 35) {
-        p--;
-        if (special && buffer.length === 0) return failure;
-        const host = __urlHostOf(buffer, special);
-        if (host.error.length > 0) return host.error;
-        url.host = host.host;
-        url.hasHost = true;
-        buffer = [];
-        state = PATH_START;
-      } else {
-        if (c === 91) brackets = true;
-        if (c === 93) brackets = false;
-        buffer.push(c);
-      }
-    } else if (state === PORT) {
-      if (__urlDigit(c)) buffer.push(c);
-      else if (c === -1 || slash || c === 63 || c === 35) {
-        if (buffer.length > 0) {
-          let port: i64 = 0;
-          for (const d of buffer) {
-            port = port * 10 + (d - 48);
-            if (port > 65535) return failure;
-          }
-          url.port = port === __urlDefaultPort(url.scheme) ? -1 : port;
-          buffer = [];
-        }
-        state = PATH_START;
-        p--;
-      } else return failure;
     } else if (state === FILE) {
       url.scheme = "file";
       special = __urlSpecial(url.scheme);
@@ -1780,25 +1882,16 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
         if (c !== 47) p--;
       }
     } else if (state === PATH) {
-      if (c === -1 || slash || c === 63 || c === 35) {
-        let text = __urlText(segment);
-        segment = [];
-        if (__urlDoubleDot(text)) {
-          __urlShorten(url);
-          if (!slash) url.path.push("");
-        } else if (__urlSingleDot(text) && !slash) url.path.push("");
-        else if (!__urlSingleDot(text)) {
-          if (url.scheme === "file" && url.path.length === 0 && __urlDrive(text, false)) text = text.slice(0, 1) + ":";
-          url.path.push(text);
-        }
-        if (c === 63) {
-          queryRead = true;
-          state = QUERY;
-        } else if (c === 35) {
-          url.hasFragment = true;
-          state = FRAGMENT;
-        }
-      } else __urlPut(segment, c, "path");
+      p = __urlReadPath(input, p, url, segment, special);
+      segment = [];
+      const end = __urlAt(input, p);
+      if (end === 63) {
+        queryRead = true;
+        state = QUERY;
+      } else if (end === 35) {
+        url.hasFragment = true;
+        state = FRAGMENT;
+      }
     } else if (state === OPAQUE_PATH) {
       if (c === 63) {
         queryRead = true;
@@ -1854,61 +1947,6 @@ function __urlFetchTarget(url: string): __urlRecord | string {
   if (parsed.host.startsWith("[")) return "IPv6 hosts aren't supported yet";
   if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
   return parsed;
-}
-
-// Percent-encoded UTF-8 decoded, as decodeURIComponent does, or null for a '%' without two hex
-// digits after it or bytes that aren't UTF-8.
-function __urlDecodeStrict(text: string): string | null {
-  const bytes = new TextEncoder().encode(text);
-  let out: u8[] = [];
-  let i: usize = 0;
-  while (i < bytes.length) {
-    if (bytes[i] !== 37) {
-      out.push(bytes[i]);
-      i += 1;
-      continue;
-    }
-    if (i + 2 >= bytes.length + 0 || __urlHexValue(bytes[i + 1] as i64) < 0 || __urlHexValue(bytes[i + 2] as i64) < 0) return null;
-    out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
-    i += 3;
-  }
-  if (!__urlUtf8Valid(out)) return null;
-  return new TextDecoder().decode(out);
-}
-
-// Whether bytes are well-formed UTF-8: no overlong forms, surrogates or code points past U+10FFFF.
-function __urlUtf8Valid(bytes: Ref<u8[]>): boolean {
-  const n = bytes.length as i64;
-  let i: i64 = 0;
-  while (i < n) {
-    const b = bytes[i as usize] as i64;
-    let need: i64 = 0;
-    let low: i64 = 0x80;
-    let high: i64 = 0xBF;
-    if (b < 0x80) need = 0;
-    else if (b >= 0xC2 && b <= 0xDF) need = 1;
-    else if (b === 0xE0) { need = 2; low = 0xA0; }
-    else if (b === 0xED) { need = 2; high = 0x9F; }
-    else if (b >= 0xE1 && b <= 0xEF) need = 2;
-    else if (b === 0xF0) { need = 3; low = 0x90; }
-    else if (b === 0xF4) { need = 3; high = 0x8F; }
-    else if (b >= 0xF1 && b <= 0xF3) need = 3;
-    else return false;
-    if (i + need >= n) return false;
-    for (let k: i64 = 1; k <= need; k++) {
-      const c = bytes[(i + k) as usize] as i64;
-      if (c < (k === 1 ? low : 0x80) || c > (k === 1 ? high : 0xBF)) return false;
-    }
-    i += need + 1;
-  }
-  return true;
-}
-
-// A URL's path as its pathname gives it.
-function __urlPathText(url: Ref<__urlRecord>): string {
-  if (url.opaque) return url.path[0];
-  if (url.path.length === 0) return "";
-  return "/" + url.path.join("/");
 }
 
 // A URL written out, with the query its params hold now.
@@ -2227,6 +2265,8 @@ class URLSearchParams {
 `;
 
 const URL_NAMES = ["URL", "URLSearchParams"];
+// std's names a program may declare its own of, which std's own code then reaches under another.
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
 const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
@@ -2899,43 +2939,57 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
 export const STD_FILE = "<fish std>";
 
 // A hash of the std source, the compiler's own sources and Bun's version, which decides the
-// serialization format, so no other parser's tree is ever loaded.
-export function stdKey(source: string, dir: string): string {
+// serialization format, so no other parser's tree is ever loaded. Null when no compiler source
+// can be read, as inside a single-file executable, since the hash couldn't tell parsers apart.
+export function stdKey(source: string, dir: string): string | null {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".ts")).sort();
+  } catch {
+    return null;
+  }
+  if (files.length === 0) return null;
   const hash = createHash("sha256").update(Bun.version).update("\0").update(source);
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".ts")).sort()) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
+  for (const f of files) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
   return hash.digest("hex").slice(0, 16);
 }
 
 // How many times this process has parsed std rather than loading its tree.
 export const stdParses = { count: 0 };
 
-let stdTree: { path: string; bytes: Uint8Array } | undefined;
-let key: string | undefined;
+let stdTree: { path: string | null; bytes: Uint8Array } | undefined;
+let key: string | null | undefined;
 
 // std's parsed tree, serialized: kept in memory, else read from the cache, else parsed and
-// written there. A cache that can't be read or written only costs the parse.
+// written there. A cache that can't be read or written only costs the parse, and without a key
+// the cache isn't touched at all.
 function stdBytes(): Uint8Array {
-  const path = join(cacheDir(), "std", `ast-${(key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
-  if (stdTree?.path === path) return stdTree.bytes;
+  if (key === undefined) key = stdKey(STD_SOURCE, import.meta.dir);
+  const path = key === null ? null : join(cacheDir(), "std", `ast-${key}.bin`);
+  if (stdTree !== undefined && stdTree.path === path) return stdTree.bytes;
   let bytes: Uint8Array | undefined;
-  try {
-    bytes = readFileSync(path);
-    if (!Array.isArray(deserialize(bytes))) bytes = undefined;
-  } catch {
-    bytes = undefined;
+  if (path !== null) {
+    try {
+      bytes = readFileSync(path);
+      if (!Array.isArray(deserialize(bytes))) bytes = undefined;
+    } catch {
+      bytes = undefined;
+    }
   }
   if (bytes === undefined) {
     stdParses.count++;
     bytes = new Uint8Array(serialize(parse(STD_SOURCE)));
-    try {
-      const temp = partial(path);
-      writeFileSync(temp, bytes);
-      renameSync(temp, path);
-    } catch {}
+    if (path !== null) {
+      try {
+        const temp = partial(path);
+        writeFileSync(temp, bytes);
+        renameSync(temp, path);
+      } catch {}
+    }
   }
   stdTree = { path, bytes };
   return bytes;
@@ -2950,27 +3004,39 @@ export function stdFor(written: Stmt[]): Stmt[] {
   // none hides them.
   hideHelpers(all);
   const at = (s: Stmt) => s.start - STD_BASE;
-  const prelude = all.filter((s) => at(s) < PRELUDE.length);
-  const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
-  const urlAt = PRELUDE.length + HTTP.length;
-  const url = all.filter((s) => at(s) >= urlAt && at(s) < urlAt + URL_LIB.length);
-  const jsonAt = urlAt + URL_LIB.length;
-  const json = all.filter((s) => at(s) >= jsonAt && at(s) < jsonAt + JSON_VALUE.length);
-  const jsonName = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length && at(s) < jsonAt + JSON_VALUE.length + JSON_NAME.length);
+  let from = 0;
+  // The statements of std's next section, in the order STD_SOURCE joins them.
+  const next = (text: string) => {
+    const start = from;
+    from += text.length;
+    return all.filter((s) => at(s) >= start && at(s) < from);
+  };
+  const prelude = next(PRELUDE);
+  const http = next(HTTP);
+  const fetching = next(FETCH);
+  const served = next(SERVED);
+  const core = next(URL_CORE);
+  const url = next(URL_LIB);
+  const json = next(JSON_VALUE);
+  const jsonName = next(JSON_NAME);
+  const ast = next(AST + AST_HELPERS);
+  const js = next(JS_ERROR);
   renameValue([...json, ...jsonName]);
-  const jsAt = STD_SOURCE.length - JS_ERROR.length;
-  const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length && at(s) < jsAt);
-  const js = all.filter((s) => at(s) >= jsAt);
-  const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  const parts = [[http, HTTP_NAMES], [url, URL_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
+  const astNames = ast.flatMap(declaredNames);
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
   const packages = written.some(fromPackage);
-  // The HTTP library parses its URLs with the URL library's parser, which comes with it. A
-  // program's own URL or URLSearchParams keeps its name, and std's takes one no program can write.
+  // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
+  // program can write.
+  const declared = new Set(written.flatMap(declaredNames));
+  const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
+  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url], own);
+  // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
+  // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
-  const urlWanted = httpUsed || uses(written, [], URL_NAMES);
-  const own = new Set(URL_NAMES.filter((n) => written.some((s) => "name" in s && s.name === n)));
-  if (urlWanted && own.size > 0) hideNames([...http, ...url], own);
-  return [...prelude, ...parts.flatMap(([part, names]) => (part === url ? urlWanted : uses(written, part, [...names]) || (part === js && packages)) ? part : [])];
+  const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
+  const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentions(written, (n) => n.kind === "ident" && n.name === "Request"));
+  const urls = [...(httpUsed && !urlWanted ? served : []), ...(httpUsed || urlWanted ? core : []), ...(urlWanted ? url : [])];
+  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []))];
 }
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
@@ -3015,14 +3081,51 @@ function fromPackage(s: Stmt): boolean {
 }
 
 function uses(written: Stmt[], library: Stmt[], wanted: string[]): boolean {
-  const declared = new Set(written.map((s) => ("name" in s ? s.name : undefined)));
-  if (library.some((s) => "name" in s && declared.has(s.name))) return false;
-  const names = (v: unknown): boolean => {
-    if (Array.isArray(v)) return v.some(names);
-    if (typeof v !== "object" || v === null) return false;
-    const node = v as Record<string, unknown>;
-    const named = (node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && wanted.includes(node.name);
-    return named || Object.values(node).some(names);
-  };
-  return names(written);
+  const declared = new Set(written.flatMap(declaredNames));
+  if (library.some((s) => declaredNames(s).some((n) => declared.has(n)))) return false;
+  // A name the program declares is its own, not the library's.
+  return mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && wanted.includes(n.name) && !declared.has(n.name));
+}
+
+// The top-level names a statement binds: a declaration's, each name its `let` or `const`
+// patterns bind, and an import's, through `export` and `declare`.
+function declaredNames(s: Stmt): string[] {
+  switch (s.kind) {
+    case "export":
+    case "declare":
+      return declaredNames(s.body);
+    case "exportDefault":
+      return s.declaration === undefined ? [] : declaredNames(s.declaration);
+    case "let":
+      return s.declarations.flatMap((d) => boundNames(d.target));
+    case "import":
+      return [...(s.default === undefined ? [] : [s.default]), ...(s.namespace === undefined ? [] : [s.namespace]), ...(s.named ?? []).map((n) => n.alias ?? n.name)];
+    default:
+      return "name" in s && typeof s.name === "string" ? [s.name] : [];
+  }
+}
+
+// The names a binding pattern binds; a default's value binds none.
+function boundNames(p: Pattern | undefined): string[] {
+  if (p === undefined) return [];
+  switch (p.kind) {
+    case "ident":
+      return [p.name];
+    case "object":
+      return [...p.props.flatMap((prop) => boundNames(prop.value)), ...boundNames(p.rest)];
+    case "array":
+      return [...p.elements.flatMap(boundNames), ...boundNames(p.rest)];
+    case "default":
+      return boundNames(p.target);
+    default:
+      return [];
+  }
+}
+
+// Whether a node in a tree is one the test picks.
+function mentions(v: unknown, test: (node: Record<string, unknown>) => boolean): boolean {
+  if (Array.isArray(v)) return v.some((n) => mentions(n, test));
+  if (typeof v !== "object" || v === null) return false;
+  const node = v as Record<string, unknown>;
+  return test(node) || Object.values(node).some((n) => mentions(n, test));
 }

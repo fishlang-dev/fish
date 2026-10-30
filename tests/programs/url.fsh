@@ -185,3 +185,51 @@ function main(): void throws TypeError {
 // expect: http://h/dir/page?a=2 http://h/dir/page?a=2&b=3
 // expect: http://h/dir/other http://h/dir/page?q
 // expect: x=1 x=1&y=2
+// case: url_own_type_error
+// expect: TypeError Invalid URL
+// expect: mine
+// std's URL still throws std's TypeError in a program with its own.
+class TypeError { describe(): string { return "mine"; } }
+function main() {
+  try {
+    const u = new URL("nope");
+    console.log(u.href);
+  } catch (e) {
+    console.log(e.name, e.message);
+  }
+  console.log(new TypeError().describe());
+}
+// case: url_own_const
+// expect: 7 a=1
+// A program's own URL constant is the one it names, beside std's URLSearchParams.
+const URL = 7;
+function main() {
+  console.log(URL, new URLSearchParams("a=1").toString());
+}
+// case: url_own_const_http
+// expect: 7 200
+// A program's own URL constant works beside the HTTP library.
+const URL = 7;
+async function main(): Promise<void> {
+  console.log(URL, new Response("hi").status);
+}
+// case: url_own_const_type_error
+// expect: TypeError Invalid URL 5
+// std's URL still throws std's TypeError in a program with a TypeError constant of its own.
+const TypeError = 5;
+function main() {
+  try {
+    const u = new URL("nope");
+    console.log(u.href);
+  } catch (e) {
+    console.log(e.name, e.message, TypeError);
+  }
+}
+// case: url_search_params_from_pairs
+// expect: a=1&b=2
+// expect: 2
+function main() {
+  const p = new URLSearchParams([["a", "1"], ["b", "2"]]);
+  console.log(p.toString());
+  console.log(p.get("b"));
+}
