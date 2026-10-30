@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ENGINE, runtimeUnits } from "../src/main.ts";
 import { cachedObject, files } from "../src/mathlib.ts";
+import { STD_SOURCE, stdKey } from "../src/std.ts";
 
 // A fresh cache compiles the Math runtime too, which takes seconds.
 setDefaultTimeout(120_000);
@@ -164,4 +165,73 @@ test("an edit to a hashed engine header is a new object", () => {
     if (was === undefined) delete process.env.FISH_CACHE_DIR;
     else process.env.FISH_CACHE_DIR = was;
   }
+});
+
+const STD = join(import.meta.dir, "..", "src", "std.ts");
+const HTTP_PROGRAM = join(root, "http.fsh");
+writeFileSync(HTTP_PROGRAM, `async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users/:id", async (req) => new Response("user " + req.param("id")));
+  const res = await app.handle(new Request("http://h/users/7"));
+  const body = await res.text();
+  console.log(res.status, body);
+}
+`);
+
+// How many times one process parsed std over two checks with the cache at `cache`.
+function stdParsesIn(cache: string): string {
+  const script = `import { stdFor, stdParses } from ${JSON.stringify(STD)};
+const [a, b] = [stdFor([]), stdFor([])];
+if (Bun.deepEquals(a, b)) console.log(stdParses.count);`;
+  const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache } });
+  expect(run.stderr.toString()).toBe("");
+  return run.stdout.toString().trim();
+}
+
+function emit(cache: string, file: string): string {
+  const run = Bun.spawnSync(["bun", MAIN, "build", file, "--emit-llvm"], { env: { ...process.env, FISH_CACHE_DIR: cache } });
+  expect(run.stderr.toString()).toBe("");
+  expect(run.exitCode).toBe(0);
+  return run.stdout.toString();
+}
+
+const stdTrees = (cache: string) => readdirSync(join(cache, "std")).map((f) => join(cache, "std", f));
+
+test("std's parsed tree is cached once and loaded by later builds, with the same IR", () => {
+  const cache = join(root, "std-tree");
+  expect(stdParsesIn(cache)).toBe("1");
+  const [tree] = stdTrees(cache);
+  expect(stdTrees(cache)).toHaveLength(1);
+  const written = statSync(tree!).mtimeMs;
+  expect(stdParsesIn(cache)).toBe("0");
+  expect(statSync(tree!).mtimeMs).toBe(written);
+  for (const program of [HELLO, HTTP_PROGRAM]) {
+    const fresh = join(root, `std-fresh-${program === HELLO ? "hello" : "http"}`);
+    expect(emit(cache, program)).toBe(emit(fresh, program));
+  }
+});
+
+test("a corrupt or truncated cached tree is parsed again and rewritten", () => {
+  const cache = join(root, "std-corrupt");
+  const expected = emit(cache, HELLO);
+  const [tree] = stdTrees(cache);
+  const good = readFileSync(tree!);
+  for (const bad of [good.subarray(0, good.length / 2), Buffer.from("not a tree"), Buffer.alloc(0)]) {
+    writeFileSync(tree!, bad);
+    expect(stdParsesIn(cache)).toBe("1");
+    expect(readFileSync(tree!).equals(good)).toBe(true);
+    writeFileSync(tree!, bad);
+    expect(emit(cache, HELLO)).toBe(expected);
+  }
+  expect(stdTrees(cache)).toEqual([tree!]);
+});
+
+test("a change to std or to a compiler source is a new key for std's tree", () => {
+  const src = join(root, "src-copy");
+  cpSync(join(import.meta.dir, "..", "src"), src, { recursive: true });
+  const before = stdKey(STD_SOURCE, src);
+  expect(stdKey(STD_SOURCE, src)).toBe(before);
+  expect(stdKey(`${STD_SOURCE}\nfunction edited() {}\n`, src)).not.toBe(before);
+  appendFileSync(join(src, "parser.ts"), "\n// edited\n");
+  expect(stdKey(STD_SOURCE, src)).not.toBe(before);
 });
