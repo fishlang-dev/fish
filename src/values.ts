@@ -4158,9 +4158,6 @@ export function expressions(ctx: Context) {
           if (fits(to, from)) throw new CompileError(`'as' can't narrow '${show(from)}' to '${show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
           if (!(from === "boolean" && isInteger(to))) throw new CompileError(`'${show(from)}' can't be converted to '${show(to)}' with 'as', since neither fits the other`, e.start, e.end);
         }
-        if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
-          throw unsupported("'as' conversions other than between numbers", e);
-        }
         return to;
       }
       case "this":
