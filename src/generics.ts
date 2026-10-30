@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, heldArgument, callableOf, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -271,8 +271,18 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   // arguments, have decided. What it gives decides the rest, through \`infer\`.
   function callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined {
     const written = f.params[i]?.type;
-    if (written?.kind !== "function" || !generic(f)) return undefined;
     const params = typeParamsOf(f);
+    // A parameter written as a type parameter given a function type, by the call as in
+    // `id<(x: i64) => i64>((x) => x * 2)` or by its class's instance, types the arrow as that function.
+    if (written?.kind === "ref" && written.args.length === 0) {
+      const k = params.findIndex((p) => p.name === written.name);
+      const given = k < 0 ? f.scope?.get(written.name) : typeArgs.length === params.length ? resolveType(typeArgs[k]!) : undefined;
+      if (typeof given !== "string" && given?.kind === "dyn") return callableOf.get(given.of);
+      if (typeof given === "string" || given?.kind !== "function") return undefined;
+      if (given.generic) throw unsupported("generic function types as type arguments", at);
+      return given;
+    }
+    if (written?.kind !== "function" || !generic(f)) return undefined;
     const bindings = new Map<string, Type>();
     if (typeArgs.length === params.length) params.forEach((p, k) => bindings.set(p.name, resolveType(typeArgs[k]!)));
     else {
@@ -416,7 +426,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     }
     const bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
-      params.forEach((p, i) => bindings.set(p.name, resolveType(typeArgs[i]!)));
+      params.forEach((p, i) => bindings.set(p.name, heldArgument(resolveType(typeArgs[i]!))));
     } else {
       const names = new Set(params.map((p) => p.name));
       f.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
@@ -427,7 +437,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       if (typeof type !== "string" && type.kind === "interface") {
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
-      if (typeof type !== "string" && type.kind === "function") throw unsupported("function types as type arguments", at);
+      if (typeof type !== "string" && type.kind === "function" && type.generic) throw unsupported("generic function types as type arguments", at);
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
     withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
@@ -729,7 +739,9 @@ export function genericClasses({ classes, templates, register, layout, members, 
 
   // The class a generic class's type arguments make, declared on first use, checked for its
   // bounds, and named like `Box<i64>`.
-  function classInstance(template: ClassNode & { name: string }, args: Type[], at: Span): ClassInfo {
+  function classInstance(template: ClassNode & { name: string }, given: Type[], at: Span): ClassInfo {
+    if (given.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure") && a.generic)) throw unsupported("generic function types as type arguments", at);
+    const args = given.map(heldArgument);
     const params = template.typeParams;
     if (args.length !== params.length) {
       throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
@@ -745,7 +757,6 @@ export function genericClasses({ classes, templates, register, layout, members, 
     const shape = args.map(shapeKey).join(",");
     if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
-    if (args.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure"))) throw unsupported("functions as type arguments of classes", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);

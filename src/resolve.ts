@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, optionRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, heldArgument, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, optionRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -402,11 +402,11 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // A `JoinHandle<T>` written out is one whose task can't throw.
     if (t.name === "JoinHandle") {
       if (t.args.length !== 1) throw new CompileError("'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
-      return handleType(resolveType(t.args[0]!), undefined);
+      return handleType(heldArgument(resolveType(t.args[0]!)), undefined);
     }
     if (t.name === "Promise") {
       if (t.args.length !== 1) throw new CompileError("'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
-      const gives = resolveType(t.args[0]!);
+      const gives = heldArgument(resolveType(t.args[0]!));
       if (holdsPattern(gives)) throw unsupported("template literal pattern types in promises", t);
       return promiseInterface(gives);
     }
@@ -443,7 +443,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     const trait = interfaces.get(t.name);
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return blockType("JsValue", interfaceOf(trait, args, t));
-    if (trait) return interfaceOf(trait, args, t);
+    if (trait) return interfaceOf(trait, args.map(heldArgument), t);
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
@@ -933,7 +933,8 @@ const I64_MAX = (1n << 63n) - 1n;
 
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
 // boolean, which the processor changes in one step.
-export function interior(which: InteriorType["which"], of: Type, at: Span): InteriorType {
+export function interior(which: InteriorType["which"], given: Type, at: Span): InteriorType {
+  const of = heldArgument(given);
   const held = lower(of);
   if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
     throw new CompileError(`'Atomic' holds integers of up to 64 bits, not '${show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
@@ -959,7 +960,8 @@ function abstractless(of: Type, holder: string, at: Span) {
 
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
 // unchecked, or changes without a lock.
-export function shareable(of: Type, at: Span): SharedType {
+export function shareable(given: Type, at: Span): SharedType {
+  const of = heldArgument(given);
   const held = lower(of);
   abstractless(of, "a 'shared' value", at);
   let blocker: Type | undefined;
@@ -978,7 +980,8 @@ export function shareable(of: Type, at: Span): SharedType {
 
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
 // unchecked, or changes without a lock.
-export function channel(of: Type, at: Span): BlockType {
+export function channel(given: Type, at: Span): BlockType {
+  const of = heldArgument(given);
   const held = lower(of);
   if (typeof held !== "string" && held.kind === "union" && held.members.includes("null") || held === "null") {
     throw new CompileError(`a 'Channel' can't carry '${show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(held)} }>'`, at.start, at.end);
@@ -1015,9 +1018,9 @@ export function collection(key: Type, value: Type, set: boolean, at: Span): MapT
   if (!keyable(key)) throw new CompileError(`${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (holdsRef(value)) throw unsupported("maps of references", at);
   const v = lower(value);
-  if (typeof v !== "string" && (v.kind === "closure" || v.kind === "function")) throw unsupported("maps of functions", at);
+  if (typeof v !== "string" && (v.kind === "closure" || v.kind === "function") && v.generic) throw unsupported("maps of generic functions", at);
   if (typeof v !== "string" && v.kind === "interface") throw new CompileError(`a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
-  return mapType(key, stored(value), set);
+  return mapType(key, stored(heldArgument(value)), set);
 }
 
 const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);

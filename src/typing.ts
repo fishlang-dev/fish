@@ -431,6 +431,16 @@ export function stored(t: Type): Type {
   return t;
 }
 
+// A type argument holds its values, so a function type or a closure's type given as one is a
+// stored callable, as Rust's `Box<dyn Fn>` is.
+export function heldArgument(t: Type): Type {
+  if (typeof t === "string" || (t.kind !== "function" && t.kind !== "closure") || t.generic) return t;
+  if (t.kind === "function") return callableType(t);
+  const fn = functionType(t.params.map((_, i) => `p${i}`), t.params, t.returns, t.throws);
+  // Shown as the closure was written, with its own parameter names.
+  return callableType({ ...fn, name: t.name });
+}
+
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
