@@ -139,7 +139,8 @@ function classMember(c: Cursor): ClassMember {
   if (c.at("constructor") && isToken(c.peek(1), "(")) {
     c.next();
     const params = parameters(c);
-    return { ...member, kind: "constructor", params, body: memberBody(c), end: c.end() };
+    const throws = throwsClause(c);
+    return { ...member, kind: "constructor", params, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const generator = c.eat("*");
   const name = memberName(c);

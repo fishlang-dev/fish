@@ -1,6 +1,7 @@
 import type { Builder } from "./arithmetic.ts";
 import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
+import { rustClassOf } from "./rust.ts";
 import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
@@ -16,7 +17,8 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // union is its member's index, then enough 64-bit words for its largest member.
 export function llvm(t: Type): string {
   if (typeof t === "string") return PRIMITIVES[t];
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return "ptr";
+  // A Rust type's handle is the pointer to its boxed value, the one field its class has.
+  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive" || rustClassOf(t)) return "ptr";
   if (t.kind === "array") return ARRAY;
   if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
   if (t.kind === "dyn") return DYN;

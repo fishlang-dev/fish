@@ -1,4 +1,5 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
@@ -424,6 +425,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
       else classes.set(s.name, declareClass(node));
+      const rust = rustClassNodes.get(s);
+      if (rust) rustClasses.set(classes.get(s.name)!.type, rust);
+      // A Rust type declaring no constructor is never made with `new`, so its handle needs no
+      // assigning in the empty one it is given.
+      if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
       continue;
     }
     // `declare function f(...): T;` names a C function, called inside `unsafe`.
@@ -468,6 +474,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    const rust = rustNames.get(s);
+    if (rust) {
+      funcs.push(Object.assign({ ...s, body: [] }, { foreign: true, rust }));
+      continue;
+    }
     if (s.js) {
       const body = { ...s, body: [] };
       jsBodies.set(s, body);
@@ -530,6 +541,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
+  // Each Rust function's types, by its shim symbol, as first declared.
+  const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
   comptimeChecks((i) => {
     if (inProgress.has(i)) return false;
@@ -883,6 +896,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // pointers, with `void` for no result.
   function foreignSignature(instance: Instance) {
     const f = instance.body;
+    if (f.rust) return rustSignature(instance);
     if (f.typeParams?.length) throw unsupported("generic C functions", f);
     if (f.generator) throw new CompileError("a C function can't be a generator; drop the '*'", f.start, f.end);
     if (f.async) throw new CompileError("a C function can't be async; C calls return when they finish", f.start, f.end);
@@ -899,6 +913,47 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const returns = resolveType(f.returnType);
     if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     instance.returns = returns;
+    done.add(instance);
+  }
+
+  // A Rust function's signature: numbers and booleans, with `void` for no result, so far.
+  function rustSignature(instance: Instance) {
+    const f = instance.body;
+    const what = `the Rust function '${f.name}'`;
+    const constructor = f.self?.constructor === true;
+    if (f.typeParams?.length) throw unsupported("generic Rust functions", f);
+    if (f.generator || f.async) throw new CompileError(`${what} can't be ${f.async ? "async" : "a generator"}; it returns when the Rust function does`, f.start, f.end);
+    // A Rust `Result`'s `Err` is thrown: as Fish's `Error`, made from its Display text, or as the
+    // Rust type it is, declared as a class.
+    if (f.throws) {
+      const error = resolveType(f.throws);
+      const isError = typeof error !== "string" && error.kind === "class" && error.name === "Error" && !error.generic;
+      if (!isError && !rustClassOf(error)) throw new CompileError(`${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${show(error)}'`, f.throws.start, f.throws.end);
+      if (isError) classOf(error as ClassType);
+      instance.throws = error;
+    }
+    if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
+    const refuse = (t: Type, giving: boolean, at: Span) => {
+      const why = crossingOf(t, giving);
+      if (typeof why === "string") throw new CompileError(`${giving ? `${what} can't give` : "a Rust function can't take"} a '${show(t)}': ${why}`, at.start, at.end);
+    };
+    const params = paramTypes(instance, scopeOf(instance));
+    f.params.forEach((p, i) => {
+      if (p.rest || p.optional || p.default || p.comptime) throw unsupported("rest, optional, default and comptime parameters on Rust functions", p);
+      refuse(params[i]!, false, p);
+    });
+    instance.signature = params;
+    const returns = f.returnType ? resolveType(f.returnType) : "void";
+    if (returns !== "void") refuse(returns, true, f.returnType!);
+    // A constructor gives the handle to the value it made.
+    instance.returns = constructor ? f.owner! : returns;
+    // Every declaration of one Rust function calls the one shim function, so they agree on types.
+    // The receiver and what it throws are part of how the shim calls it, so they have to agree too.
+    const self = f.self && !constructor ? [f.self.owned ? "self" : f.self.mutable ? "&mut self" : "&self"] : [];
+    const types = `(${[...self, ...params.map(show)].join(", ")}): ${show(instance.returns)}${instance.throws ? ` throws ${show(instance.throws)}` : ""}`;
+    const other = rustTypes.get(f.rust!.symbol);
+    if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
+    rustTypes.set(f.rust!.symbol, types);
     done.add(instance);
   }
 
@@ -1040,7 +1095,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
     // function's or a generator's state, or given to an accessor, has no instance per value.
     const fixedParam = f.params.find((p) => p.comptime);
-    if (fixedParam && f.foreign) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
+    if (fixedParam && f.foreign && !f.rust) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
     if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
     if (f.js) return jsSignature(instance);

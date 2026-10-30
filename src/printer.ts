@@ -2492,7 +2492,7 @@ function classMemberDoc(path: At<"member">, src: string): Doc {
       const name = m.kind === "constructor" ? "constructor" : propertyKey(m.name, from, m.modifiers.length + keywords, path, src, m.name !== "constructor");
       const f: Fn = {
         params: m.params, typeParams: m.kind === "method" ? m.typeParams : [], returnType: m.kind === "constructor" ? undefined : m.returnType,
-        throws: m.kind === "method" ? m.throws : undefined,
+        throws: m.kind === "method" || m.kind === "constructor" ? m.throws : undefined,
       };
       const params = parameters(f, path, src, false, "");
       const returned = returnType(f, path, src);

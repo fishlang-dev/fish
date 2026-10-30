@@ -26,6 +26,7 @@ import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
+import { rustShim, type Shim } from "./rust.ts";
 
 export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
@@ -44,8 +45,16 @@ export function analyze(src: string, file: string, read?: (path: string) => stri
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
+  return compiled(src, file, release, panic, library).ir;
+}
+
+// `compile`, with the Rust shim the program's calls need, built when asked for.
+function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; shim: () => Shim | undefined } {
   const loaded = load(file, src);
-  return withSources(loaded.sources, () => bundled(codegen(check(expanded(loaded, library), library), { src, file, release, panic, library, sources: loaded.sources }), loaded));
+  return withSources(loaded.sources, () => {
+    const checked = check(expanded(loaded, library), library);
+    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), shim: () => rustShim(loaded.rust, checked.instances) };
+  });
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -83,6 +92,7 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   const loaded = load(file, src);
   const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
   const ir = withSources(loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
+  const shim = rustShim(loaded.rust, checked.instances);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
   const at = (f: string) => join(dirname(out), f);
@@ -99,13 +109,17 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   try {
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-x", "none", ...mathObjects(), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`)], ir);
+      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "c", native, ...(js ? ["-I", ENGINE, ...engine] : []), "-x", "none", ...mathObjects(), "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
     } else {
       run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
       run(["clang", "-c", "-fPIC", "-pthread", "-funwind-tables", ...(js ? ["-I", ENGINE] : []), native, "-o", runtime, optimize]);
       const objects = engine.map((source, i) => join(dir, `engine${i}.o`));
       engine.forEach((source, i) => run(["clang", "-c", "-fPIC", "-I", ENGINE, source, "-o", objects[i]!, optimize]));
-      run(["ar", "rcs", at(`lib${name}.a`), fish, runtime, ...objects, ...mathObjects()]);
+      const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
+      run(["ar", "rcs", archive, fish, runtime, ...objects, ...mathObjects()]);
+      // The shim's archive is merged in, so the library is still one file to link.
+      if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
+      else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
     writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
   } finally {
@@ -150,14 +164,15 @@ function cType(t: Type): string {
 // C half of the runtime, which is built with unwind tables so a panic can unwind through it.
 // `links` names the C libraries the program's declared functions come from.
 export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  linked(compile(readFileSync(file, "utf8"), file, release, panic), out, release, links);
+  const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+  linked(ir, out, release, links, shim());
 }
 
 // Builds the IR `ir` into the executable `out`.
-function linked(ir: string, out: string, release = false, links: string[] = []) {
+function linked(ir: string, out: string, release = false, links: string[] = [], shim?: Shim) {
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir, mathObjects()), { stdin: new TextEncoder().encode(ir) });
+    const clang = Bun.spawnSync(clangArgs(dir, out, release, links, ir, mathObjects(), shim), { stdin: new TextEncoder().encode(ir) });
     if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -166,10 +181,10 @@ function linked(ir: string, out: string, release = false, links: string[] = []) 
 
 // `build`, with clang run without blocking, so several builds can go at once.
 export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const ir = compile(readFileSync(file, "utf8"), file, release, panic);
+  const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
-    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir, await mathObjectsAsync()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+    const clang = Bun.spawn(clangArgs(dir, out, release, links, ir, await mathObjectsAsync(), shim()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
     const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
     if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   } finally {
@@ -192,7 +207,8 @@ export function buildTests(dir: string, out: string): Test[] {
     if (tests.length === 0) return tests;
     hideMains(loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
     loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
-    linked(bundled(codegen(check(expanded(loaded, false)), { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), out);
+    const checked = check(expanded(loaded, false));
+    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), out, false, [], rustShim(loaded.rust, checked.instances));
     return tests;
   });
 }
@@ -375,12 +391,12 @@ export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\
 // Clang's command line for a program read from stdin, with the runtime's source written to `dir`,
 // the engine's glue and sources with it when the program's IR calls the engine, and the prebuilt
 // `Math` objects.
-function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string, maths: string[]): string[] {
+function clangArgs(dir: string, out: string, release: boolean, links: string[], ir: string, maths: string[], shim?: Shim): string[] {
   const native = join(dir, "native.c");
   const js = callsEngine(ir);
   writeFileSync(native, js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE);
   const engine = js ? ["-I", ENGINE, ...ENGINE_SOURCES] : [];
-  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-x", "none", ...maths, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`)];
+  return ["clang", "-x", "ir", "-", "-x", "c", native, ...engine, "-x", "none", ...maths, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
 function fail(message: string): never {

@@ -11,7 +11,12 @@ export type Dependency = { name: string; start: number; end: number } & ({ path:
 // what a package depending on it imports, `entry` the program it builds.
 // `edition`: "ts-compat" marks TypeScript not yet migrated, which a build refuses and `fishc lint`
 // reads.
-export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; dependencies: Dependency[]; registry?: string; dir: string };
+// `rustDependencies` is the `[rust-dependencies]` table, when the manifest has one.
+export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
+// A Rust crate the package's `declare module "rust:<crate>"` declarations call, in Cargo's terms.
+export type RustDependency = {
+  name: string; start: number; end: number; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
+};
 export type Edition = "native" | "ts-compat";
 
 export const MANIFEST = "fish.toml";
@@ -22,7 +27,7 @@ export const validName = (name: string) => /^[a-z][a-z0-9-]{0,63}$/.test(name);
 
 export type Spanned<T> = { value: T; start: number; end: number };
 export type Entries = Map<string, { key: Spanned<string>; value: Spanned<TomlValue> }>;
-export type TomlValue = string | number | boolean | Entries;
+export type TomlValue = string | number | boolean | Entries | Spanned<TomlValue>[];
 export type Table = { start: number; end: number; keys: Entries };
 
 // The TOML a manifest and a lockfile use: comments, `[table]` and `[[array of tables]]` headers,
@@ -121,12 +126,38 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
     const start = at;
     if (src[at] === '"' || src[at] === "'") return string();
     if (src[at] === "{") return inline();
-    const word = /^[^\s#,}]+/.exec(src.slice(at))?.[0] ?? "";
+    if (src[at] === "[") return array();
+    const word = /^[^\s#,}\]]+/.exec(src.slice(at))?.[0] ?? "";
     at += word.length;
     if (word === "true" || word === "false") return { value: word === "true", start, end: at };
     if (/^[+-]?(0|[1-9]\d*)$/.test(word)) return { value: Number(word), start, end: at };
     if (word === "") throw new CompileError("expected a value after '='", start, start + 1);
-    throw unread(start, word.startsWith("[") ? "an array" : "this value");
+    throw unread(start, "this value");
+  };
+  // Blank space, line ends and comments, which an array may hold between its values.
+  const gap = () => {
+    for (;;) {
+      space();
+      if (src[at] === "#") while (at < src.length && src[at] !== "\n") at++;
+      if (src[at] === "\n" || src.startsWith("\r\n", at)) at += src[at] === "\n" ? 1 : 2;
+      else return;
+    }
+  };
+  // `["a", "b"]`, over several lines if need be, with a trailing comma allowed.
+  const array = (): Spanned<TomlValue> => {
+    const start = at;
+    const values: Spanned<TomlValue>[] = [];
+    at++;
+    for (gap(); src[at] !== "]"; gap()) {
+      if (at >= src.length) throw new CompileError("this array isn't closed", start, start + 1);
+      values.push(value());
+      gap();
+      if (src[at] === "]") break;
+      if (src[at] !== ",") throw new CompileError("expected ',' or ']' in this array", at, at + 1);
+      at++;
+    }
+    at++;
+    return { value: values, start, end: at };
   };
   while (at < src.length) {
     space();
@@ -164,12 +195,12 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 // entry, and nothing a manifest doesn't have, so a misspelled key isn't silently ignored.
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib", "edition"], dependencies: [], registry: ["url"] };
+  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib", "edition"], dependencies: [], "rust-dependencies": [], registry: ["url"] };
   for (const [name, found] of tables) {
     const table = Array.isArray(found) ? found[0]! : found;
-    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package], [dependencies] and [registry]`, table.start, table.end);
+    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`, table.start, table.end);
     for (const { key } of table.keys.values()) {
-      if (name !== "dependencies" && !known[name]!.includes(key.value)) {
+      if (name !== "dependencies" && name !== "rust-dependencies" && !known[name]!.includes(key.value)) {
         throw new CompileError(name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
       }
     }
@@ -200,9 +231,56 @@ export function readManifest(src: string, dir: string): Manifest {
   if (edition && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError(`'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
   const listed = tables.get("dependencies") as Table | undefined;
   const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
+  const crates = tables.get("rust-dependencies") as Table | undefined;
+  const rustDependencies = crates && [...crates.keys.values()].map(({ key, value }) => rustDependency(key, value));
+  // Rust spells a crate's '-' as '_', so two such names would be one crate in Rust code.
+  const spelled = new Map<string, string>();
+  for (const d of rustDependencies ?? []) {
+    const other = spelled.get(d.name.replace(/-/g, "_"));
+    if (other !== undefined) throw new CompileError(`'${d.name}' and '${other}' are the same crate in Rust, which reads '-' as '_'; list it once`, d.start, d.end);
+    spelled.set(d.name.replace(/-/g, "_"), d.name);
+  }
   const registry = (tables.get("registry") as Table | undefined)?.keys.get("url")?.value;
   if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
-  return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(registry && { registry: registry.value as string }), dir };
+  return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(rustDependencies && { rustDependencies }), ...(registry && { registry: registry.value as string }), dir };
+}
+
+// A crate's name as Cargo takes it.
+export const validCrate = (name: string) => /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(name);
+
+// A `[rust-dependencies]` entry in one of Cargo's forms: `name = "1.2"`, or a table with `version`,
+// `features`, `default-features`, and `path`, or `git` with one of `rev`, `tag` and `branch`.
+function rustDependency(key: Spanned<string>, value: Spanned<TomlValue>): RustDependency {
+  const at = { name: key.value, start: key.start, end: value.end };
+  if (!validCrate(key.value)) throw new CompileError(`'${key.value}' isn't a crate name; a crate's name is letters, digits, '_' and '-', starting with a letter or '_'`, key.start, key.end);
+  if (typeof value.value === "string") return { ...at, version: value.value };
+  const form = "a Rust dependency is a version, as in \"1.2\", or a table as Cargo takes it, as in { version = \"1.2\", features = [\"derive\"] }, { path = \"../crate\" } or { git = \"https://...\", rev = \"<commit>\" }";
+  if (!(value.value instanceof Map)) throw new CompileError(form, value.start, value.end);
+  const entries = value.value;
+  const keys = ["version", "features", "default-features", "path", "git", "rev", "tag", "branch"];
+  for (const { key: k } of entries.values()) {
+    if (!keys.includes(k.value)) throw new CompileError(`a Rust dependency has no key '${k.value}'; it has ${keys.join(", ")}`, k.start, k.end);
+  }
+  const text = (field: string): Spanned<string> | undefined => {
+    const found = entries.get(field);
+    if (found && typeof found.value.value !== "string") throw new CompileError(`'${field}' is a string`, found.value.start, found.value.end);
+    return found?.value as Spanned<string> | undefined;
+  };
+  const [version, path, git, rev, tag, branch] = ["version", "path", "git", "rev", "tag", "branch"].map(text);
+  const features = entries.get("features")?.value;
+  const named = Array.isArray(features?.value) ? features.value : undefined;
+  if (features && (!named || named.some((f) => typeof f.value !== "string"))) throw new CompileError("'features' is a list of strings, as in features = [\"derive\"]", features.start, features.end);
+  const defaults = entries.get("default-features")?.value;
+  if (defaults && typeof defaults.value !== "boolean") throw new CompileError("'default-features' is true or false", defaults.start, defaults.end);
+  if (path && git) throw new CompileError("a Rust dependency comes from a path or from git, not both", value.start, value.end);
+  if (!version && !path && !git) throw new CompileError(form, value.start, value.end);
+  const pins = [rev, tag, branch].filter((p) => p !== undefined);
+  if (pins.length > 0 && !git) throw new CompileError("rev, tag and branch choose a git dependency's commit; this one isn't from git", pins[0]!.start, pins[0]!.end);
+  if (pins.length > 1) throw new CompileError("a git dependency takes one of rev, tag and branch", pins[1]!.start, pins[1]!.end);
+  return {
+    ...at, ...(version && { version: version.value }), ...(named && { features: named.map((f) => f.value as string) }), ...(defaults && { defaultFeatures: defaults.value as boolean }),
+    ...(path && { path: path.value }), ...(git && { git: git.value }), ...(rev && { rev: rev.value }), ...(tag && { tag: tag.value }), ...(branch && { branch: branch.value }),
+  };
 }
 
 // A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.

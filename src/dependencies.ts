@@ -65,6 +65,15 @@ export function resolvePackages(entry: string): Package[] | undefined {
     const holder = existsSync(lib) ? packageOf(packages, lib) : undefined;
     if (holder && holder !== p) throw fieldError(join(p.dir, MANIFEST), "lib", `the lib '${p.manifest.lib}' is a file inside the package '${holder.manifest.name}'; a package's lib is one of its own files`);
   }
+  // A crate's build script and macros run on the machine building, so for now only the package
+  // being built chooses its crates.
+  for (const p of packages.slice(1)) {
+    if (!p.manifest.rustDependencies) continue;
+    const file = join(p.dir, MANIFEST);
+    const src = readFileSync(file, "utf8");
+    const table = parseToml(src).get("rust-dependencies") as Table;
+    throw inManifest(new CompileError(`the dependency '${p.manifest.name}' lists Rust crates under [rust-dependencies]; only the package being built may list them for now`, table.start, table.end), file, src);
+  }
   lock(packages);
   return packages;
 }

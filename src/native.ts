@@ -1124,6 +1124,45 @@ void fsh_rt_panic_string(const char *at, fsh_str *reason) {
   fsh_rt_panic("\n");
 }
 
+// A Rust panic's message, which may hold NULs.
+typedef struct { size_t length; char bytes[]; } fsh_rust_message;
+
+// A panic a Rust function's shim caught: its message, kept where the call that raises it reads it.
+void fsh_rt_rust_panicked(fsh_rust_message **out, const char *message, size_t length) {
+  fsh_rust_message *copy = malloc(sizeof(fsh_rust_message) + length);
+  if (!copy) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  copy->length = length;
+  memcpy(copy->bytes, message, length);
+  *out = copy;
+}
+
+// The Fish panic a Rust panic becomes at its call; at is the "panicked at" line.
+void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fwrite(reason->bytes, 1, reason->length, stderr);
+  fsh_rt_panic("\n");
+}
+
+// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form.
+const char *fsh_rt_rust_str_bytes(fsh_str *s, int64_t *length) {
+  *length = s ? s->length : 0;
+  return s ? s->bytes : "";
+}
+
+// A string Rust gives Fish, its bytes UTF-8, copied into a Fish string.
+fsh_str *fsh_rt_rust_str(const char *bytes, int64_t length) {
+  return fsh_str_of(bytes, length);
+}
+
+// After a Rust value's drop: a panic in it, which the shim handed back, raised as a Fish panic.
+void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
+  if (*caught) fsh_rt_panic_rust(at, *caught);
+}
+
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
