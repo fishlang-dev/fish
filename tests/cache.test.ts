@@ -1,9 +1,10 @@
 import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { ENGINE, runtimeUnits } from "../src/main.ts";
-import { cachedObject, files } from "../src/mathlib.ts";
+import { buildAsync, compile, ENGINE, runtimeUnits } from "../src/main.ts";
+import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
+import { STD_SOURCE, stdKey } from "../src/std.ts";
 
 // A fresh cache compiles the Math runtime too, which takes seconds.
 setDefaultTimeout(120_000);
@@ -164,4 +165,164 @@ test("an edit to a hashed engine header is a new object", () => {
     if (was === undefined) delete process.env.FISH_CACHE_DIR;
     else process.env.FISH_CACHE_DIR = was;
   }
+});
+
+const STD = join(import.meta.dir, "..", "src", "std.ts");
+const HTTP_PROGRAM = join(root, "http.fsh");
+writeFileSync(HTTP_PROGRAM, `async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users/:id", async (req) => new Response("user " + req.param("id")));
+  const res = await app.handle(new Request("http://h/users/7"));
+  const body = await res.text();
+  console.log(res.status, body);
+}
+`);
+
+// How many times one process parsed std over two checks with the cache at `cache`.
+function stdParsesIn(cache: string): string {
+  const script = `import { stdFor, stdParses } from ${JSON.stringify(STD)};
+const [a, b] = [stdFor([]), stdFor([])];
+if (Bun.deepEquals(a, b)) console.log(stdParses.count);`;
+  const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache } });
+  expect(run.stderr.toString()).toBe("");
+  return run.stdout.toString().trim();
+}
+
+function emit(cache: string, file: string): string {
+  const run = Bun.spawnSync(["bun", MAIN, "build", file, "--emit-llvm"], { env: { ...process.env, FISH_CACHE_DIR: cache } });
+  expect(run.stderr.toString()).toBe("");
+  expect(run.exitCode).toBe(0);
+  return run.stdout.toString();
+}
+
+const stdTrees = (cache: string) => readdirSync(join(cache, "std")).map((f) => join(cache, "std", f));
+
+test("std's parsed tree is cached once and loaded by later builds, with the same IR", () => {
+  const cache = join(root, "std-tree");
+  expect(stdParsesIn(cache)).toBe("1");
+  const [tree] = stdTrees(cache);
+  expect(stdTrees(cache)).toHaveLength(1);
+  const written = statSync(tree!).mtimeMs;
+  expect(stdParsesIn(cache)).toBe("0");
+  expect(statSync(tree!).mtimeMs).toBe(written);
+  for (const program of [HELLO, HTTP_PROGRAM]) {
+    const fresh = join(root, `std-fresh-${program === HELLO ? "hello" : "http"}`);
+    expect(emit(cache, program)).toBe(emit(fresh, program));
+  }
+});
+
+test("a corrupt or truncated cached tree is parsed again and rewritten", () => {
+  const cache = join(root, "std-corrupt");
+  const expected = emit(cache, HELLO);
+  const [tree] = stdTrees(cache);
+  const good = readFileSync(tree!);
+  for (const bad of [good.subarray(0, good.length / 2), Buffer.from("not a tree"), Buffer.alloc(0)]) {
+    writeFileSync(tree!, bad);
+    expect(stdParsesIn(cache)).toBe("1");
+    expect(readFileSync(tree!).equals(good)).toBe(true);
+    writeFileSync(tree!, bad);
+    expect(emit(cache, HELLO)).toBe(expected);
+  }
+  expect(stdTrees(cache)).toEqual([tree!]);
+});
+
+test("a change to std or to a compiler source is a new key for std's tree", () => {
+  const src = join(root, "src-copy");
+  cpSync(join(import.meta.dir, "..", "src"), src, { recursive: true });
+  const before = stdKey(STD_SOURCE, src);
+  expect(stdKey(STD_SOURCE, src)).toBe(before);
+  expect(stdKey(`${STD_SOURCE}\nfunction edited() {}\n`, src)).not.toBe(before);
+  appendFileSync(join(src, "parser.ts"), "\n// edited\n");
+  expect(stdKey(STD_SOURCE, src)).not.toBe(before);
+});
+
+// Runs `run` with the cache at `cache`.
+async function cachedInAsync(cache: string, run: () => Promise<void>) {
+  const was = process.env.FISH_CACHE_DIR;
+  process.env.FISH_CACHE_DIR = cache;
+  try {
+    await run();
+  } finally {
+    if (was === undefined) delete process.env.FISH_CACHE_DIR;
+    else process.env.FISH_CACHE_DIR = was;
+  }
+}
+
+const stdObjects = (cache: string) => readdirSync(join(cache, "objects")).filter((f) => f.startsWith("std-")).sort();
+
+// Each build is a process of its own, as a rebuild from the command line is.
+test("a dev build keeps std's object across edits to the program's own code", () => {
+  const cache = join(root, "split");
+  const base = readFileSync(HTTP_PROGRAM, "utf8");
+  const file = join(root, "edited.fsh");
+  const out = join(root, "edited");
+  const built = (src: string) => {
+    writeFileSync(file, src);
+    fishc(cache, "build", file, "-o", out);
+    return Bun.spawnSync([out]).stdout.toString();
+  };
+  expect(built(base)).toBe("200 user 7\n");
+  const first = stdObjects(cache);
+  expect(first).toHaveLength(1);
+  const edits: [string, string][] = [
+    [base.replace('"user "', '"member "'), "200 member 7\n"],
+    [base.replace('new Response("user " + req.param("id"))', '{ const id = req.param("id"); return new Response(id + " is a user"); }'), "200 7 is a user\n"],
+    [base.replaceAll("body", "text"), "200 user 7\n"],
+  ];
+  for (const [src, expected] of edits) {
+    expect(built(src)).toBe(expected);
+    expect(stdObjects(cache)).toEqual(first);
+  }
+  const aggregate = base.replace("console.log(res.status, body);", "console.log(res.status, body, new AggregateError([1, 2]).errors.length);");
+  expect(built(aggregate)).toBe("200 user 7 2\n");
+  expect(stdObjects(cache)).toHaveLength(2);
+});
+
+// Every 10th case of the test programs that builds and runs as a dev executable, with no C
+// library to link and no server to start.
+function sampled(): { file: string; src: string }[] {
+  const dir = join(import.meta.dir, "programs");
+  const cases = readdirSync(dir)
+    .filter((f) => f.endsWith(".fsh"))
+    .flatMap((f) => readFileSync(join(dir, f), "utf8").split(/^\/\/ case: .*$/m).slice(1).map((src, i) => ({ name: `${f.slice(0, -4)}-${i}`, src })))
+    .filter(({ src }) => !/\/\/ (error|mode|link):|serve\(|listen\(/.test(src));
+  const folder = join(root, "sampled");
+  mkdirSync(folder, { recursive: true });
+  return cases
+    .filter((_, i) => i % 10 === 0)
+    .map(({ name, src }) => {
+      const file = join(folder, `${name}.fsh`);
+      writeFileSync(file, src);
+      return { file, src };
+    });
+}
+
+// Builds `file` both ways, runs each under the leak check, and gives what each run printed and how
+// it ended.
+async function bothWays(file: string, src: string) {
+  const [split, whole] = [`${file}.split`, `${file}.whole`];
+  await buildAsync(file, split);
+  const ir = compile(src, file);
+  const objects = (await Promise.all([...runtimeUnits(ir, false).map(cachedObjectAsync), mathObjectsAsync()])).flat();
+  const clang = Bun.spawn(["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm"], { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+  expect(await clang.exited).toBe(0);
+  const run = async (out: string) => {
+    const done = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const [stdout, stderr] = await Promise.all([new Response(done.stdout).text(), new Response(done.stderr).text()]);
+    return { stdout, stderr, code: await done.exited };
+  };
+  return [await run(split), await run(whole)];
+}
+
+test("split and one-module dev builds of sampled test programs behave alike", async () => {
+  const programs = sampled();
+  expect(programs.length).toBeGreaterThan(50);
+  await cachedInAsync(join(root, "sampled-cache"), async () => {
+    for (let at = 0; at < programs.length; at += availableParallelism()) {
+      const batch = programs.slice(at, at + availableParallelism());
+      for (const [i, [split, whole]] of (await Promise.all(batch.map((p) => bothWays(p.file, p.src)))).entries()) {
+        expect({ file: batch[i]!.file, ...split }).toEqual({ file: batch[i]!.file, ...whole });
+      }
+    }
+  });
 });

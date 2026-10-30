@@ -75,7 +75,7 @@ function objectPath(u: Unit): string {
 
 // Each object is built into a file of its own, then renamed into place, so builds running at
 // once never see one half-written, and a failed build leaves nothing behind.
-function partial(out: string): string {
+export function partial(out: string): string {
   mkdirSync(dirname(out), { recursive: true });
   return `${out}.${process.pid}.${Math.random().toString(36).slice(2)}`;
 }

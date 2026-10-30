@@ -1401,6 +1401,10 @@ export function lowersVariants(f: typeof instanceVariant) {
   instanceVariant = f;
 }
 
+// A short name for what `description` describes, the same in every program that has it: six
+// base-36 digits of its hash.
+export const digest = (description: string): string => Bun.hash(description).toString(36).slice(-6);
+
 // A string that is the same exactly when two types are, for keying instances.
 export function keyOf(t: Type): string {
   return typeof t === "string" ? t : `{${keys.get(t)}}`;
@@ -1637,13 +1641,31 @@ export function unlocks(from: Type, to: Type, path = ""): string | undefined {
   return undefined;
 }
 
+// The instance each closure, future and generator type is made for: what tells it apart from
+// others of its signature, which show alike.
+export const madeFor = new WeakMap<Exclude<Type, string>, string>();
+let describing = false;
+
+// `show`, but with closures, futures and generators anywhere in the type named by the instance
+// each is made for, for naming what is generated for a type the same way in every program.
+export function described(t: Type): string {
+  const was = describing;
+  describing = true;
+  try {
+    return show(t);
+  } finally {
+    describing = was;
+  }
+}
+
 // How a type reads in a diagnostic, as TypeScript would print it.
 export function show(t: Type): string {
   if (t === "f64") return "number";
   if (typeof t === "string") return t;
+  if (describing && madeFor.has(t)) return madeFor.get(t)!;
   // A type holding itself is shown by its name.
   const tied = ties.get(t);
-  if (tied) return tied.name;
+  if (tied) return describing ? `part of ${tied.name}` : tied.name;
   if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
   if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
   if (t.kind === "pattern") {
@@ -1662,17 +1684,18 @@ export function show(t: Type): string {
   if (t.kind === "fixed") return `FixedArray<${show(t.element)}, ${t.size}>`;
   if (t.kind === "map") return t.set ? `Set<${show(t.key)}>` : `Map<${show(t.key)}, ${show(t.value)}>`;
   if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
-  if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+  if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}${describing ? ` ${t.name}(${t.frame.map((f) => show(f.type)).join(", ")})` : ""}`;
   if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
   if (t.kind === "shared") return `shared<${show(t.of)}>`;
   // A JS handle shows the shape its declaration gives it.
   // A package's shape is shown by the name the package gives it, not the one linking gave it.
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
-  if (t.kind === "dyn") return callableOf.has(t.of) || promised.has(t.of) ? t.of.name : `Dyn<${t.of.name}>`;
+  if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.of.name : `Dyn<${t.of.name}>`;
+  if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
-  if (t.match) return "RegExpExecArray";
-  if (t.tuple) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
+  if (t.match && !describing) return "RegExpExecArray";
+  if (t.tuple && !t.match) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
   if (t.fields.length === 0) return "{}";
   const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
   return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional && f.optional !== "undefined" ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;

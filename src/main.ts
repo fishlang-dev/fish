@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
-import { codegen } from "./codegen.ts";
+import { codegen, symbol } from "./codegen.ts";
 import { CompileError, formatError, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { locking, resolvePackages } from "./dependencies.ts";
@@ -27,6 +27,8 @@ import { compare, formatComparison, formatReport, readReport, sources, survey } 
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 import { rustShim, type Shim } from "./rust.ts";
+import { split } from "./split.ts";
+import { STD_BASE } from "./std.ts";
 
 export type Panic = "unwind" | "abort";
 // A library C can call: an archive to link, or a shared library to load.
@@ -49,11 +51,11 @@ export function compile(src: string, file: string, release = false, panic: Panic
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; shim: () => Shim | undefined } {
+function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined } {
   const loaded = load(file, src);
   return withSources(loaded.sources, () => {
     const checked = check(expanded(loaded, library), library);
-    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), shim: () => rustShim(loaded.rust, checked.instances) };
+    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances) };
   });
 }
 
@@ -159,22 +161,35 @@ function cType(t: Type): string {
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from.
 export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
-  linked(ir, out, release, links, shim());
+  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+  linked(ir, instances, out, release, links, shim());
 }
 
-// Builds the IR `ir` into the executable `out`.
-function linked(ir: string, out: string, release = false, links: string[] = [], shim?: Shim) {
-  const objects = [...runtimeUnits(ir, release).map(cachedObject), ...mathObjects()];
-  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim), { stdin: new TextEncoder().encode(ir) });
+// A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
+// and the program, and a dev build's as the program's part, with std's part a unit of its own that
+// the cache keeps between builds.
+function parts(ir: string, instances: Instance[], release: boolean): { std: Unit[]; program: string } {
+  if (release) return { std: [], program: ir };
+  const bodies = instances.filter((i) => !i.body.foreign && !i.body.rust);
+  const named = (std: boolean) => bodies.filter((i) => i.body.start >= STD_BASE === std).map(symbol);
+  const { std, program } = split(ir, named(true), named(false));
+  return { std: [{ name: "std", args: ["-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
+}
+
+// Builds the IR `ir`, of `instances`, into the executable `out`.
+function linked(ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim) {
+  const { std, program } = parts(ir, instances, release);
+  const objects = [...[...runtimeUnits(ir, release), ...std].map(cachedObject), ...mathObjects()];
+  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim), { stdin: new TextEncoder().encode(program) });
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
 export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const { ir, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
-  const objects = (await Promise.all([...runtimeUnits(ir, release).map(cachedObjectAsync), mathObjectsAsync()])).flat();
-  const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+  const { std, program } = parts(ir, instances, release);
+  const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map(cachedObjectAsync), mathObjectsAsync()])).flat();
+  const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
 }
@@ -195,7 +210,7 @@ export function buildTests(dir: string, out: string): Test[] {
     hideMains(loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
     loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
     const checked = check(expanded(loaded, false));
-    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), out, false, [], rustShim(loaded.rust, checked.instances));
+    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
     return tests;
   });
 }
