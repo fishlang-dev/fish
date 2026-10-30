@@ -41,6 +41,7 @@ export const NATIVE = String.raw`
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #ifdef __APPLE__
 #include <sys/event.h>
 #include <mach-o/dyld.h>
@@ -4273,8 +4274,12 @@ static void fsh_io_stop(void) {
 #endif
 }
 
-// A socket's block: its count and its file descriptor, closed with the last count.
-typedef struct { int64_t count; int fd; } fsh_socket;
+struct fsh_file_job;
+void fsh_rt_file_job_release(struct fsh_file_job *job);
+
+// A socket's block: its count and its file descriptor, closed with the last count. A connect
+// waiting on a host name's lookup has no descriptor yet, only the lookup's job.
+typedef struct { int64_t count; int fd; struct fsh_file_job *lookup; } fsh_socket;
 
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -4287,13 +4292,17 @@ static fsh_socket *fsh_socket_new(int fd) {
   fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
   s->count = 1;
   s->fd = fd;
+  s->lookup = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
-  if (fsh_poller >= 0) fsh_io_forget(s->fd);
-  close(s->fd);
+  if (s->fd >= 0) {
+    if (fsh_poller >= 0) fsh_io_forget(s->fd);
+    close(s->fd);
+  }
+  fsh_rt_file_job_release(s->lookup);
   fsh_rt_free(s);
 }
 
@@ -4369,8 +4378,8 @@ static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, c
   return failed;
 }
 
-// A file read or write on the blocking pool: threads of their own, apart from the executor's
-// workers, so a slow disk never stalls other tasks. A job is counted by the future polling it and
+// A file read or write, or a host name's lookup, on the blocking pool: threads of their own,
+// apart from the executor's workers, so a slow disk or resolver never stalls other tasks. A job is counted by the future polling it and
 // by the thread working on it; the thread wakes the task when done, and a future dropped first
 // leaves the job to the thread to free.
 typedef struct fsh_file_job {
@@ -4464,6 +4473,21 @@ static void fsh_file_read(fsh_file_job *job) {
 
 static void fsh_file_write(fsh_file_job *job) {
   fsh_write_whole(job->path, &job->data, &job->error, &job->syscall);
+}
+
+// A host name's first IPv4 address, into the job's data, or getaddrinfo's error code.
+static void fsh_host_lookup(fsh_file_job *job) {
+  struct addrinfo hints, *found = NULL;
+  memset(&hints, 0, sizeof hints);
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  job->error = getaddrinfo(job->path, NULL, &hints, &found);
+  job->syscall = "getaddrinfo";
+  if (job->error) return;
+  job->data.data = fsh_rt_alloc(sizeof(struct in_addr));
+  memcpy(job->data.data, &((struct sockaddr_in *)found->ai_addr)->sin_addr, sizeof(struct in_addr));
+  job->data.length = job->data.capacity = sizeof(struct in_addr);
+  freeaddrinfo(found);
 }
 
 // readFileSync, writeFileSync and existsSync: the same reads and writes, on the calling thread.
@@ -4700,7 +4724,8 @@ static void *fsh_pool_work(void *arg) {
     if (!fsh_pool_head) fsh_pool_tail = NULL;
     pthread_mutex_unlock(&fsh_pool_lock);
     if (job->op == 0) fsh_file_read(job);
-    else fsh_file_write(job);
+    else if (job->op == 1) fsh_file_write(job);
+    else fsh_host_lookup(job);
     fsh_task *task = job->task;
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
     fsh_rt_wake(task);
@@ -4777,7 +4802,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
     snprintf(reason, sizeof reason, "'%.200s' is not an IPv4 address like 127.0.0.1; host names aren't looked up", text ? text : "");
   }
   fsh_rt_free(text);
-  if (reason[0]) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
+  if (reason[0] && message) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
   return !reason[0];
 }
 
@@ -4888,19 +4913,70 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
   return 1;
 }
 
+// Starts connecting a new socket to an address, into *socket_at, or 5 with the reason.
+static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_in *at, fsh_str **message) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
+  *socket_at = fsh_socket_new(fd);
+  // Interrupted, it goes on connecting all the same.
+  if (connect(fd, (struct sockaddr *)at, sizeof *at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
+  return 0;
+}
+
 // Polls 'TcpStream.connect(host, port)': the frame keeps the socket while it connects; once
-// writable, the connection either stands, moving the socket out, or failed.
+// writable, the connection either stands, moving the socket out, or failed. A host that isn't an
+// IPv4 address is looked up on the blocking pool first, the socket waiting with no descriptor; a
+// connect dropped mid-lookup leaves the job to the pool's thread, which drops its result.
 int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
   fsh_socket *s = *socket_at;
   if (!s) {
     struct sockaddr_in at;
-    if (!fsh_address(host, port, &at, message)) return 5;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
-    s = *socket_at = fsh_socket_new(fd);
-    // Interrupted, it goes on connecting all the same.
-    if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
+    if (fsh_address(host, port, &at, NULL)) {
+      if (fsh_connect_start(socket_at, &at, message)) return 5;
+    } else {
+      char *name = fsh_rt_str_cstring(host);
+      if (port < 0 || port > 65535 || !name) {
+        fsh_rt_free(name);
+        fsh_address(host, port, &at, message);
+        return 5;
+      }
+      fsh_file_job *job = fsh_rt_alloc(sizeof(fsh_file_job));
+      memset(job, 0, sizeof *job);
+      job->refs = 2;
+      job->op = 2;
+      job->path = name;
+      __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+      job->task = task;
+      s = *socket_at = fsh_rt_alloc(sizeof(fsh_socket));
+      s->count = 1;
+      s->fd = -1;
+      s->lookup = job;
+      fsh_pool_submit(job);
+      return 0;
+    }
+  } else if (s->fd < 0) {
+    fsh_file_job *job = s->lookup;
+    if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+    if (job->error) {
+      // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
+      const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
+      size_t size = strlen(job->path) + 32;
+      char *text = fsh_rt_alloc(size);
+      snprintf(text, size, "getaddrinfo %s %s", code, job->path);
+      fsh_io_parts(message, text, code, "getaddrinfo", NULL);
+      fsh_rt_free(text);
+      return 5;
+    }
+    struct sockaddr_in at;
+    memset(&at, 0, sizeof at);
+    at.sin_family = AF_INET;
+    at.sin_port = htons((uint16_t)port);
+    memcpy(&at.sin_addr, job->data.data, sizeof at.sin_addr);
+    fsh_rt_socket_release(s);
+    *socket_at = NULL;
+    if (fsh_connect_start(socket_at, &at, message)) return 5;
   }
+  s = *socket_at;
   int error = 0;
   socklen_t size = sizeof error;
   getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);

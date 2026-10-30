@@ -320,6 +320,8 @@ class Response {
   statusText: string;
   headers: Headers;
   body: string;
+  // The URL fetch got it from, or "" for one the program built.
+  url: string = "";
 
   constructor(body?: string | null, init?: ResponseInit) {
     let status: i64 = 200;
@@ -360,6 +362,25 @@ class Response {
   async text(): Promise<string> {
     return this.body;
   }
+
+  // The body read as JSON into a T.
+  async json<T>(): Promise<T> throws JsonError {
+    return JSON.parse<T>(this.body);
+  }
+}
+
+// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
+// is a response, not an error, and a redirect is returned rather than followed.
+async function fetch(input: string | Request, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const req = Http1.fetched(input, init);
+  const signal = req.signal.clone();
+  const to = Http1.target(req.url);
+  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  let res = await Http1.receive(conn, req.method === "HEAD", signal);
+  res.url = to.url;
+  return res;
 }
 
 type ServeInfo = { hostname: string; port: i64 };
@@ -650,6 +671,13 @@ class Http1 {
     if (parts.length !== 3 || !Http1.isToken(parts[0]) || !parts[1].startsWith("/")) return null;
     const version = parts[2];
     if (version !== "HTTP/1.1" && version !== "HTTP/1.0") return null;
+    const headers = Http1.parseFields(lines);
+    if (headers === null) return null;
+    return new HttpHead(parts[0], parts[1], version, headers);
+  }
+
+  // The header lines after a head's first, or null when one isn't a header.
+  static parseFields(lines: Ref<string[]>): Headers | null {
     let headers = new Headers();
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
@@ -659,7 +687,194 @@ class Http1 {
       if (!Http1.isToken(name)) return null;
       headers.append(name, line.slice(colon + 1).trim());
     }
-    return new HttpHead(parts[0], parts[1], version, headers);
+    return headers;
+  }
+
+  // fetch's request: a Request given, with what init sets in place of its own.
+  static fetched(input: string | Request, init?: RequestInit): Request {
+    if (typeof input === "string") return new Request(input, init);
+    let req = input;
+    if (init !== null) {
+      const m = init.method;
+      if (m !== null) req.method = m.toUpperCase();
+      const h = init.headers;
+      if (h !== null) req.headers = h;
+      const b = init.body;
+      if (b !== null) req.body = b;
+      const s = init.signal;
+      if (s !== null) req.signal = s;
+    }
+    return req;
+  }
+
+  // Where an http: URL points: host and port to connect to, the Host header, the path and query
+  // sent, and the URL without its fragment.
+  // ponytail: http://host[:port][/path][?query] only; a full URL parser would take the rest.
+  static target(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+    const hash = url.indexOf("#");
+    const whole = hash >= 0 ? url.slice(0, hash) : url;
+    const scheme = whole.indexOf("://");
+    const named = scheme > 0 ? whole.slice(0, scheme).toLowerCase() : "";
+    if (named === "https") throw new IoError("can't fetch '" + url + "': https: needs TLS, which isn't supported yet");
+    if (named !== "http") throw new IoError("can't fetch '" + url + "': only http: URLs are supported");
+    for (let i = 0; i < whole.length; i++) {
+      const c = whole.charCodeAt(i) as i64;
+      if (c <= 32 || c === 127) throw new IoError("can't fetch '" + url + "': a URL can't hold spaces or control characters");
+    }
+    const rest = whole.slice(scheme + 3);
+    let end = rest.length as i64;
+    const slash = rest.indexOf("/");
+    if (slash >= 0) end = slash;
+    const query = rest.indexOf("?");
+    if (query >= 0 && query < end) end = query;
+    const authority = rest.slice(0, end);
+    let path = rest.slice(end);
+    if (!path.startsWith("/")) path = "/" + path;
+    if (authority.indexOf("@") >= 0) throw new IoError("can't fetch '" + url + "': a URL can't hold a user name or password");
+    if (authority.indexOf("[") >= 0) throw new IoError("can't fetch '" + url + "': IPv6 hosts aren't supported yet");
+    let host = authority;
+    let port: i64 = 80;
+    const colon = authority.indexOf(":");
+    if (colon >= 0) {
+      host = authority.slice(0, colon);
+      const digits = authority.slice(colon + 1);
+      if (digits.length > 0) port = Http1.digits(digits);
+      if (port < 1 || port > 65535) throw new IoError("can't fetch '" + url + "': the port isn't a number from 1 to 65535");
+    }
+    host = host.toLowerCase();
+    if (host.length === 0 || !Http1.isHost(host)) throw new IoError("can't fetch '" + url + "': it names no host");
+    return { host: host, port: port, authority: port === 80 ? host : host + ":" + String(port), path: path, url: whole };
+  }
+
+  // A request's line, headers and body, as fetch sends it: the caller's headers in their order,
+  // the framing and Host its own.
+  static requestText(req: Ref<Request>, authority: string, path: string): string throws IoError {
+    if (!Http1.isToken(req.method)) throw new IoError("can't fetch '" + req.url + "': '" + req.method + "' isn't a method name");
+    let text = req.method + " " + path + " HTTP/1.1\\r\\nhost: " + authority + "\\r\\n";
+    let bad = "";
+    req.headers.forEach((value: string, name: string) => {
+      if (!Http1.isToken(name) || Http1.hasBreak(value)) bad = name;
+      else if (name !== "host" && name !== "connection" && name !== "content-length" && name !== "transfer-encoding") text = text + name + ": " + value + "\\r\\n";
+    });
+    if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
+    if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
+    if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
+    const size = new TextEncoder().encode(req.body).length as i64;
+    if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
+    return text + "connection: close\\r\\n\\r\\n" + req.body;
+  }
+
+  // The next bytes of a response, which must come before the connection ends.
+  static async more(conn: Ref<TcpStream>, signal: Ref<AbortSignal>, before: string): Promise<u8[]> throws IoError | AbortError {
+    const got = await conn.read(16384, signal.clone());
+    if (got.length === 0) throw new IoError("the connection closed before " + before);
+    return got;
+  }
+
+  // A response read whole from a connection that closes after it. Interim 1xx responses are
+  // skipped; the body is framed by chunks, by Content-Length, or by the connection's end.
+  static async receive(conn: TcpStream, head: boolean, signal: AbortSignal): Promise<Response> throws IoError | AbortError {
+    let buffer: u8[] = [];
+    while (true) {
+      let end = Http1.headEnd(buffer, 0);
+      while (end < 0) {
+        if ((buffer.length as i64) > 65536) throw new IoError("the response's status line and headers are over 64 KiB");
+        const from = buffer.length as i64 - 3;
+        const got = await Http1.more(conn, signal, "the response's headers ended");
+        for (const b of got) buffer.push(b);
+        end = Http1.headEnd(buffer, from < 0 ? 0 : from);
+      }
+      if (end > 65536) throw new IoError("the response's status line and headers are over 64 KiB");
+      const lines = new TextDecoder().decode(Http1.take(buffer, 0, end)).split("\\r\\n");
+      buffer = Http1.take(buffer, end + 4, buffer.length as i64);
+      const parts = lines[0].split(" ");
+      const status = parts.length >= 2 ? Http1.digits(parts[1]) : -1;
+      if (!lines[0].startsWith("HTTP/1.") || status < 100 || status > 999 || parts[1].length !== 3 || Http1.hasBreak(lines[0])) {
+        throw new IoError("the response's status line '" + lines[0] + "' isn't HTTP/1.x");
+      }
+      const headers = Http1.parseFields(lines);
+      if (headers === null) throw new IoError("the response's headers are malformed");
+      if (status < 200 && status !== 101) continue;
+      let body: u8[] = [];
+      const coding = headers.get("transfer-encoding");
+      if (head || status < 200 || status === 204 || status === 304) {
+        body = [];
+      } else if (coding !== null && Http1.hasToken(coding, "chunked")) {
+        body = await Http1.chunked(conn, buffer, signal);
+      } else if (coding === null && headers.has("content-length")) {
+        const length = Http1.contentLength(headers);
+        if (length < 0) throw new IoError("the response's Content-Length isn't a number");
+        while ((buffer.length as i64) < length) {
+          const got = await Http1.more(conn, signal, "the response's body ended");
+          for (const b of got) buffer.push(b);
+        }
+        body = Http1.take(buffer, 0, length);
+      } else {
+        body = buffer;
+        while (true) {
+          const got = await conn.read(16384, signal.clone());
+          if (got.length === 0) break;
+          for (const b of got) body.push(b);
+        }
+      }
+      let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
+      res.body = new TextDecoder().decode(body);
+      return res;
+    }
+  }
+
+  // A chunked body, decoded; trailers after the last chunk are left unread.
+  static async chunked(conn: Ref<TcpStream>, start: u8[], signal: Ref<AbortSignal>): Promise<u8[]> throws IoError | AbortError {
+    let buffer = start;
+    let body: u8[] = [];
+    let at: i64 = 0;
+    while (true) {
+      // The scan goes on from where the last read ended, and a size line may take 1 KiB.
+      let line = Http1.lineEnd(buffer, at);
+      while (line < 0) {
+        if ((buffer.length as i64) - at > 1024) throw new IoError("the response's chunk size line is over 1 KiB");
+        const from = buffer.length as i64 - 1;
+        const got = await Http1.more(conn, signal, "the response's chunked body ended");
+        for (const b of got) buffer.push(b);
+        line = Http1.lineEnd(buffer, from < at ? at : from);
+      }
+      if (line - at > 1024) throw new IoError("the response's chunk size line is over 1 KiB");
+      let sizeText = new TextDecoder().decode(Http1.take(buffer, at, line));
+      const ext = sizeText.indexOf(";");
+      if (ext >= 0) sizeText = sizeText.slice(0, ext);
+      const size = Http1.hex(sizeText.trim());
+      if (size < 0) throw new IoError("the response's chunk size '" + sizeText + "' isn't a hexadecimal number");
+      at = line + 2;
+      if (size === 0) return body;
+      while ((buffer.length as i64) < at + size + 2) {
+        const got = await Http1.more(conn, signal, "the response's chunked body ended");
+        for (const b of got) buffer.push(b);
+      }
+      if (buffer[(at + size) as usize] !== 13 || buffer[(at + size + 1) as usize] !== 10) throw new IoError("the response's chunk of " + String(size) + " bytes isn't followed by CR LF");
+      for (let i = at as usize; i < ((at + size) as usize); i++) body.push(buffer[i]);
+      at = at + size + 2;
+    }
+  }
+
+  // Where the line starting at from ends: the index of its CR LF, or -1.
+  static lineEnd(buffer: Ref<u8[]>, from: i64): i64 {
+    for (let i = from as usize; i + 1 < buffer.length; i++) {
+      if (buffer[i] === 13 && buffer[i + 1] === 10) return i as i64;
+    }
+    return -1;
+  }
+
+  // A whole number written in hexadecimal digits, or -1.
+  static hex(text: string): i64 {
+    if (text.length === 0 || text.length > 15) return -1;
+    let n: i64 = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i) as i64;
+      const d = c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : c >= 65 && c <= 70 ? c - 55 : -1;
+      if (d < 0) return -1;
+      n = n * 16 + d;
+    }
+    return n;
   }
 
   // The body's length from Content-Length, 0 without one, or -1 when it isn't a number.
@@ -788,7 +1003,7 @@ class Http1 {
 }
 `;
 
-const HTTP_NAMES = ["serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
