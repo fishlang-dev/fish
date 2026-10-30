@@ -5500,6 +5500,9 @@ const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
   pathReal: [["string"], "string", true],
   dirTemp: [["string"], "string", true],
   pathRemove: [["string", "boolean", "boolean"], "void", true],
+  // A command, its arguments, the working directory ("" for this one's) and stdin, giving the
+  // pid, exit status (-1 for a signal), signal number, stdout and stderr.
+  processSpawn: [["string", arrayType("string"), "string", arrayType("u8")], tupleType(["i64", "i64", "i64", arrayType("u8"), arrayType("u8")]), true],
 };
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.

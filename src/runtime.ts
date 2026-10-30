@@ -33,6 +33,7 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_fs_realpath(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_fs_mkdtemp(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_fs_rm(ptr, i32, i32, ptr)",
+  "declare i32 @fsh_rt_spawn_sync(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_str_from_units(ptr, i64)",
   "declare ptr @fsh_rt_str_from_points(ptr, i64, ptr)",
   "declare ptr @fsh_rt_str_at_or_null(ptr, i64)",

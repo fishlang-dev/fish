@@ -2831,6 +2831,93 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
 `,
+  child_process: String.raw`
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
+
+// A "utf8" encoding is read from the call's literal, which then gives text; an options value held
+// elsewhere can't ask for text, its encoding only null.
+export type SpawnSyncOptions = { cwd?: string; input?: string | u8[]; encoding?: "buffer" | null };
+
+export class SpawnSyncReturns<T> {
+  pid: i64;
+  status: i64 | null;
+  signal: string | null;
+  stdout: T;
+  stderr: T;
+  error: IoError | null;
+  constructor(pid: i64, status: i64 | null, signal: string | null, stdout: T, stderr: T, error: IoError | null) {
+    this.pid = pid;
+    this.status = status;
+    this.signal = signal;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.error = error;
+  }
+}
+
+export function spawnSync(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<u8[]> {
+  const input = options.input ?? "";
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  try {
+    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes);
+    const name = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
+    return new SpawnSyncReturns<u8[]>(pid, status < 0 ? null : status, name, stdout, stderr, null);
+  } catch (e) {
+    return new SpawnSyncReturns<u8[]>(0, null, null, [], [], e);
+  }
+}
+
+// A command that ran but exited with a code other than 0, or was ended by a signal.
+export class ExecError extends Error {
+  status: i64 | null;
+  signal: string | null;
+  stdout: u8[];
+  stderr: u8[];
+  constructor(message: string, status: i64 | null, signal: string | null, stdout: u8[], stderr: u8[]) {
+    super(message);
+    this.status = status;
+    this.signal = signal;
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+// What the exec calls give: the child's stdout, after its stderr has gone on to this process's,
+// as Node's do; or the error, Node's message naming the command as it was given.
+function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoError | ExecError {
+  if (r.stderr.length > 0) unsafe { write(2, ptrOf(r.stderr[0]), r.stderr.length as usize) };
+  const failed = r.error;
+  if (failed !== null) throw failed;
+  if (r.status === 0) return r.stdout;
+  const text = new TextDecoder();
+  const message = r.stderr.length > 0 ? "Command failed: " + command + "\n" + text.decode(r.stderr) : "Command failed: " + command;
+  throw new ExecError(message, r.status, r.signal, r.stdout, r.stderr);
+}
+
+export function execFileSync(file: string, args: string[] = [], options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
+  const named = [file, ...args].join(" ");
+  return executed(spawnSync(file, args, options), named);
+}
+
+export function execFileSyncText(file: string, args: string[] = [], options: SpawnSyncOptions = {}): string throws IoError | ExecError {
+  return new TextDecoder().decode(execFileSync(file, args, options));
+}
+
+export function execSync(command: string, options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
+  return executed(spawnSync("/bin/sh", ["-c", command], options), command);
+}
+
+export function execSyncText(command: string, options: SpawnSyncOptions = {}): string throws IoError | ExecError {
+  return new TextDecoder().decode(execSync(command, options));
+}
+
+export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {
+  const r = spawnSync(command, args, options);
+  const text = new TextDecoder();
+  return new SpawnSyncReturns<string>(r.pid, r.status, r.signal, text.decode(r.stdout), text.decode(r.stderr), r.error);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
