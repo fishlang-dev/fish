@@ -33,6 +33,8 @@ let expansions = 0;
 // members' and parameters', nearest first, then its own. A decorator a macro gave applies in
 // the next round.
 export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
+  expansions = 0;
+  constants = 0;
   upcasts.clear();
   // The pinned names every round's quotes made, which a later round's macro may give back.
   const pins = new Set<string>();
