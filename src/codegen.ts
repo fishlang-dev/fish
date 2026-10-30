@@ -59,7 +59,7 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
 // An instance's name in the IR.
-const symbol = (i: Instance) => (i.body.rust ? `@"${trusted(i.body.rust).symbol}"` : i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
+export const symbol = (i: Instance) => (i.body.rust ? `@"${trusted(i.body.rust).symbol}"` : i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols
 // they name.
