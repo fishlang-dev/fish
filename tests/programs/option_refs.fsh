@@ -643,3 +643,48 @@ function main() {
 // expect: 1 2
 // expect: 2
 // expect: 3
+// case: option_refs_through_wrappers
+class Item {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function first(xs: Ref<Item[]>): Ref<Item> {
+  return xs[0];
+}
+function main(): void {
+  let items = [new Item("a")];
+  const r = first(items) satisfies Ref<Item>;
+  items = [new Item("b")];
+  console.log(r.name);
+}
+// error: cannot change 'items' while 'r' borrows 'items' and is used later
+// case: option_refs_through_unsafe
+class Item {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function first(xs: Ref<Item[]>): Ref<Item> {
+  return xs[0];
+}
+function main(): void {
+  let items = [new Item("a")];
+  const r = unsafe { first(items) };
+  items = [new Item("b")];
+  console.log(r.name);
+}
+// error: cannot change 'items' while 'r' borrows 'items' and is used later
+// case: option_refs_through_as
+class Item {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function find(xs: Ref<Item[]>): Ref<Item> | null {
+  return xs.length > 0 ? xs[0] : null;
+}
+function main(): void {
+  let items = [new Item("a")];
+  const r = (find(items) as Ref<Item> | null)!;
+  items = [new Item("b")];
+  console.log(r.name);
+}
+// error: cannot change 'items' while 'r' borrows 'items' and is used later

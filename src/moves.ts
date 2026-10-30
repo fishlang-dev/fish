@@ -1386,13 +1386,18 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
-    if (e.kind === "nonNull" && optionRef(types.get(e.expr))) return rootOf(e.expr);
+    if ((e.kind === "nonNull" && optionRef(types.get(e.expr))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
-  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`.
+  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
+  // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
   function unwrapped(e: Expr): Expr {
-    return e.kind === "nonNull" && optionRef(types.get(e.expr)) ? unwrapped(e.expr) : e;
+    return (e.kind === "nonNull" && optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
+  }
+
+  function transparent(e: Named): boolean {
+    return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe";
   }
 
   // The indexes into arrays along a place's path, outermost first.
