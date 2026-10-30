@@ -7,7 +7,7 @@ import { rustClassOf } from "./rust.ts";
 import { kindTests } from "./narrow.ts";
 import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
-import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, optionRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -54,7 +54,14 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
-  const { types, locals, calls, setters, jumps, coercions, borrowsFrom } = instance;
+  const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
+  // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
+  const coercions = new Map(instance.coercions);
+  for (const [e, to] of coercions) {
+    const ref = optionRef(to);
+    const from = types.get(e);
+    if (ref && from !== undefined && from !== "null" && !optionRef(from) && !isRef(from)) coercions.set(e, ref);
+  }
   const body = f.body;
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
@@ -808,7 +815,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places an expression lends a reference to, and how: a place borrowed, a reference
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
+    e = unwrapped(e);
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
     // A closure made for a call lends what it captures for the call.
@@ -827,8 +836,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const place = key(e);
     // A shared reference passed on is just another pointer, which needs nothing lent; a
     // mutable one lends itself, shared or mutably as it is passed on.
-    if (place === undefined || !isRef(to) || (isRef(type) && !type.mutable)) return [];
-    return [[place, e, to.mutable]];
+    // A mutable reference or nothing passed on lends itself as a mutable reference does.
+    const ref = to && (isRef(to) ? to : optionRef(to));
+    const held = type && (isRef(type) ? type : optionRef(type));
+    if (place === undefined || !ref || (held && !held.mutable)) return [];
+    return [[place, e, ref.mutable]];
   }
 
   // What a call's result borrows from one of its sources: what the source lends, or, for a
@@ -857,7 +869,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
-    if (root && isRef(root.type)) {
+    if (root && (isRef(root.type) || optionRef(root.type))) {
       throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // Nor out of a reference a field holds, or a shared value every clone of it uses.
@@ -955,9 +967,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the reference it copies, or the reference it borrows through, holds.
   function hold(holder: Local, e: Expr) {
     if (!state) return;
-    if (e.kind === "conditional") {
-      hold(holder, e.then);
-      hold(holder, e.else);
+    e = unwrapped(e);
+    if (e.kind === "conditional" || choosing(e)) {
+      hold(holder, e.kind === "conditional" ? e.then : e.left);
+      hold(holder, e.kind === "conditional" ? e.else : e.right);
       return;
     }
     if (lentTemporary(e)) throw outlived(e, `'${holder.name}'`);
@@ -1007,7 +1020,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             }
           }
         }
-      } else inherit(holder, e);
+      } else {
+        lent(e).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
+        inherit(holder, e);
+      }
       return;
     }
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
@@ -1128,7 +1144,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a reference value points into: places it borrows where they live, what the
   // reference variables it reads through hold, what calls' results borrow, or a temporary.
   function pointsInto(e: Expr): string[] {
+    e = unwrapped(e);
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
+    if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
     // A closure points at what it borrows, and wherever what it holds points.
     if (e.kind === "arrow" || instance.envs?.has(e)) return captured(e).flatMap(([place, , from, , held]) => (held ? (from && holdsRef(from.type) ? heldBy(from) : []) : [place]));
     const from = borrowsFrom.get(e);
@@ -1163,7 +1181,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a holder's loans are on, leaving out those inside other holders, whose own
   // loans are held too.
   function heldBy(root: Local): string[] {
-    const refs = new Set([...locals.values()].filter((l) => isRef(l.type)).map((l) => String(l.id)));
+    const refs = new Set([...locals.values()].filter((l) => isRef(l.type) || optionRef(l.type)).map((l) => String(l.id)));
     return [...(state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!)).map((l) => l.place);
   }
 
@@ -1171,7 +1189,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // reference read out of a value holding references points where that value's loans are.
   function within(e: Expr): string[] {
     const root = locals.get(rootOf(e) as never);
-    if (!root || !(isRef(root.type) || (isRef(types.get(e)!) && holdsRef(root.type)))) return [key(e)!];
+    if (!root || !(isRef(root.type) || optionRef(root.type) || (isRef(types.get(e)!) && holdsRef(root.type)))) return [key(e)!];
     return heldBy(root);
   }
 
@@ -1362,8 +1380,24 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }), ...through];
   }
 
+  // `a ?? b` holding a reference gives the one either side holds.
+  function choosing(e: Named): e is Extract<Expr, { kind: "binary" }> {
+    return e.kind === "binary" && e.op === "??" && holdsRef(types.get(e)!);
+  }
+
   function rootOf(e: Named): Named {
+    if ((e.kind === "nonNull" && optionRef(types.get(e.expr))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
+  }
+
+  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
+  // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
+  function unwrapped(e: Expr): Expr {
+    return (e.kind === "nonNull" && optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
+  }
+
+  function transparent(e: Named): boolean {
+    return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe";
   }
 
   // The indexes into arrays along a place's path, outermost first.

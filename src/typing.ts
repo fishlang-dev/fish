@@ -216,6 +216,13 @@ export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
 // Whether a type is an Option: a union one of whose members is the empty value.
 export const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
 
+// The reference a `Ref<T> | null` holds when it isn't empty.
+export function optionRef(t: Type | undefined): RefType | undefined {
+  if (!t || !isOption(t) || t.members.length !== 2) return undefined;
+  const ref = t.members.find((m) => m !== "null")!;
+  return typeof ref !== "string" && ref.kind === "ref" ? ref : undefined;
+}
+
 // The values an integer type holds.
 export function range(t: Integer): [bigint, bigint] {
   const { bits, signed } = INTEGERS[t];

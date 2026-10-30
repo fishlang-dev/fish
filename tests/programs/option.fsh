@@ -90,7 +90,7 @@ function main() {
 }
 // error: '?.' reads through an Option, and this is a '{ x: i64 }', which is never empty; use '.'
 // case: option_chain_reference
-// An Option can't hold a reference yet.
+// A chain giving a reference gives an Option of it, which borrows what the chain read.
 class C {
   n: i64 = 1
   r(): Ref<i64> { return this.n }
@@ -102,7 +102,7 @@ function main() {
   const y: i64 = x!
   print(y)
 }
-// error: Options holding references are not supported yet
+// error: cannot change 'o' while 'x' borrows 'o' and is used later
 // case: option_condition
 // An Option isn't a condition.
 function main() {

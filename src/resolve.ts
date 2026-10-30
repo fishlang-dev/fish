@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, optionRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -52,6 +52,8 @@ export function storable(written: Type, at: Span): Type {
     throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions stored in fields", at);
+  // A reference or nothing is only a variable's, a parameter's or a result's.
+  if (holdsPart(type, (t) => optionRef(t) !== undefined)) throw unsupported("unions holding references", at);
   return type;
 }
 
@@ -324,7 +326,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
     if (t.kind === "literal") return literal(t.value);
-    if (t.kind === "union") return unionType(t.types.map(unionMember));
+    if (t.kind === "union") return union(t.types);
     if (t.kind === "intersection") return intersection(t.types);
     if (t.kind === "array") return array(resolveType(t.element), t);
     if (t.kind === "tuple") {
@@ -414,7 +416,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.name === "Option") {
       if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
-      return unionType([unionMember(t.args[0]!), "null"]);
+      return unionType([unionMember(t.args[0]!, true), "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
     const lifetime = slots.get(t.name);
@@ -475,9 +477,16 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     return refType(to, t.name === "Mut", life?.name);
   }
 
+  // The one union holding a reference is a reference or nothing, `Ref<T> | null`, as Rust's
+  // `Option<&T>` is.
+  function union(nodes: TypeNode[]): Type {
+    const option = nodes.filter((n) => !(n.kind === "ref" && n.name === "null" && n.args.length === 0)).length === 1;
+    return unionType(nodes.map((n) => unionMember(n, option)));
+  }
+
   // A union holds values, so an interface, which describes values without being one, can't be
   // a member, and neither can `void`.
-  function unionMember(node: TypeNode): Type {
+  function unionMember(node: TypeNode, option = false): Type {
     const t = resolveType(node);
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
@@ -486,7 +495,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     // A union holds a value, so a function type in one is a stored callable.
     if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
-    if (holdsRef(t)) throw unsupported("unions holding references", node);
+    if (holdsRef(t) && !(option && typeof t !== "string" && t.kind === "ref")) throw unsupported("unions holding references", node);
     return t;
   }
 

@@ -9,7 +9,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, optionRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -3610,7 +3610,7 @@ export function expressions(ctx: Context) {
 
   // What a link of an optional chain gives: an Option of what it reads.
   function optional(t: Type, at: Expr): Type {
-    if (holdsRef(t)) throw unsupported("Options holding references", at);
+    if (holdsRef(t) && !isRefType(t)) throw unsupported("Options holding references", at);
     return unionType([t, "null"]);
   }
 
@@ -4154,6 +4154,9 @@ export function expressions(ctx: Context) {
         // Between other types, 'as' only widens, which nothing needs to check at run time; a
         // narrower type is reached by a check that narrows.
         if (!isNumeric(to) || !isNumeric(from)) {
+          // A reference widened to what it points to would be a copy nobody wrote.
+          const read = types.get(e.expr) ?? from;
+          if ((isRefType(from) || isRefType(read)) && !isCopy(lower(from)) && !isRefType(to) && !optionRef(to)) throw new CompileError(`'as' can't take the value out of '${show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
           if (!(from === "boolean" && isInteger(to)) && fits(from, to)) {
             coerce(e.expr, from, to, "");
             return to;
@@ -4304,6 +4307,13 @@ export function expressions(ctx: Context) {
             coerce(e.else, otherwise, shared, "");
             return shared;
           }
+        }
+        // A reference against nothing is a reference or nothing.
+        const option = isRef(then) && otherwise === "null" ? unionType([then, "null"]) : isRef(otherwise) && then === "null" ? unionType([otherwise, "null"]) : undefined;
+        if (option) {
+          coerce(e.then, then, option, "");
+          coerce(e.else, otherwise, option, "");
+          return option;
         }
         if (isRef(then) || isRef(otherwise)) [then, otherwise] = [loaded(e.then, then), loaded(e.else, otherwise)];
         if (then === otherwise) return then;
@@ -4456,7 +4466,8 @@ export function expressions(ctx: Context) {
       return to;
     }
     const fallback = value(e.right);
-    const to = fits(fallback, inner) || adaptable(e.right, inner) ? inner : option;
+    // An Option of a reference takes a place to lend as its fallback.
+    const to = fits(fallback, inner) || adaptable(e.right, inner) || (isRefType(inner) && fits(fallback, inner.to)) ? inner : option;
     coerce(e.right, fallback, to, `type '${show(fallback)}' is not assignable to type '${show(to)}', what '${show(option)}' holds`);
     return to;
   }
@@ -4674,9 +4685,25 @@ export function expressions(ctx: Context) {
       borrow(e, type, to, message);
       return;
     }
+    // A place meeting a reference or nothing is lent, as one meeting the reference is.
+    const lent = optionRef(to);
+    // A `?:` lends a place either side chooses into it, as it does into a reference.
+    if (lent && e.kind === "conditional" && optionRef(type) === undefined && [e.then, e.else].some(rooted)) {
+      for (const side of [e.then, e.else]) {
+        coercions.delete(side);
+        coerce(side, types.get(side)!, to, message);
+      }
+      types.set(e, to);
+      return;
+    }
+    if (lent && type !== "null" && !optionRef(type) && (typeof type === "string" || type.kind !== "ref")) {
+      borrow(e, type, lent, message);
+      coercions.set(e, to);
+      return;
+    }
     // A reference gives its value where one is wanted only by copying it: nothing moves out of
     // a borrow.
-    if (typeof type !== "string" && type.kind === "ref" && (typeof to === "string" || to.kind !== "ref")) {
+    if (typeof type !== "string" && type.kind === "ref" && (typeof to === "string" || to.kind !== "ref") && !lent) {
       if (!isCopy(type.to) && fits(type.to, to)) {
         throw new CompileError(`can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end);
       }
@@ -4999,6 +5026,7 @@ export function expressions(ctx: Context) {
       return { ...field, type: own };
     }
     if (typeof field.type !== "string" && field.type.kind === "closure") throw unsupported("functions stored in objects", p);
+    if (optionRef(field.type)) throw unsupported("unions holding references", p);
     return field;
   }
 
