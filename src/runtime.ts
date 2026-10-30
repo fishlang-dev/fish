@@ -11,6 +11,8 @@ export const RUNTIME = [
   "declare void @exit(i32) noreturn",
   "declare void @abort() noreturn",
   "declare ptr @fsh_rt_format_f64(double, ptr)",
+  "declare ptr @fsh_rt_format_i128(i128, ptr)",
+  "declare ptr @fsh_rt_format_u128(i128, ptr)",
   "declare ptr @fsh_rt_format_f32(float, ptr)",
   "declare void @fsh_rt_str_retain(ptr)",
   "declare void @fsh_rt_str_release(ptr)",
@@ -194,11 +196,15 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_run(ptr, ptr, ptr, ptr, i64, i64, ptr)",
   "declare ptr @fsh_rt_str_from_cstring(ptr)",
   "declare ptr @fsh_rt_str_from_u64(i64)",
+  "declare ptr @fsh_rt_str_from_i128(i128)",
+  "declare ptr @fsh_rt_str_from_u128(i128)",
   "declare ptr @fsh_rt_str_from_f64(double)",
   "declare ptr @fsh_rt_str_from_f32(float)",
   "declare ptr @fsh_rt_json_new()",
   "declare void @fsh_rt_json_raw(ptr, ptr, i64)",
   "declare void @fsh_rt_json_i64(ptr, i64)",
+  "declare void @fsh_rt_json_i128(ptr, i128)",
+  "declare void @fsh_rt_json_u128(ptr, i128)",
   "declare void @fsh_rt_json_u64(ptr, i64)",
   "declare void @fsh_rt_json_f64(ptr, double, i32)",
   "declare void @fsh_rt_json_string(ptr, ptr)",
@@ -229,6 +235,8 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_json_end(ptr)",
   "declare ptr @fsh_rt_insp_text(ptr)",
   "declare ptr @fsh_rt_insp_i64(i64)",
+  "declare ptr @fsh_rt_insp_i128(i128)",
+  "declare ptr @fsh_rt_insp_u128(i128)",
   "declare ptr @fsh_rt_insp_u64(i64)",
   "declare ptr @fsh_rt_insp_f64(double, i32)",
   "declare ptr @fsh_rt_insp_string(ptr)",
@@ -246,6 +254,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_text_add(ptr, ptr)",
   "declare void @fsh_rt_text_raw(ptr, ptr)",
   "declare void @fsh_rt_text_i64(ptr, i64)",
+  "declare void @fsh_rt_text_i128(ptr, i128)",
+  "declare void @fsh_rt_text_u128(ptr, i128)",
   "declare void @fsh_rt_text_u64(ptr, i64)",
   "declare void @fsh_rt_text_f64(ptr, double)",
   "declare void @fsh_rt_text_f32(ptr, float)",
@@ -334,8 +344,16 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       format += "%s";
       values.push(`, ptr ${text}`);
     } else {
-      // Every integer prints as a 64-bit one, extended by its signedness.
+      // Every integer prints as a 64-bit one, extended by its signedness, but for the 128-bit
+      // ones, which the runtime writes.
       const { bits, signed } = INTEGERS[type as Integer];
+      if (bits === 128) {
+        const text = temp();
+        emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${b.alloca("[41 x i8]")})`);
+        format += "%s";
+        values.push(`, ptr ${text}`);
+        return;
+      }
       let wide = v;
       if (bits < 64) {
         wide = temp();

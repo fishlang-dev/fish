@@ -3452,6 +3452,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return void emit(`call void @fsh_rt_json_f64(ptr ${w}, double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
     }
     const { bits, signed } = INTEGERS[t as Integer];
+    if (bits === 128) return void emit(`call void @fsh_rt_json_${signed ? "i" : "u"}128(ptr ${w}, i128 ${v})`);
     let wide = v;
     if (bits < 64) {
       wide = temp();
@@ -3730,7 +3731,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       whole(FARG_KINDS.float, t === "f32" ? "1" : "0");
       put(2, "double", x);
-    } else if (isInteger(t)) {
+    } else if (isInteger(t) && INTEGERS[t].bits < 128) {
       const { bits, signed } = INTEGERS[t];
       let x = v;
       if (bits < 64) {
@@ -3769,6 +3770,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (isFloat(t)) return emit(`call void @fsh_rt_text_${t}(ptr ${b}, ${llvm(t)} ${v})`);
     if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
+      if (bits === 128) return emit(`call void @fsh_rt_text_${signed ? "i" : "u"}128(ptr ${b}, i128 ${v})`);
       let x = v;
       if (bits < 64) {
         x = temp();
@@ -3925,7 +3927,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         wide = temp();
         emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
-      emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i64" : "u64"}(i64 ${wide})`);
+      if (bits === 128) emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i" : "u"}128(i128 ${v})`);
+      else emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i64" : "u64"}(i64 ${wide})`);
     }
     return node;
   }
@@ -4355,13 +4358,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (typeof t === "string" && Object.hasOwn(INTEGERS, t)) {
       const { bits, signed } = INTEGERS[t as Integer];
-      const [slot, ok, v] = [alloca("i64"), temp(), temp()];
+      const [slot, ok, v] = [alloca("i128"), temp(), temp()];
       emit(`${ok} = call i32 @fsh_rt_json_int(ptr ${r}, ptr ${slot}, i32 ${bits}, i32 ${signed ? 1 : 0}, ptr ${cString(t)})`);
       jsonGuard(ok, "i32");
-      emit(`${v} = load i64, ptr ${slot}`);
-      if (bits === 64) return v;
+      emit(`${v} = load i128, ptr ${slot}`);
+      if (bits === 128) return v;
       const narrow = temp();
-      emit(`${narrow} = trunc i64 ${v} to i${bits}`);
+      emit(`${narrow} = trunc i128 ${v} to i${bits}`);
       return narrow;
     }
     const c = t as Exclude<Type, string>;
@@ -8758,6 +8761,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (isInteger(type)) {
       const { bits, signed } = INTEGERS[type];
       if (!signed) from = "u64";
+      if (bits === 128) {
+        const result = temp();
+        emit(`${result} = call ptr @fsh_rt_str_from_${signed ? "i" : "u"}128(i128 ${v})`);
+        pending.push({ v: result, type: "string" });
+        return result;
+      }
       if (bits < 64) {
         wide = temp();
         emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);

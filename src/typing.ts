@@ -105,14 +105,14 @@ export type FunctionType = { kind: "function"; name: string; names: string[]; pa
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
 
 // The sized numbers. `isize` and `usize` are 64 bits on every target Fish supports.
-export type Integer = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize";
+export type Integer = "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize";
 export type Numeric = Integer | "f32" | "f64";
 
 export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
   i8: { bits: 8, signed: true }, i16: { bits: 16, signed: true }, i32: { bits: 32, signed: true },
-  i64: { bits: 64, signed: true }, isize: { bits: 64, signed: true },
+  i64: { bits: 64, signed: true }, i128: { bits: 128, signed: true }, isize: { bits: 64, signed: true },
   u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
-  u64: { bits: 64, signed: false }, usize: { bits: 64, signed: false },
+  u64: { bits: 64, signed: false }, u128: { bits: 128, signed: false }, usize: { bits: 64, signed: false },
 };
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;

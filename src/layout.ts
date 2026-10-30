@@ -8,7 +8,7 @@ import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, l
 // differently.
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
-  i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
+  i8: "i8", i16: "i16", i32: "i32", i64: "i64", i128: "i128", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", u128: "i128", usize: "i64",
   f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr",
 };
 

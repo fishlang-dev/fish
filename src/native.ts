@@ -1608,6 +1608,50 @@ void fsh_rt_json_raw(fsh_json_out *w, const char *p, int64_t n) {
   w->length += n;
 }
 
+// A 128-bit integer's decimal digits, which printf can't write: its length in out, which holds 41.
+static int fsh_digits128(unsigned __int128 magnitude, int negative, char *out) {
+  char reversed[40];
+  int n = 0;
+  do {
+    reversed[n++] = (char)('0' + (int)(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude);
+  int length = 0;
+  if (negative) out[length++] = '-';
+  while (n) out[length++] = reversed[--n];
+  out[length] = 0;
+  return length;
+}
+
+static int fsh_i128_digits(__int128 v, char *out) {
+  return fsh_digits128(v < 0 ? -(unsigned __int128)v : (unsigned __int128)v, v < 0, out);
+}
+
+char *fsh_rt_format_i128(__int128 v, char *out) { fsh_i128_digits(v, out); return out; }
+char *fsh_rt_format_u128(unsigned __int128 v, char *out) { fsh_digits128(v, 0, out); return out; }
+
+fsh_str *fsh_rt_str_from_i128(__int128 v) {
+  char text[41];
+  fsh_i128_digits(v, text);
+  return fsh_rt_str_from_cstring(text);
+}
+
+fsh_str *fsh_rt_str_from_u128(unsigned __int128 v) {
+  char text[41];
+  fsh_digits128(v, 0, text);
+  return fsh_rt_str_from_cstring(text);
+}
+
+void fsh_rt_json_i128(fsh_json_out *w, __int128 v) {
+  char text[41];
+  fsh_rt_json_raw(w, text, fsh_i128_digits(v, text));
+}
+
+void fsh_rt_json_u128(fsh_json_out *w, unsigned __int128 v) {
+  char text[41];
+  fsh_rt_json_raw(w, text, fsh_digits128(v, 0, text));
+}
+
 void fsh_rt_json_i64(fsh_json_out *w, int64_t v) {
   char text[24];
   fsh_rt_json_raw(w, text, snprintf(text, sizeof text, "%lld", (long long)v));
@@ -1904,7 +1948,7 @@ static int64_t fsh_json_number(fsh_json_in *r, int *whole, int64_t *bad) {
 
 // An integer of the given width: written whole, or as a whole number a double holds exactly,
 // as JavaScript would read it.
-int32_t fsh_rt_json_int(fsh_json_in *r, int64_t *out, int32_t bits, int32_t is_signed, const char *what) {
+int32_t fsh_rt_json_int(fsh_json_in *r, __int128 *out, int32_t bits, int32_t is_signed, const char *what) {
   int32_t c = fsh_rt_json_peek(r);
   if (c != '-' && !(c >= '0' && c <= '9')) return fsh_json_wrong(r, what);
   int whole;
@@ -1915,27 +1959,27 @@ int32_t fsh_rt_json_int(fsh_json_in *r, int64_t *out, int32_t bits, int32_t is_s
   }
   const unsigned char *p = r->p + r->at;
   int negative = p[0] == '-', over = 0;
-  uint64_t magnitude = 0;
+  unsigned __int128 magnitude = 0, all = ~(unsigned __int128)0;
   if (whole) {
     for (int64_t i = negative; i < length; i++) {
-      uint64_t d = p[i] - '0';
-      if (magnitude > (UINT64_MAX - d) / 10) over = 1;
+      unsigned d = p[i] - '0';
+      if (magnitude > (all - d) / 10) over = 1;
       else magnitude = magnitude * 10 + d;
     }
   } else {
     double x = fsh_js_strtod(p, length);
     if (x != floor(x) || fabs(x) > 9007199254740992.0) over = 1;
-    else magnitude = (uint64_t)fabs(x);
+    else magnitude = (unsigned __int128)fabs(x);
   }
-  uint64_t top = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
-  uint64_t limit = is_signed ? (negative ? 1ull << (bits - 1) : (1ull << (bits - 1)) - 1) : negative ? 0 : top;
+  unsigned __int128 one = 1, top = bits == 128 ? all : (one << bits) - 1;
+  unsigned __int128 limit = is_signed ? (negative ? one << (bits - 1) : (one << (bits - 1)) - 1) : negative ? 0 : top;
   if (over || magnitude > limit) {
     int64_t size = strlen(what) + r->path_length + length + 32;
     char *message = fsh_rt_alloc(size);
     snprintf(message, size, "%.*s doesn't fit %s at %.*s", (int)length, (const char *)p, what, (int)r->path_length, r->path);
     return fsh_json_error(r, message);
   }
-  *out = negative ? (int64_t)(0 - magnitude) : (int64_t)magnitude;
+  *out = negative ? (__int128)(0 - magnitude) : (__int128)magnitude;
   r->at += length;
   return 1;
 }
@@ -2327,6 +2371,20 @@ static void fsh_insp_free(fsh_insp *v) {
 
 fsh_insp *fsh_rt_insp_text(const char *text) {
   return fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+}
+
+fsh_insp *fsh_rt_insp_i128(__int128 n) {
+  char text[41];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, fsh_i128_digits(n, text));
+  v->numeric = 1;
+  return v;
+}
+
+fsh_insp *fsh_rt_insp_u128(unsigned __int128 n) {
+  char text[41];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, fsh_digits128(n, 0, text));
+  v->numeric = 1;
+  return v;
 }
 
 fsh_insp *fsh_rt_insp_i64(int64_t n) {
@@ -2895,6 +2953,18 @@ fsh_sb *fsh_rt_text_new(void) {
 void fsh_rt_text_add(fsh_sb *b, fsh_str *s) { fsh_sb_put(b, s->bytes, s->length); }
 
 void fsh_rt_text_raw(fsh_sb *b, const char *s) { fsh_sb_str(b, s); }
+
+void fsh_rt_text_i128(fsh_sb *b, __int128 x) {
+  char t[41];
+  fsh_i128_digits(x, t);
+  fsh_sb_str(b, t);
+}
+
+void fsh_rt_text_u128(fsh_sb *b, unsigned __int128 x) {
+  char t[41];
+  fsh_digits128(x, 0, t);
+  fsh_sb_str(b, t);
+}
 
 void fsh_rt_text_i64(fsh_sb *b, int64_t x) {
   char t[32];
