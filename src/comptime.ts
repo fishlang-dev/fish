@@ -473,6 +473,8 @@ function interpreter() {
         return isFloat(type) ? fit(Number(e.value), type) : BigInt(e.value);
       case "float":
         return fit(e.value, type as "f32" | "f64");
+      case "bigint":
+        return e.value;
       // A regex is its compiled program, which comptime only hands on; its flags and pattern
       // stand for it, as \`flags/pattern\`.
       case "regex":

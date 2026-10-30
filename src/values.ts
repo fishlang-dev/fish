@@ -3787,6 +3787,8 @@ export function expressions(ctx: Context) {
         return "i64";
       case "float":
         return "f64";
+      case "bigint":
+        return "bigint";
       case "regex":
         return regexLiteral(e.pattern, e.flags, e);
       case "destructure":
@@ -4203,7 +4205,7 @@ export function expressions(ctx: Context) {
         const type = operand(e.operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
         if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) fitted.add(e.operand);
-        if (e.op === "!" ? type !== "boolean" : e.op === "~" ? !isInteger(type) : !isNumeric(type)) {
+        if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
           throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(type)}'`, e.start, e.end);
         }
         if (e.op === "-" && isInteger(type) && !INTEGERS[type].signed) {
@@ -4238,7 +4240,7 @@ export function expressions(ctx: Context) {
       }
       case "update": {
         const target = assignable(e.operand, true);
-        if (!isNumeric(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
+        if (!isNumeric(target) && target !== "bigint") throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return target;
       }
       case "conditional": {
@@ -4361,6 +4363,8 @@ export function expressions(ctx: Context) {
   // its own type, like `powf`. A literal base takes its type from the exponent's only when that
   // is a float.
   function power(base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
+    // A bigint's exponent is a bigint, as in JavaScript.
+    if (left === "bigint" || right === "bigint") return binaryType("*", left, right, at);
     if (isFloat(right) && left !== right && adapt(base, right)) left = right;
     // A power of literals alone may still become a float where it is written, so an exponent
     // a u32 can't hold waits to see.
@@ -4549,7 +4553,7 @@ export function expressions(ctx: Context) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
-    if (isNumeric(type) || type === "boolean") return;
+    if (isNumeric(type) || type === "boolean" || type === "bigint") return;
     throw new CompileError(`${into} works with strings, numbers and booleans, not '${show(type)}'`, e.start, e.end);
   }
 

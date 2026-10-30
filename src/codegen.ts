@@ -480,6 +480,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A binary operator on numbers: floats never overflow, and integers are checked as Rust's are.
   function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
+    if (type === "bigint") return bigOperate(op, a, b, at);
     if (!isFloat(type)) return operate(op, a, b, at, type as Integer);
     const result = temp();
     // `**` is `Math.pow`; an f32 one is worked in f64 and rounded back.
@@ -497,6 +498,24 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return result;
     }
     emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
+    return result;
+  }
+
+  // A new bigint from an operator on two, made by the runtime.
+  function bigOperate(op: BinaryOp, a: string, b: string, at: Expr): string {
+    const result = temp();
+    // Division, powers and shifts may panic, unwinding what the statement holds.
+    const call = (line: string, panics = false) => (panics ? unwinding(`call ptr ${line}`, result) : emit(`${result} = call ptr ${line}`));
+    switch (op) {
+      case "+": call(`@fsh_rt_big_add(ptr ${a}, ptr ${b})`); break;
+      case "-": call(`@fsh_rt_big_sub(ptr ${a}, ptr ${b})`); break;
+      case "*": call(`@fsh_rt_big_mul(ptr ${a}, ptr ${b})`); break;
+      case "/": case "%": call(`@fsh_rt_big_div(ptr ${a}, ptr ${b}, i32 ${op === "%" ? 1 : 0}, ptr ${panicAt(at)})`, true); break;
+      case "**": call(`@fsh_rt_big_pow(ptr ${a}, ptr ${b}, ptr ${panicAt(at)})`, true); break;
+      case "<<": case ">>": call(`@fsh_rt_big_shift(ptr ${a}, ptr ${b}, i32 ${op === ">>" ? 1 : 0}, ptr ${panicAt(at)})`, true); break;
+      case "&": case "|": case "^": call(`@fsh_rt_big_bitwise(ptr ${a}, ptr ${b}, i32 ${["&", "|", "^"].indexOf(op)})`); break;
+      default: throw new Error(`internal error: no bigint '${op}'`);
+    }
     return result;
   }
 
@@ -3105,7 +3124,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Whether a value of the type owns memory it gives back when dropped: a string, or anything
   // holding one by value.
   function needsDrop(type: Type | undefined): boolean {
-    if (type === "string" || (type !== undefined && rustClassOf(type))) return true;
+    if (type === "string" || type === "bigint" || (type !== undefined && rustClassOf(type))) return true;
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
@@ -3134,6 +3153,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`call void @fsh_rt_str_retain(ptr ${v})`);
       return v;
     }
+    if (type === "bigint") {
+      emit(`call void @fsh_rt_big_retain(ptr ${v})`);
+      return v;
+    }
     if (typeof type !== "string" && type.kind === "handle") {
       emit(`call void @fsh_rt_handle_retain(ptr ${v})`);
       return v;
@@ -3149,6 +3172,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return dispose(v, type.of);
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
+    if (type === "bigint") return emit(`call void @fsh_rt_big_release(ptr ${v})`);
     if (typeof type !== "string" && type.kind === "handle") return emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
     const rust = rustClassOf(type);
     if (rust) {
@@ -3768,6 +3792,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${word})`);
     }
     if (isFloat(t)) return emit(`call void @fsh_rt_text_${t}(ptr ${b}, ${llvm(t)} ${v})`);
+    if (t === "bigint") {
+      const digits = temp();
+      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${digits})`);
+      return emit(`call void @fsh_rt_str_release(ptr ${digits})`);
+    }
     if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
       if (bits === 128) return emit(`call void @fsh_rt_text_${signed ? "i" : "u"}128(ptr ${b}, i128 ${v})`);
@@ -3909,6 +3939,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     }
     if (t === "null" || t === "never" || t === "void") emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${cString("null")})`);
     else if (t === "string") emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${v})`);
+    else if (t === "bigint") emit(`${node} = call ptr @fsh_rt_insp_bigint(ptr ${v})`);
     else if (t === "boolean") {
       const word = temp();
       emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
@@ -5736,10 +5767,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       case "pipe":
         return true;
       // An awaited future gives its value over.
+      // A bigint's literal and every operator on one make a new one.
+      case "bigint":
+        return true;
       case "unary":
-        return e.op === "await";
+        return e.op === "await" || types.get(e) === "bigint";
       case "binary":
-        return e.op === "+" || e.op === "??";
+        return e.op === "+" || e.op === "??" || types.get(e) === "bigint";
       case "member":
         return calls.has(e) || current.copiesOut.has(e) || computed.has(e) || jsMembers.has(e) || jsStatics.has(e);
       // A JsValue read out of JS as a string, or a package's const.
@@ -8164,6 +8198,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       case "float":
         return floatConstant(e.value, types.get(e) as "f32" | "f64");
+      case "bigint": {
+        const made = temp();
+        emit(`${made} = call ptr @fsh_rt_big_from_text(ptr ${cString(String(e.value))})`);
+        return made;
+      }
       case "regex":
         return regex(types.get(e) as RegexType);
       case "as": {
@@ -8365,6 +8404,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           return isFloat(type) ? floatConstant(-Number(e.operand.value), type) : String(-e.operand.value);
         }
         const operand = value(e.operand);
+        if (type === "bigint") {
+          const result = temp();
+          emit(`${result} = call ptr @fsh_rt_big_${e.op === "-" ? "neg" : "not"}(ptr ${operand})`);
+          return result;
+        }
         if (e.op === "-" && isFloat(type)) {
           const result = temp();
           emit(`${result} = fneg ${llvm(type)} ${operand}`);
@@ -8387,6 +8431,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return fixing(e.operand, () => {
           const old = value(e.operand);
           const type = types.get(e)!;
+          if (type === "bigint") {
+            // The old value outlives the store that releases the place's hold on it.
+            const [one, kept] = [temp(), copied(old, type)];
+            emit(`${one} = call ptr @fsh_rt_big_from_text(ptr ${cString("1")})`);
+            const result = bigOperate(e.op === "++" ? "+" : "-", old, one, e);
+            emit(`call void @fsh_rt_big_release(ptr ${one})`);
+            store(e.operand, result);
+            if (e.prefix) {
+              emit(`call void @fsh_rt_big_release(ptr ${kept})`);
+              return result;
+            }
+            pending.push({ v: kept, type });
+            return kept;
+          }
           const result = numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
           store(e.operand, result);
           return e.prefix ? result : old;
@@ -8463,10 +8521,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);
           return result;
         }
-        // Strings compare by the runtime's order: below, equal or above zero.
-        if (type === "string") {
+        // Strings and bigints compare by the runtime's order: below, equal or above zero.
+        if (type === "string" || type === "bigint") {
           const order = temp();
-          emit(`${order} = call i32 @fsh_rt_str_compare(ptr ${a}, ptr ${b})`);
+          emit(`${order} = call i32 @fsh_rt_${type === "string" ? "str" : "big"}_compare(ptr ${a}, ptr ${b})`);
           emit(`${result} = icmp ${condition} i32 ${order}, 0`);
           return result;
         }
@@ -8751,6 +8809,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // released when the statement ends.
   function written(v: string, type: Type): string {
     if (type === "string") return v;
+    if (type === "bigint") {
+      const digits = temp();
+      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      pending.push({ v: digits, type: "string" });
+      return digits;
+    }
     if (type === "boolean") {
       const result = temp();
       emit(`${result} = select i1 ${v}, ptr ${text("true")}, ptr ${text("false")}`);

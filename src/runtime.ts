@@ -197,6 +197,25 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_str_from_cstring(ptr)",
   "declare ptr @fsh_rt_str_from_u64(i64)",
   "declare ptr @fsh_rt_str_from_i128(i128)",
+  "declare void @fsh_rt_big_retain(ptr)",
+  "declare void @fsh_rt_big_release(ptr)",
+  "declare ptr @fsh_rt_big_from_text(ptr)",
+  "declare ptr @fsh_rt_big_from_u128(i128, i32)",
+  "declare ptr @fsh_rt_big_from_i128(i128)",
+  "declare i32 @fsh_rt_big_compare(ptr, ptr)",
+  "declare i1 @fsh_rt_big_equal(ptr, ptr)",
+  "declare ptr @fsh_rt_big_add(ptr, ptr)",
+  "declare ptr @fsh_rt_big_sub(ptr, ptr)",
+  "declare ptr @fsh_rt_big_mul(ptr, ptr)",
+  "declare ptr @fsh_rt_big_div(ptr, ptr, i32, ptr)",
+  "declare ptr @fsh_rt_big_neg(ptr)",
+  "declare ptr @fsh_rt_big_pow(ptr, ptr, ptr)",
+  "declare ptr @fsh_rt_big_shift(ptr, ptr, i32, ptr)",
+  "declare ptr @fsh_rt_big_bitwise(ptr, ptr, i32)",
+  "declare ptr @fsh_rt_big_not(ptr)",
+  "declare ptr @fsh_rt_big_text(ptr, i64)",
+  "declare i128 @fsh_rt_big_low(ptr)",
+  "declare double @fsh_rt_big_f64(ptr)",
   "declare ptr @fsh_rt_str_from_u128(i128)",
   "declare ptr @fsh_rt_str_from_f64(double)",
   "declare ptr @fsh_rt_str_from_f32(float)",
@@ -236,6 +255,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_insp_text(ptr)",
   "declare ptr @fsh_rt_insp_i64(i64)",
   "declare ptr @fsh_rt_insp_i128(i128)",
+  "declare ptr @fsh_rt_insp_bigint(ptr)",
   "declare ptr @fsh_rt_insp_u128(i128)",
   "declare ptr @fsh_rt_insp_u64(i64)",
   "declare ptr @fsh_rt_insp_f64(double, i32)",
@@ -312,6 +332,14 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       // Written by the runtime, since its bytes may hold anything printf would read as format.
       flush();
       emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${v})`);
+    } else if (type === "bigint") {
+      // Written as console.log writes one, with its 'n'.
+      flush();
+      const digits = temp();
+      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${digits})`);
+      emit(`call void @fsh_rt_str_release(ptr ${digits})`);
+      format += "n";
     } else if (type === "never") {
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {

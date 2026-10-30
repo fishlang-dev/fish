@@ -1642,6 +1642,350 @@ fsh_str *fsh_rt_str_from_u128(unsigned __int128 v) {
   return fsh_rt_str_from_cstring(text);
 }
 
+// A bigint: immutable once made and shared by count. Its magnitude is 'length' 32-bit limbs,
+// least significant first, with no zero limb on top; zero has none and is never negative.
+typedef struct fsh_big {
+  int64_t count;
+  int32_t negative;
+  int64_t length;
+  uint32_t limbs[];
+} fsh_big;
+
+static fsh_big *fsh_big_new(int64_t length) {
+  fsh_big *b = fsh_rt_alloc(sizeof(fsh_big) + (length ? length : 1) * sizeof(uint32_t));
+  b->count = 1;
+  b->negative = 0;
+  b->length = length;
+  memset(b->limbs, 0, (length ? length : 1) * sizeof(uint32_t));
+  return b;
+}
+
+static fsh_big *fsh_big_trim(fsh_big *b, int negative) {
+  while (b->length && !b->limbs[b->length - 1]) b->length--;
+  b->negative = b->length ? negative : 0;
+  return b;
+}
+
+void fsh_rt_big_retain(fsh_big *b) { __atomic_fetch_add(&b->count, 1, __ATOMIC_RELAXED); }
+
+void fsh_rt_big_release(fsh_big *b) {
+  if (b && __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) == 0) fsh_rt_free(b);
+}
+
+static _Noreturn void fsh_big_panic(const char *where, const char *reason) {
+  fflush(NULL);
+  fputs(where, stderr);
+  fsh_rt_panic(reason);
+}
+
+fsh_big *fsh_rt_big_from_u128(unsigned __int128 magnitude, int32_t negative) {
+  fsh_big *b = fsh_big_new(4);
+  for (int i = 0; i < 4; i++) b->limbs[i] = (uint32_t)(magnitude >> (32 * i));
+  return fsh_big_trim(b, negative);
+}
+
+fsh_big *fsh_rt_big_from_i128(__int128 v) {
+  return fsh_rt_big_from_u128(v < 0 ? -(unsigned __int128)v : (unsigned __int128)v, v < 0);
+}
+
+// Multiplies a magnitude by m and adds a, in place, growing it by a limb when it carries out.
+static fsh_big *fsh_big_mul_add(fsh_big *b, uint32_t m, uint32_t a) {
+  uint64_t carry = a;
+  for (int64_t i = 0; i < b->length; i++) {
+    uint64_t t = (uint64_t)b->limbs[i] * m + carry;
+    b->limbs[i] = (uint32_t)t;
+    carry = t >> 32;
+  }
+  if (!carry) return b;
+  fsh_big *grown = fsh_big_new(b->length + 1);
+  memcpy(grown->limbs, b->limbs, b->length * sizeof(uint32_t));
+  grown->limbs[b->length] = (uint32_t)carry;
+  fsh_rt_free(b);
+  return grown;
+}
+
+// A literal's decimal digits, an optional '-' first.
+fsh_big *fsh_rt_big_from_text(const char *text) {
+  int negative = *text == '-';
+  fsh_big *b = fsh_big_new(0);
+  for (const char *p = text + negative; *p; p++) b = fsh_big_mul_add(b, 10, (uint32_t)(*p - '0'));
+  return fsh_big_trim(b, negative);
+}
+
+static int fsh_mag_cmp(const fsh_big *a, const fsh_big *b) {
+  if (a->length != b->length) return a->length < b->length ? -1 : 1;
+  for (int64_t i = a->length; i-- > 0;) if (a->limbs[i] != b->limbs[i]) return a->limbs[i] < b->limbs[i] ? -1 : 1;
+  return 0;
+}
+
+int32_t fsh_rt_big_compare(const fsh_big *a, const fsh_big *b) {
+  if (a->negative != b->negative) return a->negative ? -1 : 1;
+  int c = fsh_mag_cmp(a, b);
+  return a->negative ? -c : c;
+}
+
+_Bool fsh_rt_big_equal(const fsh_big *a, const fsh_big *b) { return fsh_rt_big_compare(a, b) == 0; }
+
+static fsh_big *fsh_mag_add(const fsh_big *a, const fsh_big *b, int negative) {
+  if (a->length < b->length) return fsh_mag_add(b, a, negative);
+  fsh_big *r = fsh_big_new(a->length + 1);
+  uint64_t carry = 0;
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t t = (uint64_t)a->limbs[i] + (i < b->length ? b->limbs[i] : 0) + carry;
+    r->limbs[i] = (uint32_t)t;
+    carry = t >> 32;
+  }
+  r->limbs[a->length] = (uint32_t)carry;
+  return fsh_big_trim(r, negative);
+}
+
+// |a| - |b|, where |a| >= |b|.
+static fsh_big *fsh_mag_sub(const fsh_big *a, const fsh_big *b, int negative) {
+  fsh_big *r = fsh_big_new(a->length);
+  int64_t borrow = 0;
+  for (int64_t i = 0; i < a->length; i++) {
+    int64_t t = (int64_t)a->limbs[i] - (i < b->length ? b->limbs[i] : 0) - borrow;
+    borrow = t < 0;
+    r->limbs[i] = (uint32_t)(t + (borrow ? ((int64_t)1 << 32) : 0));
+  }
+  return fsh_big_trim(r, negative);
+}
+
+// a + b, with b's sign flipped when flip is set.
+static fsh_big *fsh_big_add(const fsh_big *a, const fsh_big *b, int flip) {
+  int bn = b->length ? b->negative ^ flip : 0;
+  if (a->negative == bn) return fsh_mag_add(a, b, a->negative);
+  return fsh_mag_cmp(a, b) >= 0 ? fsh_mag_sub(a, b, a->negative) : fsh_mag_sub(b, a, bn);
+}
+
+fsh_big *fsh_rt_big_add(const fsh_big *a, const fsh_big *b) { return fsh_big_add(a, b, 0); }
+fsh_big *fsh_rt_big_sub(const fsh_big *a, const fsh_big *b) { return fsh_big_add(a, b, 1); }
+
+fsh_big *fsh_rt_big_mul(const fsh_big *a, const fsh_big *b) {
+  fsh_big *r = fsh_big_new(a->length + b->length);
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t carry = 0;
+    for (int64_t j = 0; j < b->length; j++) {
+      uint64_t t = (uint64_t)a->limbs[i] * b->limbs[j] + r->limbs[i + j] + carry;
+      r->limbs[i + j] = (uint32_t)t;
+      carry = t >> 32;
+    }
+    r->limbs[i + b->length] = (uint32_t)carry;
+  }
+  return fsh_big_trim(r, a->negative ^ b->negative);
+}
+
+// |a| divided by |b|, which isn't zero: the quotient and remainder magnitudes.
+// ponytail: shift-and-subtract, O(n^2) per bit of the dividend; Knuth's algorithm D if bigint
+// division ever shows up in a profile.
+static void fsh_mag_divmod(const fsh_big *a, const fsh_big *b, fsh_big **quotient, fsh_big **remainder) {
+  fsh_big *q = fsh_big_new(a->length), *r = fsh_big_new(b->length + 1);
+  r->length = 0;
+  if (b->length == 1) {
+    uint64_t rest = 0;
+    for (int64_t i = a->length; i-- > 0;) {
+      uint64_t t = (rest << 32) | a->limbs[i];
+      q->limbs[i] = (uint32_t)(t / b->limbs[0]);
+      rest = t % b->limbs[0];
+    }
+    r->limbs[0] = (uint32_t)rest;
+    r->length = 1;
+  } else {
+    for (int64_t bit = a->length * 32; bit-- > 0;) {
+      // r = r * 2 + the dividend's next bit.
+      uint32_t carry = (a->limbs[bit / 32] >> (bit % 32)) & 1;
+      for (int64_t i = 0; i < r->length; i++) {
+        uint32_t top = r->limbs[i] >> 31;
+        r->limbs[i] = (r->limbs[i] << 1) | carry;
+        carry = top;
+      }
+      if (carry) r->limbs[r->length++] = carry;
+      if (fsh_mag_cmp(r, b) >= 0) {
+        int64_t borrow = 0;
+        for (int64_t i = 0; i < r->length; i++) {
+          int64_t t = (int64_t)r->limbs[i] - (i < b->length ? b->limbs[i] : 0) - borrow;
+          borrow = t < 0;
+          r->limbs[i] = (uint32_t)(t + (borrow ? ((int64_t)1 << 32) : 0));
+        }
+        while (r->length && !r->limbs[r->length - 1]) r->length--;
+        q->limbs[bit / 32] |= (uint32_t)1 << (bit % 32);
+      }
+    }
+  }
+  *quotient = q;
+  *remainder = r;
+}
+
+// Division truncates and a remainder takes the dividend's sign, as JavaScript's do.
+fsh_big *fsh_rt_big_div(const fsh_big *a, const fsh_big *b, int32_t remainder, const char *where) {
+  if (!b->length) fsh_big_panic(where, "Division by zero\n");
+  fsh_big *q, *r;
+  fsh_mag_divmod(a, b, &q, &r);
+  if (remainder) {
+    fsh_rt_free(q);
+    return fsh_big_trim(r, a->negative);
+  }
+  fsh_rt_free(r);
+  return fsh_big_trim(q, a->negative ^ b->negative);
+}
+
+fsh_big *fsh_rt_big_neg(const fsh_big *a) {
+  fsh_big *r = fsh_big_new(a->length);
+  memcpy(r->limbs, a->limbs, a->length * sizeof(uint32_t));
+  return fsh_big_trim(r, !a->negative);
+}
+
+// A count of bits from a bigint, past which no result could be held.
+static uint64_t fsh_big_small(const fsh_big *n, const char *where) {
+  if (n->length > 1) fsh_big_panic(where, "Maximum BigInt size exceeded\n");
+  return n->length ? n->limbs[0] : 0;
+}
+
+fsh_big *fsh_rt_big_pow(const fsh_big *a, const fsh_big *e, const char *where) {
+  if (e->negative) fsh_big_panic(where, "Exponent must be non-negative\n");
+  // Checked before anything is made, so a panic leaves nothing behind.
+  uint64_t n = a->length > 1 || (a->length == 1 && a->limbs[0] > 1) ? fsh_big_small(e, where) : 0;
+  fsh_big *result = fsh_rt_big_from_u128(1, 0), *base = fsh_rt_big_neg(a);
+  base->negative = a->negative;
+  if (!(a->length == 1 && a->limbs[0] == 1) && a->length) {
+    for (; n; n >>= 1) {
+      if (n & 1) {
+        fsh_big *next = fsh_rt_big_mul(result, base);
+        fsh_rt_free(result);
+        result = next;
+      }
+      if (n > 1) {
+        fsh_big *squared = fsh_rt_big_mul(base, base);
+        fsh_rt_free(base);
+        base = squared;
+      }
+    }
+  } else if (!a->length) {
+    // 0n ** 0n is 1n; any other power of zero is zero.
+    if (e->length) result->length = 0;
+  } else if (a->negative && e->length && (e->limbs[0] & 1)) {
+    result->negative = 1;
+  }
+  fsh_rt_free(base);
+  return result;
+}
+
+// |a| shifted right by n bits; 'rounded' is set when any one bit shifted out was set.
+static fsh_big *fsh_mag_shr(const fsh_big *a, uint64_t n, int *rounded) {
+  int64_t whole = (int64_t)(n / 32), bits = (int64_t)(n % 32);
+  *rounded = 0;
+  for (int64_t i = 0; i < whole && i < a->length; i++) if (a->limbs[i]) *rounded = 1;
+  if (bits && whole < a->length && (a->limbs[whole] & (((uint32_t)1 << bits) - 1))) *rounded = 1;
+  int64_t length = a->length > whole ? a->length - whole : 0;
+  fsh_big *r = fsh_big_new(length);
+  for (int64_t i = 0; i < length; i++) {
+    uint64_t pair = a->limbs[i + whole] | (i + whole + 1 < a->length ? (uint64_t)a->limbs[i + whole + 1] << 32 : 0);
+    r->limbs[i] = (uint32_t)(pair >> bits);
+  }
+  return r;
+}
+
+// a << n, or a >> -n; a right shift floors, as JavaScript's does.
+fsh_big *fsh_rt_big_shift(const fsh_big *a, const fsh_big *count, int32_t right, const char *where) {
+  if (count->negative) right = !right;
+  if (!a->length) return fsh_big_new(0);
+  if (right) {
+    uint64_t n = count->length > 1 ? UINT64_MAX : count->length ? count->limbs[0] : 0;
+    int rounded;
+    fsh_big *r = fsh_big_trim(fsh_mag_shr(a, n, &rounded), a->negative);
+    if (!(a->negative && rounded)) return r;
+    // A negative value that lost set bits floors one further down.
+    fsh_big *one = fsh_rt_big_from_u128(1, 1), *floored = fsh_rt_big_add(r, one);
+    fsh_rt_free(r);
+    fsh_rt_free(one);
+    return floored;
+  }
+  uint64_t n = fsh_big_small(count, where);
+  int64_t whole = (int64_t)(n / 32), bits = (int64_t)(n % 32);
+  fsh_big *r = fsh_big_new(a->length + whole + 1);
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t moved = (uint64_t)a->limbs[i] << bits;
+    r->limbs[i + whole] |= (uint32_t)moved;
+    r->limbs[i + whole + 1] |= (uint32_t)(moved >> 32);
+  }
+  return fsh_big_trim(r, a->negative);
+}
+
+// A value's two's complement in 'width' limbs, wide enough for any value in play.
+static void fsh_big_twos(const fsh_big *a, uint32_t *out, int64_t width) {
+  for (int64_t i = 0; i < width; i++) out[i] = i < a->length ? a->limbs[i] : 0;
+  if (!a->negative) return;
+  // -x is ~(x - 1).
+  for (int64_t i = 0; i < width; i++) if (out[i]--) break;
+  for (int64_t i = 0; i < width; i++) out[i] = ~out[i];
+}
+
+// &, | and ^ as op 0, 1 and 2, on two's complement of unbounded width.
+fsh_big *fsh_rt_big_bitwise(const fsh_big *a, const fsh_big *b, int32_t op) {
+  int64_t width = (a->length > b->length ? a->length : b->length) + 1;
+  uint32_t *x = fsh_rt_alloc(width * sizeof(uint32_t)), *y = fsh_rt_alloc(width * sizeof(uint32_t));
+  fsh_big_twos(a, x, width);
+  fsh_big_twos(b, y, width);
+  fsh_big *r = fsh_big_new(width);
+  for (int64_t i = 0; i < width; i++) r->limbs[i] = op == 0 ? x[i] & y[i] : op == 1 ? x[i] | y[i] : x[i] ^ y[i];
+  fsh_rt_free(x);
+  fsh_rt_free(y);
+  int negative = r->limbs[width - 1] >> 31;
+  if (negative) {
+    for (int64_t i = 0; i < width; i++) r->limbs[i] = ~r->limbs[i];
+    for (int64_t i = 0; i < width; i++) if (++r->limbs[i]) break;
+  }
+  return fsh_big_trim(r, negative);
+}
+
+// ~a is -a - 1.
+fsh_big *fsh_rt_big_not(const fsh_big *a) {
+  fsh_big *one = fsh_rt_big_from_u128(1, 0), *r = fsh_big_add(one, a, 0);
+  fsh_rt_free(one);
+  r->negative = r->length ? !r->negative : 0;
+  return r;
+}
+
+// The value's digits in a radix from 2 to 36, a '-' first when it is negative.
+fsh_str *fsh_rt_big_text(const fsh_big *a, int64_t radix) {
+  int64_t room = a->length * 32 + 2;
+  char *digits = fsh_rt_alloc(room + 1);
+  int64_t at = room;
+  digits[at] = 0;
+  fsh_big *rest = fsh_big_new(a->length);
+  memcpy(rest->limbs, a->limbs, a->length * sizeof(uint32_t));
+  do {
+    uint64_t r = 0;
+    for (int64_t i = rest->length; i-- > 0;) {
+      uint64_t t = (r << 32) | rest->limbs[i];
+      rest->limbs[i] = (uint32_t)(t / radix);
+      r = t % radix;
+    }
+    while (rest->length && !rest->limbs[rest->length - 1]) rest->length--;
+    digits[--at] = "0123456789abcdefghijklmnopqrstuvwxyz"[r];
+  } while (rest->length);
+  if (a->negative) digits[--at] = '-';
+  fsh_rt_free(rest);
+  fsh_str *s = fsh_rt_str_from_cstring(digits + at);
+  fsh_rt_free(digits);
+  return s;
+}
+
+// The low 128 bits of the value's two's complement, which 'as' truncates to its type.
+unsigned __int128 fsh_rt_big_low(const fsh_big *a) {
+  unsigned __int128 v = 0;
+  for (int64_t i = 0; i < 4 && i < a->length; i++) v |= (unsigned __int128)a->limbs[i] << (32 * i);
+  return a->negative ? 0 - v : v;
+}
+
+// The nearest double, as Number(x) gives.
+double fsh_rt_big_f64(const fsh_big *a) {
+  fsh_str *text = fsh_rt_big_text(a, 10);
+  double x = fsh_js_strtod((const unsigned char *)text->bytes, text->length);
+  fsh_rt_str_release(text);
+  return x;
+}
+
 void fsh_rt_json_i128(fsh_json_out *w, __int128 v) {
   char text[41];
   fsh_rt_json_raw(w, text, fsh_i128_digits(v, text));
@@ -2371,6 +2715,19 @@ static void fsh_insp_free(fsh_insp *v) {
 
 fsh_insp *fsh_rt_insp_text(const char *text) {
   return fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+}
+
+// A bigint as console.log shows one, its digits then 'n'.
+fsh_insp *fsh_rt_insp_bigint(const struct fsh_big *n) {
+  fsh_str *digits = fsh_rt_big_text(n, 10);
+  char *text = fsh_rt_alloc(digits->length + 2);
+  memcpy(text, digits->bytes, digits->length);
+  text[digits->length] = 'n';
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, digits->length + 1);
+  v->numeric = 1;
+  fsh_rt_free(text);
+  fsh_rt_str_release(digits);
+  return v;
 }
 
 fsh_insp *fsh_rt_insp_i128(__int128 n) {
