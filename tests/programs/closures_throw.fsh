@@ -324,3 +324,98 @@ function main() {
 // expect: stored
 // expect: 3
 // expect: s zero
+// case: closures_throw_nested_recursive
+// A nested function that throws can call itself, the error raised at each call.
+function main() {
+  function fact(n: i64): i64 throws string {
+    if (n < 0) throw "negative"
+    return n === 0 ? 1 : n * fact(n - 1)
+  }
+  function walk(n: i64): i64 throws string {
+    if (n < 0) throw "neg"
+    if (n === 0) return 0
+    try {
+      return walk(n - 1) + 1
+    } catch (e) {
+      return -100
+    }
+  }
+  try {
+    print(fact(5))
+    print(walk(3))
+    print(fact(-1))
+  } catch (e) {
+    print(e)
+  }
+}
+// expect: 120
+// expect: 3
+// expect: negative
+// case: closures_throw_object_literal
+// An object literal with no type stores a throwing closure as a callable that throws.
+function main() {
+  const f = (n: i64): i64 throws string => n > 0 ? throw "positive" : n
+  const o = { run: f, check: (n: i64) => n === 0 ? throw "zero" : n }
+  try {
+    print(o.run(-2))
+    print(o.check(5))
+    print(o.check(0))
+  } catch (e) {
+    print("caught", e)
+  }
+}
+// expect: -2
+// expect: 5
+// expect: caught zero
+// case: closures_throw_object_literal_quiet
+// A throwing callable in an object doesn't fit an object type whose callable throws nothing.
+function g(o: { run: (n: i64) => i64 }): i64 {
+  return o.run(1)
+}
+function main() {
+  const f = (n: i64) => n > 0 ? throw "x" : n
+  print(g({ run: f }))
+}
+// error: argument of type '{ run: (n: i64) => i64 throws string }' is not assignable to parameter of type '{ run: (n: i64) => i64 }'
+// case: closures_throw_stored_relay
+// A stored callable becomes a stored one that throws, or throws more, through an adapter.
+class Box {
+  f: () => i64 throws string | boolean
+  constructor(f: () => i64 throws string | boolean) {
+    this.f = f
+  }
+}
+function keep(f: () => i64 throws string): () => i64 throws string {
+  const k: () => i64 throws string = f
+  return k
+}
+function main() {
+  const g: () => i64 = () => 41
+  const h: () => i64 throws string = g.clone()
+  const fail: () => i64 throws string = () => throw "failed"
+  const box = new Box(fail.clone())
+  const kept = keep(g.clone())
+  let fs: ((n: i64) => i64 throws string)[] = [(n) => n > 1 ? throw "big" : n]
+  const triple: (n: i64) => i64 = (n) => n * 3
+  fs.push(triple)
+  try {
+    print(h() + 1)
+    print(kept())
+    print(fs[1](5))
+    print(h.clone()())
+    print(box.f())
+  } catch (e) {
+    if (typeof e === "string") print("caught", e)
+  }
+}
+// expect: 42
+// expect: 41
+// expect: 15
+// expect: 41
+// expect: caught failed
+// case: closures_throw_async_context
+// An async arrow that throws can't be given as a function type whose Promise throws nothing.
+async function main() {
+  setTimeout(async () => { throw "boom" }, 1)
+}
+// error: this async closure throws 'string', but it is given as '() => Promise<void>', whose Promise throws nothing; catch it inside the closure with try/catch

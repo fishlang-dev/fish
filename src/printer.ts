@@ -819,6 +819,8 @@ function typeNeedsParens(path: At<"type">): boolean {
     case "function":
     case "conditional": {
       if (t.kind === "function" && !t.construct && key === "returnType" && up?.sort === "expr" && up.node.kind === "arrow") return true;
+      // A function type returned by one that throws would take its `throws` as its own.
+      if (t.kind === "function" && !t.throws && key === "returnType" && (up?.node as { throws?: unknown } | undefined)?.throws !== undefined) return true;
       if (p?.kind === "conditional" && (key === "checkType" || (key === "extendsType" && t.kind === "conditional"))) return true;
       if (key === "constraint" && t.kind === "conditional" && up?.sort !== "type") return true;
       if (key === "extendsType" && p?.kind === "conditional" && t.kind === "function") {

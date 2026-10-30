@@ -1407,6 +1407,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       });
       selfCalls.add(e);
       calls.set(e, instance);
+      if (errorType) raise(e, errorType, `'${name}'`);
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
 
@@ -1895,6 +1896,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (expected && throws && e.throws && !openThrows.has(expected) && !(expected.throws && fits(throws, expected.throws))) {
         const takes = expected.throws ? `which throws '${show(expected.throws)}'` : "which throws nothing";
         throw new CompileError(`this closure throws '${show(throws)}', but it is given as '${show(expected)}', ${takes}; catch it inside the closure with try/catch`, e.throws.start, e.throws.end);
+      }
+      // An async one's future throws, which a function type giving a Promise can't say yet.
+      const failing = inner.future?.throws;
+      if (expected && failing && !openThrows.has(expected) && promiseElement(expected.returns) !== undefined) {
+        const at = e.throws ?? [...inner.raises.keys()][0] ?? e;
+        throw new CompileError(`this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
       }
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
