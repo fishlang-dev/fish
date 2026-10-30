@@ -236,6 +236,15 @@ test("a change to std or to a compiler source is a new key for std's tree", () =
   expect(stdKey(STD_SOURCE, src)).not.toBe(before);
 });
 
+test("std's tree has no key where no compiler source can be read", () => {
+  const bare = join(root, "no-sources");
+  mkdirSync(bare, { recursive: true });
+  writeFileSync(join(bare, "fishc"), "a single-file executable");
+  expect(stdKey(STD_SOURCE, bare)).toBeNull();
+  expect(stdKey(STD_SOURCE, join(root, "missing"))).toBeNull();
+  expect(stdKey(STD_SOURCE, join(import.meta.dir, "..", "src"))).toMatch(/^[0-9a-f]{16}$/);
+});
+
 // Runs `run` with the cache at `cache`.
 async function cachedInAsync(cache: string, run: () => Promise<void>) {
   const was = process.env.FISH_CACHE_DIR;

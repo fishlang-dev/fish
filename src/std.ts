@@ -2943,39 +2943,53 @@ export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB +
 export const STD_FILE = "<fish std>";
 
 // A hash of the std source, the compiler's own sources and Bun's version, which decides the
-// serialization format, so no other parser's tree is ever loaded.
-export function stdKey(source: string, dir: string): string {
+// serialization format, so no other parser's tree is ever loaded. Null when no compiler source
+// can be read, as inside a single-file executable, since the hash couldn't tell parsers apart.
+export function stdKey(source: string, dir: string): string | null {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".ts")).sort();
+  } catch {
+    return null;
+  }
+  if (files.length === 0) return null;
   const hash = createHash("sha256").update(Bun.version).update("\0").update(source);
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".ts")).sort()) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
+  for (const f of files) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
   return hash.digest("hex").slice(0, 16);
 }
 
 // How many times this process has parsed std rather than loading its tree.
 export const stdParses = { count: 0 };
 
-let stdTree: { path: string; bytes: Uint8Array } | undefined;
-let key: string | undefined;
+let stdTree: { path: string | null; bytes: Uint8Array } | undefined;
+let key: string | null | undefined;
 
 // std's parsed tree, serialized: kept in memory, else read from the cache, else parsed and
-// written there. A cache that can't be read or written only costs the parse.
+// written there. A cache that can't be read or written only costs the parse, and without a key
+// the cache isn't touched at all.
 function stdBytes(): Uint8Array {
-  const path = join(cacheDir(), "std", `ast-${(key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
-  if (stdTree?.path === path) return stdTree.bytes;
+  if (key === undefined) key = stdKey(STD_SOURCE, import.meta.dir);
+  const path = key === null ? null : join(cacheDir(), "std", `ast-${key}.bin`);
+  if (stdTree !== undefined && stdTree.path === path) return stdTree.bytes;
   let bytes: Uint8Array | undefined;
-  try {
-    bytes = readFileSync(path);
-    if (!Array.isArray(deserialize(bytes))) bytes = undefined;
-  } catch {
-    bytes = undefined;
+  if (path !== null) {
+    try {
+      bytes = readFileSync(path);
+      if (!Array.isArray(deserialize(bytes))) bytes = undefined;
+    } catch {
+      bytes = undefined;
+    }
   }
   if (bytes === undefined) {
     stdParses.count++;
     bytes = new Uint8Array(serialize(parse(STD_SOURCE)));
-    try {
-      const temp = partial(path);
-      writeFileSync(temp, bytes);
-      renameSync(temp, path);
-    } catch {}
+    if (path !== null) {
+      try {
+        const temp = partial(path);
+        writeFileSync(temp, bytes);
+        renameSync(temp, path);
+      } catch {}
+    }
   }
   stdTree = { path, bytes };
   return bytes;
