@@ -112,7 +112,6 @@ const EXPRESSIONS: [string, string][] = [
   ["import('m')", "dynamic imports"],
   ["f?.()", "optional calls"],
   ["true as boolean", "'as' conversions other than between numbers"],
-  ["1 satisfies i64", "'satisfies' expressions"],
   ["<i64>1", "type assertions"],
 ];
 

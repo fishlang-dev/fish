@@ -4,7 +4,7 @@ function main() {
   const x = 1.5
   print(x as boolean)
 }
-// error: 'as' conversions other than between numbers are not supported yet
+// error: 'number' can't be converted to 'boolean' with 'as', since neither fits the other
 // case: as_numbers
 // 'as' converts between numbers as Rust's does: truncating or extending integers, rounding
 // floats toward zero and saturating, and turning booleans and enum members into numbers.

@@ -3808,6 +3808,14 @@ export function expressions(ctx: Context) {
         return "f64";
       case "bigint":
         return "bigint";
+      // `x satisfies T` checks x against T and keeps x's own type, as TypeScript does.
+      case "satisfies": {
+        const wanted = resolveType(e.type);
+        expect(e.expr, wanted);
+        const t = value(e.expr);
+        if (!fits(t, wanted)) throw new CompileError(`type '${show(t)}' does not satisfy the expected type '${show(wanted)}'`, e.expr.start, e.expr.end);
+        return t;
+      }
       case "regex":
         return regexLiteral(e.pattern, e.flags, e);
       case "destructure":
@@ -4140,6 +4148,16 @@ export function expressions(ctx: Context) {
         // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
         if (to === "bigint" && from !== "bigint") throw new CompileError(`'${show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
         if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
+        // Between other types, 'as' only widens, which nothing needs to check at run time; a
+        // narrower type is reached by a check that narrows.
+        if (!isNumeric(to) || !isNumeric(from)) {
+          if (!(from === "boolean" && isInteger(to)) && fits(from, to)) {
+            coerce(e.expr, from, to, "");
+            return to;
+          }
+          if (fits(to, from)) throw new CompileError(`'as' can't narrow '${show(from)}' to '${show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
+          if (!(from === "boolean" && isInteger(to))) throw new CompileError(`'${show(from)}' can't be converted to '${show(to)}' with 'as', since neither fits the other`, e.start, e.end);
+        }
         if (!isNumeric(to) || !(isNumeric(from) || (from === "boolean" && isInteger(to)))) {
           throw unsupported("'as' conversions other than between numbers", e);
         }
