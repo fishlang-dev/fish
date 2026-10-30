@@ -2835,7 +2835,9 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
 
-export type SpawnSyncOptions = { cwd?: string; input?: string | u8[] };
+// A "utf8" encoding is read from the call's literal, which then gives text; an options value held
+// elsewhere can only ask for bytes.
+export type SpawnSyncOptions = { cwd?: string; input?: string | u8[]; encoding?: "buffer" | null };
 
 export class SpawnSyncReturns<T> {
   pid: i64;

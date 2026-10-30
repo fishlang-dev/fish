@@ -89,3 +89,33 @@ test("execFileSync and execSync give stdout, or node's errors", () => {
   }`);
   compare("exec", `import { execFileSync, execSync, ExecError } from "node:child_process";`, body + fish.join(""), "throws IoError | ExecError ", body + node.join(""));
 });
+
+test("spawnSync takes byte input, a missing cwd and Node's bytes encodings as node does", () => {
+  compare("more", `import { spawnSync } from "node:child_process";`, `
+  const c = spawnSync("cat", [], { input: new TextEncoder().encode("bytes in"), encoding: "utf8" });
+  console.log(c.stdout);
+  const m = spawnSync("pwd", [], { cwd: "/no/such/dir" });
+  console.log(m.status, m.error?.message, m.error?.code, m.error?.syscall);
+  console.log(spawnSync("echo", ["x"], { encoding: "buffer" }).stdout.length, spawnSync("echo", ["y"], { encoding: null }).stdout.length);`);
+});
+
+test("a child gets its input with this process's stdin closed", () => {
+  const program = join(tmp, "closed.fsh");
+  writeFileSync(program, `import { spawnSync } from "node:child_process";\nfunction main(): void {\n  const r = spawnSync("cat", [], { input: "fed", encoding: "utf8" });\n  console.log(r.stdout, r.status);\n}\n`);
+  const out = join(tmp, "closed");
+  Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  const run = Bun.spawnSync(["sh", "-c", `"$0" <&-`, out]);
+  expect(run.stdout.toString()).toBe("fed 0\n");
+});
+
+test("an encoding held anywhere but the call's literal is refused", () => {
+  for (const [code, message] of [
+    [`const o = { encoding: "utf8" };\n  spawnSync("true", [], o);`, `is not assignable`],
+    [`const encoding = "utf8";\n  spawnSync("true", [], { encoding });`, `'spawnSync' takes its encoding as a literal`],
+  ]) {
+    const program = join(tmp, "held.fsh");
+    writeFileSync(program, `import { spawnSync } from "node:child_process";\nfunction main(): void {\n  ${code}\n}\n`);
+    const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", join(tmp, "held")]);
+    expect(built.stderr.toString()).toContain(message!);
+  }
+});

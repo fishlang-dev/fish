@@ -743,8 +743,10 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
     if (!given) return false;
     const options = typeof role === "number";
     if (options && (given.kind !== "object" || !given.props.some(isEncoding))) return false;
-    const encoding = given.kind === "string" && !options ? given.value : given.kind === "object" ? encodingOf(given, options) : undefined;
+    let encoding = given.kind === "string" && !options ? given.value : given.kind === "object" ? encodingOf(given, options) : undefined;
     if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like ${options ? "" : `"utf8" or `}{ encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
+    // Node's "buffer" asks for bytes, what no encoding gives.
+    if (options && encoding === "buffer") encoding = null;
     if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
     if (options) (given as Extract<Expr, { kind: "object" }>).props = (given as Extract<Expr, { kind: "object" }>).props.filter((p) => !isEncoding(p));
     else args.splice(at, 1);
@@ -765,7 +767,7 @@ const ENCODED: Record<string, Record<string, "read" | "write" | number>> = {
   "std:child_process": { spawnSync: 2, execFileSync: 2, execSync: 1 },
 };
 
-const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][number]) => p.kind === "property" && p.key === "encoding";
+const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][number]) => (p.kind === "property" && p.key === "encoding") || (p.kind === "shorthand" && p.name === "encoding");
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
 // it isn't a literal, or the object holds anything else and `others` doesn't allow it.

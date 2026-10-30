@@ -4376,6 +4376,16 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // waiting on a host name's lookup has no descriptor yet, only the lookup's job.
 typedef struct { int64_t count; int fd; struct fsh_file_job *lookup; } fsh_socket;
 
+// Linux marks a new socket close-on-exec as it makes it, so a child spawned on another thread
+// meanwhile can't inherit it; macOS can't, and its spawns close what they don't name instead.
+#ifdef __APPLE__
+#define FSH_SOCK_CLOEXEC 0
+#define FSH_ACCEPT(fd) accept(fd, NULL, NULL)
+#else
+#define FSH_SOCK_CLOEXEC SOCK_CLOEXEC
+#define FSH_ACCEPT(fd) accept4(fd, NULL, NULL, SOCK_CLOEXEC)
+#endif
+
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
   // A program the Fish program starts doesn't inherit its sockets.
@@ -4823,15 +4833,27 @@ const char *fsh_rt_signal_name(int64_t number) {
   return NULL;
 }
 
+// A close-on-exec pipe whose ends are above 2: were this process's stdin, stdout or stderr closed,
+// an end landing on 0, 1 or 2 would be dup2'd onto itself, which keeps it close-on-exec.
 static int fsh_pipe(int fds[2]) {
 #ifdef __APPLE__
   if (pipe(fds) != 0) return -1;
-  fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-  fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-  return 0;
 #else
-  return pipe2(fds, O_CLOEXEC);
+  if (pipe2(fds, O_CLOEXEC) != 0) return -1;
 #endif
+  for (int i = 0; i < 2; i++) {
+    int moved = fcntl(fds[i], F_DUPFD_CLOEXEC, 3);
+    if (moved < 0) {
+      int failure = errno;
+      close(fds[0]);
+      close(fds[1]);
+      errno = failure;
+      return -1;
+    }
+    close(fds[i]);
+    fds[i] = moved;
+  }
+  return 0;
 }
 
 // Reads what a pipe has into a byte array, giving 0 at its end.
@@ -4870,8 +4892,15 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     posix_spawn_file_actions_adddup2(&actions, outp[1], 1);
     posix_spawn_file_actions_adddup2(&actions, errp[1], 2);
     if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+    // Only the three pipes reach the child, whatever other threads have open.
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
     extern char **environ;
-    failure = posix_spawnp(&pid, file, &actions, NULL, argv, environ);
+    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, environ);
+    posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
   }
   for (int i = 0; i < 2; i++) {
@@ -4879,18 +4908,7 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     if (failure && outp[i] >= 0) close(outp[i]);
     if (failure && errp[i] >= 0) close(errp[i]);
   }
-  if (failure) {
-    const char *name = file ? file : "";
-    char code[32], text[200];
-    fsh_errno_words(failure, code, sizeof code, text, sizeof text);
-    size_t size = 2 * strlen(name) + 64;
-    char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
-    snprintf(syscall, size, "spawnSync %s", name);
-    snprintf(message, size, "spawnSync %s %s", name, code);
-    fsh_io_parts(error, message, code, syscall, name);
-    fsh_rt_free(syscall);
-    fsh_rt_free(message);
-  } else {
+  if (!failure) {
     close(in[0]);
     close(outp[1]);
     close(errp[1]);
@@ -4910,6 +4928,8 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
       struct pollfd fds[3] = { { in[1], POLLOUT, 0 }, { outp[0], POLLIN, 0 }, { errp[0], POLLIN, 0 } };
       if (poll(fds, 3, -1) < 0) {
         if (errno == EINTR) continue;
+        // Closed, a child blocked writing ends with SIGPIPE rather than waiting forever.
+        for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
         break;
       }
       if (in[1] >= 0 && fds[0].revents) {
@@ -4942,11 +4962,29 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
       sigwait(&pipe_only, &taken);
     }
     pthread_sigmask(SIG_SETMASK, &before, NULL);
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    int status = 0, waited;
+    while ((waited = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
+    // ECHILD, when the program has set SIGCHLD to be ignored: how it ended is lost.
+    if (waited < 0) failure = errno;
     numbers[0] = pid;
     numbers[1] = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+  }
+  if (failure) {
+    const char *name = file ? file : "";
+    char code[32], text[200];
+    fsh_errno_words(failure, code, sizeof code, text, sizeof text);
+    size_t size = 2 * strlen(name) + 64;
+    char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
+    snprintf(syscall, size, "spawnSync %s", name);
+    snprintf(message, size, "spawnSync %s %s", name, code);
+    fsh_io_parts(error, message, code, syscall, name);
+    fsh_rt_free(syscall);
+    fsh_rt_free(message);
+    fsh_rt_free(out->data);
+    fsh_rt_free(err->data);
+    out->data = err->data = NULL;
+    out->length = out->capacity = err->length = err->capacity = 0;
   }
   for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
   fsh_rt_free(argv);
@@ -5050,7 +5088,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
   struct sockaddr_in at;
   if (!fsh_address(host, port, &at, message)) return 5;
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   int on = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
@@ -5074,7 +5112,7 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
 // A client that gave up before it was accepted is skipped, as servers expect.
 int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
   int fd;
-  while ((fd = accept(listener->fd, NULL, NULL)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
+  while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
     *out = fsh_socket_new(fd);
     return 1;
@@ -5155,7 +5193,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
 
 // Starts connecting a new socket to an address, into *socket_at, or 5 with the reason.
 static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_in *at, fsh_str **message) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   *socket_at = fsh_socket_new(fd);
   // Interrupted, it goes on connecting all the same.
