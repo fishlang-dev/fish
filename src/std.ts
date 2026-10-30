@@ -2833,6 +2833,7 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
 `,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
 
 export type SpawnSyncOptions = { cwd?: string; input?: string | u8[] };
 
@@ -2863,6 +2864,50 @@ export function spawnSync(command: string, args: string[] = [], options: SpawnSy
   } catch (e) {
     return new SpawnSyncReturns<u8[]>(0, null, null, [], [], e);
   }
+}
+
+// A command that ran but exited with a code other than 0, or was ended by a signal.
+export class ExecError extends Error {
+  status: i64 | null;
+  signal: string | null;
+  stdout: u8[];
+  stderr: u8[];
+  constructor(message: string, status: i64 | null, signal: string | null, stdout: u8[], stderr: u8[]) {
+    super(message);
+    this.status = status;
+    this.signal = signal;
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+// What the exec calls give: the child's stdout, after its stderr has gone on to this process's,
+// as Node's do; or the error, Node's message naming the command as it was given.
+function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoError | ExecError {
+  if (r.stderr.length > 0) unsafe { write(2, ptrOf(r.stderr[0]), r.stderr.length as usize) };
+  const failed = r.error;
+  if (failed !== null) throw failed;
+  if (r.status === 0) return r.stdout;
+  const text = new TextDecoder();
+  const message = r.stderr.length > 0 ? "Command failed: " + command + "\n" + text.decode(r.stderr) : "Command failed: " + command;
+  throw new ExecError(message, r.status, r.signal, r.stdout, r.stderr);
+}
+
+export function execFileSync(file: string, args: string[] = [], options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
+  const named = [file, ...args].join(" ");
+  return executed(spawnSync(file, args, options), named);
+}
+
+export function execFileSyncText(file: string, args: string[] = [], options: SpawnSyncOptions = {}): string throws IoError | ExecError {
+  return new TextDecoder().decode(execFileSync(file, args, options));
+}
+
+export function execSync(command: string, options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
+  return executed(spawnSync("/bin/sh", ["-c", command], options), command);
+}
+
+export function execSyncText(command: string, options: SpawnSyncOptions = {}): string throws IoError | ExecError {
+  return new TextDecoder().decode(execSync(command, options));
 }
 
 export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {

@@ -9,14 +9,14 @@ setDefaultTimeout(30_000);
 // The std `child_process` module against node's: the same body run by both, output compared.
 const tmp = mkdtempSync(join(tmpdir(), "fish-child-process-"));
 
-function compare(name: string, imports: string, body: string, throws = "") {
+function compare(name: string, imports: string, body: string, throws = "", nodeBody = body) {
   const program = join(tmp, `${name}.fsh`);
   writeFileSync(program, `${imports}\nfunction main(): void ${throws}{${body}\n}\n`);
   const out = join(tmp, name);
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: tmp, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const cp = require("node:child_process"); const { spawnSync, execFileSync, execSync } = cp; (() => {${body}\n})();`;
+  const script = `const cp = require("node:child_process"); const { spawnSync, execFileSync, execSync } = cp; (() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: tmp });
   expect(fish.stderr.toString()).toBe(node.stderr.toString());
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
@@ -62,4 +62,30 @@ test("spawnSync's encoding must be a literal UTF-8", () => {
     const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", join(tmp, "bad")]);
     expect(built.stderr.toString()).toContain(message!);
   }
+});
+
+// Node throws one kind of error for both failures; Fish an IoError when the command can't start and
+// an ExecError when it fails.
+const failing = [`execFileSync("sh", ["-c", "echo partial; echo bad >&2; exit 4"])`, `execSync("kill -TERM $$")`, `execFileSync("no-such-cmd-x")`];
+
+test("execFileSync and execSync give stdout, or node's errors", () => {
+  const body = `
+  console.log(new TextDecoder().decode(execFileSync("echo", ["a", "b"])));
+  console.log(execFileSync("sh", ["-c", "printf out; printf warned >&2"], { encoding: "utf8" }));
+  console.log(execSync("echo $((1+2))", { encoding: "utf8" }), execSync("cat", { input: "x" }).length);`;
+  const fish = failing.map((call) => `
+  try {
+    ${call};
+  } catch (e) {
+    if (e instanceof ExecError) console.log(JSON.stringify(e.message), e.status, e.signal, e.stdout.length, e.stderr.length);
+    else console.log(e.message, e.code, e.syscall, e.path);
+  }`);
+  const node = failing.map((call) => `
+  try {
+    ${call};
+  } catch (e) {
+    if (e.code === undefined) console.log(JSON.stringify(e.message), e.status, e.signal, e.stdout.length, e.stderr.length);
+    else console.log(e.message, e.code, e.syscall, e.path);
+  }`);
+  compare("exec", `import { execFileSync, execSync, ExecError } from "node:child_process";`, body + fish.join(""), "throws IoError | ExecError ", body + node.join(""));
 });
