@@ -554,6 +554,8 @@ function interpreter() {
       }
       case "as":
         return convert(unwrap(expr(f, e.expr)), type, e);
+      case "satisfies":
+        return expr(f, e.expr);
       case "nonNull": {
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);

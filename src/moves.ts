@@ -714,6 +714,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
       case "as":
+      case "satisfies":
       case "unsafe":
         return expr(e.expr, consume, discarded);
       // Comptime code runs while compiling, so it moves and borrows nothing at run time.
@@ -1589,6 +1590,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made }:
         return;
       case "nonNull":
       case "as":
+      case "satisfies":
       case "unsafe":
         return expr(e.expr, call);
       case "binary":

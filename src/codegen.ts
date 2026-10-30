@@ -11,7 +11,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -520,6 +520,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const narrow = temp();
     emit(`${narrow} = trunc i128 ${result} to i${bits}`);
     return narrow;
+  }
+
+  // Whether an 'as' widens to a type that isn't a number, rather than converting a number.
+  function widens(e: Extract<Expr, { kind: "as" | "satisfies" }>): boolean {
+    const to = types.get(e)!;
+    return !isNumeric(to) && to !== "bigint" && !(typeof to !== "string" && to.kind === "pointer");
   }
 
   // A new bigint from an operator on two, made by the runtime.
@@ -5819,6 +5825,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // of, which is left empty, or else a copy holding another reference to what it owns. A
   // conversion that leaves part of a value behind copies the part it keeps.
   function owned(e: Expr): string {
+    // A widening 'as' or a 'satisfies' hands on what its operand owns.
+    if ((e.kind === "satisfies" || (e.kind === "as" && widens(e))) && !coercions.has(e)) return owned(e.expr);
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it.
@@ -8253,8 +8261,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return bigConstant(e.value);
       case "regex":
         return regex(types.get(e) as RegexType);
+      case "satisfies":
+        return value(e.expr);
       case "as": {
         const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
+        // A widening 'as' is its operand, converted by the coercion the checker gave it.
+        if (widens(e)) return value(e.expr);
         if (from === "bigint") return bigTo(value(e.expr), to);
         const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
         if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
