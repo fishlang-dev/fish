@@ -17,7 +17,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { madeFor, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -226,6 +226,12 @@ export function isAwait(e: Expr): e is Extract<Expr, { kind: "unary" }> {
 // An async method's object as its future holds it.
 function receiverField(self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
   return { name: "this", type: laid(self.owned ? self.type : refType(self.type, self.mutable)) };
+}
+
+// A closure, future or generator type, marked as made for `instance`.
+function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instance: Instance): T {
+  madeFor.set(t, `${t.kind} of ${instance.symbol}`);
+  return t;
 }
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
@@ -1108,7 +1114,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const given = f.closure?.expected?.returns;
     let declared = f.closure ? (f.returnType ? stored(resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
     // A generator's declared `Generator<T>` says what it yields; calling it gives its own type.
-    const generator = f.generator ? (instance.generator ??= generatorType(f.name, instance.concrete)) : undefined;
+    const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete), instance)) : undefined;
     let yielded = generator && declared ? generatorElement(declared) : undefined;
     if (generator && declared && !yielded) throw new CompileError("a generator function's return type is 'Generator<T>', the type of what it yields", f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
@@ -1116,7 +1122,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
     // give that, and calling it gives its own future, which runs nothing until awaited.
-    const future = f.async ? (instance.future ??= futureType(f.name, instance.concrete)) : undefined;
+    const future = f.async ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
     if (future && declared) {
       const gives = promiseElement(declared);
       if (gives === undefined) throw new CompileError("an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
@@ -1864,7 +1870,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
-      const type = closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete);
+      const type = madeBy(closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete), inner);
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {

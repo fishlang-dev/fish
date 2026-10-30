@@ -11,7 +11,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
+import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -60,6 +60,18 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
 // An instance's name in the IR.
 const symbol = (i: Instance) => (i.body.rust ? `@"${trusted(i.body.rust).symbol}"` : i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
+
+// Function definitions and declarations, each with the lines after it, in order of the symbols
+// they name.
+function byName(lines: string[]): string[] {
+  const chunks: string[][] = [];
+  for (const line of lines) {
+    if (line.startsWith("define ") || line.startsWith("declare ")) chunks.push([line]);
+    else chunks.at(-1)!.push(line);
+  }
+  const named = chunks.map((c) => [/@("[^"]*"|[\w.$-]+)\(/.exec(c[0]!)![1]!, c] as const);
+  return named.toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).flatMap(([, c]) => c);
+}
 
 // The `Math` functions LLVM's intrinsics compute exactly. The rest call the runtime's
 // correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
@@ -119,6 +131,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   let body: string[] = [];
   let temps = 0;
   let labels = 0;
+  // Each variable's number in the function being emitted, which tells apart two of one name.
+  // Counted per function, so a function's IR doesn't change with the program around it.
+  let numbered = new Map<Local, number>();
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   // The instance being emitted, and the tables its checking produced.
@@ -162,6 +177,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const fixed = new Map<Expr, string>();
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
+  const cStrings = new Map<string, string>();
+  const tables = new Set<string>();
   // The function dropping, or copying, what a value of each type owns, made once.
   const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
   // The function comparing two values of each compound type, made once.
@@ -180,8 +197,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const stringers = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
-  // Whether the one thunk copying a Dyn that can't be copied is made.
+  // Whether the one thunk copying a Dyn that can't be copied is made, and the one dropping a
+  // settled JS promise's output.
   let uncopyable = false;
+  let settledOutput = false;
   const elementDrops = new Map<Type, string>();
   // The functions JS calls a Fish callback through, by its type and where it was given, and the
   // tasks settling the JS promises Fish futures are given to JS as.
@@ -193,7 +212,6 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The functions `sort` compares through: one per comparator, and one per element type for the
   // default order.
   const orders = new Map<string, string>();
-  let comparators = 0;
   const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type), inspect: (v: string, type: Type) => inspected(v, type) };
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
@@ -208,6 +226,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
   const futureOf = new Map(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
+  // Each generated name in each family and what it stands for, so two things described alike
+  // are never given one name.
+  const taken = new Map<string, unknown>();
   // The future types whose task glue is made.
   const glued = new Set<FutureType>();
 
@@ -247,6 +268,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     body = [];
     temps = 0;
     labels = 0;
+    numbered = new Map();
     block = "entry";
     pending = [];
     floor = 0;
@@ -276,8 +298,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
       }
       for (const [local, i] of instance.frame!.locals) field(slot(local), i);
-      for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop.${j}`, j));
-      for (const i of instance.frame!.awaits.values()) field(`%await.${i}`, i);
+      for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop${j}`, j));
+      for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
       startBlock(resuming.start);
     }
     // Parameters are copied into slots like any other binding.
@@ -345,8 +367,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const start = library ? instances.filter((i) => i.body.exported).flatMap(exported) : entry();
   const filled = fillConstants();
 
+  // Definitions in order of their names, rather than of when they were made, so a function
+  // has the same place among them whatever the program around it.
   return [
-    ...globals,
+    ...globals.toSorted(),
     // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
     // two libraries in one program don't both define it; its exports abort on a panic anyway.
     ...(library ? [] : [`@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`]),
@@ -355,11 +379,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     ...[...intrinsics].filter((line) => !foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
     ...[...rustDrops].map((name) => `declare void ${name}(ptr, ptr)`),
     "",
-    ...out,
+    ...byName(out),
     ...start,
     ...filled,
     "",
   ].join("\n");
+
+  // The part of a generated symbol telling `owner` apart in its family: a hash of its description
+  // rather than a count, so it is the same in every program making it. Owners described alike
+  // get numbered suffixes.
+  function stableId(family: string, description: string, owner: unknown = description): string {
+    const stem = digest(description);
+    let id = stem;
+    for (let n = 1; taken.has(`${family} ${id}`) && taken.get(`${family} ${id}`) !== owner; n++) id = `${stem}.${n}`;
+    taken.set(`${family} ${id}`, owner);
+    return id;
+  }
 
   // A top-level const holding an aggregate lives in a global, filled once before main runs (or
   // as a library loads) and only ever read; its arrays and strings are never freed.
@@ -1327,8 +1362,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const key = `${keyOf(type)} ${at.start}`;
     const made = settlers.get(key);
     if (made) return made;
-    const n = settlers.size;
-    const names: [string, string] = [`@"fsh.js.settle.${n}"`, `@"fsh.js.settle.drop.${n}"`];
+    const n = stableId("js.settle", `${described(type)} ${at.start}`, key);
+    const names: [string, string] = [`@fsh.js.settle.${n}`, `@fsh.js.settle.drop.${n}`];
     settlers.set(key, names);
     const frame = `{ ${DYN}, ptr }`;
     const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
@@ -1365,7 +1400,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     emit(`call void @fsh_rt_js_release(ptr ${held})`);
     emit("ret void");
     out.push(`define internal void ${names[1]}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    if (n === 0) out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
+    if (!settledOutput) {
+      settledOutput = true;
+      out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
+    }
     ({ allocas, body, temps, labels, block, pending, scopes, jsSite } = saved);
     return names;
   }
@@ -1377,7 +1415,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const key = `${keyOf(type)} ${at.start}`;
     const made = callbacks.get(key);
     if (made) return made;
-    const name = `@"fsh.js.callback.${callbacks.size}"`;
+    const name = `@fsh.js.callback.${stableId("js.callback", `${described(type)} ${at.start}`, key)}`;
     callbacks.set(key, name);
     const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -1867,28 +1905,29 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const key = `${keyOf(type)} ${keyOf(to)}`;
     const made = vtables.get(key);
     if (made) return made;
-    const name = `@"fsh.vtable.${vtables.size}"`;
+    const n = stableId("vtable", `${described(type)} as ${described(to)}`, key);
+    const name = `@fsh.vtable.${n}`;
     vtables.set(key, name);
     const table = dynMembers.get(key)!;
     let slots: string[];
     if (sharesDyn(to)) {
       // A shared Dyn's '.clone()' runs its class's own clone when it has one, and otherwise shares.
       const own = table.clone && table.clone !== "copy";
-      slots = [dynRelease(type), "@fsh_rt_dyn_retain", own ? dynClone(type, table, true) : "@fsh_rt_dyn_retain"];
+      slots = [dynRelease(type, n), "@fsh_rt_dyn_retain", own ? dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
       // A Rust value is never copied, so a Dyn holding one panics if it ever is.
-      const copied = holdsRust(type) ? dynUncopyable() : dynCopy(type);
-      const cloned = table.clone === "copy" ? copied : dynClone(type, table);
+      const copied = holdsRust(type) ? dynUncopyable() : dynCopy(type, n);
+      const cloned = table.clone === "copy" ? copied : dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
       const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
       const copy = !pinned || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
-      slots = [dynDrop(type), copy, cloned];
+      slots = [dynDrop(type, n), copy, cloned];
     }
-    slots.push(...dynSlots(type, to, table));
+    slots.push(...dynSlots(type, n, to, table));
     // An error-like value boxed as a cause keeps how it prints, so an Error prints its cause
     // chain as Node does.
-    if (to.of.name === "ErrorLike") slots.push(inspectThunk(type));
+    if (to.of.name === "ErrorLike") slots.push(inspectThunk(type, n));
     globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
     return name;
   }
@@ -1904,8 +1943,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A boxed value's inspect tree at a depth, as console.log would make it for its own type.
-  function inspectThunk(type: Type): string {
-    const name = `@"fsh.dyn.inspect.${vtables.size}"`;
+  function inspectThunk(type: Type, n: string): string {
+    const name = `@fsh.dyn.inspect.${n}`;
     thunk(name, "ptr", () => {
       const v = temp();
       emit(`${v} = load ${llvm(type)}, ptr %p`);
@@ -1915,8 +1954,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A shared Dyn's drop: the last count drops the value and frees its block.
-  function dynRelease(type: Type): string {
-    const name = `@"fsh.dyn.release.${vtables.size}"`;
+  function dynRelease(type: Type, n: string): string {
+    const name = `@fsh.dyn.release.${n}`;
     thunk(name, "void", () => {
       const [last, gone, kept, v] = [temp(), label(), label(), temp()];
       emit(`${last} = call i1 @fsh_rt_dyn_release(ptr %p)`);
@@ -1945,8 +1984,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  function dynDrop(type: Type): string {
-    const name = `@"fsh.dyn.drop.${vtables.size}"`;
+  function dynDrop(type: Type, n: string): string {
+    const name = `@fsh.dyn.drop.${n}`;
     thunk(name, "void", () => {
       const v = temp();
       emit(`${v} = load ${llvm(type)}, ptr %p`);
@@ -1958,8 +1997,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // A new block holding the compiler's copy of the value: what its copies and drops balance on.
-  function dynCopy(type: Type): string {
-    const name = `@"fsh.dyn.copy.${vtables.size}"`;
+  function dynCopy(type: Type, n: string): string {
+    const name = `@fsh.dyn.copy.${n}`;
     thunk(name, "ptr", () => {
       const v = temp();
       emit(`${v} = load ${llvm(type)}, ptr %p`);
@@ -1974,10 +2013,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // What a Dyn's '.clone()' runs when the class has its own `clone`: a new block holding what
   // it gives. Null when the type can't be cloned, which the call panics on.
-  function dynClone(type: Type, table: DynTable, counted = false): string {
+  function dynClone(type: Type, n: string, table: DynTable, counted = false): string {
     if (!table.clone || table.clone === "copy") return "null";
     const own = table.clone;
-    const name = `@"fsh.dyn.clone.${vtables.size}"`;
+    const name = `@fsh.dyn.clone.${n}`;
     thunk(name, "ptr", () => {
       const made = invoke(own, "%p", [])!;
       const block = dynBlock(type, counted);
@@ -1989,14 +2028,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A slot per interface member: each method, then each field. A method giving an interface
   // type can't be called through a Dyn, so its slot is null.
-  function dynSlots(type: Type, to: DynType, { methods, fields }: DynTable): string[] {
+  function dynSlots(type: Type, n: string, to: DynType, { methods, fields }: DynTable): string[] {
     // A boxed future's slots are its poll, which takes its frame as the block, and its cancel.
     if (promiseElement(to.of) !== undefined) {
       const instance = futureOf.get(type as FutureType)!;
       cancelled.add(instance);
       return [symbol(instance), cancelSymbol(instance)];
     }
-    const n = vtables.size;
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
@@ -2178,7 +2216,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function elementDrop(type: Type): string {
     const made = elementDrops.get(type);
     if (made) return made;
-    const name = `@"fsh.element.drop.${elementDrops.size}"`;
+    const name = `@fsh.element.drop.${stableId("element.drop", described(type), type)}`;
     elementDrops.set(type, name);
     const saved = { allocas, body, temps, labels, block };
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
@@ -2245,7 +2283,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
   function loopSlot(s: Stmt, i: number, type: string): string {
-    return resuming ? `%loop.${current.frame!.loops.get(s)! + i}` : alloca(type);
+    return resuming ? `%loop${current.frame!.loops.get(s)! + i}` : alloca(type);
   }
 
   // `for...of` over a fixed array: each element where it lives, as an array's loop gives them;
@@ -2430,8 +2468,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function slot(local: Local): string {
-    // Quoted, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
-    return captured.get(local) ?? `%"${local.name === "%" ? "topic" : local.name}.${local.id}"`;
+    const at = captured.get(local);
+    if (at) return at;
+    let n = numbered.get(local);
+    if (n === undefined) numbered.set(local, (n = numbered.size));
+    // Its number follows a dot, as no other name in a function's IR puts one. Quoted unless
+    // plain, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
+    const name = `${local.name === "%" ? "topic" : local.name}.${n}`;
+    return /^[-\w$.]+$/.test(name) ? `%${name}` : `%"${name}"`;
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
@@ -3125,7 +3169,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (kind === "copy" && holdsRust(type)) throw new Error(`internal error: a '${show(type)}' holds a Rust handle, which is moved, never copied`);
     const made = glue[kind].get(type);
     if (made) return made;
-    const name = `@"fsh.${kind}.${glue[kind].size}"`;
+    const name = `@fsh.${kind}.${stableId(kind, described(type), type)}`;
     glue[kind].set(type, name);
     // A copy keeps the parts it has made pending, so a panic part way drops them.
     const saved = { allocas, body, temps, labels, block, pending, scopes };
@@ -3249,7 +3293,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function deepEquals(a: string, b: string, type: Type): string {
     let name = comparers.get(type);
     if (!name) {
-      name = `@"fsh.eq.${comparers.size}"`;
+      name = `@fsh.eq.${stableId("eq", described(type), type)}`;
       comparers.set(type, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -3367,7 +3411,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const written = asWritten(type);
     let name = jsonWriters.get(written);
     if (!name) {
-      name = `@"fsh.json.${jsonWriters.size}"`;
+      name = `@fsh.json.${stableId("json", described(written), written)}`;
       jsonWriters.set(written, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -3752,7 +3796,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (t.kind !== "array" && t.kind !== "fixed" && t.kind !== "ref" && t.kind !== "recursive" && !(t.kind === "object" && isTuple(t))) return raw("[object Object]");
     let name = stringers.get(t);
     if (!name) {
-      name = `@"fsh.text.${stringers.size}"`;
+      name = `@fsh.text.${stableId("text", described(t), t)}`;
       stringers.set(t, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -3839,7 +3883,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const written = asWritten(type);
     let name = inspectors.get(written);
     if (!name) {
-      name = `@"fsh.insp.${inspectors.size}"`;
+      name = `@fsh.insp.${stableId("insp", described(written), written)}`;
       inspectors.set(written, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -4235,7 +4279,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = lower(type);
     let name = jsonReaders.get(t);
     if (!name) {
-      name = `@"fsh.json.read.${jsonReaders.size}"`;
+      name = `@fsh.json.read.${stableId("json.read", described(t), t)}`;
       jsonReaders.set(t, name);
       const saved = { allocas, body, temps, labels, block, pending, scopes };
       [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
@@ -5116,7 +5160,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const target = calls.get(compare)!;
       env = alloca(llvm(closure));
       emit(`store ${llvm(closure)} ${owned(compare)}, ptr ${env}`);
-      through = `@"fsh.sort.compare.${comparators++}"`;
+      // Its own owner, since code emitted twice, as a `finally` is, makes two.
+      through = `@fsh.sort.compare.${stableId("sort.compare", `${current.symbol} ${compare.start}`, {})}`;
       thunk(through, "i32", () => {
         const arg = (p: string, given: Type | undefined): string[] => {
           if (given === undefined) return [];
@@ -5173,7 +5218,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = lower(element);
     const known = orders.get(keyOf(t));
     if (known) return known;
-    const name = `@"fsh.sort.order.${orders.size}"`;
+    const name = `@fsh.sort.order.${stableId("sort.order", described(t), keyOf(t))}`;
     orders.set(keyOf(t), name);
     thunk(name, "i32", () => {
       const [a, b] = [temp(), temp()];
@@ -7080,7 +7125,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A boxed future polls as a future giving what its Promise does, and throws nothing.
     const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
     const g = resuming!;
-    const at = `%await.${current.frame!.awaits.get(e)!}`;
+    const at = `%await${current.frame!.awaits.get(e)!}`;
     emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
     settle();
     scopes.at(-1)!.push({ slot: at, type: inner });
@@ -7126,7 +7171,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function combinePoll(t: FutureType): string {
     const known = combinePolls.get(t);
     if (known) return known;
-    const name = `@"fsh.combine.${combinePolls.size}"`;
+    const name = `@fsh.combine.${stableId("combine", `${described(t)} ${combinedOf.get(t)!.at.start}`, t)}`;
     combinePolls.set(t, name);
     const { kind, futures, at, array } = combinedOf.get(t)!;
     if (array) return combineArray(t, name, kind, array, at as Expr);
@@ -8739,10 +8784,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(type.element, n)})`);
       // Numbers are copied from constant data, so a large table is one copy, not a store each.
       if (v.items.length > 0 && (isInteger(type.element) || isFloat(type.element))) {
-        const table = `@.table.${globals.length}`;
         const element = type.element;
         const items = v.items.map((x) => `${t} ${typeof untagged(x) === "number" ? floatConstant(untagged(x) as number, element as "f32" | "f64") : String(untagged(x))}`);
-        globals.push(`${table} = private unnamed_addr constant [${n} x ${t}] [${items.join(", ")}]`);
+        const contents = `[${n} x ${t}] [${items.join(", ")}]`;
+        const table = `@.table.${stableId("table", contents)}`;
+        if (!tables.has(table)) globals.push(`${table} = private unnamed_addr constant ${contents}`);
+        tables.add(table);
         intrinsics.add("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
         emit(`call void @llvm.memcpy.p0.p0.i64(ptr ${data}, ptr ${table}, i64 ${bytes(element, n)}, i1 false)`);
         return built(data, n, n);
@@ -8994,7 +9041,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const made = regexes.get(key);
     if (made) return made;
     const program = compileRegex(parsePattern(t.pattern, t.flags));
-    const name = `@.regex.${globals.length}`;
+    const name = `@.regex.${stableId("regex", key)}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);
     return name;
@@ -9009,7 +9056,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
       lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
     }
-    const name = `@.text.${globals.length}`;
+    const name = `@.text.${stableId("text constant", lit, value)}`;
     texts.set(value, name);
     globals.push(`${name}.bytes = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     // Non-ASCII text longer than one breadcrumb's stride gets its breadcrumbs, as the runtime
@@ -9027,7 +9074,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
       lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
     }
-    const name = `@.str.${globals.length}`;
+    // Keyed by its bytes, which two strings with lone surrogates may share.
+    const made = cStrings.get(lit);
+    if (made) return made;
+    const name = `@.str.${stableId("str", lit)}`;
+    cStrings.set(lit, name);
     globals.push(`${name} = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     return name;
   }
