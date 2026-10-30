@@ -203,3 +203,67 @@ function main() {
   console.log(new Error("outer", { cause: r }));
 }
 // error: a 'Dyn<Rich>' can't become a 'Dyn<ErrorLike>' yet; box the value it was made from
+// case: error_own_type_error_class
+// expect: mine bad
+// A program's own TypeError class is the one it names, beside the prelude's.
+class TypeError { constructor(public why: string) {} }
+function main() {
+  console.log("mine", new TypeError("bad").why);
+}
+// case: error_own_type_error_class_http
+// expect: mine bad
+// expect: 200
+// A program's own TypeError class works beside the HTTP library, which keeps std's.
+class TypeError { constructor(public why: string) {} }
+async function main(): Promise<void> {
+  console.log("mine", new TypeError("bad").why);
+  console.log(new Response("hi").status);
+}
+// case: error_own_type_error_function
+// expect: mine 2
+// A program's own TypeError function is the one it calls.
+function TypeError(n: i64): string { return "mine " + n; }
+function main() {
+  console.log(TypeError(2));
+}
+// case: error_own_type_error_function_http
+// expect: mine 2
+// expect: 200
+// A program's own TypeError function works beside the HTTP library.
+function TypeError(n: i64): string { return "mine " + n; }
+async function main(): Promise<void> {
+  console.log(TypeError(2));
+  console.log(new Response("hi").status);
+}
+// case: error_own_type_error_type
+// expect: 3
+// A program's own TypeError type is the one it names.
+type TypeError = { code: i64 };
+function main() {
+  const e: TypeError = { code: 3 };
+  console.log(e.code);
+}
+// case: error_own_type_error_type_http
+// expect: 3
+// expect: 200
+// A program's own TypeError type works beside the HTTP library.
+type TypeError = { code: i64 };
+async function main(): Promise<void> {
+  const e: TypeError = { code: 3 };
+  console.log(e.code);
+  console.log(new Response("hi").status);
+}
+// case: error_own_type_error_const
+// expect: 5
+// A program's own TypeError constant is the one it names.
+const TypeError = 5;
+function main() {
+  console.log(TypeError);
+}
+// case: error_own_type_error_const_http
+// expect: 5 200
+// A program's own TypeError constant works beside the HTTP library, which keeps std's.
+const TypeError = 5;
+async function main(): Promise<void> {
+  console.log(TypeError, new Response("hi").status);
+}
