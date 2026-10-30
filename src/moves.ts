@@ -815,6 +815,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places an expression lends a reference to, and how: a place borrowed, a reference
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
+    e = unwrapped(e);
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
     if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
     // A literal lends what each of its parts does, nested literals included.
@@ -836,8 +837,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A shared reference passed on is just another pointer, which needs nothing lent; a
     // mutable one lends itself, shared or mutably as it is passed on.
     // A mutable reference or nothing passed on lends itself as a mutable reference does.
-    const ref = isRef(to) ? to : optionRef(to);
-    const held = isRef(type) ? type : optionRef(type);
+    const ref = to && (isRef(to) ? to : optionRef(to));
+    const held = type && (isRef(type) ? type : optionRef(type));
     if (place === undefined || !ref || (held && !held.mutable)) return [];
     return [[place, e, ref.mutable]];
   }
@@ -868,7 +869,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
     const root = locals.get(rootOf(e) as never);
-    if (root && isRef(root.type)) {
+    if (root && (isRef(root.type) || optionRef(root.type))) {
       throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // Nor out of a reference a field holds, or a shared value every clone of it uses.
@@ -966,6 +967,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the reference it copies, or the reference it borrows through, holds.
   function hold(holder: Local, e: Expr) {
     if (!state) return;
+    e = unwrapped(e);
     if (e.kind === "conditional" || choosing(e)) {
       hold(holder, e.kind === "conditional" ? e.then : e.left);
       hold(holder, e.kind === "conditional" ? e.else : e.right);
@@ -1142,6 +1144,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a reference value points into: places it borrows where they live, what the
   // reference variables it reads through hold, what calls' results borrow, or a temporary.
   function pointsInto(e: Expr): string[] {
+    e = unwrapped(e);
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
     if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
     // A closure points at what it borrows, and wherever what it holds points.
@@ -1178,7 +1181,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a holder's loans are on, leaving out those inside other holders, whose own
   // loans are held too.
   function heldBy(root: Local): string[] {
-    const refs = new Set([...locals.values()].filter((l) => isRef(l.type)).map((l) => String(l.id)));
+    const refs = new Set([...locals.values()].filter((l) => isRef(l.type) || optionRef(l.type)).map((l) => String(l.id)));
     return [...(state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!)).map((l) => l.place);
   }
 
@@ -1186,7 +1189,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // reference read out of a value holding references points where that value's loans are.
   function within(e: Expr): string[] {
     const root = locals.get(rootOf(e) as never);
-    if (!root || !(isRef(root.type) || (isRef(types.get(e)!) && holdsRef(root.type)))) return [key(e)!];
+    if (!root || !(isRef(root.type) || optionRef(root.type) || (isRef(types.get(e)!) && holdsRef(root.type)))) return [key(e)!];
     return heldBy(root);
   }
 
@@ -1383,7 +1386,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
+    if (e.kind === "nonNull" && optionRef(types.get(e.expr))) return rootOf(e.expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
+  }
+
+  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`.
+  function unwrapped(e: Expr): Expr {
+    return e.kind === "nonNull" && optionRef(types.get(e.expr)) ? unwrapped(e.expr) : e;
   }
 
   // The indexes into arrays along a place's path, outermost first.

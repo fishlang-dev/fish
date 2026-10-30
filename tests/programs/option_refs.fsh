@@ -352,3 +352,294 @@ function main() {}
 function f(xs: (Ref<i64> | null)[]) {}
 function main() {}
 // error: arrays of references are not supported yet
+// case: option_refs_unwrap_call
+// 'find(...)!' borrows what the lookup does.
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const r = find(items, 1)!
+  items = [new Item()]
+  console.log(r.id)
+}
+// error: cannot change 'items' while 'r' borrows 'items' and is used later
+// case: option_refs_unwrap_local
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const a = find(items, 1)
+  const r: Ref<Item> = a!
+  items = [new Item()]
+  console.log(r.id)
+}
+// error: cannot change 'items' while 'r' borrows 'items' and is used later
+// case: option_refs_unwrap_move
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function take(xs: Item[]) {}
+function main() {
+  const items = [new Item()]
+  const r = find(items, 1)!
+  take(items)
+  console.log(r.id)
+}
+// error: cannot move 'items' while 'r' borrows 'items' and is used later
+// case: option_refs_unwrap_method
+class Item {
+  id: i64 = 1
+}
+class Store {
+  items: Item[] = []
+  get(id: i64): Ref<Item> | null {
+    for (const it of this.items) if (it.id === id) return it
+    return null
+  }
+}
+function main() {
+  let s = new Store()
+  s.items.push(new Item())
+  const x = s.get(1)!
+  s.items = []
+  console.log(x.id)
+}
+// error: cannot change 's.items' while 'x' borrows 's' and is used later
+// case: option_refs_unwrap_mut
+class Item {
+  id: i64 = 1
+}
+function findMut(items: Mut<Item[]>, id: i64): Mut<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const m = findMut(items, 1)
+  const r = m!
+  items = [new Item()]
+  r.id = 2
+}
+// error: cannot change 'items' while 'r' borrows 'items' mutably and is used later
+// case: option_refs_unwrap_mut_shared
+class Item {
+  id: i64 = 1
+}
+function findMut(items: Mut<Item[]>, id: i64): Mut<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const m = findMut(items, 1)
+  const r: Ref<Item> = m!
+  items[0].id = 3
+  console.log(r.id)
+}
+// error: cannot change 'items[0].id' while 'r' borrows 'items' mutably and is used later
+// case: option_refs_unwrap_field
+class Item {
+  id: i64 = 1
+}
+class Outer {
+  inner: Item = new Item()
+}
+function findO(xs: Ref<Outer[]>): Ref<Outer> | null {
+  if (xs.length > 0) return xs[0]
+  return null
+}
+function main() {
+  let xs = [new Outer()]
+  const o = findO(xs)
+  const r: Ref<Item> = o!.inner
+  xs = []
+  console.log(r.id)
+}
+// error: cannot change 'xs' while 'r' borrows 'xs' and is used later
+// case: option_refs_unwrap_object
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const o = { r: find(items, 1)! }
+  items = [new Item()]
+  console.log(o.r.id)
+}
+// error: cannot change 'items' while 'o' borrows 'items' and is used later
+// case: option_refs_unwrap_tuple
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const t: [Ref<Item>, i64] = [find(items, 1)!, 1]
+  items = [new Item()]
+  console.log(t[0].id)
+}
+// error: cannot change 'items' while 't' borrows 'items' and is used later
+// case: option_refs_unwrap_closure
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const r = find(items, 1)!
+  const f = () => r.id
+  items = [new Item()]
+  console.log(f())
+}
+// error: cannot change 'items' while 'f' borrows 'items' and is used later
+// case: option_refs_unwrap_mut_twice
+class Item {
+  id: i64 = 1
+}
+function findMut(items: Mut<Item[]>, id: i64): Mut<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function main() {
+  let items = [new Item()]
+  const m = findMut(items, 1)!
+  const n = findMut(items, 1)!
+  m.id = 2
+  n.id = 3
+}
+// error: cannot use 'items' while 'm' borrows 'items' mutably and is used later
+// case: option_refs_unwrap_mut_args
+class Item {
+  id: i64 = 1
+}
+function findMut(items: Mut<Item[]>, id: i64): Mut<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function two(a: Mut<Item>, b: Mut<Item>) {}
+function main() {
+  let items = [new Item()]
+  two(findMut(items, 1)!, findMut(items, 1)!)
+}
+// error: cannot use 'items' while 'items' is lent mutably to 'two' for this call
+// case: option_refs_unwrap_move_out
+class Item {
+  tags: i64[] = [1]
+}
+class Outer {
+  inner: Item = new Item()
+}
+function findO(xs: Ref<Outer[]>): Ref<Outer> | null {
+  if (xs.length > 0) return xs[0]
+  return null
+}
+function main() {
+  const xs = [new Outer()]
+  const o = findO(xs)
+  let v = o!.inner
+  v.tags.push(4)
+}
+// error: 'o!.inner' can't be moved out of 'o', which only borrows it; use 'o!.inner.clone()'
+// case: option_refs_unwrap_return_local
+class Item {
+  id: i64 = 1
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function g(x: Ref<Item>): Ref<Item> {
+  const local = [new Item()]
+  return find(local, 1)!
+}
+function main() {}
+// error: can't return a reference to 'local', which belongs to this function
+// case: option_refs_conditional_place
+class Item {
+  id: i64 = 1
+}
+function main() {
+  let items = [new Item()]
+  const r: Ref<Item> | null = items.length > 0 ? items[0] : null
+  items = [new Item()]
+  console.log(r!.id)
+}
+// error: cannot change 'items' while 'r' borrows 'items[...]' and is used later
+// case: option_refs_unwrap_ok
+// 'x!' passed on or returned borrows what the Option does, and a '?:' lends a place it chooses.
+class Item {
+  id: i64
+  constructor(id: i64) {
+    this.id = id
+  }
+}
+function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return items[i]
+  }
+  return null
+}
+function g(xs: Ref<Item[]>): Ref<Item> {
+  return find(xs, 1)!
+}
+function h(xs: Ref<Item[]>): Ref<Item> {
+  const a = find(xs, 2)
+  return a!
+}
+function main() {
+  let items = [new Item(1), new Item(2)]
+  console.log(g(items).id, h(items).id)
+  const r: Ref<Item> | null = items.length > 1 ? items[1] : null
+  console.log(r!.id)
+  items.push(new Item(3))
+  console.log(items.length)
+}
+// expect: 1 2
+// expect: 2
+// expect: 3

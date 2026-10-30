@@ -4684,6 +4684,15 @@ export function expressions(ctx: Context) {
     }
     // A place meeting a reference or nothing is lent, as one meeting the reference is.
     const lent = optionRef(to);
+    // A `?:` lends a place either side chooses into it, as it does into a reference.
+    if (lent && e.kind === "conditional" && optionRef(type) === undefined && [e.then, e.else].some(rooted)) {
+      for (const side of [e.then, e.else]) {
+        coercions.delete(side);
+        coerce(side, types.get(side)!, to, message);
+      }
+      types.set(e, to);
+      return;
+    }
     if (lent && type !== "null" && !optionRef(type) && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, lent, message);
       coercions.set(e, to);
