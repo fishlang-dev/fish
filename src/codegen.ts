@@ -6225,6 +6225,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${made} = call i64 @fsh_rt_now_ms()`);
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "shutdownSignal" && !calls.has(e)) {
+        const made = temp();
+        emit(`${made} = call ptr @fsh_rt_signal_shutdown()`);
+        if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !calls.has(e)) {
         const made = temp();
         emit(`${made} = call ptr @fsh_rt_http_date()`);

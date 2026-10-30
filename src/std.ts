@@ -395,9 +395,9 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
-  let stop = new AbortController().signal;
+  // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
-  if (given !== null) stop = given;
+  const stop = given ?? shutdownSignal();
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
@@ -1626,6 +1626,11 @@ export function env(name: string): string | null {
   return unsafe { fromCString(value) };
 }
 
+// Aborted by the first SIGINT or SIGTERM; a second exits at once with 130 or 143.
+export function shutdown(): AbortSignal {
+  return shutdownSignal();
+}
+
 export function exit(code: i64 = 0): never {
   unsafe { fsh_rt_exit(code) };
   // The C call never returns.
@@ -1638,7 +1643,7 @@ export function exit(code: i64 = 0): never {
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table" },
+  process: { argv: "value", env: "table", shutdown: "value" },
 };
 
 // The compiler's own tests run JS through this module, which no program may import: Fish has no

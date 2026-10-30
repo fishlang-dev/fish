@@ -37,6 +37,7 @@ export const NATIVE = String.raw`
 #include <sys/stat.h>
 #include <dirent.h>
 #include <ftw.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -86,10 +87,14 @@ void fsh_rt_constants(void (*drop)(void)) {
 // the engine from being torn down.
 static void (*fsh_engine_end)(void) = NULL;
 static int32_t fsh_panic_began = 0;
+// What frees the list of tasks that waited on the shutdown signal, when the program asked for it:
+// the signal itself lives to the end, so nothing else frees it.
+static void (*fsh_shutdown_end)(void) = NULL;
 
 __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
+  if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
   const char *check = getenv("FISH_LEAKS");
   if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
@@ -4122,6 +4127,93 @@ void fsh_rt_signal_abort(fsh_signal *s) {
   pthread_mutex_unlock(&s->lock);
   for (int64_t i = 0; i < waiting.count; i++) fsh_wake_waiter(waiting.tasks[i].task);
   fsh_rt_free(waiting.tasks);
+}
+
+// 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the
+// first time a program asks for it, so one that never does dies at Ctrl-C as usual. A handler
+// only writes the signal's number to a nonblocking pipe, as async-signal-safe code must; a thread
+// of its own reads it, aborting the signal the first time and exiting with 128 plus the number the
+// second, flushing output but running no drops. The block is static and the runtime holds a count
+// on it, so it is never freed.
+static fsh_signal fsh_shutdown;
+static pthread_once_t fsh_shutdown_once = PTHREAD_ONCE_INIT;
+static int fsh_shutdown_pipe[2];
+
+static void fsh_shutdown_caught(int sig) {
+  int saved = errno;
+  unsigned char number = (unsigned char)sig;
+  (void)!write(fsh_shutdown_pipe[1], &number, 1);
+  errno = saved;
+}
+
+// The second signal's exit flushes what output it can. A stream another thread holds, as one
+// blocked writing a line to a full pipe does, is skipped; a flush that blocks itself is cut off
+// by the watcher's exit a second later.
+static int32_t fsh_shutdown_code;
+
+static void *fsh_shutdown_flush(void *arg) {
+  FILE *streams[2] = { stdout, stderr };
+  for (int i = 0; i < 2; i++) {
+    if (ftrylockfile(streams[i]) != 0) continue;
+    fflush(streams[i]);
+    funlockfile(streams[i]);
+  }
+  _exit(fsh_shutdown_code);
+}
+
+static void *fsh_shutdown_watch(void *arg) {
+  int32_t seen = 0;
+  for (;;) {
+    unsigned char number;
+    ssize_t got = read(fsh_shutdown_pipe[0], &number, 1);
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) return NULL;
+    if (seen++ == 0) {
+      fsh_rt_signal_abort(&fsh_shutdown);
+      continue;
+    }
+    fsh_shutdown_code = 128 + number;
+    pthread_t flusher;
+    if (pthread_create(&flusher, NULL, fsh_shutdown_flush, NULL) == 0) {
+      struct timespec bound = { 1, 0 };
+      nanosleep(&bound, NULL);
+    }
+    _exit(fsh_shutdown_code);
+  }
+}
+
+static void fsh_shutdown_waiters_free(void) {
+  pthread_mutex_lock(&fsh_shutdown.lock);
+  fsh_waiters_free(&fsh_shutdown.waiting);
+  fsh_shutdown.waiting = (fsh_waiters){ NULL, 0, 0 };
+  pthread_mutex_unlock(&fsh_shutdown.lock);
+}
+
+static void fsh_shutdown_start(void) {
+  fsh_shutdown.count = 1;
+  pthread_mutex_init(&fsh_shutdown.lock, NULL);
+  fsh_shutdown_end = fsh_shutdown_waiters_free;
+  const char *failed = "fish: the shutdown signal couldn't be set up, so SIGINT and SIGTERM end the program at once\n";
+  if (pipe(fsh_shutdown_pipe) != 0) return (void)fputs(failed, stderr);
+  fcntl(fsh_shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_shutdown_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_shutdown_pipe[1], F_SETFL, O_NONBLOCK);
+  pthread_t watcher;
+  if (pthread_create(&watcher, NULL, fsh_shutdown_watch, NULL) != 0) return (void)fputs(failed, stderr);
+  pthread_detach(watcher);
+  struct sigaction caught;
+  memset(&caught, 0, sizeof caught);
+  caught.sa_handler = fsh_shutdown_caught;
+  sigemptyset(&caught.sa_mask);
+  caught.sa_flags = SA_RESTART;
+  sigaction(SIGINT, &caught, NULL);
+  sigaction(SIGTERM, &caught, NULL);
+}
+
+fsh_signal *fsh_rt_signal_shutdown(void) {
+  pthread_once(&fsh_shutdown_once, fsh_shutdown_start);
+  __atomic_fetch_add(&fsh_shutdown.count, 1, __ATOMIC_RELAXED);
+  return &fsh_shutdown;
 }
 
 // The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
