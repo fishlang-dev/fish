@@ -18,6 +18,7 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
+import { HOST_TARGET, hostTriple, resolveTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
@@ -89,12 +90,13 @@ function withSources<T>(sources: Source[], run: () => T): T {
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it.
-export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
+export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET) {
   const src = readFileSync(file, "utf8");
   const loaded = load(file, src);
   const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
   const ir = withSources(loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
   const shim = rustShim(loaded.rust, checked.instances);
+  if (shim) refuseForeignRust(target);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
   const at = (f: string) => join(dirname(out), f);
@@ -106,14 +108,16 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
     if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
   };
   try {
-    const objects = [...runtimeUnits(ir, release, true).map(cachedObject), ...mathObjects()];
+    const objects = [...runtimeUnits(ir, release, true, target).map(cachedObject), ...mathObjects(target.compile)];
     if (kind === "shared") {
-      const extension = process.platform === "darwin" ? "dylib" : "so";
-      run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
+      const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
+      const extension = darwin ? "dylib" : "so";
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
     } else {
-      run(["clang", "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
+      run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
       const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
-      run(["ar", "rcs", archive, fish, ...objects]);
+      if (target.ar !== "ar" && !Bun.which(target.ar)) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
+      run([target.ar, "rcs", archive, fish, ...objects]);
       // The shim's archive is merged in, so the library is still one file to link.
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
@@ -160,27 +164,34 @@ function cType(t: Type): string {
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from.
-export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
+export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET) {
   const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
-  linked(ir, instances, out, release, links, shim());
+  const rust = shim();
+  if (rust) refuseForeignRust(target);
+  linked(ir, instances, out, release, links, rust, target);
+}
+
+// Cargo isn't told the target yet, so a crate would be built for the host.
+function refuseForeignRust(target: Target) {
+  if (target.compile.includes("-target")) throw new Error(`fishc build: Rust crates can't be built for ${target.triple} yet; build on a ${target.triple} machine, or without --target`);
 }
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
 // and the program, and a dev build's as the program's part, with std's part a unit of its own that
 // the cache keeps between builds.
-function parts(ir: string, instances: Instance[], release: boolean): { std: Unit[]; program: string } {
+function parts(ir: string, instances: Instance[], release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
   const bodies = instances.filter((i) => !i.body.foreign && !i.body.rust);
   const named = (std: boolean) => bodies.filter((i) => i.body.start >= STD_BASE === std).map(symbol);
   const { std, program } = split(ir, named(true), named(false));
-  return { std: [{ name: "std", args: ["-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
+  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
 }
 
 // Builds the IR `ir`, of `instances`, into the executable `out`.
-function linked(ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim) {
-  const { std, program } = parts(ir, instances, release);
-  const objects = [...[...runtimeUnits(ir, release), ...std].map(cachedObject), ...mathObjects()];
-  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim), { stdin: new TextEncoder().encode(program) });
+function linked(ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET) {
+  const { std, program } = parts(ir, instances, release, target);
+  const objects = [...[...runtimeUnits(ir, release, false, target), ...std].map(cachedObject), ...mathObjects(target.compile)];
+  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim, target), { stdin: new TextEncoder().encode(program) });
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
 }
 
@@ -393,17 +404,17 @@ export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
 // program's IR calls the engine. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library.
-export function runtimeUnits(ir: string, release: boolean, pic = false): Unit[] {
+export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = HOST_TARGET): Unit[] {
   const js = callsEngine(ir);
-  const flags = ["-funwind-tables", "-pthread", release ? "-O2" : "-O0", ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
+  const flags = [...target.compile, "-funwind-tables", "-pthread", release ? "-O2" : "-O0", ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
   const runtime: Unit = { name: js ? "runtime-js" : "runtime", args: ["-x", "c", "-", ...flags], stdin: js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE, inputs: js ? files(ENGINE) : [] };
   const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   return [runtime, ...engine];
 }
 
 // Clang's command line for a program read from stdin, linked with `objects`.
-function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim): string[] {
-  return ["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
+function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = HOST_TARGET): string[] {
+  return ["clang", ...target.compile, ...target.link, "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
 function fail(message: string): never {
@@ -438,6 +449,8 @@ else if (import.meta.main) {
           panic: { type: "string", default: "unwind" },
           link: { type: "string", multiple: true },
           lib: { type: "string" },
+          target: { type: "string" },
+          sysroot: { type: "string" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
           self: { type: "string" },
@@ -638,13 +651,24 @@ else if (import.meta.main) {
     }
   }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {
     if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined));
-    else if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? []);
-    else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? []);
+    else {
+      // FISH_SYSROOT is for building for another target, never the host's own plain builds.
+      const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() ? process.env.FISH_SYSROOT || undefined : undefined);
+      const platform = resolveTarget(values.target, sysroot);
+      try {
+        if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? [], platform);
+        else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? [], platform);
+      } catch (e) {
+        // A missing header or library for another target is most often a missing or partial sysroot.
+        if (e instanceof Error && platform.compile.includes("-target") && e.message.startsWith("clang failed")) e.message += `\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`;
+        throw e;
+      }
+    }
   } catch (e) {
     if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
