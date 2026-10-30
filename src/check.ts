@@ -1170,7 +1170,15 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
     const caseOnly = new Set<Local>();
-    const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable);
+    // A call of a function whose result is `x is T` narrows its argument for x to T.
+    const predicate = (call: Extract<Expr, { kind: "call" }>) => {
+      const target = calls.get(call);
+      const p = target?.body.returnType;
+      if (!target || p?.kind !== "predicate" || !p.type) return undefined;
+      const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
+      return { index, type: withScope(target.bindings, () => resolveType(p.type!)) };
+    };
+    const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
