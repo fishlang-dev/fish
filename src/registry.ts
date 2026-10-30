@@ -1,5 +1,6 @@
 import { extend, type Body, type ClassInfo } from "./classes.ts";
 import { unsupported } from "./unsupported.ts";
+import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -54,6 +55,9 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = classes.get(c.baseName);
     if (!base) throw new CompileError(`cannot find class '${c.baseName}'`, c.node.extends!.start, c.node.extends!.end);
+    // A Rust type's value is Rust's, behind its handle, with no fields to embed.
+    const rust = rustClassOf(base.type);
+    if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
     extend(c, base);
     linked.add(c);

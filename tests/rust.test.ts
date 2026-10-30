@@ -119,12 +119,12 @@ test("Rust declarations and imports are refused where they go wrong", () => {
     "src/rust.fsh": `declare module "rust:demo" {\n  export function s(x: string): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n  console.log(s("a"));\n}\n`,
   });
-  expect(refused(unsupported)).toBe("rust.fsh:2:21: error: a 'string' can't cross the Rust boundary yet; Rust functions take and give numbers and booleans");
+  expect(refused(unsupported)).toBe("rust.fsh:2:21: error: a 'string' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
   const returned = pkg({
     "src/rust.fsh": `declare module "rust:demo" {\n  export function s(): i64[];\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n  s();\n}\n`,
   });
-  expect(refused(returned)).toBe("rust.fsh:2:24: error: a 'i64[]' can't cross the Rust boundary yet; Rust functions take and give numbers and booleans");
+  expect(refused(returned)).toBe("rust.fsh:2:24: error: a 'i64[]' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
   const path = pkg({
     "src/rust.fsh": `const name = "x";\ndeclare module "rust:demo" {\n  @rust(name) export function s(): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n`,
@@ -318,4 +318,314 @@ test("a static library links the shim of the Rust it calls", () => {
   const clang = Bun.spawnSync(["clang", join(dir, "main.c"), "-I", join(dir, "out"), join(dir, "out", "libapp.a"), "-lm", "-o", join(dir, "prog")]);
   expect(clang.stderr.toString()).toBe("");
   expect(Bun.spawnSync([join(dir, "prog")]).stdout.toString()).toBe("42\n");
+});
+
+const HANDLES = `declare module "rust:demo" {
+  export class Counter {
+    constructor(start: i64);
+    @rust("zero") static empty(): Counter;
+    get(): i64;
+    add(this: Mut<this>, n: i64): void;
+    finish(this: Own<this>): i64;
+    fail(): i64;
+    clone(): Counter;
+  }
+  export class Bare {
+    static make(): Bare;
+  }
+  export class Racy {
+    constructor();
+    bump(): i64;
+    get(): i64;
+  }
+  export function total(c: Ref<Counter>): i64;
+  export function bump_counter(c: Mut<Counter>): void;
+  export function consume(c: Counter): i64;
+  export function drops(): i64;
+}
+`;
+
+const IMPORTS = `import { Counter, Bare, Racy, total, consume, drops, bump_counter } from "rust:demo";\n`;
+
+// A package declaring the fixture's Rust types, its entry `IMPORTS` and then `program`.
+function handles(program: string, declarations = HANDLES): string {
+  return pkg({ "src/rust.fsh": declarations, "src/main.fsh": IMPORTS + program });
+}
+
+test("a Rust type's constructor, statics and methods of each receiver are calls of its shim", () => {
+  const dir = handles(`function main() {
+  const c = new Counter(1);
+  let e = Counter.empty();
+  e.add(2);
+  bump_counter(e);
+  console.log(c.get(), total(c), consume(c.clone()), e.finish());
+}
+`);
+  const file = join(dir, "src", "main.fsh");
+  const ir = compile(readFileSync(file, "utf8"), file);
+  for (const call of [
+    `call ptr @"fsh_rust_4demo7Counter3new"(i64 1, ptr `,
+    `call ptr @"fsh_rust_4demo7Counter4zero"(ptr `,
+    `call void @"fsh_rust_4demo7Counter3add"(ptr %`,
+    `call void @"fsh_rust_4demo12bump_counter"(ptr %`,
+    `call i64 @"fsh_rust_4demo7Counter3get"(ptr %`,
+    `call i64 @"fsh_rust_4demo5total"(ptr %`,
+    `call ptr @"fsh_rust_4demo7Counter5clone"(ptr %`,
+    `call i64 @"fsh_rust_4demo7consume"(ptr %`,
+    `call i64 @"fsh_rust_4demo7Counter6finish"(ptr %`,
+    `call void @"fsh_rust_4demo7Counter_drop"(ptr %`,
+  ]) {
+    expect(ir).toMatch(new RegExp(`(call|invoke) ${call.slice("call ".length).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  }
+});
+
+test("Rust handles move and borrow as Fish values do, and cross threads", () => {
+  expect(refused(handles(`function main() {\n  const c = new Counter(1);\n  consume(c);\n  console.log(c.get());\n}\n`))).toBe("src/main.fsh:5:15: error: 'c' was moved, so it can't be used here");
+  expect(refused(handles(`function look(c: Ref<Counter>) {\n  c.add(1);\n}\nfunction main() {}\n`))).toBe("src/main.fsh:3:3: error: cannot call 'add' on 'c' because it is a shared reference ('Ref'), which only reads");
+  const sent = handles(`async function run(c: Counter): Promise<i64> {\n  return c.get();\n}\nasync function main() {\n  const n = await spawn(run(new Counter(1)));\n  console.log(n);\n}\n`);
+  const file = join(sent, "src", "main.fsh");
+  expect(() => compile(readFileSync(file, "utf8"), file)).not.toThrow();
+});
+
+test("what a Rust handle can't do is refused where it is written", () => {
+  const cases: [string, string][] = [
+    [`function main() {\n  const a = new Counter(1);\n  console.log(a === new Counter(2));\n}\n`, "src/main.fsh:4:15: error: values of type 'Counter' can't be compared with '===': a Rust 'Counter' isn't compared from Fish; compare what its methods give"],
+    [`function main() {\n  const a = new Counter(1);\n  console.log(a);\n}\n`, "src/main.fsh:4:15: error: printing a 'Counter' isn't supported, since it holds a Rust value; print what its methods give"],
+    [`function main() {\n  const a = new Counter(1);\n  const o = { ...a };\n}\n`, "src/main.fsh:4:15: error: a Rust 'Counter' has no fields Fish can read, so it can't be spread; call its methods for what it holds"],
+    [`function main() {\n  const b = Bare.make();\n  const c = b.clone();\n}\n`, "src/main.fsh:4:13: error: can't clone a Rust 'Bare' unless its class declares 'clone(): Bare', which calls its Clone"],
+    [`function main() {\n  const xs = [new Counter(1)];\n  const ys = xs.clone();\n}\n`, "src/main.fsh:4:14: error: can't clone a value holding a Rust 'Counter' as a whole; clone each 'Counter' with its 'clone()'"],
+    [`function main() {\n  const b = new Bare();\n}\n`, "src/main.fsh:3:13: error: the Rust type 'Bare' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function"],
+  ];
+  for (const [program, error] of cases) expect(refused(handles(program))).toBe(error);
+  const declared = (body: string) => refused(handles(`function main() {}\n`, `declare module "rust:demo" {\n${body}\n}\n`));
+  expect(declared(`  export class A extends B {}`)).toBe("rust.fsh:2:26: error: a Rust type's class can't extend another");
+  expect(declared(`  export class A implements I {}`)).toBe("rust.fsh:2:29: error: a Rust type's class can't implement an interface yet");
+  expect(declared(`  export class A {\n    x: i64;\n  }`)).toBe("rust.fsh:3:5: error: a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish");
+  expect(declared(`  export class A {\n    get(): i64 {\n      return 1;\n    }\n  }`)).toBe("rust.fsh:3:5: error: a Rust type's members are declared without bodies; the crate has them");
+  expect(declared(`  @rust.other export class A {}`)).toBe(`rust.fsh:2:4: error: a Rust type takes only '@rust("path::to::Type")'`);
+  expect(declared(`  @rust.local export class A {}`)).toBe("rust.fsh:2:4: error: Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send");
+  expect(declared(`  export class A {\n    @rust("a::b") get(): i64;\n  }`)).toBe(`rust.fsh:3:11: error: a member's Rust name is one name, as in "with_value"`);
+  const lent = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    peek(): Ref<A>;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
+  expect(refused(lent)).toBe("rust.fsh:4:13: error: the Rust function 'A.peek' can't give a 'Ref<A>': a borrow's lifetime can't cross from Rust yet; give the value itself");
+  const text = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: string): i64;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
+  expect(refused(text)).toBe("rust.fsh:4:11: error: a 'string' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
+});
+
+test("a Rust type lives in Fish: made, called, lent, moved, cloned and dropped once", () => {
+  const dir = handles(`function scoped() {
+  const c = new Counter(7);
+  console.log(c.get());
+}
+
+function main() {
+  const c = new Counter(1);
+  let e = Counter.empty();
+  e.add(2);
+  bump_counter(e);
+  console.log(c.get(), e.get(), total(c));
+  const d = c.clone();
+  console.log(consume(d), drops());
+  console.log(e.finish(), drops());
+  scoped();
+  console.log(drops());
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "1 102 1\n1001 1\n1020 2\n7\n3\n", ""]);
+});
+
+test("a Rust type that isn't Send is refused by the build, naming Send", () => {
+  const dir = handles(`function main() {\n  console.log(new Pinned().same());\n}\n`, HANDLES.replace("  export function total", "  export class Pinned {\n    constructor();\n    same(): boolean;\n  }\n  export function total"));
+  writeFileSync(join(dir, "src", "main.fsh"), `import { Pinned } from "rust:demo";\nfunction main() {\n  console.log(new Pinned().same());\n}\n`);
+  const run = fishc(dir, ["build"]);
+  expect(run.code).toBe(1);
+  expect(run.err).toContain("cannot be sent between threads safely");
+  expect(run.err).toContain("Send");
+});
+test("a panic in a Rust method is a Fish panic at the call", () => {
+  const dir = handles(`function main() {\n  const c = new Counter(4);\n  console.log(c.get());\n  console.log(c.fail());\n}\n`);
+  expect(fishc(dir, ["build"]).code).toBe(0);
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "4\n", "panicked at src/main.fsh:5:15:\ncounter at 4\n"]);
+});
+
+test("a panic in a Rust value's drop is a Fish panic", () => {
+  const dir = pkg({
+    "src/rust.fsh": `declare module "rust:demo" {\n  export class Grumpy {\n    constructor();\n  }\n}\n`,
+    "src/main.fsh": `import { Grumpy } from "rust:demo";\n\nfunction main() {\n  const g = new Grumpy();\n  console.log("made");\n}\n`,
+  });
+  expect(fishc(dir, ["build"]).code).toBe(0);
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "made\n", "panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\n"]);
+});
+
+test("a Rust handle is owned by a spawned task, and shared between tasks, and dropped once", () => {
+  const dir = handles(`async function doubled(c: Counter): Promise<i64> {
+  return c.get() * 2;
+}
+
+async function work(state: shared<Counter>, n: i64): Promise<i64> {
+  state.update((c) => c.add(n));
+  return n;
+}
+
+async function both(): Promise<i64> {
+  const state = shared<Counter>(new Counter(0));
+  const a = spawn(work(state.clone(), 1));
+  const b = spawn(work(state.clone(), 2));
+  await a;
+  await b;
+  return state.update((c) => c.get());
+}
+
+async function main() {
+  const n = await spawn(doubled(new Counter(21)));
+  console.log(n, drops());
+  const total = await both();
+  console.log(total, drops());
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "42 1\n3 2\n", ""]);
+});
+
+test("a Rust handle made for an Own method moves into it, never copied", () => {
+  const dir = handles(`function mk(): Counter {
+  return new Counter(5);
+}
+
+function pick(b: boolean): Counter | null {
+  if (b) return new Counter(6);
+  return null;
+}
+
+function main() {
+  const c = new Counter(3);
+  console.log(new Counter(4).finish(), mk().finish(), Counter.empty().finish(), c.clone().finish(), drops());
+  const a = pick(true);
+  if (a !== null) console.log(a.get(), pick(false) === null, drops());
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "40 50 0 30 4\n6 true 4\n", ""]);
+});
+
+test("a shared value gives its Rust values only inside update, so they need only be Send", () => {
+  expect(refused(handles(`async function main() {\n  const s = shared<{ c: Counter }>({ c: new Counter(1) });\n  console.log(s.c.get());\n}\n`)))
+    .toBe("src/main.fsh:4:15: error: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
+  expect(refused(handles(`async function main() {\n  const s = shared<{ c: Counter }>({ c: new Counter(1) });\n  const c = s.c;\n}\n`)))
+    .toBe("src/main.fsh:4:13: error: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
+  const dir = handles(`async function work(s: shared<{ r: Racy }>): Promise<i64> {
+  for (let i = 0; i < 200; i++) {
+    s.update((v) => v.r.bump());
+    if (i % 10 === 0) await yieldNow();
+  }
+  return 0;
+}
+
+async function main() {
+  const s = shared<{ r: Racy }>({ r: new Racy() });
+  const a = spawn(work(s.clone()));
+  const b = spawn(work(s.clone()));
+  await a;
+  await b;
+  console.log(s.update((v) => v.r.get()));
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(built(dir).stdout.toString()).toBe("400\n");
+});
+
+test("no class extends a Rust type", () => {
+  expect(refused(handles(`class Mine extends Counter {\n  constructor() {\n    super(1);\n  }\n}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error: a class can't extend the Rust type 'Counter'; hold one in a field instead");
+  expect(refused(handles(`class Mine extends Bare {}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error: a class can't extend the Rust type 'Bare'; hold one in a field instead");
+});
+
+test("a static and a method naming one Rust function are refused, and so is a Dyn of a Rust type", () => {
+  const twice = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n    @rust("zero") again(): Counter;\n    static zero(): Counter;\n  }\n}\n`, "src/main.fsh": `import { Counter } from "rust:demo";\nfunction main() {}\n` });
+  expect(refused(twice)).toBe("rust.fsh:5:5: error: 'demo::Counter::zero' is declared elsewhere as (&self): Counter; declare it with the same types");
+  expect(refused(handles(`interface Getter {\n  get(): i64;\n}\nfunction main() {\n  const d: Dyn<Getter> = new Counter(4);\n}\n`)))
+    .toBe("src/main.fsh:6:26: error: a Rust 'Counter' can't become a 'Dyn<Getter>' yet; call its methods on it, or take it as a generic parameter");
+});
+
+test("a Rust value moves through shorthand properties, '??' and destructuring defaults", () => {
+  const dir = handles(`function mk(c: Counter): { c: Counter } {
+  return { c };
+}
+
+function or(c: Counter | null): Counter {
+  return c ?? Counter.empty();
+}
+
+function given({ a = new Counter(9) }: { a?: Counter }): i64 {
+  return a.finish();
+}
+
+function main() {
+  {
+    const f = new Counter(4);
+    const o = { f, n: 1 };
+    console.log(o.f.get(), mk(new Counter(1)).c.get());
+  }
+  console.log(drops());
+  {
+    const a: Counter | null = null;
+    const b = a ?? new Counter(3);
+    const c: Counter | null = new Counter(2);
+    const d = c ?? new Counter(5);
+    console.log(b.get(), d.get(), or(null).get(), or(new Counter(6)).get(), drops());
+  }
+  console.log(drops());
+  {
+    const { a = new Counter(8) }: { a?: Counter } = {};
+    console.log(a.get(), given({}), given({ a: new Counter(1) }), drops());
+  }
+  console.log(drops());
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "4 1\n2\n3 2 0 6 2\n6\n8 90 10 8\n9\n", ""]);
+  expect(refused(handles(`function main() {\n  const a: Counter | null = new Counter(1);\n  const b = a ?? new Counter(2);\n  const c = a ?? new Counter(3);\n}\n`))).toContain("'a' was moved");
+});
+
+test("a future holding a Rust value is boxed by moving it: stored as a Promise, through a function value, and as a handler", () => {
+  const dir = handles(`async function hold(): Promise<i64> {
+  const c = new Counter(5);
+  await yieldNow();
+  return c.get();
+}
+
+async function counted(req: Request): Promise<Response> {
+  const c = new Counter(7);
+  await yieldNow();
+  return new Response(\`count \${c.get()}\`);
+}
+
+async function main() {
+  const f: () => Promise<i64> = hold;
+  const a = await f();
+  const d: Promise<i64> = hold();
+  const b = await d;
+  console.log(a, b, drops());
+  let app = new Router();
+  app.get("/n", counted);
+  app.get("/m", async (req) => {
+    const c = new Counter(3);
+    await yieldNow();
+    return new Response(\`m \${c.get()}\`);
+  });
+  const n = await app.handle(new Request("/n"));
+  const nb = await n.text();
+  const m = await app.handle(new Request("/m"));
+  const mb = await m.text();
+  console.log(nb, mb, drops());
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "5 5 2\ncount 7 m 3 4\n", ""]);
 });

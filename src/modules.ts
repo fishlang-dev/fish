@@ -5,10 +5,10 @@ import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
-import { parse, shiftSpans, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type ClassMember, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
-import { RUST_NAME, rustNames, rustSymbol } from "./rust.ts";
+import { HANDLE, RUST_NAME, rustClassNodes, rustNames, rustSymbol } from "./rust.ts";
 import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
@@ -261,24 +261,71 @@ function rustBlock(s: Stmt) {
   return s.kind === "declare" && s.body.kind === "namespace" && s.body.quoted && s.body.name.startsWith("rust:") ? s.body : undefined;
 }
 
-// A function a Rust module declares, as an exported function whose body is the crate's: under the
-// Fish name, at the Rust path `@rust` gives from the crate's root, or else at the same name there.
+// A function or class a Rust module declares, exported, its bodies the crate's: under the Fish
+// name, at the Rust path `@rust` gives from the crate's root, or else at the same name there.
 function rustFunction(crate: string, s: Stmt): Stmt {
   const f = s.kind === "export" ? s.body : s;
-  if (f.kind !== "function") throw new CompileError(`a Rust module declares the crate's functions, as in 'export function f(x: i64): i64;'`, s.start, s.end);
+  if (f.kind === "class") return { kind: "export", body: rustClass(crate, f), start: s.start, end: s.end };
+  if (f.kind !== "function") throw new CompileError(`a Rust module declares the crate's functions and types, as in 'export function f(x: i64): i64;' or 'export class Counter { ... }'`, s.start, s.end);
   if (f.body !== undefined) throw new CompileError("a Rust function is declared without a body; the crate has its body", f.start, f.end);
   if (!RUST_NAME.test(f.name)) throw new CompileError(`'${f.name}' can't name a Rust function; use letters, digits and '_'`, f.start, f.end);
-  let path = f.name;
-  for (const d of f.decorators ?? []) {
-    if (d.kind !== "call" || d.callee.kind !== "ident" || d.callee.name !== "rust") throw new CompileError("a Rust function takes only '@rust(\"path::to::item\")'", d.start, d.end);
-    const [arg, ...rest] = d.args;
-    if (arg?.kind !== "string" || rest.length > 0) throw new CompileError(`@rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`, d.start, d.end);
-    if (!arg.value.split("::").every((part) => RUST_NAME.test(part))) throw new CompileError("this isn't a Rust path; write one from the crate's root, as in \"util::mul\"", arg.start, arg.end);
-    path = arg.value;
-  }
+  const path = rustPath(f.decorators ?? [], f.name, "function");
   const declared: Func = { ...f, decorators: undefined };
   rustNames.set(declared, { crate, path, symbol: rustSymbol(crate, path) });
   return { kind: "export", body: declared, start: s.start, end: s.end };
+}
+
+// A Rust type declared as a class: a handle holding the boxed Rust value, whose constructor,
+// statics and methods are the type's.
+function rustClass(crate: string, c: Extract<Stmt, { kind: "class" }>): Stmt {
+  if (c.name === undefined || !RUST_NAME.test(c.name)) throw new CompileError("a Rust type is a named class, its name letters, digits and '_'", c.start, c.end);
+  if (c.typeParams.length > 0) throw new CompileError("generic Rust types can't cross to Fish yet", c.typeParams[0]!.start, c.typeParams[0]!.end);
+  if (c.extends) throw new CompileError("a Rust type's class can't extend another", c.extends.start, c.extends.end);
+  if (c.implements.length > 0) throw new CompileError("a Rust type's class can't implement an interface yet", c.implements[0]!.start, c.implements[0]!.end);
+  const path = rustPath(c.decorators, c.name, "type");
+  const members = c.members.map((m): ClassMember => {
+    const named = m.kind === "constructor" ? "new" : m.kind === "method" && typeof m.name === "string" ? m.name : undefined;
+    if (named === undefined || (m.kind !== "constructor" && m.kind !== "method") || (m.kind === "method" && (m.optional || m.generator || m.typeParams.length > 0))) {
+      throw new CompileError("a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish", m.start, m.end);
+    }
+    if (m.kind === "method" && m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
+    if (m.body !== undefined) throw new CompileError("a Rust type's members are declared without bodies; the crate has them", m.start, m.end);
+    if (m.modifiers.some((x) => x !== "static")) throw new CompileError("a Rust type's members take no modifiers but 'static'", m.start, m.end);
+    if (m.kind === "method" && !RUST_NAME.test(named)) throw new CompileError(`'${named}' can't name a Rust function; use letters, digits and '_'`, m.start, m.end);
+    const member = rustPath(m.decorators, named, "member");
+    const declared = { ...m, decorators: [], body: [] } as ClassMember;
+    rustNames.set(declared, { crate, path: `${path}::${member}`, symbol: rustSymbol(crate, `${path}::${member}`) });
+    return declared;
+  });
+  // The one field, the address of the boxed value, which nothing in Fish reads; the IR holds it
+  // as a pointer. It is a number to the checker, so the handle crosses threads as its type does.
+  const at = { start: c.start, end: c.start };
+  const handle: ClassMember = { kind: "field", name: HANDLE, optional: false, definite: false, type: { kind: "ref", name: "usize", args: [], ...at }, init: undefined, modifiers: [], decorators: [], ...at };
+  const declared = { ...c, decorators: [], members: [handle, ...members] };
+  rustClassNodes.set(declared, { crate, path, name: c.name });
+  return declared;
+}
+
+// The Rust path of a declaration from its decorators: `@rust("path")` from the crate's root, or
+// for a member from its type.
+function rustPath(decorators: Expr[], name: string, what: "function" | "type" | "member"): string {
+  let path = name;
+  for (const d of decorators) {
+    // Fish moves values between threads, so a Rust type that isn't Send has no place yet.
+    if (what === "type" && d.kind === "member" && d.object.kind === "ident" && d.object.name === "rust" && d.name === "local") {
+      throw new CompileError("Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send", d.start, d.end);
+    }
+    const only = what === "type" ? "'@rust(\"path::to::Type\")'" : what === "member" ? "'@rust(\"name\")'" : "'@rust(\"path::to::item\")'";
+    if (d.kind !== "call" || d.callee.kind !== "ident" || d.callee.name !== "rust") throw new CompileError(`a Rust ${what} takes only ${only}`, d.start, d.end);
+    const [arg, ...rest] = d.args;
+    if (arg?.kind !== "string" || rest.length > 0) throw new CompileError(`@rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`, d.start, d.end);
+    const parts = arg.value.split("::");
+    if (!parts.every((part) => RUST_NAME.test(part)) || (what === "member" && parts.length > 1)) {
+      throw new CompileError(what === "member" ? "a member's Rust name is one name, as in \"with_value\"" : "this isn't a Rust path; write one from the crate's root, as in \"util::mul\"", arg.start, arg.end);
+    }
+    path = arg.value;
+  }
+  return path;
 }
 
 // A statement under `declare` or `export`.

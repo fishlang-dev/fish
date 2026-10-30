@@ -5,8 +5,8 @@ import type { Instance } from "./check.ts";
 import { validCrate } from "./manifest.ts";
 import { cacheDir } from "./mathlib.ts";
 import type { RustCrate } from "./modules.ts";
-import type { Func } from "./parser.ts";
-import type { Type } from "./typing.ts";
+import type { ClassMember, ClassNode, Func } from "./parser.ts";
+import type { ClassType, Type } from "./typing.ts";
 
 // Rust functions reach Fish through a shim crate fishc generates: one `extern "C"` function per
 // Rust function the program declares, which catches a panic and hands its message back to the
@@ -17,9 +17,24 @@ import type { Type } from "./typing.ts";
 // A Rust function: its crate, its path from the crate's root, and the shim's C symbol for it.
 export type RustName = { crate: string; path: string; symbol: string };
 
-// The Rust function each function a Rust module declares names. It is kept off the AST, so a
-// macro, which sees and makes AST, can't make a function Rust.
-export const rustNames = new WeakMap<Func, RustName>();
+// The Rust function each function, constructor and method a Rust module declares names. It is
+// kept off the AST, so a macro, which sees and makes AST, can't make a function Rust.
+export const rustNames = new WeakMap<Func | ClassMember, RustName>();
+
+// A Rust type a class names: its crate and its path from the crate's root. Fish moves its values
+// between threads, so it must be Send, which the shim asserts.
+export type RustClass = { crate: string; path: string; name: string };
+
+// The Rust type of each class a Rust module declares, by its declaration, and by its type once
+// the checker has one.
+export const rustClassNodes = new WeakMap<ClassNode, RustClass>();
+export const rustClasses = new WeakMap<ClassType, RustClass>();
+
+// The field a handle's class holds its boxed Rust value in.
+export const HANDLE = "#handle";
+
+// The Rust type a type is, when it is one.
+export const rustClassOf = (t: Type): RustClass | undefined => (typeof t !== "string" && t.kind === "class" ? rustClasses.get(t) : undefined);
 
 export const RUST_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -36,6 +51,10 @@ export function trusted(name: RustName): RustName {
   }
   return name;
 }
+
+// The symbol of the shim function that drops a Rust type's boxed value. No member's symbol ends
+// so, since each of a symbol's parts is spelled after its length.
+export const dropSymbol = (c: RustClass) => `${trusted({ crate: c.crate, path: c.path, symbol: rustSymbol(c.crate, c.path) }).symbol}_drop`;
 
 // What a program links for the Rust functions it calls: the shim's static library, then the
 // system libraries it needs.
@@ -133,21 +152,55 @@ function manifest(crates: RustCrate[]): string {
 
 const RUST_TYPES: Record<string, string> = { boolean: "bool", void: "()" };
 
-function rustType(t: Type): string {
-  return RUST_TYPES[t as string] ?? (t as string);
+// A Rust type's path in the shim, from the crate's root.
+function typePath(c: RustClass): string {
+  trusted({ crate: c.crate, path: c.path, symbol: rustSymbol(c.crate, c.path) });
+  return `::${c.crate.replace(/-/g, "_")}::${c.path}`;
 }
 
-// The shim's source: each function calls its Rust function inside `caught`.
+// How a value crosses to the shim: a Rust type as the pointer to its box, owned or lent.
+function rustType(t: Type): string {
+  const c = rustClassOf(typeof t !== "string" && t.kind === "ref" ? t.to : t);
+  return c ? `*mut ${typePath(c)}` : (RUST_TYPES[t as string] ?? (t as string));
+}
+
+// The Rust expression a parameter is given as: a Rust type moved out of its box, or lent from it.
+function argument(t: Type, name: string): string {
+  if (typeof t !== "string" && t.kind === "ref") return `${t.mutable ? "&mut " : "&"}*${name}`;
+  return rustClassOf(t) ? `*Box::from_raw(${name})` : name;
+}
+
+// The shim's source: each function calls its Rust function inside `caught`, a Rust type's value
+// boxed and handed over as a pointer; each Rust type gets a drop function and an assertion that
+// it is Send.
 function source(called: Instance[]): string {
+  const types = new Map<string, RustClass>();
+  const note = (t: Type) => {
+    const c = rustClassOf(typeof t !== "string" && t.kind === "ref" ? t.to : t);
+    if (c) types.set(typePath(c), c);
+  };
   const wrappers = called.map((i) => {
     const { crate, path, symbol } = trusted(i.body.rust!);
-    const params = i.signature!.map((t, k) => `a${k}: ${rustType(t)}`);
-    const args = i.signature!.map((_, k) => `a${k}`).join(", ");
-    const returns = i.returns === "void" ? "" : ` -> ${rustType(i.returns)}`;
-    return `#[no_mangle]\npub extern "C" fn ${symbol}(${[...params, "panicked: *mut *mut c_char"].join(", ")})${returns} {\n    caught(panicked, || ::${crate.replace(/-/g, "_")}::${path}(${args}))\n}\n`;
+    const owner = i.body.owner && rustClassOf(i.body.owner);
+    const self = owner && i.body.self && !i.body.self.constructor ? i.body.self : undefined;
+    const constructor = owner && i.body.self?.constructor;
+    [...i.signature!, i.returns, ...(owner ? [i.body.owner!] : [])].forEach(note);
+    const params = [...(self ? [`this: *mut ${typePath(owner!)}`] : []), ...i.signature!.map((t, k) => `a${k}: ${rustType(t)}`), "panicked: *mut *mut c_char"];
+    const receiver = self ? [self.owned ? "*Box::from_raw(this)" : self.mutable ? "&mut *this" : "&*this"] : [];
+    const args = [...receiver, ...i.signature!.map((t, k) => argument(t, `a${k}`))].join(", ");
+    const callee = `::${crate.replace(/-/g, "_")}::${path}`;
+    const gives = constructor ? i.body.owner! : i.returns;
+    const made = rustClassOf(gives) ? `Box::into_raw(Box::new(${callee}(${args})))` : `${callee}(${args})`;
+    const returns = gives === "void" ? "" : ` -> ${rustType(gives)}`;
+    return `#[no_mangle]\npub extern "C" fn ${symbol}(${params.join(", ")})${returns} {\n    caught(panicked, || unsafe { ${made} })\n}\n`;
+  });
+  const drops = [...types.values()].map((c) => {
+    const at = typePath(c);
+    const send = `const _: fn() = || {\n    fn send<T: Send>() {}\n    send::<${at}>();\n};\n\n`;
+    return `${send}#[no_mangle]\npub extern "C" fn ${dropSymbol(c)}(this: *mut ${at}, panicked: *mut *mut c_char) {\n    if !this.is_null() {\n        caught(panicked, || unsafe { drop(Box::from_raw(this)) })\n    }\n}\n`;
   });
   return `// Generated by fishc: each function calls a Rust function for Fish, as C calls it.
-#![allow(non_snake_case)]
+#![allow(non_snake_case, unused_unsafe)]
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, set_hook, AssertUnwindSafe};
 use std::sync::Once;
@@ -156,9 +209,10 @@ extern "C" {
     fn fsh_rt_rust_panicked(out: *mut *mut c_char, message: *const u8, length: usize);
 }
 
-// Runs f, a panic in it handed to the runtime for the call to raise as a Fish panic. Rust's own
-// report of the panic is silenced, since Fish reports it at the call.
-fn caught<T: Default>(out: *mut *mut c_char, f: impl FnOnce() -> T) -> T {
+// Runs f, a panic in it handed to the runtime for the call to raise as a Fish panic, and zero
+// given back instead, which the call never reads. Rust's own report of the panic is silenced,
+// since Fish reports it at the call.
+fn caught<T>(out: *mut *mut c_char, f: impl FnOnce() -> T) -> T {
     static QUIET: Once = Once::new();
     QUIET.call_once(|| set_hook(Box::new(|_| {})));
     match catch_unwind(AssertUnwindSafe(f)) {
@@ -168,10 +222,11 @@ fn caught<T: Default>(out: *mut *mut c_char, f: impl FnOnce() -> T) -> T {
             unsafe { fsh_rt_rust_panicked(out, message.as_ptr(), message.len()) };
             // Dropping the payload could panic again, inside a function C called, which aborts.
             std::mem::forget(payload);
-            T::default()
+            // Only numbers, booleans, () and pointers are given, for each of which zero is a value.
+            unsafe { std::mem::zeroed() }
         }
     }
 }
 
-${wrappers.join("\n")}`;
+${[...wrappers, ...drops].join("\n")}`;
 }

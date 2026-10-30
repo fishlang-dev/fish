@@ -1,5 +1,5 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
-import { rustNames } from "./rust.ts";
+import { rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
@@ -425,6 +425,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
       else classes.set(s.name, declareClass(node));
+      const rust = rustClassNodes.get(s);
+      if (rust) rustClasses.set(classes.get(s.name)!.type, rust);
+      // A Rust type declaring no constructor is never made with `new`, so its handle needs no
+      // assigning in the empty one it is given.
+      if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
       continue;
     }
     // `declare function f(...): T;` names a C function, called inside `unsafe`.
@@ -915,23 +920,31 @@ export function check(written: Stmt[], library = false, macros = false, module =
   function rustSignature(instance: Instance) {
     const f = instance.body;
     const what = `the Rust function '${f.name}'`;
+    const constructor = f.self?.constructor === true;
     if (f.typeParams?.length) throw unsupported("generic Rust functions", f);
     if (f.generator || f.async) throw new CompileError(`${what} can't be ${f.async ? "async" : "a generator"}; it returns when the Rust function does`, f.start, f.end);
     if (f.throws) throw new CompileError(`${what} can't throw; a Rust panic is a Fish panic`, f.throws.start, f.throws.end);
-    if (!f.returnType) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
-    const crosses = (t: Type) => isNumeric(t) || t === "boolean";
-    const refused = (t: Type, at: Span) => new CompileError(`a '${show(t)}' can't cross the Rust boundary yet; Rust functions take and give numbers and booleans`, at.start, at.end);
+    if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
+    // Numbers and booleans, and Rust types: owned, or lent as `Ref<T>` or `Mut<T>`.
+    const crosses = (t: Type, lent: boolean) => isNumeric(t) || t === "boolean" || rustClassOf(t) !== undefined || (lent && typeof t !== "string" && t.kind === "ref" && rustClassOf(t.to) !== undefined);
+    const refused = (t: Type, at: Span) => new CompileError(`a '${show(t)}' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types`, at.start, at.end);
     const params = paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default || p.comptime) throw unsupported("rest, optional, default and comptime parameters on Rust functions", p);
-      if (!crosses(params[i]!)) throw refused(params[i]!, p);
+      if (!crosses(params[i]!, true)) throw refused(params[i]!, p);
     });
     instance.signature = params;
-    const returns = resolveType(f.returnType);
-    if (returns !== "void" && !crosses(returns)) throw refused(returns, f.returnType);
-    instance.returns = returns;
+    const returns = f.returnType ? resolveType(f.returnType) : "void";
+    if (f.returnType && typeof returns !== "string" && returns.kind === "ref" && rustClassOf(returns.to)) {
+      throw new CompileError(`${what} can't give a '${show(returns)}': a borrow's lifetime can't cross from Rust yet; give the value itself`, f.returnType.start, f.returnType.end);
+    }
+    if (returns !== "void" && !crosses(returns, false)) throw refused(returns, f.returnType!);
+    // A constructor gives the handle to the value it made.
+    instance.returns = constructor ? f.owner! : returns;
     // Every declaration of one Rust function calls the one shim function, so they agree on types.
-    const types = `(${params.map(show).join(", ")}): ${show(returns)}`;
+    // The receiver is part of how the shim calls it, so it has to agree too.
+    const self = f.self && !constructor ? [f.self.owned ? "self" : f.self.mutable ? "&mut self" : "&self"] : [];
+    const types = `(${[...self, ...params.map(show)].join(", ")}): ${show(returns)}`;
     const other = rustTypes.get(f.rust!.symbol);
     if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
     rustTypes.set(f.rust!.symbol, types);

@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { trusted } from "./rust.ts";
+import { dropSymbol, rustClassOf, trusted } from "./rust.ts";
 import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
@@ -68,6 +68,9 @@ const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
+
+// Whether a value of the type holds a Rust handle, which only moves.
+const holdsRust = (t: Type) => holdsPart(t, (u) => rustClassOf(u) !== undefined);
 
 // How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
 // holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
@@ -171,8 +174,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
-  // The shim functions declared, each once however many declarations name its Rust function.
+  // The shim functions declared, each once however many declarations name its Rust function,
+  // and the drop functions of the Rust types the program drops.
   const declaredRust = new Set<string>();
+  const rustDrops = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
   const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
 
@@ -196,8 +201,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (instance.body.foreign) {
       const returns = crossed(instance.returns);
       foreign.add(instance.body.name);
-      // A Rust function's shim takes a last parameter, where it puts a panic's message.
-      const params = [...instance.signature!.map(crossing), ...(instance.body.rust ? ["ptr"] : [])];
+      // A Rust function's shim takes its handle first when it is a method, and a last parameter,
+      // where it puts a panic's message.
+      const self = instance.body.rust && instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
+      const params = [...self, ...instance.signature!.map(crossing), ...(instance.body.rust ? ["ptr"] : [])];
       const rust = instance.body.rust && symbol(instance);
       if (rust && declaredRust.has(rust)) continue;
       if (rust) declaredRust.add(rust);
@@ -318,6 +325,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     "",
     ...RUNTIME,
     ...[...intrinsics].filter((line) => !foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
+    ...[...rustDrops].map((name) => `declare void ${name}(ptr, ptr)`),
     "",
     ...out,
     ...start,
@@ -1840,7 +1848,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const own = table.clone && table.clone !== "copy";
       slots = [dynRelease(type), "@fsh_rt_dyn_retain", own ? dynClone(type, table, true) : "@fsh_rt_dyn_retain"];
     } else {
-      const copied = dynCopy(type);
+      // A Rust value is never copied, so a Dyn holding one panics if it ever is.
+      const copied = holdsRust(type) ? dynUncopyable() : dynCopy(type);
       const cloned = table.clone === "copy" ? copied : dynClone(type, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
@@ -1901,7 +1910,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (!uncopyable) {
       uncopyable = true;
       thunk(name, "ptr", () => {
-        unwinding(`call void @fsh_rt_panic(ptr ${cString("panicked while copying a Dyn:\nits value holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it\n")})`);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString("panicked while copying a Dyn:\nits value holds an Atomic, a Lock, a JoinHandle, a Rust value or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it\n")})`);
         emit("unreachable");
       });
     }
@@ -3024,7 +3033,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // Whether a value of the type owns memory it gives back when dropped: a string, or anything
   // holding one by value.
   function needsDrop(type: Type | undefined): boolean {
-    if (type === "string") return true;
+    if (type === "string" || (type !== undefined && rustClassOf(type))) return true;
     if (typeof type !== "string" && type?.kind === "handle") return true;
     if (type === undefined || typeof type === "string") return false;
     if (type.kind === "union") return type.members.some(needsDrop);
@@ -3046,6 +3055,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A copy of a value, holding its own reference to each string in it.
   function copied(v: string, type: Type): string {
+    if (holdsRust(type)) throw new Error(`internal error: a '${show(type)}' holds a Rust handle, which is moved, never copied`);
     if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return copied(v, type.of);
     if (!needsDrop(type)) return v;
     if (type === "string") {
@@ -3068,6 +3078,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
     if (typeof type !== "string" && type.kind === "handle") return emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
+    const rust = rustClassOf(type);
+    if (rust) {
+      // Rust's drop runs in the shim, which hands back a panic in it for the runtime to raise.
+      const [name, caught] = [`@"${dropSymbol(rust)}"`, alloca("ptr")];
+      rustDrops.add(name);
+      emit(`store ptr null, ptr ${caught}`);
+      emit(`call void ${name}(ptr ${v}, ptr ${caught})`);
+      return emit(`call void @fsh_rt_rust_dropped(ptr ${caught}, ptr ${cString(`panicked while dropping a Rust '${rust.name}':\n`)})`);
+    }
     emit(`call void ${helper("drop", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
   }
 
@@ -3075,6 +3094,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
   function helper(kind: "drop" | "copy", type: Exclude<Type, string>): string {
+    if (kind === "copy" && holdsRust(type)) throw new Error(`internal error: a '${show(type)}' holds a Rust handle, which is moved, never copied`);
     const made = glue[kind].get(type);
     if (made) return made;
     const name = `@"fsh.${kind}.${glue[kind].size}"`;
@@ -5693,11 +5713,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       return convert(v, type, to);
     }
     const whole = !to || keepsAll(types.get(e)!, to);
-    if (whole && fresh(e)) return value(e, true);
+    // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
+    const rust = holdsRust(types.get(e)!);
+    if ((whole || rust) && fresh(e)) return value(e, true);
+    if (!rust && !needsDrop(types.get(e)!) && holdsRust(valueType(e))) return value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
     if (to && !needsDrop(types.get(e)!) && holdsPart(to, (t) => typeof t !== "string" && t.kind === "recursive")) return value(e, true);
     const v = value(e);
-    if (whole && current.consumes.has(e) && lendable(e)) {
+    if ((whole || rust) && current.consumes.has(e) && lendable(e)) {
       take(e);
       return v;
     }
@@ -5798,7 +5821,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function operand(e: Expr, later: Expr[]): string {
     const v = value(e);
     const type = valueType(e);
-    if (!needsDrop(type) || fresh(e) || e.kind === "string" || !later.some(writes)) return v;
+    if (!needsDrop(type) || fresh(e) || e.kind === "string" || !later.some(writes) || holdsRust(type)) return v;
     const copy = copied(v, type);
     pending.push({ v: copy, type });
     return copy;
@@ -6696,8 +6719,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const cleanup = after || unwound ? () => (after?.(), unwound?.()) : undefined;
     const type = target.returns;
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    // A narrow value crosses to C widened, both ways.
-    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
+    // A narrow value crosses to C widened, both ways. A Rust type lent to Rust, or the handle a
+    // method is called on, is the handle read from where it is held.
+    const handle = (v: string) => {
+      const h = temp();
+      emit(`${h} = load ptr, ptr ${v.slice(v.lastIndexOf(" ") + 1)}`);
+      return `ptr ${h}`;
+    };
+    // A method taking its object over leaves the place it was in empty, as one in Fish does.
+    const taken = (v: string) => {
+      const h = handle(v);
+      if (target.body.self?.owned) emit(`store ptr null, ptr ${v}`);
+      return h;
+    };
+    const passed = target.body.rust ? [...(pointer ? [taken(pointer)] : []), ...args.map((v, i) => ((typeof target.signature![i]! !== "string" && (target.signature![i]! as Exclude<Type, string>).kind === "ref") ? handle(v) : v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)))]
+      : target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
     const caught = target.body.rust ? alloca("ptr") : undefined;
     if (caught) {
       emit(`store ptr null, ptr ${caught}`);
@@ -7847,6 +7883,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (lendable(object)) return blockOf(address(object), stored(object));
     const type = llvm(types.get(object)!);
     const spilled = alloca(type);
+    // A Rust handle made for the call moves into it, the call taking it over.
+    if (owns && holdsRust(types.get(object)!)) {
+      if (!fresh(object)) throw new Error("internal error: a Rust handle taken over by a method is read from a place nothing empties");
+      emit(`store ${type} ${value(object, true)}, ptr ${spilled}`);
+      return spilled;
+    }
     const read = value(object);
     const v = owns ? spill(spilled, types.get(object)!, read) : read;
     emit(`store ${type} ${v}, ptr ${spilled}`);
@@ -8083,6 +8125,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if ((types.get(e) as Exclude<Type, string>).kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         if ((types.get(e) as Exclude<Type, string>).kind === "block") return blockNew(e, types.get(e) as BlockType);
         if ((types.get(e) as Exclude<Type, string>).kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
+        // A Rust type's constructor gives the handle to the value it boxed.
+        if (calls.get(e)!.body.rust) return invoke(calls.get(e)!, undefined, argValues(e.args ?? [], calls.get(e)!), e)!;
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;
@@ -8263,9 +8307,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           put(p.name, slot(local), to);
           continue;
         }
-        const read = temp();
-        emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-        put(p.name, copied(read, local.type), local.type);
+        put(p.name, shorthand(p, local), local.type);
         continue;
       }
       if (p.kind !== "spread") throw new Error("internal error: unchecked property");
@@ -8307,9 +8349,21 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const to = field(object, p.name)!.type;
     // A shorthand lent to a reference field points at its variable.
     if (isRef(to) && !isRef(local.type)) return [p.name, slot(local)];
+    if (holdsRust(local.type)) return [p.name, convert(shorthand(p, local), local.type, to)];
     const result = temp();
     emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
     return [p.name, copied(convert(result, local.type, to), to)];
+  }
+
+  // A shorthand property's value: its variable's, copied, or for a Rust value, moved out of it, as
+  // the property written out moves it.
+  function shorthand(p: Extract<ObjectProp, { kind: "shorthand" }>, local: Local): string {
+    const read = temp();
+    emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
+    if (!holdsRust(local.type)) return copied(read, local.type);
+    if (!current.consumes.has(p)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
+    emit(`store ${llvm(local.type)} zeroinitializer, ptr ${slot(local)}`);
+    return read;
   }
 
   // Writes a value to a place, giving the assignment's value: what was written, or, for a setter,
@@ -8318,6 +8372,11 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const setter = setters.get(target);
     if (setter && target.kind === "member") {
       const type = types.get(target)!;
+      // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
+      if (holdsRust(type)) {
+        invoke(setter, thisPointer(setter, target.object), [`${llvm(type)} ${result}`]);
+        return result;
+      }
       const kept = copied(result, type);
       if (needsDrop(type)) pending.push({ v: kept, type });
       invoke(setter, thisPointer(setter, target.object), [`${llvm(type)} ${result}`]);
@@ -8426,12 +8485,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function orElse(e: Extract<Expr, { kind: "binary" }>): string {
     const option = valueType(e.left) as UnionType;
     const type = types.get(e)!;
-    const v = value(e.left);
+    // A Rust value is moved out of the left side, which is left empty, never copied.
+    const rust = holdsRust(option);
+    const v = rust && fresh(e.left) ? value(e.left, true) : value(e.left);
+    if (rust && !fresh(e.left)) {
+      if (!current.consumes.has(e.left) || !lendable(e.left)) throw new Error("internal error: a Rust value on the left of '??' isn't moved");
+      take(e.left);
+    }
     const [some, none, end] = [label(), label(), label()];
     emit(`br i1 ${holds(v, option, ["null"])}, label %${none}, label %${some}`);
     startBlock(some);
     // The result is a value of its own, like a conditional's.
-    const kept = copied(convert(v, option, type), type);
+    const kept = rust ? convert(v, option, type) : copied(convert(v, option, type), type);
     const someEnd = block;
     emit(`br label %${end}`);
     startBlock(none);

@@ -1147,6 +1147,11 @@ void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
   fsh_rt_panic("\n");
 }
 
+// After a Rust value's drop: a panic in it, which the shim handed back, raised as a Fish panic.
+void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
+  if (*caught) fsh_rt_panic_rust(at, *caught);
+}
+
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {

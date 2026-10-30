@@ -62,3 +62,119 @@ impl Drop for Bomb {
 pub fn bomb() -> i64 {
     std::panic::panic_any(Bomb)
 }
+
+static DROPS: AtomicI64 = AtomicI64::new(0);
+
+#[derive(Clone)]
+pub struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    pub fn new(start: i64) -> Counter {
+        Counter { value: start }
+    }
+
+    pub fn zero() -> Counter {
+        Counter { value: 0 }
+    }
+
+    pub fn get(&self) -> i64 {
+        self.value
+    }
+
+    pub fn add(&mut self, n: i64) {
+        self.value += n;
+    }
+
+    pub fn finish(self) -> i64 {
+        self.value * 10
+    }
+
+    pub fn fail(&self) -> i64 {
+        panic!("counter at {}", self.value)
+    }
+}
+
+impl Drop for Counter {
+    fn drop(&mut self) {
+        DROPS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+pub fn drops() -> i64 {
+    DROPS.load(Ordering::SeqCst)
+}
+
+pub fn total(c: &Counter) -> i64 {
+    c.value
+}
+
+pub fn bump_counter(c: &mut Counter) {
+    c.value += 100;
+}
+
+pub fn consume(c: Counter) -> i64 {
+    c.value + 1000
+}
+
+
+pub struct Bare;
+
+impl Bare {
+    pub fn make() -> Bare {
+        Bare
+    }
+}
+
+pub struct Grumpy;
+
+impl Grumpy {
+    pub fn new() -> Grumpy {
+        Grumpy
+    }
+}
+
+impl Drop for Grumpy {
+    fn drop(&mut self) {
+        panic!("grumpy to the end");
+    }
+}
+
+// Send but not Sync: two threads bumping it at once would lose bumps.
+pub struct Racy {
+    value: std::cell::Cell<i64>,
+}
+
+impl Racy {
+    pub fn new() -> Racy {
+        Racy { value: std::cell::Cell::new(0) }
+    }
+
+    pub fn bump(&self) -> i64 {
+        let v = self.value.get();
+        std::thread::yield_now();
+        self.value.set(v + 1);
+        v
+    }
+
+    pub fn get(&self) -> i64 {
+        self.value.get()
+    }
+}
+
+// Not Send: it knows the thread that made it.
+pub struct Pinned {
+    made: std::thread::ThreadId,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Pinned {
+    pub fn new() -> Pinned {
+        Pinned { made: std::thread::current().id(), _not_send: std::marker::PhantomData }
+    }
+
+    pub fn same(&self) -> bool {
+        self.made == std::thread::current().id()
+    }
+}
