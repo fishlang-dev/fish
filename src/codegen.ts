@@ -6039,6 +6039,27 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         };
         break;
       }
+      case "processSpawn": {
+        const [args, input] = [alloca(ARRAY), alloca(ARRAY)];
+        emit(`store ${ARRAY} ${operand(e.args[1]!, e.args.slice(2))}, ptr ${args}`);
+        const cwd = operand(e.args[2]!, e.args.slice(3));
+        emit(`store ${ARRAY} ${value(e.args[3]!)}, ptr ${input}`);
+        const [numbers, out, err] = [alloca("[3 x i64]"), alloca(ARRAY), alloca(ARRAY)];
+        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
+        read = () => {
+          const tuple = tupleType(["i64", "i64", "i64", arrayType("u8"), arrayType("u8")]) as ObjectType;
+          let made = "zeroinitializer";
+          for (let i = 0; i < 5; i++) {
+            const [at, v, next] = [temp(), temp(), temp()];
+            if (i < 3) emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
+            emit(`${v} = load ${i < 3 ? "i64" : ARRAY}, ptr ${i < 3 ? at : i === 3 ? out : err}`);
+            emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${i < 3 ? "i64" : ARRAY} ${v}, ${fieldPath(tuple, String(i)).join(", ")}`);
+            made = next;
+          }
+          return made;
+        };
+        break;
+      }
       case "pathRemove": {
         const [recursive, force] = [temp(), temp()];
         emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
@@ -6056,7 +6077,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (!read) return undefined;
     const result = read();
     // Unused, as a statement, what a call gives is released when the statement ends.
-    const gives: Record<string, Type> = { fileReadSync: arrayType("u8"), dirRead: arrayType("string"), pathReal: "string", dirTemp: "string" };
+    const gives: Record<string, Type> = { processSpawn: tupleType(["i64", "i64", "i64", arrayType("u8"), arrayType("u8")]), fileReadSync: arrayType("u8"), dirRead: arrayType("string"), pathReal: "string", dirTemp: "string" };
     if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
     return result;
   }

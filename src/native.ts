@@ -38,6 +38,9 @@ export const NATIVE = String.raw`
 #include <dirent.h>
 #include <ftw.h>
 #include <signal.h>
+#include <spawn.h>
+#include <poll.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -4804,6 +4807,151 @@ int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **
   }
   fsh_rt_free(c);
   return result;
+}
+
+// A signal's name, as Node gives a child's: "SIGTERM", or NULL for one it doesn't name.
+const char *fsh_rt_signal_name(int64_t number) {
+  static const struct { int number; const char *name; } names[] = {
+    { SIGHUP, "SIGHUP" }, { SIGINT, "SIGINT" }, { SIGQUIT, "SIGQUIT" }, { SIGILL, "SIGILL" }, { SIGTRAP, "SIGTRAP" },
+    { SIGABRT, "SIGABRT" }, { SIGBUS, "SIGBUS" }, { SIGFPE, "SIGFPE" }, { SIGKILL, "SIGKILL" }, { SIGUSR1, "SIGUSR1" },
+    { SIGSEGV, "SIGSEGV" }, { SIGUSR2, "SIGUSR2" }, { SIGPIPE, "SIGPIPE" }, { SIGALRM, "SIGALRM" }, { SIGTERM, "SIGTERM" },
+    { SIGCHLD, "SIGCHLD" }, { SIGCONT, "SIGCONT" }, { SIGSTOP, "SIGSTOP" }, { SIGTSTP, "SIGTSTP" }, { SIGTTIN, "SIGTTIN" },
+    { SIGTTOU, "SIGTTOU" }, { SIGURG, "SIGURG" }, { SIGXCPU, "SIGXCPU" }, { SIGXFSZ, "SIGXFSZ" }, { SIGVTALRM, "SIGVTALRM" },
+    { SIGPROF, "SIGPROF" }, { SIGWINCH, "SIGWINCH" }, { SIGIO, "SIGIO" }, { SIGSYS, "SIGSYS" },
+  };
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) if (names[i].number == number) return names[i].name;
+  return NULL;
+}
+
+static int fsh_pipe(int fds[2]) {
+#ifdef __APPLE__
+  if (pipe(fds) != 0) return -1;
+  fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+  return 0;
+#else
+  return pipe2(fds, O_CLOEXEC);
+#endif
+}
+
+// Reads what a pipe has into a byte array, giving 0 at its end.
+static ssize_t fsh_drain(int fd, fsh_array *into) {
+  fsh_array_room(into, into->length + 65536, 1);
+  ssize_t n = read(fd, into->data + into->length, into->capacity - into->length);
+  if (n > 0) into->length += n;
+  return n;
+}
+
+// spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
+// writing input to its stdin and reading its stdout and stderr until both close, then waiting for
+// it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
+// none), or 5 with the IoError's parts, in Node's words, when it couldn't start.
+int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
+  out->data = err->data = NULL;
+  out->length = out->capacity = err->length = err->capacity = 0;
+  char *file = fsh_rt_str_cstring(command);
+  char *dir = fsh_rt_str_units(cwd) > 0 ? fsh_rt_str_cstring(cwd) : NULL;
+  char **argv = fsh_rt_alloc((args->length + 2) * sizeof(char *));
+  int bad = !file || (fsh_rt_str_units(cwd) > 0 && !dir);
+  argv[0] = file;
+  for (int64_t i = 0; i < args->length; i++) {
+    argv[i + 1] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
+    bad |= !argv[i + 1];
+  }
+  argv[args->length + 1] = NULL;
+  int in[2] = { -1, -1 }, outp[2] = { -1, -1 }, errp[2] = { -1, -1 };
+  int failure = bad ? EINVAL : 0;
+  if (!failure && (fsh_pipe(in) != 0 || fsh_pipe(outp) != 0 || fsh_pipe(errp) != 0)) failure = errno;
+  pid_t pid = 0;
+  if (!failure) {
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, in[0], 0);
+    posix_spawn_file_actions_adddup2(&actions, outp[1], 1);
+    posix_spawn_file_actions_adddup2(&actions, errp[1], 2);
+    if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
+    extern char **environ;
+    failure = posix_spawnp(&pid, file, &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+  }
+  for (int i = 0; i < 2; i++) {
+    if (failure && in[1 - i] >= 0) close(in[1 - i]);
+    if (failure && outp[i] >= 0) close(outp[i]);
+    if (failure && errp[i] >= 0) close(errp[i]);
+  }
+  if (failure) {
+    const char *name = file ? file : "";
+    char code[32], text[200];
+    fsh_errno_words(failure, code, sizeof code, text, sizeof text);
+    size_t size = 2 * strlen(name) + 64;
+    char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
+    snprintf(syscall, size, "spawnSync %s", name);
+    snprintf(message, size, "spawnSync %s %s", name, code);
+    fsh_io_parts(error, message, code, syscall, name);
+    fsh_rt_free(syscall);
+    fsh_rt_free(message);
+  } else {
+    close(in[0]);
+    close(outp[1]);
+    close(errp[1]);
+    // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
+    // signal is held back on this thread while writing and a pending one taken.
+    sigset_t pipe_only, before;
+    sigemptyset(&pipe_only);
+    sigaddset(&pipe_only, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
+    fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
+    int64_t written = 0;
+    if (input->length == 0) {
+      close(in[1]);
+      in[1] = -1;
+    }
+    while (in[1] >= 0 || outp[0] >= 0 || errp[0] >= 0) {
+      struct pollfd fds[3] = { { in[1], POLLOUT, 0 }, { outp[0], POLLIN, 0 }, { errp[0], POLLIN, 0 } };
+      if (poll(fds, 3, -1) < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (in[1] >= 0 && fds[0].revents) {
+        ssize_t n = write(in[1], input->data + written, input->length - written);
+        if (n > 0) written += n;
+        if ((n < 0 && errno != EAGAIN && errno != EINTR) || written == input->length) {
+          close(in[1]);
+          in[1] = -1;
+        }
+      }
+      if (outp[0] >= 0 && fds[1].revents) {
+        ssize_t n = fsh_drain(outp[0], out);
+        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+          close(outp[0]);
+          outp[0] = -1;
+        }
+      }
+      if (errp[0] >= 0 && fds[2].revents) {
+        ssize_t n = fsh_drain(errp[0], err);
+        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+          close(errp[0]);
+          errp[0] = -1;
+        }
+      }
+    }
+    sigset_t pending;
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE)) {
+      int taken;
+      sigwait(&pipe_only, &taken);
+    }
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    numbers[0] = pid;
+    numbers[1] = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+  }
+  for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
+  fsh_rt_free(argv);
+  fsh_rt_free(dir);
+  return failure ? 5 : 1;
 }
 
 static void *fsh_pool_work(void *arg) {

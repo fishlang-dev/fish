@@ -2831,6 +2831,40 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
 `,
+  child_process: String.raw`
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+
+export type SpawnSyncOptions = { cwd?: string; input?: string | u8[] };
+
+export class SpawnSyncReturns<T> {
+  pid: i64;
+  status: i64 | null;
+  signal: string | null;
+  stdout: T;
+  stderr: T;
+  error: IoError | null;
+  constructor(pid: i64, status: i64 | null, signal: string | null, stdout: T, stderr: T, error: IoError | null) {
+    this.pid = pid;
+    this.status = status;
+    this.signal = signal;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.error = error;
+  }
+}
+
+export function spawnSync(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<u8[]> {
+  const input = options.input ?? "";
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  try {
+    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes);
+    const name = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
+    return new SpawnSyncReturns<u8[]>(pid, status < 0 ? null : status, name, stdout, stderr, null);
+  } catch (e) {
+    return new SpawnSyncReturns<u8[]>(0, null, null, [], [], e);
+  }
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
