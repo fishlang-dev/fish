@@ -1835,7 +1835,14 @@ fsh_big *fsh_rt_big_pow(const fsh_big *a, const fsh_big *e, const char *where) {
   if (e->negative) fsh_big_panic(where, "Exponent must be non-negative\n");
   // Checked before anything is made, so a panic leaves nothing behind.
   uint64_t n = a->length > 1 || (a->length == 1 && a->limbs[0] > 1) ? fsh_big_small(e, where) : 0;
-  if (n && (fsh_big_bits(a) - 1) * n > FSH_BIG_MOST_BITS) fsh_big_too_big(where);
+  // At least (bits - 1) * n + 1 bits, and about n * log2|a|, which a power past the limit is
+  // refused on before any multiplying.
+  if (n) {
+    uint64_t bits = fsh_big_bits(a);
+    double lead = a->limbs[a->length - 1] + (a->length > 1 ? a->limbs[a->length - 2] / 4294967296.0 : 0);
+    double log2a = (a->length - 1) * 32.0 + log2(lead);
+    if ((bits - 1) * n + 1 > FSH_BIG_MOST_BITS || (double)n * log2a > (double)FSH_BIG_MOST_BITS) fsh_big_too_big(where);
+  }
   fsh_big *result = fsh_rt_big_from_u128(1, 0), *base = fsh_rt_big_neg(a);
   base->negative = a->negative;
   if (!(a->length == 1 && a->limbs[0] == 1) && a->length) {
@@ -3467,7 +3474,7 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
 // The texts and trees described arguments hold.
 static void fsh_fargs_free(fsh_farg *args, int64_t n) {
   for (int64_t i = 0; i < n; i++) {
-    if (args[i].kind != FSH_FARG_PARTS) continue;
+    if (args[i].kind != FSH_FARG_PARTS && args[i].kind != FSH_FARG_DIGITS && args[i].kind != FSH_FARG_BIGINT) continue;
     if (args[i].text) fsh_rt_str_release(args[i].text);
     if (args[i].tree) fsh_insp_free(args[i].tree);
   }

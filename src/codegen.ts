@@ -3778,7 +3778,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       put(2, "double", x);
     } else if (t === "bigint" || (isInteger(t) && INTEGERS[t].bits === 128)) {
       put(0, "i32", String(t === "bigint" ? FARG_KINDS.bigint : FARG_KINDS.digits));
-      put(3, "ptr", written(v, t));
+      // Made inside a union member's block, the text is freed by the runtime once read, as a
+      // value with parts' is.
+      const digits = temp();
+      if (t === "bigint") emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      else emit(`${digits} = call ptr @fsh_rt_str_from_${INTEGERS[t as Integer].signed ? "i" : "u"}128(i128 ${v})`);
+      put(3, "ptr", digits);
+      put(4, "ptr", "null");
     } else if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
       let x = v;
@@ -4030,7 +4036,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           const at = temp();
           x = temp();
           emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
-          emit(`${x} = load ${llvm(member)}, ptr ${at}`);
+          emit(`${x} = load ${llvm(member)}, ptr ${at}, align 8`);
         }
         emit(`store ptr ${inspectTree(x, members[i]!, "%d")}, ptr ${result}`);
         emit(`br label %${done}`);
@@ -4919,7 +4925,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
         const [at, x] = [temp(), temp()];
         emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
-        emit(`${x} = load ${llvm(member)}, ptr ${at}`);
+        emit(`${x} = load ${llvm(member)}, ptr ${at}, align 8`);
         jsonWrite(w, x, written[i]!);
       }
       emit(`br label %${done}`);

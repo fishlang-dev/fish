@@ -135,3 +135,23 @@ function main(): void {
   console.log(2n ** n);
 }
 // panic: Maximum BigInt size exceeded
+// case: bigint_union_format
+function f(b: boolean): i128 | null {
+  const seven: i128 = 7;
+  return b ? seven : null;
+}
+function big(b: boolean): bigint | i64 {
+  return b ? 12345678901234567890123n : 5;
+}
+function main(): void {
+  console.log(f(true), f(false), big(true), big(false));
+  console.log("%d a%sb", f(true), big(true));
+}
+// expect: 7 null 12345678901234567890123n 5
+// expect: 7 a12345678901234567890123nb
+// case: bigint_power_estimate
+function main(): void {
+  const n = 700000000n;
+  console.log(3n ** n);
+}
+// panic: Maximum BigInt size exceeded
