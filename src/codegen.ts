@@ -197,9 +197,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const stringers = new Map<Type, string>();
   // The global each top-level const holding an aggregate lives in.
   const constantGlobals = new Map<Instance, string>();
-  // Whether the one thunk copying a Dyn that can't be copied is made, and the one dropping a
-  // settled JS promise's output.
-  let uncopyable = false;
+  // The thunks copying a Dyn that can't be copied that are made, by the Rust type they name or
+  // "" for the general one, and whether the one dropping a settled JS promise's output is.
+  const uncopyable = new Set<string>();
   let settledOutput = false;
   const elementDrops = new Map<Type, string>();
   // The functions JS calls a Fish callback through, by its type and where it was given, and the
@@ -1916,7 +1916,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       slots = [dynRelease(type, n), "@fsh_rt_dyn_retain", own ? dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
       // A Rust value is never copied, so a Dyn holding one panics if it ever is.
-      const copied = holdsRust(type) ? dynUncopyable() : dynCopy(type, n);
+      let rust: string | undefined;
+      holdsPart(type, (u) => (rust ??= rustClassOf(u)?.name) !== undefined);
+      const copied = rust !== undefined ? dynUncopyable(rust) : dynCopy(type, n);
       const cloned = table.clone === "copy" ? copied : dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
@@ -1971,13 +1973,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return name;
   }
 
-  // The copy of a Dyn whose value can't be cloned: it panics rather than split state in two.
-  function dynUncopyable(): string {
-    const name = `@"fsh.dyn.uncopyable"`;
-    if (!uncopyable) {
-      uncopyable = true;
+  // The copy of a Dyn whose value can't be cloned: it panics rather than split state in two,
+  // naming the Rust type when a Rust value is what can't be copied.
+  function dynUncopyable(rust = ""): string {
+    const name = rust ? `@"fsh.dyn.uncopyable.${rust}"` : `@"fsh.dyn.uncopyable"`;
+    if (!uncopyable.has(rust)) {
+      uncopyable.add(rust);
+      const why = rust
+        ? `its value holds a Rust '${rust}', which is moved, never copied; await the futures holding one, or move them rather than copy them`
+        : "its value holds an Atomic, a Lock, a JoinHandle, a Rust value or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it";
       thunk(name, "ptr", () => {
-        unwinding(`call void @fsh_rt_panic(ptr ${cString("panicked while copying a Dyn:\nits value holds an Atomic, a Lock, a JoinHandle, a Rust value or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it\n")})`);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked while copying a Dyn:\n${why}\n`)})`);
         emit("unreachable");
       });
     }

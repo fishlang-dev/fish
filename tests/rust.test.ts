@@ -630,6 +630,32 @@ async function main() {
   expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "5 5 2\ncount 7 m 3 4\n", ""]);
 });
 
+test("copying a boxed future holding a Rust value panics naming its type; one holding none copies", () => {
+  const dir = handles(`async function hold(): Promise<i64> {
+  const c = new Counter(5);
+  await yieldNow();
+  return c.get();
+}
+
+async function plain(): Promise<i64> {
+  await yieldNow();
+  return 2;
+}
+
+async function main() {
+  const fine: Promise<i64>[] = [plain(), plain()];
+  const kept = fine.slice(0, 1);
+  console.log(kept.length);
+  const ps: Promise<i64>[] = [hold(), hold()];
+  const qs = ps.slice(0, 1);
+  console.log(qs.length);
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "1\n", "panicked while copying a Dyn:\nits value holds a Rust 'Counter', which is moved, never copied; await the futures holding one, or move them rather than copy them\n"]);
+});
+
 const TEXT = `declare module "rust:demo" {
   export class Counter {
     constructor(start: i64);
