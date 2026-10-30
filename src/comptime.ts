@@ -754,10 +754,15 @@ function interpreter() {
 
   function unary(f: Frame, e: Extract<Expr, { kind: "unary" }>): Value {
     if (e.op === "await") refuse("'await'", e);
-    const v = unwrap(expr(f, e.operand));
+    const held = expr(f, e.operand);
+    const v = unwrap(held);
     const type = typeOf(f, e);
     if (e.op === "!") return !v;
-    if (e.op === "typeof") return typeOf(f, e.operand) === "bigint" ? "bigint" : typeofValue(v);
+    if (e.op === "typeof") {
+      const from = typeOf(f, e.operand);
+      const member = typeof from !== "string" && from.kind === "union" ? memberOf(held, from) : from;
+      return member === "bigint" ? "bigint" : typeofValue(v);
+    }
     if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
     if (e.op === "-") return typeof v === "number" ? fit(-v, type as "f32" | "f64") : checked(-(v as bigint), type as Integer, "negate", e);
     if (e.op === "~") return wrap(~(v as bigint), type as Integer);
@@ -1220,7 +1225,7 @@ export function memberOf(value: Value, union: UnionType): Type {
   }
   const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);
   if (literal) return literal;
-  if (typeof v === "bigint") return m.find(isInteger)!;
+  if (typeof v === "bigint") return m.find(isInteger) ?? "bigint";
   if (typeof v === "number") return m.find(isFloat)!;
   if (typeof v === "string") return "string";
   return "boolean";

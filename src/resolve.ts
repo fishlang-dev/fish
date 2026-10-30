@@ -913,6 +913,9 @@ const I64_MAX = (1n << 63n) - 1n;
 // boolean, which the processor changes in one step.
 export function interior(which: InteriorType["which"], of: Type, at: Span): InteriorType {
   const held = lower(of);
+  if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
+    throw new CompileError(`'Atomic' holds integers of up to 64 bits, not '${show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
+  }
   if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && held.kind === "param")) {
     throw new CompileError(`'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
@@ -974,7 +977,8 @@ export function channel(of: Type, at: Span): BlockType {
 // them, such as an enum's members. A type parameter is checked again in each instance.
 function keyable(t: Type): boolean {
   const k = lower(t);
-  if (k === "string" || isInteger(k)) return true;
+  // A key is hashed as 64 bits, which a 128-bit integer doesn't fit.
+  if (k === "string" || (isInteger(k) && INTEGERS[k].bits <= 64)) return true;
   if (typeof k === "string") return false;
   if (k.kind === "param") return !k.concrete;
   if (k.kind === "literal") return typeof k.value !== "boolean";

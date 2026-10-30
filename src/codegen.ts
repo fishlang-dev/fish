@@ -45,7 +45,7 @@ const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 // An argument described for the runtime's util.format routine: its kind, an integer's or a
 // boolean's value, a float's, a string or String(x), and an inspect tree.
 const FARG = "{ i32, i64, double, ptr, ptr }";
-const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6 };
+const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
@@ -177,6 +177,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const fixed = new Map<Expr, string>();
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
+  const bigConstants = new Map<bigint, string>();
   const cStrings = new Map<string, string>();
   const tables = new Set<string>();
   // The function dropping, or copying, what a value of each type owns, made once.
@@ -2702,7 +2703,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
           // Anything but two values of one primitive type, such as a union or an enum member,
           // compares by value.
           const testType = valueType(c.test);
-          const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string";
+          const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string" && subjectType !== "bigint";
           const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
           settle(floor + held.length);
           const next = label();
@@ -3775,7 +3776,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       whole(FARG_KINDS.float, t === "f32" ? "1" : "0");
       put(2, "double", x);
-    } else if (isInteger(t) && INTEGERS[t].bits < 128) {
+    } else if (t === "bigint" || (isInteger(t) && INTEGERS[t].bits === 128)) {
+      put(0, "i32", String(t === "bigint" ? FARG_KINDS.bigint : FARG_KINDS.digits));
+      put(3, "ptr", written(v, t));
+    } else if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
       let x = v;
       if (bits < 64) {
@@ -9182,12 +9186,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // A bigint known while compiling, as a constant the runtime never counts or frees.
   function bigConstant(value: bigint): string {
     const key = String(value);
-    const made = texts.get(`bigint ${key}`);
+    const made = bigConstants.get(value);
     if (made) return made;
     const limbs: bigint[] = [];
     for (let m = value < 0n ? -value : value; m > 0n; m >>= 32n) limbs.push(m & 0xffffffffn);
     const name = `@.bigint.${stableId("bigint constant", key, key)}`;
-    texts.set(`bigint ${key}`, name);
+    bigConstants.set(value, name);
     const words = limbs.length === 0 ? "i32 0" : limbs.map((l) => `i32 ${BigInt.asIntN(32, l)}`).join(", ");
     globals.push(`${name} = private unnamed_addr constant { i64, i32, i64, [${Math.max(limbs.length, 1)} x i32] } { i64 -1, i32 ${value < 0n ? 1 : 0}, i64 ${limbs.length}, [${Math.max(limbs.length, 1)} x i32] [${words}] }`);
     return name;

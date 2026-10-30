@@ -101,3 +101,19 @@ function main(): void {
   const n: u128 = 340282366920938463463374607431768211456;
 }
 // error: '340282366920938463463374607431768211456' doesn't fit in 'u128'
+// case: i128_map_key
+function main(): void {
+  const m = new Map<i128, string>();
+}
+// error: a 'Map' is keyed by strings or integers, or unions of their literals, not 'i128'
+// case: i128_atomic
+function main(): void {
+  const a = new Atomic<u128>(0);
+}
+// error: 'Atomic' holds integers of up to 64 bits, not 'u128'
+// case: i128_to_fixed
+function main(): void {
+  const x: i128 = 5;
+  console.log(x.toFixed(1));
+}
+// error: 'toFixed' on a 128-bit integer isn't supported yet; convert it with 'as f64' first

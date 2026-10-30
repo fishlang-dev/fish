@@ -1814,16 +1814,28 @@ fsh_big *fsh_rt_big_neg(const fsh_big *a) {
   return fsh_big_trim(r, !a->negative);
 }
 
+// The most bits a bigint may hold, as V8 allows.
+#define FSH_BIG_MOST_BITS ((uint64_t)1 << 30)
+
+static _Noreturn void fsh_big_too_big(const char *where) { fsh_big_panic(where, "Maximum BigInt size exceeded\n"); }
+
 // A count of bits from a bigint, past which no result could be held.
 static uint64_t fsh_big_small(const fsh_big *n, const char *where) {
-  if (n->length > 1) fsh_big_panic(where, "Maximum BigInt size exceeded\n");
+  if (n->length > 1 || (n->length && n->limbs[0] > FSH_BIG_MOST_BITS)) fsh_big_too_big(where);
   return n->length ? n->limbs[0] : 0;
+}
+
+// The bits a magnitude takes.
+static uint64_t fsh_big_bits(const fsh_big *a) {
+  if (!a->length) return 0;
+  return (uint64_t)(a->length - 1) * 32 + (32 - __builtin_clz(a->limbs[a->length - 1]));
 }
 
 fsh_big *fsh_rt_big_pow(const fsh_big *a, const fsh_big *e, const char *where) {
   if (e->negative) fsh_big_panic(where, "Exponent must be non-negative\n");
   // Checked before anything is made, so a panic leaves nothing behind.
   uint64_t n = a->length > 1 || (a->length == 1 && a->limbs[0] > 1) ? fsh_big_small(e, where) : 0;
+  if (n && (fsh_big_bits(a) - 1) * n > FSH_BIG_MOST_BITS) fsh_big_too_big(where);
   fsh_big *result = fsh_rt_big_from_u128(1, 0), *base = fsh_rt_big_neg(a);
   base->negative = a->negative;
   if (!(a->length == 1 && a->limbs[0] == 1) && a->length) {
@@ -1880,6 +1892,7 @@ fsh_big *fsh_rt_big_shift(const fsh_big *a, const fsh_big *count, int32_t right,
     return floored;
   }
   uint64_t n = fsh_big_small(count, where);
+  if (fsh_big_bits(a) + n > FSH_BIG_MOST_BITS) fsh_big_too_big(where);
   int64_t whole = (int64_t)(n / 32), bits = (int64_t)(n % 32);
   fsh_big *r = fsh_big_new(a->length + whole + 1);
   for (int64_t i = 0; i < a->length; i++) {
@@ -3341,7 +3354,8 @@ fsh_str *fsh_rt_text_done(fsh_sb *b) {
 // with parts its String(x), as JavaScript writes it, and its inspect tree, each built only when a
 // specifier may ask for it. A float's whole is 1 when it is an f32, written as one. A string is
 // lent; the text and tree of a value with parts are the routine's to free.
-enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS };
+// An integer too wide for 'whole', a 128-bit one or a bigint, is its exact digits in 'text'.
+enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS, FSH_FARG_DIGITS, FSH_FARG_BIGINT };
 
 typedef struct {
   int32_t kind;
@@ -3368,6 +3382,8 @@ static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
       else fsh_farg_number(b, a->number);
       break;
     case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
+    case FSH_FARG_DIGITS: fsh_sb_put(b, a->text->bytes, a->text->length); break;
+    case FSH_FARG_BIGINT: fsh_sb_put(b, a->text->bytes, a->text->length); fsh_sb_str(b, "n"); break;
     default: fsh_sb_str(b, "null"); break;
   }
 }
@@ -3425,7 +3441,8 @@ static double fsh_js_parse_int(fsh_str *s) {
 // What %d, %i and %f write: Number(x), parseInt(String(x)) and parseFloat(String(x)), an
 // integer written as Fish writes it.
 static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
-  if (a->kind == FSH_FARG_INT || a->kind == FSH_FARG_UINT) {
+  // Node writes a bigint's %d and %i with its 'n', and %f as the number it reads.
+  if (a->kind == FSH_FARG_INT || a->kind == FSH_FARG_UINT || a->kind == FSH_FARG_DIGITS || (a->kind == FSH_FARG_BIGINT && spec != 'f')) {
     fsh_farg_plain(b, a);
     return;
   }
@@ -3437,7 +3454,7 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
   if (spec == 'd' && a->kind != FSH_FARG_STRING && a->kind != FSH_FARG_PARTS) {
     x = a->kind == FSH_FARG_BOOL ? (double)a->whole : 0;
   } else {
-    fsh_str *text = fsh_farg_string(a);
+    fsh_str *text = a->kind == FSH_FARG_BIGINT ? (fsh_rt_str_retain(a->text), a->text) : fsh_farg_string(a);
     double read;
     if (spec == 'd') x = fsh_rt_parse_number(text, &read) ? read : NAN;
     else if (spec == 'f') x = fsh_rt_parse_float(text, &read) ? read : NAN;

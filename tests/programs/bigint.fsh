@@ -86,3 +86,52 @@ function main(): void {
   const b = n as bigint;
 }
 // error: 'i64' converts to a bigint with 'BigInt(x)', not 'as'
+// case: bigint_switch
+function main(): void {
+  const b = 10n ** 30n / 10n ** 29n;
+  switch (b) {
+    case 10n:
+      console.log("ten");
+      break;
+    default:
+      console.log("other");
+  }
+}
+// expect: ten
+// case: bigint_constant_beside_string
+function main(): void {
+  const s: string = "bigint 5";
+  const a = 5n;
+  console.log(a + 1n, s, s.length);
+}
+// expect: 6n bigint 5 8
+// case: bigint_format
+function main(): void {
+  const wide: i128 = 9223372036854775807 * 4;
+  console.log("%d %i %s", wide, wide, wide);
+  console.log("%d %i %f %s", 100000000000000000000n, 5n, 5n, 5n);
+}
+// expect: 36893488147419103228 36893488147419103228 36893488147419103228
+// expect: 100000000000000000000n 5n 5 5n
+// case: bigint_comptime_typeof
+function g(x: bigint | string): string {
+  if (typeof x === "bigint") return "big";
+  return "str";
+}
+const AT = comptime g(5n);
+function main(): void {
+  console.log(AT, g(5n));
+}
+// expect: big big
+// case: bigint_shift_too_big
+function main(): void {
+  const n = 4000000000n;
+  console.log(1n << n);
+}
+// panic: Maximum BigInt size exceeded
+// case: bigint_power_too_big
+function main(): void {
+  const n = 2000000000n;
+  console.log(2n ** n);
+}
+// panic: Maximum BigInt size exceeded

@@ -359,7 +359,8 @@ export function conversions(b: Slots) {
     if (typeof member === "string" || member.kind !== "literal") {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(to)}, ptr ${slot}, i32 0, i32 1`);
-      emit(`store ${llvm(member)} ${value}, ptr ${at}`);
+      // The payload is i64 words, aligned to 8 however wide a member is.
+      emit(`store ${llvm(member)} ${value}, ptr ${at}, align 8`);
     }
     const result = temp();
     emit(`${result} = load ${llvm(to)}, ptr ${slot}`);
@@ -374,7 +375,7 @@ export function conversions(b: Slots) {
     const at = temp();
     emit(`${at} = getelementptr ${llvm(from)}, ptr ${slot}, i32 0, i32 1`);
     const result = temp();
-    emit(`${result} = load ${llvm(to)}, ptr ${at}`);
+    emit(`${result} = load ${llvm(to)}, ptr ${at}, align 8`);
     return result;
   }
 
