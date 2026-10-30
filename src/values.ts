@@ -531,6 +531,12 @@ export function expressions(ctx: Context) {
       owning.add(e);
       wanted.set(e, t);
     }
+    // An array literal where a union is expected is expected to be its one array, tuple or fixed
+    // array member of a length the literal could have.
+    if (e.kind === "array" && typeof t !== "string" && t.kind === "union") {
+      const fitting = t.members.filter((m) => couldHold(m, e));
+      if (fitting.length === 1) t = fitting[0]!;
+    }
     // An array literal's elements are expected to be its element type, and an object literal's
     // properties their fields'.
     if (e.kind === "array" && isArray(t)) {
@@ -578,6 +584,18 @@ export function expressions(ctx: Context) {
     if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
+  }
+
+  // Whether an array literal's length suits `t`: any array's, or a tuple's or fixed array's count.
+  function couldHold(t: Type, e: Extract<Expr, { kind: "array" }>): boolean {
+    if (isArray(t)) return true;
+    const n = e.elements.length;
+    const spread = e.elements.some((x) => x?.kind === "spread");
+    if (isFixed(t)) return spread || n === t.size;
+    if (!isTuple(t)) return false;
+    const tuple = t as ObjectType;
+    const count = elementsOf(tuple).length;
+    return spread || (n >= (tuple.required ?? count) && (tuple.rest !== undefined || n <= count));
   }
 
   // What a match arm gives: its expression, or each value its block's `return`s give, leaving
