@@ -17,7 +17,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { madeFor, openThrows, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { madeFor, openThrows, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, optionRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -794,7 +794,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const f = instance.body;
     const returns = returnOf(instance, at);
     if (!holdsRef(returns)) return [];
-    const origins = isRef(returns) ? originsOf(f, paramTypes(instance), returns) : heldOrigins(f);
+    const ref = isRef(returns) ? returns : optionRef(returns);
+    const origins = ref ? originsOf(f, paramTypes(instance), ref) : heldOrigins(f);
     if (!origins) return [...args.filter(lends), ...(receiver ? [receiver] : [])];
     return origins.flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
   }
@@ -1354,7 +1355,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (!f.closure) lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
     const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
-    const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
+    const ref = isRef(type) ? type : optionRef(type);
+    const origins = ref ? originsOf(f, params, ref) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
     if (gives !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);

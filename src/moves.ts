@@ -7,7 +7,7 @@ import { rustClassOf } from "./rust.ts";
 import { kindTests } from "./narrow.ts";
 import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
-import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, optionRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -54,7 +54,14 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
-  const { types, locals, calls, setters, jumps, coercions, borrowsFrom } = instance;
+  const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
+  // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
+  const coercions = new Map(instance.coercions);
+  for (const [e, to] of coercions) {
+    const ref = optionRef(to);
+    const from = types.get(e);
+    if (ref && from !== undefined && from !== "null" && !optionRef(from) && !isRef(from)) coercions.set(e, ref);
+  }
   const body = f.body;
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
@@ -809,6 +816,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
     // A closure made for a call lends what it captures for the call.
@@ -827,8 +835,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const place = key(e);
     // A shared reference passed on is just another pointer, which needs nothing lent; a
     // mutable one lends itself, shared or mutably as it is passed on.
-    if (place === undefined || !isRef(to) || (isRef(type) && !type.mutable)) return [];
-    return [[place, e, to.mutable]];
+    // A mutable reference or nothing passed on lends itself as a mutable reference does.
+    const ref = isRef(to) ? to : optionRef(to);
+    const held = isRef(type) ? type : optionRef(type);
+    if (place === undefined || !ref || (held && !held.mutable)) return [];
+    return [[place, e, ref.mutable]];
   }
 
   // What a call's result borrows from one of its sources: what the source lends, or, for a
@@ -955,9 +966,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the reference it copies, or the reference it borrows through, holds.
   function hold(holder: Local, e: Expr) {
     if (!state) return;
-    if (e.kind === "conditional") {
-      hold(holder, e.then);
-      hold(holder, e.else);
+    if (e.kind === "conditional" || choosing(e)) {
+      hold(holder, e.kind === "conditional" ? e.then : e.left);
+      hold(holder, e.kind === "conditional" ? e.else : e.right);
       return;
     }
     if (lentTemporary(e)) throw outlived(e, `'${holder.name}'`);
@@ -1007,7 +1018,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             }
           }
         }
-      } else inherit(holder, e);
+      } else {
+        lent(e).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
+        inherit(holder, e);
+      }
       return;
     }
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
@@ -1129,6 +1143,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // reference variables it reads through hold, what calls' results borrow, or a temporary.
   function pointsInto(e: Expr): string[] {
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
+    if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
     // A closure points at what it borrows, and wherever what it holds points.
     if (e.kind === "arrow" || instance.envs?.has(e)) return captured(e).flatMap(([place, , from, , held]) => (held ? (from && holdsRef(from.type) ? heldBy(from) : []) : [place]));
     const from = borrowsFrom.get(e);
@@ -1360,6 +1375,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (!use) return [];
       return [from === "this" ? ["this", use, undefined, mutable, false] : [String(from.id), use, from, mutable, held]];
     }), ...through];
+  }
+
+  // `a ?? b` holding a reference gives the one either side holds.
+  function choosing(e: Named): e is Extract<Expr, { kind: "binary" }> {
+    return e.kind === "binary" && e.op === "??" && holdsRef(types.get(e)!);
   }
 
   function rootOf(e: Named): Named {

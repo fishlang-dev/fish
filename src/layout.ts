@@ -2,7 +2,7 @@ import type { Builder } from "./arithmetic.ts";
 import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -286,7 +286,8 @@ export function conversions(b: Slots) {
     if (typeof from !== "string" && from.kind === "array" && typeof to !== "string" && to.kind === "array" && (from.element === "never" || (js(from.element) && js(to.element)))) return v;
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
-    if (typeof from !== "string" && from.kind === "ref") {
+    // A reference going into a `Ref<T> | null` is its pointer, as the payload.
+    if (typeof from !== "string" && from.kind === "ref" && !optionRef(to)) {
       if (typeof to !== "string" && to.kind === "ref") return lend(v, from.to, to.to);
       const loaded = temp();
       emit(`${loaded} = load ${llvm(from.to)}, ptr ${v}`);
