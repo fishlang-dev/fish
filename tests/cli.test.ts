@@ -125,3 +125,27 @@ test("a dependency's TS-compat file is refused where the dependency is built", (
   expect(code).toBe(1);
   expect(err).toBe(`../../words/src/lib.fsh:1:1: error: ${COMPAT}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`);
 });
+
+test("fishc check checks a file or package without building, exiting 1 on an error", () => {
+  const p = dir("checked", { "fish.toml": `[package]\nname = "checked"\nversion = "0.1.0"\n`, "src/main.fsh": `function main() { console.log("ok"); }\n`, "bad.fsh": `function main() {\n  const n: i64 = "no";\n}\n` });
+  expect(fishc(p, "check")).toEqual({ code: 0, out: "", err: "" });
+  expect(fishc(p, "check", "src/main.fsh")).toEqual({ code: 0, out: "", err: "" });
+  expect(existsSync(join(p, "target"))).toBe(false);
+  const bad = fishc(p, "check", "bad.fsh");
+  expect(bad.code).toBe(1);
+  expect(bad.err).toBe(fishc(p, "build", "bad.fsh").err);
+  expect(bad.err).toContain("bad.fsh:2:18: error:");
+});
+
+test("fishc run builds and runs a program with its arguments and exit code", () => {
+  const program = `import { argv, exit } from "node:process";\nfunction main() {\n  const args = argv();\n  console.log(args.slice(2).join(","));\n  if (args.length > 3) exit(3);\n}\n`;
+  const p = dir("runs", { "fish.toml": `[package]\nname = "runs"\nversion = "0.1.0"\n`, "src/main.fsh": program, "one.fsh": program, "bad.fsh": `function main() {\n  const n: i64 = "no";\n}\n` });
+  expect(fishc(p, "run", "one.fsh", "a")).toEqual({ code: 0, out: "a\n", err: "" });
+  expect(fishc(p, "run", "one.fsh", "--", "a", "--flag")).toEqual({ code: 3, out: "a,--flag\n", err: "" });
+  expect(fishc(p, "run", "--", "x")).toEqual({ code: 0, out: "x\n", err: "" });
+  expect(existsSync(join(p, "target", "debug", "runs"))).toBe(true);
+  const bad = fishc(p, "run", "bad.fsh");
+  expect(bad.code).toBe(1);
+  expect(bad.out).toBe("");
+  expect(bad.err).toContain("error:");
+});

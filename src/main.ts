@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
@@ -48,6 +48,13 @@ export function analyze(src: string, file: string, read?: (path: string) => stri
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
   return compiled(src, file, release, panic, library).ir;
+}
+
+// Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
+// first CompileError.
+export function checkProgram(file: string) {
+  const loaded = load(file, readFileSync(file, "utf8"));
+  withSources(loaded.sources, () => check(expanded(loaded, false), false));
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
@@ -457,7 +464,10 @@ else if (import.meta.main) {
       return fail(`fishc: ${e instanceof Error ? e.message : e}`);
     }
   })();
-  const [command, file] = positionals;
+  // `fishc run` takes the program's arguments after the file, or all of them with no file.
+  const [command, named] = positionals;
+  const file = command === "run" && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
+  const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "survey") {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
@@ -620,9 +630,9 @@ else if (import.meta.main) {
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if (command === "build" && !file && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run") && !file && lib === undefined) {
     const found = findManifest(process.cwd());
-    if (!found) fail(`fishc build: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
       // An entry inside a package nested here would build as that package's program.
@@ -630,15 +640,43 @@ else if (import.meta.main) {
       if (holder && realpathSync(holder) !== realpathSync(found)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
       target = relative(process.cwd(), join(manifest.dir, manifest.entry));
       out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
-      if (!values["emit-llvm"]) mkdirSync(dirname(out), { recursive: true });
+      if (!values["emit-llvm"] && command !== "check") mkdirSync(dirname(out), { recursive: true });
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
       console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
       process.exit(1);
     }
   }
+  if (command === "check" && target && !values.out && !values.release && !values["emit-llvm"] && lib === undefined) {
+    try {
+      checkProgram(target);
+    } catch (e) {
+      if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
+      else console.error(e instanceof Error ? e.message : e);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+  if (command === "run" && target && !values.out && !values["emit-llvm"] && lib === undefined) {
+    // A lone file's program is built where nothing else looks, and removed once it has run.
+    const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-run-")) : undefined;
+    const binary = out ?? join(scratch!, basename(target, ".fsh"));
+    let code = 1;
+    try {
+      build(target, binary, values.release, panic, values.link ?? []);
+      const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      // A signal ends it with 128 plus the signal's number, as a shell reports it.
+      code = ran.exitCode ?? 128 + (ran.signalCode ? constants.signals[ran.signalCode as NodeJS.Signals] : 0);
+    } catch (e) {
+      if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
+      else console.error(e instanceof Error ? e.message : e);
+    } finally {
+      if (scratch) rmSync(scratch, { recursive: true, force: true });
+    }
+    process.exit(code);
+  }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   try {
