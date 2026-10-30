@@ -164,7 +164,10 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     start: (ctor ?? node).start,
     end: (ctor ?? node).end,
     ...(ctor && rustOf(ctor)),
+    ...(ctor?.throws && { throws: ctor.throws }),
   };
+  // Only a Rust type's constructor, whose body is Rust's, may fail yet.
+  if (ctor?.throws && !constructor.rust) throw unsupported("constructors that throw", ctor.throws);
   const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
   return { type, fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node, wraps: [] };

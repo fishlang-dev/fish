@@ -4162,6 +4162,8 @@ export function expressions(ctx: Context) {
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
+        const error = errorOf(constructor);
+        if (error) raise(e, error, `'new ${c.type.name}'`);
         // An instance holding references borrows from what it was built from.
         if (holdsRef(c.type)) borrowsFrom.set(e, list.filter(lends));
         return c.type;

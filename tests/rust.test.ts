@@ -116,15 +116,15 @@ test("Rust declarations and imports are refused where they go wrong", () => {
     .toBe(`src/main.fsh:1:1: error: 'other' isn't a Rust dependency of this package; list it under [rust-dependencies] in fish.toml, as in other = "1.0"`);
   expect(refused(pkg({ "src/main.fsh": `import { nope } from "rust:demo";\nfunction main() {}\n` }))).toBe("src/main.fsh:1:10: error: 'rust:demo' has no export named 'nope'");
   const unsupported = pkg({
-    "src/rust.fsh": `declare module "rust:demo" {\n  export function s(x: string): i64;\n}\n`,
-    "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n  console.log(s("a"));\n}\n`,
+    "src/rust.fsh": `declare module "rust:demo" {\n  export function s(x: Map<string, i64>): i64;\n}\n`,
+    "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n}\n`,
   });
-  expect(refused(unsupported)).toBe("rust.fsh:2:21: error: a 'string' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
+  expect(refused(unsupported)).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
   const returned = pkg({
-    "src/rust.fsh": `declare module "rust:demo" {\n  export function s(): i64[];\n}\n`,
+    "src/rust.fsh": `declare module "rust:demo" {\n  export function s(): [i64, i64];\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n  s();\n}\n`,
   });
-  expect(refused(returned)).toBe("rust.fsh:2:24: error: a 'i64[]' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
+  expect(refused(returned)).toBe("rust.fsh:2:24: error: the Rust function 's' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
   const path = pkg({
     "src/rust.fsh": `const name = "x";\ndeclare module "rust:demo" {\n  @rust(name) export function s(): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n`,
@@ -407,8 +407,8 @@ test("what a Rust handle can't do is refused where it is written", () => {
   expect(declared(`  export class A {\n    @rust("a::b") get(): i64;\n  }`)).toBe(`rust.fsh:3:11: error: a member's Rust name is one name, as in "with_value"`);
   const lent = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    peek(): Ref<A>;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
   expect(refused(lent)).toBe("rust.fsh:4:13: error: the Rust function 'A.peek' can't give a 'Ref<A>': a borrow's lifetime can't cross from Rust yet; give the value itself");
-  const text = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: string): i64;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
-  expect(refused(text)).toBe("rust.fsh:4:11: error: a 'string' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types");
+  const text = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: i64 | string): i64;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
+  expect(refused(text)).toBe("rust.fsh:4:11: error: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
 });
 
 test("a Rust type lives in Fish: made, called, lent, moved, cloned and dropped once", () => {
@@ -628,4 +628,338 @@ async function main() {
   expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
   const run = built(dir);
   expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "5 5 2\ncount 7 m 3 4\n", ""]);
+});
+
+const TEXT = `declare module "rust:demo" {
+  export class Counter {
+    constructor(start: i64);
+    @rust("named") static named(name: string): Counter;
+    get(): i64;
+    describe(): string;
+    tag(prefix: string | null): string | null;
+  }
+  @rust("text::greet") export function greet(name: string): string;
+  @rust("text::shout") export function shout(s: string): string;
+  @rust("text::label") export function label(): string;
+  @rust("text::chars") export function chars(s: string): usize;
+  @rust("text::code_points") export function codePoints(s: string): string;
+  @rust("text::halve") export function halve(n: i64 | null): i64 | null;
+  @rust("text::flip") export function flip(b: boolean | null): boolean | null;
+  @rust("text::bracket") export function bracket(s: string | null): string | null;
+  @rust("text::find") export function find(start: i64): Counter | null;
+  @rust("text::value_or_zero") export function valueOrZero(c: Counter | null): i64;
+  export function drops(): i64;
+}
+`;
+
+// Runs the package's program with the leak check on.
+function checked(dir: string) {
+  const run = Bun.spawnSync([join(dir, "target", "debug", "app")], { env: { ...process.env, FISH_LEAKS: "1" } });
+  return [run.exitCode, run.stdout.toString(), run.stderr.toString()];
+}
+
+test("strings and Options cross to Rust and back, whichever Rust types take and give them", () => {
+  const dir = pkg({
+    "src/rust.fsh": TEXT,
+    "src/main.fsh": `import { Counter, greet, shout, label, chars, codePoints, halve, flip, bracket, find, valueOrZero, drops } from "rust:demo";
+
+function main() {
+  const who = "fish";
+  console.log(greet(who), shout("loud " + who), label(), chars("héllo"));
+  console.log(codePoints("a\\uD800b"), codePoints("é"));
+  console.log(halve(9), halve(null), flip(true), flip(null));
+  console.log(bracket("x"), bracket(null));
+  const c = find(4);
+  if (c !== null) console.log(c.get(), c.describe(), c.tag("#"), c.tag(null));
+  console.log(find(0) === null, valueOrZero(find(3)), valueOrZero(null));
+  const n = Counter.named("four");
+  console.log(n.get(), drops());
+}
+`,
+  });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "hello, fish LOUD FISH a static label 5\n61 FFFD 62 E9\n4 null false null\n<x> null\n4 counter 4 #4 null\ntrue 3 0\n4 1\n", ""]);
+});
+
+test("what can't cross the Rust boundary yet is refused at its type", () => {
+  const declared = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  ${body}\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` }));
+  expect(declared("export function f(m: Map<string, i64>): i64;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
+  expect(declared("export function f(): [i64, i64];")).toBe("rust.fsh:2:24: error: the Rust function 'f' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
+  expect(declared("export function f(x: i64 | string): i64;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
+  expect(declared("export function f(): Ref<i64[]>;")).toBe("rust.fsh:2:24: error: the Rust function 'f' can't give a 'Ref<i64[]>': a borrow's lifetime can't cross from Rust yet; give the value itself");
+  expect(declared("export function f(x: Mut<i64[]>): void;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
+});
+
+const FALLIBLE = `declare module "rust:demo" {
+  export class Oops {
+    code(): i64;
+  }
+  export class Counter {
+    @rust("try_new") constructor(start: i64) throws Oops;
+    get(): i64;
+    @rust("checked_add") add(this: Mut<this>, n: i64): i64 throws Error;
+  }
+  @rust("fallible::parse") export function parse(s: string): i64 throws Error;
+  @rust("fallible::check") export function check(n: i64): i64 throws Oops;
+  @rust("fallible::touch") export function touch(ok: boolean): void throws Error;
+  @rust("fallible::oops_drops") export function oopsDrops(): i64;
+}
+`;
+
+test("a Rust Result is a Fish throws: Err caught as an Error or as a Rust value, propagated, and dropped once", () => {
+  const dir = pkg({ "src/rust.fsh": FALLIBLE, "src/main.fsh": `import { Oops, Counter, parse, check, touch, oopsDrops } from "rust:demo";
+
+function doubled(n: i64): i64 throws Oops {
+  return check(n) + 1;
+}
+
+function main() {
+  try {
+    console.log(parse("42"));
+    console.log(parse("4x2"));
+  } catch (e) {
+    console.log("caught:", e.message);
+  }
+  try {
+    console.log(check(5));
+    console.log(check(-3));
+  } catch (e) {
+    console.log("oops", e.code(), oopsDrops());
+  }
+  console.log(oopsDrops());
+  try {
+    console.log(doubled(2));
+    console.log(doubled(-7));
+  } catch (e) {
+    console.log("propagated", e.code());
+  }
+  try {
+    touch(true);
+    console.log("touched");
+    touch(false);
+  } catch (e) {
+    console.log("caught:", e.message);
+  }
+  try {
+    let c = new Counter(1);
+    try {
+      console.log(c.add(2));
+      console.log(c.add(9223372036854775807));
+    } catch (e) {
+      console.log("caught:", e.message);
+    }
+  } catch (e) {
+    console.log("unexpected", e.code());
+  }
+  try {
+    const d = new Counter(-1);
+    console.log(d.get());
+  } catch (e) {
+    console.log("no counter", e.code());
+  }
+  console.log(oopsDrops());
+}
+` });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "42\ncaught: invalid digit found in string\n10\noops -3 0\n1\n5\npropagated -7\ntouched\ncaught: touch failed\n3\ncaught: 3 + 9223372036854775807 overflows\nno counter -1\n3\n", ""]);
+});
+
+test("a fallible Rust call needs a throws clause or a catch, and throws only Error or a Rust type", () => {
+  expect(refused(pkg({ "src/rust.fsh": FALLIBLE, "src/main.fsh": `import { parse } from "rust:demo";\nfunction main() {\n  console.log(parse("1"));\n}\n` })))
+    .toBe("src/main.fsh:3:15: error: 'main' must declare 'throws Error' after its return type since 'parse' can throw 'Error', or catch it with try/catch");
+  expect(refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export function f(): i64 throws string;\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` })))
+    .toBe("rust.fsh:2:35: error: the Rust function 'f' throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a 'string'");
+  expect(refused(pkg({ "src/main.fsh": `class A {\n  constructor() throws Error {}\n}\nfunction main() {}\n` }))).toBe("src/main.fsh:2:24: error: constructors that throw are not supported yet");
+});
+
+const VECTORS = `declare module "rust:demo" {
+  export class Counter {
+    constructor(start: i64);
+    get(): i64;
+  }
+  @rust("vectors::sum") export function sum(xs: Ref<i64[]>): i64;
+  @rust("vectors::len_vec") export function lenVec(xs: Ref<i64[]>): usize;
+  @rust("vectors::doubled") export function doubled(xs: i64[]): i64[];
+  @rust("vectors::flags") export function flags(xs: boolean[]): boolean[];
+  @rust("vectors::words") export function words(s: string): string[];
+  @rust("vectors::statics") export function statics(): string[];
+  @rust("vectors::joined") export function joined(xs: Ref<string[]>): string;
+  @rust("vectors::owned_join") export function ownedJoin(xs: string[]): string;
+  @rust("vectors::counters") export function counters(n: i64): Counter[];
+  @rust("vectors::total_all") export function totalAll(cs: Counter[]): i64;
+  @rust("vectors::maybe_list") export function maybeList(n: i64): i64[] | null;
+  @rust("vectors::count_opt") export function countOpt(xs: i64[] | null): i64;
+  export function drops(): i64;
+}
+`;
+
+test("arrays cross to Rust as vectors and slices and back, Rust values moved both ways and dropped once", () => {
+  const dir = pkg({ "src/rust.fsh": VECTORS, "src/main.fsh": `import { Counter, sum, lenVec, doubled, flags, words, statics, joined, ownedJoin, counters, totalAll, maybeList, countOpt, drops } from "rust:demo";
+
+function main() {
+  const xs: i64[] = [1, 2, 3];
+  const empty: i64[] = [];
+  console.log(sum(xs), lenVec(xs), sum(empty), doubled([4, 5]), doubled(empty));
+  console.log(flags([true, false]), words("to be  or"), statics());
+  const names = ["x", "y" + "z"];
+  console.log(joined(names), ownedJoin(["p", "q"]), names.length);
+  {
+    const cs = counters(3);
+    console.log(cs.length, cs[2].get(), drops());
+    console.log(totalAll(cs), drops());
+    const more = counters(2);
+    console.log(more[0].get(), drops());
+  }
+  console.log(drops());
+  console.log(maybeList(3), maybeList(0), countOpt([7, 8]), countOpt(null));
+}
+` });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "6 3 0 [ 8, 10 ] []\n[ false, true ] [ 'to', 'be', 'or' ] [ 'a', 'b' ]\nx+yz p-q 2\n3 3 0\n6 3\n1 3\n5\n[ 0, 1, 2 ] null 2 -1\n", ""]);
+});
+
+test("a slice of Rust values, an array of arrays and a mutable slice are refused at their types", () => {
+  const declared = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n  }\n  ${body}\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` }));
+  expect(declared("export function f(xs: Ref<Counter[]>): i64;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'Ref<Counter[]>': a slice of Rust values can't be lent, since Fish holds each in its own box; pass the array, which moves them");
+  expect(declared("export function f(xs: i64[][]): i64;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'i64[][]': arrays of arrays can't cross the Rust boundary yet");
+  expect(declared("export function f(): string[][];")).toBe("rust.fsh:5:24: error: the Rust function 'f' can't give a 'string[][]': arrays of arrays can't cross the Rust boundary yet");
+  expect(declared("export function f(xs: Mut<i64[]>): void;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
+});
+
+const EDGES = `declare module "rust:demo" {
+  export class Counter {
+    constructor(start: i64);
+    get(): i64;
+  }
+  @rust("edges::consume_all") export function consumeAll(s: string, xs: i64[], c: Counter, fail: boolean): i64 throws Error;
+  @rust("edges::boom") export function boom(s: string, xs: Ref<i64[]>, words: string[], c: Counter): i64;
+  @rust("edges::opt_words") export function optWords(xs: string[] | null): i64;
+  @rust("edges::opt_counters") export function optCounters(cs: Counter[] | null): i64;
+  @rust("edges::bytes") export function bytes(xs: Ref<u8[]>): u8[];
+  @rust("edges::scale") export function scale(xs: f32[]): f32[];
+  @rust("vectors::sum") export function sum(xs: Ref<i64[]>): i64;
+  @rust("text::code_points") export function codePoints(s: string): string;
+  export function drops(): i64;
+}
+`;
+
+test("Err and panic paths give up converted arguments, and Options of arrays, small numbers, temporaries, fields and surrogates cross", () => {
+  const dir = pkg({ "src/rust.fsh": EDGES, "src/main.fsh": `import { Counter, consumeAll, boom, optWords, optCounters, bytes, scale, sum, codePoints, drops } from "rust:demo";
+
+type Holder = { xs: i64[] };
+
+function main() {
+  const name = "n" + "ame";
+  try {
+    console.log(consumeAll(name, [1, 2], new Counter(5), false), drops());
+    console.log(consumeAll("x" + name, [1, 2, 3], new Counter(6), true));
+  } catch (e) {
+    console.log("caught:", e.message, drops());
+  }
+  console.log(optWords(["ab", "c" + "d"]), optWords(null), optCounters([new Counter(2), new Counter(3)]), optCounters(null), drops());
+  const raw: u8[] = [1, 2, 255];
+  const f: f32[] = [1.5, 2];
+  console.log(bytes(raw), scale(f));
+  const h: Holder = { xs: [4, 5] };
+  console.log(sum([1, 2, 3]), sum(h.xs));
+  const high = "\\uD83D";
+  console.log(codePoints("ab\\uD800"), codePoints(high + "\\uDE00"));
+  if (process.argv.length > 2) boom("s" + name, h.xs, ["w", "v" + name], new Counter(9));
+}
+` });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const out = "7 1\ncaught: failed with xname 3 6 2\n4 -1 5 -1 4\n[ 255, 2, 1 ] [ 2.25, 3 ]\n6 9\n61 62 FFFD 1F600\n";
+  expect(checked(dir)).toEqual([0, out, ""]);
+  const panicked = Bun.spawnSync([join(dir, "target", "debug", "app"), "x"], { env: { ...process.env, FISH_LEAKS: "1" } });
+  expect([panicked.exitCode, panicked.stdout.toString(), panicked.stderr.toString()]).toEqual([101, out, "panicked at src/main.fsh:21:32:\nboom sname 2 2 9\n"]);
+});
+
+test("a returned array whose Rust elements aren't the declared ones is cargo's type error", () => {
+  for (const declared of ['@rust("edges::small") export function f(n: i64): i64[];', 'export class Oops {\n    code(): i64;\n  }\n  @rust("vectors::counters") export function f(n: i64): Oops[];']) {
+    const dir = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  ${declared}\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {\n  console.log(f(1).length);\n}\n` });
+    const run = fishc(dir, ["build"]);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("type mismatch in closure arguments");
+  }
+});
+
+test("declarations of one Rust function agree on what they throw, and a static and a constructor that agree share it", () => {
+  const twice = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Oops {\n    code(): i64;\n  }\n${body}}\n`, "src/main.fsh": `import { a, b } from "rust:demo";\nfunction main() {}\n` }));
+  expect(twice(`  @rust("fallible::check") export function a(n: i64): i64 throws Oops;\n  @rust("fallible::check") export function b(n: i64): i64;\n`))
+    .toBe("rust.fsh:6:3: error: 'demo::fallible::check' is declared elsewhere as (i64): i64 throws Oops; declare it with the same types");
+  expect(twice(`  @rust("fallible::parse") export function a(s: string): i64 throws Error;\n  @rust("fallible::parse") export function b(s: string): i64 throws Oops;\n`))
+    .toBe("rust.fsh:6:3: error: 'demo::fallible::parse' is declared elsewhere as (string): i64 throws Error; declare it with the same types");
+  const dir = pkg({
+    "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n    @rust("new") static make(start: i64): Counter;\n    get(): i64;\n  }\n}\n`,
+    "src/main.fsh": `import { Counter } from "rust:demo";\nfunction main() {\n  console.log(new Counter(2).get(), Counter.make(3).get());\n}\n`,
+  });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "2 3\n", ""]);
+});
+
+test("a Rust value Fish holds can't borrow what the call was given, and one that owns its data can be held", () => {
+  const borrowing = (declared: string, use: string) => {
+    const dir = pkg({
+      "src/rust.fsh": `declare module "rust:demo" {\n  @rust("borrow::Holder") export class Holder {\n    get(): string;\n  }\n  ${declared}\n}\n`,
+      "src/main.fsh": `import { Holder, f } from "rust:demo";\nfunction main() {\n  ${use}\n}\n`,
+    });
+    return fishc(dir, ["build"]);
+  };
+  for (const [declared, use] of [
+    ['@rust("borrow::many") export function f(s: string): Holder[];', 'const hs = f("abc" + "def");\n  console.log(hs[0].get());'],
+    ['@rust("borrow::bad") export function f(s: string): i64 throws Holder;', 'try {\n    console.log(f("abc" + "def"));\n  } catch (e) {\n    console.log(e.get());\n  }'],
+  ]) {
+    const run = borrowing(declared!, use!);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("does not live long enough");
+  }
+  const dir = pkg({
+    "src/rust.fsh": `declare module "rust:demo" {\n  @rust("borrow::Owner") export class Owner {\n    get(): string;\n  }\n  @rust("borrow::owned") export function owned(s: string): Owner[];\n  @rust("borrow::owned_err") export function ownedErr(s: string): i64 throws Owner;\n}\n`,
+    "src/main.fsh": `import { Owner, owned, ownedErr } from "rust:demo";\nfunction main() {\n  const hs = owned("abc" + "def");\n  const junk = "zzzzzz" + "yyyyyy";\n  try {\n    console.log(ownedErr("e" + "rr"));\n  } catch (e) {\n    console.log(hs[0].get(), e.get(), junk);\n  }\n}\n`,
+  });
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "abcdef err zzzzzzyyyyyy\n", ""]);
+});
+
+test("a Rust value Fish holds can't borrow the receiver or a lent Rust value, and one owning its data can be held", () => {
+  const declarations = `declare module "rust:demo" {
+  export class Counter {
+    constructor(start: i64);
+  }
+  @rust("borrow::Peek") export class Peek {
+    first(): i64;
+  }
+  @rust("borrow::Look") export class Look {
+    read(): i64;
+  }
+  @rust("borrow::Item") export class Item {
+    get(): i64;
+  }
+  @rust("borrow::Bag") export class Bag {
+    constructor(n: i64);
+    MEMBER
+  }
+  FUNCTION
+}
+`;
+  // Only the function a case calls is declared, since each declared one goes into the shim.
+  const build = (member: string, use: string, looks = false) => {
+    const dir = pkg({
+      "src/rust.fsh": declarations.replace("MEMBER", member).replace("FUNCTION", looks ? `@rust("borrow::looks") export function looks(c: Ref<Counter>): Look[];` : ""),
+      "src/main.fsh": `import { Counter, Peek, Look, Item, Bag${looks ? ", looks" : ""} } from "rust:demo";\nfunction main() {\n  ${use}\n}\n`,
+    });
+    return { dir, run: fishc(dir, ["build"]) };
+  };
+  for (const [member, use, looks] of [
+    ["views(): Peek[];", "const b = new Bag(3);\n  console.log(b.views().length);"],
+    ["viewe(): i64 throws Peek;", "const b = new Bag(3);\n  try {\n    console.log(b.viewe());\n  } catch (e) {\n    console.log(e.first());\n  }"],
+    ["", "const c = new Counter(41);\n  console.log(looks(c).length);", "looks"],
+  ]) {
+    const { run } = build(member!, use!, looks === "looks");
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("does not live long enough");
+  }
+  const { dir, run } = build("items(): Item[];", "const items = new Bag(3).items();\n  const junk = [9, 9, 9];\n  console.log(items[0].get(), items.length, junk.length);");
+  expect(run).toEqual({ code: 0, out: "", err: "" });
+  expect(checked(dir)).toEqual([0, "3 3 3\n", ""]);
 });

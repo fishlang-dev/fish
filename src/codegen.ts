@@ -1,5 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { dropSymbol, rustClassOf, trusted } from "./rust.ts";
+import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
@@ -77,6 +77,30 @@ const holdsRust = (t: Type) => holdsPart(t, (u) => rustClassOf(u) !== undefined)
 const extension = (type: Type) => (type === "boolean" || type === "u8" || type === "u16" ? "zeroext" : type === "i8" || type === "i16" ? "signext" : "");
 const crossing = (type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
 const crossed = (type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
+
+// The C parameters a value crossing to a Rust shim is passed as: a pointer for a Rust type, a
+// string or an Option of either, which is null when empty; an array's buffer and length; and a
+// flag first for an Option of a number, a boolean or an array.
+function shimParams(c: Crossing): string[] {
+  if (c.kind === "plain") return [crossing(c.type)];
+  if (c.kind === "array") return ["ptr", "i64"];
+  if (c.kind === "option" && (c.of.kind === "plain" || c.of.kind === "array")) return ["i1 zeroext", ...shimParams(c.of)];
+  return ["ptr"];
+}
+
+// What a Rust shim returns for what its function gives, and the type of the slot it writes the
+// rest of it into: an array, or what an Option of a number, a boolean or an array holds.
+function shimGives(c: Crossing | undefined): { returns: string; out?: string } {
+  if (!c) return { returns: "void" };
+  if (c.kind === "plain") return { returns: crossed(c.type) };
+  if (c.kind === "array") return { returns: "void", out: ARRAY };
+  if (c.kind === "option" && c.of.kind === "plain") return { returns: "zeroext i1", out: llvm(c.inner) };
+  if (c.kind === "option" && c.of.kind === "array") return { returns: "zeroext i1", out: ARRAY };
+  return { returns: "ptr" };
+}
+
+// What a Rust function gives, as it crosses: a constructor gives its handle.
+const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.constructor ? rustCrossing(i.body.owner!, true) : i.returns === "void" ? undefined : rustCrossing(i.returns, true));
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
@@ -199,16 +223,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (instance.body.comptime) continue;
     // A C function is declared under its own name, unless the runtime already declares it.
     if (instance.body.foreign) {
-      const returns = crossed(instance.returns);
       foreign.add(instance.body.name);
-      // A Rust function's shim takes its handle first when it is a method, and a last parameter,
-      // where it puts a panic's message.
-      const self = instance.body.rust && instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
-      const params = [...self, ...instance.signature!.map(crossing), ...(instance.body.rust ? ["ptr"] : [])];
-      const rust = instance.body.rust && symbol(instance);
-      if (rust && declaredRust.has(rust)) continue;
-      if (rust) declaredRust.add(rust);
-      if (rust || !DECLARED.has(instance.body.name)) out.push(`declare ${returns} ${symbol(instance)}(${params.join(", ")})`, "");
+      if (instance.body.rust) {
+        // A Rust function's shim takes its handle first when it is a method, then its parameters
+        // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
+        const rust = symbol(instance);
+        if (declaredRust.has(rust)) continue;
+        declaredRust.add(rust);
+        const self = instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
+        const gives = shimGives(rustGiven(instance));
+        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(rustCrossing(t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+        out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
+        continue;
+      }
+      if (!DECLARED.has(instance.body.name)) out.push(`declare ${crossed(instance.returns)} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
       continue;
     }
     current = instance;
@@ -6718,37 +6746,18 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void, unwound?: () => void): string | undefined {
     const cleanup = after || unwound ? () => (after?.(), unwound?.()) : undefined;
     const type = target.returns;
+    if (target.body.rust) return rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
-    // A narrow value crosses to C widened, both ways. A Rust type lent to Rust, or the handle a
-    // method is called on, is the handle read from where it is held.
-    const handle = (v: string) => {
-      const h = temp();
-      emit(`${h} = load ptr, ptr ${v.slice(v.lastIndexOf(" ") + 1)}`);
-      return `ptr ${h}`;
-    };
-    // A method taking its object over leaves the place it was in empty, as one in Fish does.
-    const taken = (v: string) => {
-      const h = handle(v);
-      if (target.body.self?.owned) emit(`store ptr null, ptr ${v}`);
-      return h;
-    };
-    const passed = target.body.rust ? [...(pointer ? [taken(pointer)] : []), ...args.map((v, i) => ((typeof target.signature![i]! !== "string" && (target.signature![i]! as Exclude<Type, string>).kind === "ref") ? handle(v) : v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)))]
-      : target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
-    const caught = target.body.rust ? alloca("ptr") : undefined;
-    if (caught) {
-      emit(`store ptr null, ptr ${caught}`);
-      passed.push(`ptr ${caught}`);
-    }
+    // A narrow value crosses to C widened, both ways.
+    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
     const call = `call ${target.body.foreign ? crossed(type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, cleanup);
-      if (caught) rustPanic(caught, at!);
       after?.();
       return undefined;
     }
     const result = temp();
     unwinding(call, result, cleanup);
-    if (caught) rustPanic(caught, at!);
     if (!target.throws) {
       after?.();
       return result;
@@ -6768,6 +6777,136 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const got = temp();
     emit(`${got} = extractvalue ${resultType(target)} ${result}, 1`);
     return got;
+  }
+
+  // A call of a Rust function's shim: the handle a method works on, read from where it is held,
+  // then each argument as it crosses, owned strings and arrays given up once Rust has made its
+  // own of them; what it gives made into a Fish value; and a panic in it raised at the call.
+  function rustInvoke(target: Instance, pointer: string | undefined, args: string[], at: Expr, cleanup?: () => void, after?: () => void): string | undefined {
+    const load = (type: string, from: string) => {
+      const v = temp();
+      emit(`${v} = load ${type}, ptr ${from}`);
+      return v;
+    };
+    const part = (whole: string, i: number) => {
+      const v = temp();
+      emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
+      return v;
+    };
+    const passed: string[] = [];
+    const given: (() => void)[] = [];
+    if (pointer && target.body.self && !target.body.self.constructor) {
+      passed.push(`ptr ${load("ptr", pointer)}`);
+      // A method taking its object over leaves the place it was in empty, as one in Fish does.
+      if (target.body.self.owned) emit(`store ptr null, ptr ${pointer}`);
+    }
+    // An owned array is given up once Rust has its elements: Rust has made its own strings and
+    // numbers, and taken the Rust values, which leave only the buffer.
+    const giveUp = (v: string, c: Extract<Crossing, { kind: "array" }>, t: Type) => {
+      if (c.element.kind !== "handle") return dispose(v, t);
+      const emptied = temp();
+      emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
+      dispose(emptied, t);
+    };
+    const pass = (c: Crossing, t: Type, v: string): string[] => {
+      switch (c.kind) {
+        case "plain":
+          return [`${crossing(t)} ${v}`];
+        case "handle":
+          return [`ptr ${v}`];
+        case "string":
+          given.push(() => dispose(v, t));
+          return [`ptr ${v}`];
+        case "lent":
+          return [`ptr ${load("ptr", v)}`];
+        case "array": {
+          const whole = c.lent ? load(ARRAY, v) : v;
+          if (!c.lent) given.push(() => giveUp(v, c, t));
+          return [`ptr ${part(whole, 0)}`, `i64 ${part(whole, 1)}`];
+        }
+        case "option": {
+          const none = holds(v, t as UnionType, ["null"]);
+          const inner = convert(v, t, c.inner);
+          if (c.of.kind === "string") given.push(() => dispose(v, t));
+          if (c.of.kind === "array" && !c.of.lent) {
+            const array = c.of;
+            given.push(() => {
+              const [some, done] = [label(), label()];
+              emit(`br i1 ${none}, label %${done}, label %${some}`);
+              startBlock(some);
+              giveUp(inner, array, c.inner);
+              emit(`br label %${done}`);
+              startBlock(done);
+            });
+          }
+          if (c.of.kind === "plain" || c.of.kind === "array") {
+            const some = temp();
+            emit(`${some} = xor i1 ${none}, true`);
+            return [`i1 zeroext ${some}`, ...pass(c.of.kind === "array" ? { ...c.of, lent: true } : c.of, c.inner, c.of.kind === "array" ? spilled(inner) : inner)];
+          }
+          const p = temp();
+          emit(`${p} = select i1 ${none}, ptr null, ptr ${inner}`);
+          return [`ptr ${p}`];
+        }
+      }
+    };
+    // An Option's array is read where it is spilled, as a lent one is.
+    const spilled = (v: string) => {
+      const slot = alloca(ARRAY);
+      emit(`store ${ARRAY} ${v}, ptr ${slot}`);
+      return slot;
+    };
+    args.forEach((a, i) => passed.push(...pass(rustCrossing(target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
+    const gives = rustGiven(target);
+    const shim = shimGives(gives);
+    const out = shim.out ? alloca(shim.out) : undefined;
+    if (out) passed.push(`ptr ${out}`);
+    const err = target.throws ? alloca("ptr") : undefined;
+    if (err) {
+      emit(`store ptr null, ptr ${err}`);
+      passed.push(`ptr ${err}`);
+    }
+    const caught = alloca("ptr");
+    emit(`store ptr null, ptr ${caught}`);
+    passed.push(`ptr ${caught}`);
+    const call = `call ${shim.returns} ${symbol(target)}(${passed.join(", ")})`;
+    const result = shim.returns === "void" ? undefined : temp();
+    unwinding(call, result, cleanup);
+    given.forEach((g) => g());
+    rustPanic(caught, at);
+    after?.();
+    if (err) rustErr(err, target.throws!, at);
+    if (!gives) return undefined;
+    const type = target.body.self?.constructor ? target.body.owner! : target.returns;
+    if (gives.kind !== "option") return gives.kind === "array" ? load(ARRAY, out!) : result;
+    const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : temp();
+    if (some !== result) emit(`${some} = icmp ne ptr ${result}, null`);
+    const inner = gives.of.kind === "plain" ? load(llvm(gives.inner), out!) : gives.of.kind === "array" ? load(ARRAY, out!) : result!;
+    const made = temp();
+    emit(`${made} = select i1 ${some}, ${llvm(type)} ${convert(inner, gives.inner, type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+    return made;
+  }
+
+  // A Rust `Err` the shim handed back, raised at the call: the Rust value itself, or Fish's
+  // `Error` with the Rust error's text as its message.
+  function rustErr(err: string, thrown: Type, at: Expr) {
+    const [error, failed, bad, ok] = [temp(), temp(), label(), label()];
+    emit(`${error} = load ptr, ptr ${err}`);
+    emit(`${failed} = icmp ne ptr ${error}, null`);
+    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    startBlock(bad);
+    if (rustClassOf(thrown)) raised(at, error);
+    else {
+      const made = (thrown as ClassType).fields.reduce((whole, f, i) => {
+        const v = f.name === "name" ? text("Error") : f.name === "message" ? error : f.name === "cause" ? convert("zeroinitializer", "null", f.type) : undefined;
+        if (v === undefined) throw new Error(`internal error: Error has a field '${f.name}' a Rust error doesn't fill`);
+        const next = temp();
+        emit(`${next} = insertvalue ${llvm(thrown)} ${whole}, ${llvm(f.type)} ${v}, ${i}`);
+        return next;
+      }, "undef");
+      raised(at, made);
+    }
+    startBlock(ok);
   }
 
   // A panic a Rust function's shim caught, raised as a Fish panic at the call.

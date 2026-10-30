@@ -1147,6 +1147,17 @@ void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
   fsh_rt_panic("\n");
 }
 
+// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form.
+const char *fsh_rt_rust_str_bytes(fsh_str *s, int64_t *length) {
+  *length = s ? s->length : 0;
+  return s ? s->bytes : "";
+}
+
+// A string Rust gives Fish, its bytes UTF-8, copied into a Fish string.
+fsh_str *fsh_rt_rust_str(const char *bytes, int64_t length) {
+  return fsh_str_of(bytes, length);
+}
+
 // After a Rust value's drop: a panic in it, which the shim handed back, raised as a Fish panic.
 void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
   if (*caught) fsh_rt_panic_rust(at, *caught);

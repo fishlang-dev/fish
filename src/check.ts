@@ -1,5 +1,5 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
-import { rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
+import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
@@ -923,28 +923,34 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const constructor = f.self?.constructor === true;
     if (f.typeParams?.length) throw unsupported("generic Rust functions", f);
     if (f.generator || f.async) throw new CompileError(`${what} can't be ${f.async ? "async" : "a generator"}; it returns when the Rust function does`, f.start, f.end);
-    if (f.throws) throw new CompileError(`${what} can't throw; a Rust panic is a Fish panic`, f.throws.start, f.throws.end);
+    // A Rust `Result`'s `Err` is thrown: as Fish's `Error`, made from its Display text, or as the
+    // Rust type it is, declared as a class.
+    if (f.throws) {
+      const error = resolveType(f.throws);
+      const isError = typeof error !== "string" && error.kind === "class" && error.name === "Error" && !error.generic;
+      if (!isError && !rustClassOf(error)) throw new CompileError(`${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${show(error)}'`, f.throws.start, f.throws.end);
+      if (isError) classOf(error as ClassType);
+      instance.throws = error;
+    }
     if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
-    // Numbers and booleans, and Rust types: owned, or lent as `Ref<T>` or `Mut<T>`.
-    const crosses = (t: Type, lent: boolean) => isNumeric(t) || t === "boolean" || rustClassOf(t) !== undefined || (lent && typeof t !== "string" && t.kind === "ref" && rustClassOf(t.to) !== undefined);
-    const refused = (t: Type, at: Span) => new CompileError(`a '${show(t)}' can't cross the Rust boundary yet; Rust functions take and give numbers, booleans and Rust types`, at.start, at.end);
+    const refuse = (t: Type, giving: boolean, at: Span) => {
+      const why = crossingOf(t, giving);
+      if (typeof why === "string") throw new CompileError(`${giving ? `${what} can't give` : "a Rust function can't take"} a '${show(t)}': ${why}`, at.start, at.end);
+    };
     const params = paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default || p.comptime) throw unsupported("rest, optional, default and comptime parameters on Rust functions", p);
-      if (!crosses(params[i]!, true)) throw refused(params[i]!, p);
+      refuse(params[i]!, false, p);
     });
     instance.signature = params;
     const returns = f.returnType ? resolveType(f.returnType) : "void";
-    if (f.returnType && typeof returns !== "string" && returns.kind === "ref" && rustClassOf(returns.to)) {
-      throw new CompileError(`${what} can't give a '${show(returns)}': a borrow's lifetime can't cross from Rust yet; give the value itself`, f.returnType.start, f.returnType.end);
-    }
-    if (returns !== "void" && !crosses(returns, false)) throw refused(returns, f.returnType!);
+    if (returns !== "void") refuse(returns, true, f.returnType!);
     // A constructor gives the handle to the value it made.
     instance.returns = constructor ? f.owner! : returns;
     // Every declaration of one Rust function calls the one shim function, so they agree on types.
-    // The receiver is part of how the shim calls it, so it has to agree too.
+    // The receiver and what it throws are part of how the shim calls it, so they have to agree too.
     const self = f.self && !constructor ? [f.self.owned ? "self" : f.self.mutable ? "&mut self" : "&self"] : [];
-    const types = `(${[...self, ...params.map(show)].join(", ")}): ${show(returns)}`;
+    const types = `(${[...self, ...params.map(show)].join(", ")}): ${show(instance.returns)}${instance.throws ? ` throws ${show(instance.throws)}` : ""}`;
     const other = rustTypes.get(f.rust!.symbol);
     if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
     rustTypes.set(f.rust!.symbol, types);
