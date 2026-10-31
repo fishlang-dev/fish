@@ -297,6 +297,22 @@ export const REGEX_FLAGS: Record<string, string> = { hasIndices: "d", global: "g
 export const fixedPrints = new WeakSet<Expr>();
 // The `Math` calls and constants, which codegen lowers itself.
 export const maths = new WeakSet<Expr>();
+// The integer methods named for how they overflow, as Rust's are: `checkedAdd`, `wrappingShl`,
+// `saturatingPow`, `overflowingMul` and the rest, by family then operation.
+const INTEGER_METHODS: Record<string, string[]> = {
+  checked: ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "Shl", "Shr", "Pow"],
+  wrapping: ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "Shl", "Shr", "Pow"],
+  saturating: ["Add", "Sub", "Mul", "Div", "Neg", "Pow"],
+  overflowing: ["Add", "Sub", "Mul"],
+};
+// A method name as its family and operation, when it is one of them.
+export function integerMethod(name: string): [string, string] | undefined {
+  const family = Object.keys(INTEGER_METHODS).find((f) => name.startsWith(f));
+  const operation = family && name.slice(family.length);
+  return family && INTEGER_METHODS[family]!.includes(operation!) ? [family, operation!] : undefined;
+}
+// The calls of those methods.
+export const integerCalls = new WeakSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
 export const MATH_FLOAT: Record<string, number> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
@@ -1113,6 +1129,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
+    if (callee.kind === "member" && receiver !== undefined && isInteger(lower(receiver)) && integerMethod(callee.name)) return integerCall(e, callee, lower(receiver) as Integer);
     const rx = receiver === undefined ? undefined : asRegex(receiver);
     if (callee.kind === "member" && rx) return regexCall(e, callee, rx, lower(receiver!) !== rx);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
@@ -2124,6 +2141,27 @@ export function expressions(ctx: Context) {
     const t = value(digits);
     if (t !== "i64" && !adapt(digits, "i64")) throw new CompileError(`'toFixed' takes its digits as an 'i64', not '${show(t)}'`, digits.start, digits.end);
     return { type: "string", what: "'toFixed'" };
+  }
+
+  // `x.checkedAdd(y)` and its kin: the other operand is x's type, or a `u32` for a shift or a
+  // power; checked gives an Option, overflowing a tuple with whether it overflowed.
+  function integerCall(e: Call, callee: Extract<Expr, { kind: "member" }>, type: Integer): { type: Type; what: string } {
+    const [family, operation] = integerMethod(callee.name)!;
+    const what = `'${callee.name}'`;
+    if (callee.optional || linked(callee)) throw new CompileError(`${what} can't be called through an optional chain yet; check for null first`, callee.start, callee.end);
+    if (operation === "Neg" && family === "saturating" && !INTEGERS[type].signed) throw new CompileError(`'${show(type)}' has no method ${what}: an unsigned number is never negated past its range; use 'checkedNeg' or 'wrappingNeg'`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    loaded(callee.object, types.get(callee.object)!);
+    const other: Integer = ["Shl", "Shr", "Pow"].includes(operation) ? "u32" : type;
+    const arity = operation === "Neg" ? 0 : 1;
+    if (e.args.length !== arity) throw new CompileError(arity === 0 ? `${what} takes no argument` : `${what} takes one '${show(other)}'`, e.start, e.end);
+    for (const a of e.args) {
+      const t = read(a);
+      if (t !== other && !adapt(a, other)) throw new CompileError(`${what} on '${show(type)}' takes a '${show(other)}', not '${show(t)}'; convert it with 'as', as in 'n as ${show(other)}'`, a.start, a.end);
+    }
+    integerCalls.add(e);
+    const result = family === "checked" ? unionType([type, "null"]) : family === "overflowing" ? tupleType([type, "boolean"]) : type;
+    return { type: result, what };
   }
 
   // The global `parseInt`, `parseFloat`, `Number` and `Number.parse...` a call makes, unless a
