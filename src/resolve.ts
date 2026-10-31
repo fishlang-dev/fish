@@ -419,13 +419,17 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (holdsPattern(gives)) throw unsupported("template literal pattern types in promises", t);
       return promiseInterface(gives);
     }
-    if (t.name === "Generator") {
-      if (t.args.length !== 1) throw new CompileError("'Generator' takes the type it yields, like 'Generator<i64>'", t.start, t.end);
-      return generatorInterface(resolveType(t.args[0]!));
-    }
-    if (t.name === "AsyncGenerator") {
-      if (t.args.length !== 1) throw new CompileError("'AsyncGenerator' takes the type it yields, like 'AsyncGenerator<i64>'", t.start, t.end);
-      return asyncGeneratorInterface(resolveType(t.args[0]!));
+    // `Generator<T, R, N>`: what it yields, what it returns, which is nothing yet, and what
+    // `next(x)` sends it.
+    if (t.name === "Generator" || t.name === "AsyncGenerator") {
+      if (t.args.length < 1 || t.args.length > 3) throw new CompileError(`'${t.name}' takes the type it yields, like '${t.name}<i64>', then optionally 'void' and the type 'next' sends`, t.start, t.end);
+      const returned = t.args[1];
+      if (returned && resolveType(returned) !== "void" && !(returned.kind === "ref" && returned.name === "undefined")) throw unsupported("generator return values", returned);
+      const sends = t.args[2] && resolveType(t.args[2]);
+      if (sends !== undefined && t.name === "AsyncGenerator") throw unsupported("values sent into an async generator's 'next'", t.args[2]!);
+      if (sends !== undefined && holdsRef(sends)) throw unsupported("references sent into generators", t.args[2]!);
+      const yields = resolveType(t.args[0]!);
+      return t.name === "Generator" ? generatorInterface(yields, sends) : asyncGeneratorInterface(yields);
     }
     if (t.name === "Option") {
       if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);

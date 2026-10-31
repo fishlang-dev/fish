@@ -343,6 +343,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
       startBlock(resuming.start);
+      // The first `next`'s value has no `yield` to go to.
+      dropSent();
     }
     // Parameters are copied into slots like any other binding.
     const params = f.params.flatMap((p) => {
@@ -386,12 +388,22 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (resuming) {
       // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
       // `await`, or the end. A finished future is never polled again.
+      // Advancing a generator already finished drops what was sent; one finishing in this very
+      // call has dropped or taken it already, and comes to `done` directly.
+      const finished = resuming.type.kind === "generator" && resuming.type.sends && needsDrop(resuming.type.sends) ? label() : resuming.done;
+      if (finished !== resuming.done) {
+        startBlock(finished);
+        dropSent();
+        emit(`br label %${resuming.done}`);
+      }
       startBlock(resuming.done);
       if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resuming.type.yields))}`);
       else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
-      const takes = resuming.type.kind === "future" || resuming.type.async ? "ptr %frame, ptr %cx" : "ptr %frame";
+      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
+      // A generator taking values through `next(x)` is given one, and whether it was.
+      const sends = resuming.type.kind === "generator" ? resuming.type.sends : undefined;
+      const takes = resuming.type.kind === "future" || resuming.type.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
       out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
       continue;
     }
@@ -2694,7 +2706,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       at = temp();
       emit(`${at} = load ptr, ptr ${held}`);
     }
-    const result = resume(generator, at);
+    const result = resume(generator, at, s.right);
     const [finished, more] = nextShapes(generator.yields);
     emit(`br i1 ${holds(result, nextResult(generator.yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
     startBlock(loop);
@@ -2810,16 +2822,20 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     return convert(made, more, nextResult(yields));
   }
 
-  // Runs a generator to its next `yield`, through a pointer to it.
-  function resume(generator: GeneratorType, at: string): string {
+  // Runs a generator to its next `yield`, through a pointer to it. An error it throws is
+  // raised at `raising`.
+  // `sent` is the value `next(x)` gives it, for one taking values.
+  function resume(generator: GeneratorType, at: string, raising: Expr, sent?: string): string {
     const target = generatorOf.get(generator)!;
     const result = temp();
-    unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at})`, result);
-    return result;
+    const given = generator.sends ? `, ${llvm(generator.sends)} ${sent ?? "zeroinitializer"}, i1 ${sent !== undefined}` : "";
+    unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at}${given})`, result);
+    return generator.throws ? unpacked(resultType(target), result, nextResult(generator.yields), raising)! : result;
   }
 
   // `yield v`: the value goes back to `next()`'s caller, and the next call goes on from here.
-  function yielded(e: Extract<Expr, { kind: "yield" }>) {
+  // As a statement, it drops what `next(x)` sent; as a value, it gives it.
+  function yielded(e: Extract<Expr, { kind: "yield" }>, used = false): string {
     const g = resuming!;
     const v = owned(e.value!);
     settle();
@@ -2829,6 +2845,30 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     emit(`store i32 ${g.resumes.length}, ptr %state`);
     emit(`ret ${resultType(current)} ${yieldedAs(result)}`);
     startBlock(at);
+    if (!used) {
+      dropSent();
+      return "";
+    }
+    // JavaScript gives `undefined` when nothing was sent, which no Fish type holds.
+    const [fail, ok] = [label(), label()];
+    emit(`br i1 %sent.has, label %${ok}, label %${fail}`);
+    startBlock(fail);
+    unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\ngenerator resumed without a value\n`)})`);
+    emit("unreachable");
+    startBlock(ok);
+    return "%sent";
+  }
+
+  // Drops a value `next(x)` sent that nothing takes.
+  function dropSent() {
+    const sends = current.generator?.sends;
+    if (!sends || !needsDrop(sends)) return;
+    const [drop, on] = [label(), label()];
+    emit(`br i1 %sent.has, label %${drop}, label %${on}`);
+    startBlock(drop);
+    dispose("%sent", sends);
+    emit(`br label %${on}`);
+    startBlock(on);
   }
 
   // A variable's slot: an alloca, or in a generator, the frame's field, reached on entry.
@@ -2863,7 +2903,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function lowerStatement(s: Stmt) {
     switch (s.kind) {
       case "expr":
-        if (s.expr.kind === "yield") return yielded(s.expr);
+        if (s.expr.kind === "yield") return void yielded(s.expr);
         effect(s.expr);
         settle();
         return;
@@ -6132,6 +6172,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       case "array":
       case "match":
       case "pipe":
+      case "yield":
         return true;
       // An awaited future gives its value over.
       // Every operator on a bigint makes a new one; a literal is a constant.
@@ -6784,7 +6825,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         return made;
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "generator") {
-        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
+        const sent = e.args[0] && owned(e.args[0]);
+        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object), e, sent);
         const type = nextResult((valueType(e.callee.object) as GeneratorType).yields);
         if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
         return result;
@@ -7487,14 +7529,18 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // What a generator gives back from a `yield` or its end: what `next()` gives, which an async
   // one's resume gives as ready.
   function yieldedAs(answer: string): string {
-    return current.generator?.async ? polled(pollOf(current), 1, answer) : answer;
+    if (current.generator?.async) return polled(pollOf(current), 1, answer);
+    if (!current.generator?.throws) return answer;
+    const made = temp();
+    emit(`${made} = insertvalue ${resultType(current)} zeroinitializer, ${llvm(nextResult(current.generator.yields))} ${answer}, 1`);
+    return made;
   }
 
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
     if (i.generator?.async) return pollType(pollOf(i));
-    if (i.generator) return llvm(nextResult(i.generator.yields));
+    if (i.generator) return i.generator.throws ? throwing(nextResult(i.generator.yields), i.generator.throws) : llvm(nextResult(i.generator.yields));
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
     return throwing(i.returns, i.throws);
@@ -7614,6 +7660,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       emit(`ret ${resultType(current)} ${polled(current.future, 2, undefined, error)}`);
       return;
     }
+    // A generator that throws is finished, as in JavaScript.
+    if (current.generator) emit("store i32 -1, ptr %state");
+    if (current.generator?.async) return emit(`ret ${resultType(current)} ${polled(pollOf(current), 2, undefined, error)}`);
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
@@ -8172,7 +8221,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const target = generatorOf.get(leaf.of as GeneratorType)!;
       unwinding(`call ${pollType(shape)} ${symbol(target)}(ptr ${generator}, ptr %cx)`, result);
       emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     } else if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
@@ -8384,7 +8433,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         startBlock(join);
         emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
-      } else if (leaf) error = abortError(thrown);
+      } else if (leaf && leaf.method !== "next") error = abortError(thrown);
       else if (why) error = joinError(why, tag, result, (inner as HandleType).joined!, thrown);
       else {
         error = temp();
@@ -8973,6 +9022,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       }
       case "assign":
         return fixing(e.target, () => assign(e));
+      case "yield":
+        return yielded(e, true);
       case "match":
         return lowerMatch(e, true)!;
       case "unsafe":
