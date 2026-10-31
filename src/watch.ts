@@ -7,9 +7,10 @@ import type { Subprocess } from "bun";
 const SETTLE_MS = 100;
 const GRACE_MS = 2000;
 
-// The files a rebuild depends on: those a build loaded, and the package's manifest, as real paths.
+// The files a rebuild depends on: those a build read or looked for, and the package's manifest,
+// once each, real paths where they exist. A missing one stays, so its coming back is seen.
 export function watchedFiles(loaded: string[], manifest?: string): string[] {
-  const files = [...loaded, ...(manifest ? [manifest] : [])].filter((f) => existsSync(f)).map((f) => realpathSync(resolve(f)));
+  const files = [...loaded, ...(manifest ? [manifest] : [])].map((f) => (existsSync(f) ? realpathSync(f) : resolve(f)));
   return [...new Set(files)].sort();
 }
 
@@ -69,17 +70,18 @@ export function watchProgram(w: Watching): Promise<never> {
   };
   const rewatch = () => {
     for (const watcher of state.watchers) watcher.close();
-    state.watchers = [...directories(state.files)].map(([dir, names]) => watch(dir, (_, name) => {
+    // A directory that doesn't exist can't be watched; a later build watches it once it does.
+    state.watchers = [...directories(state.files)].filter(([dir]) => existsSync(dir)).map(([dir, names]) => watch(dir, (_, name) => {
       if (name === null || names.has(basename(name))) schedule();
     }));
   };
   const start = () => {
     // Read before building, so a save during the build still differs afterwards.
     const before = snapshot(state.files);
-    let loaded: string[] | undefined;
+    let loaded: string[] = [];
     const built = w.build((files) => (loaded = files));
     // A build that failed may not have reached every import, so the files watched only grow then.
-    state.files = watchedFiles(loaded ?? [...state.files, w.entry], w.manifest);
+    state.files = watchedFiles([...(built ? [] : state.files), ...loaded, w.entry], w.manifest);
     state.contents = new Map(state.files.map((f) => [f, before.has(f) ? before.get(f) : snapshot([f]).get(f)]));
     rewatch();
     if (!built) return note("waiting for changes");
