@@ -568,7 +568,7 @@ function interpreter(tables: Tables) {
           if (!kept.includes(memberType(typing, held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
           return retag(typing, held, from, to);
         }
-        if (redundantBang(e, f.instance.types)) return expr(f, e.expr);
+        if (redundantBang(e)) return expr(f, e.expr);
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
         return v;
@@ -846,7 +846,7 @@ function interpreter(tables: Tables) {
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
   function place(f: Frame, target: Expr, object?: Value): Place {
-    if (target.kind === "nonNull" && redundantBang(target, f.instance.types)) return place(f, target.expr, object);
+    if (target.kind === "nonNull" && redundantBang(target)) return place(f, target.expr, object);
     if (target.kind === "this") return { kind: "place", get: () => f.self, set: () => unsupported("replacing 'this'", target) };
     if (target.kind === "ident") {
       const local = f.instance.locals.get(target);

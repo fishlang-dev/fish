@@ -607,7 +607,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         expr(e.operand);
         return change(e.operand);
       case "assign": {
-        const target = bare(e.target, types);
+        const target = bare(e.target);
         // A whole value written through a mutable reference changes everything it points to,
         // and can't keep references there, nor be handed on as well.
         if (isRef(types.get(target)!) && coercions.has(target)) {
@@ -724,7 +724,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       // `x!` is x's value, handed over or read as x is.
       case "nonNull":
-        if (redundantBang(e, types)) return expr(e.expr, consume, discarded);
+        if (redundantBang(e)) return expr(e.expr, consume, discarded);
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
       case "as":
@@ -1394,7 +1394,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
-    if ((e.kind === "nonNull" && (optionRef(types.get(e.expr)) || redundantBang(e, types))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
+    if ((e.kind === "nonNull" && (optionRef(types.get(e.expr)) || redundantBang(e))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
@@ -1411,7 +1411,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The indexes into arrays along a place's path, outermost first.
   function indexes(e: Expr): Expr[] {
     const found: Expr[] = [];
-    for (e = bare(e, types); e.kind === "member" || e.kind === "index"; e = bare(e.object, types)) if (element(e)) found.unshift(e.index);
+    for (e = bare(e); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (element(e)) found.unshift(e.index);
     return found;
   }
 

@@ -131,3 +131,79 @@ function main() {
   print(n, m, made[0]!, made[1]!, made[2]!, made[3]!)
 }
 // expect: 50 20 1 4 4 4
+// case: non_null_through_mut
+// A whole value written through a mutable reference with '!' goes where it points.
+function set(n: Mut<i64>) { n! = 3 }
+function bump(n: Mut<i64>) { n! += 3; n!++ }
+function name(s: Mut<string>) { s! = "zz" }
+function main() {
+  let a = 1
+  set(a)
+  print(a)
+  bump(a)
+  print(a)
+  let s = "a"
+  name(s)
+  print(s)
+}
+// expect: 3
+// expect: 7
+// expect: zz
+// case: non_null_setter
+// A setter written through a '!' runs as without it.
+class C {
+  #n: i64 = 0
+  get v(): i64 { return this.#n }
+  set v(x: i64) { print("set", x); this.#n = x * 2 }
+}
+function main() {
+  let c = new C()
+  c.v! = 3
+  print(c.v)
+  c.v! += 1
+  print(c.v)
+}
+// expect: set 3
+// expect: 6
+// expect: set 7
+// expect: 14
+// case: non_null_generic
+// A '!' on a 'T' never unwraps, in any instance, as in TypeScript.
+function id<T>(x: T): T { return x! }
+function first<T>(xs: Mut<T[]>, v: T) { xs[0]! = v }
+function main() {
+  const o: i64 | null = null
+  print(id(3), id(o), id("s"))
+  let b: (string | null)[] = ["m"]
+  const n: string | null = "z"
+  first(b, n)
+  let c: i64[] = [1]
+  first(c, 2)
+  print(b[0], c[0])
+}
+// expect: 3 null s
+// expect: z 2
+// case: non_null_null
+// 'null' itself is always empty.
+function main() {
+  print(null!)
+}
+// error: '!' takes the value out of an Option, and this is a 'null', which is always empty
+// case: non_null_null_narrowed
+// So is an Option narrowed to 'null'.
+function get(b: boolean): i64 | null { return b ? 1 : null }
+function main() {
+  const o = get(false)
+  if (o === null) print(o!)
+}
+// error: '!' takes the value out of an Option, and this is a 'null', which is always empty
+// case: non_null_shared_reference
+// A change through '!' on a 'Ref' is refused naming the place as written.
+type P = { x: i64 }
+function f(r: Ref<P>) { r!.x = 3 }
+function main() {
+  let p: P = { x: 1 }
+  f(p)
+  print(p.x)
+}
+// error: cannot assign to 'r!.x' because 'r' is a shared reference ('Ref'), which only reads
