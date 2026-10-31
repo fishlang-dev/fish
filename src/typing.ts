@@ -196,10 +196,13 @@ export function range(t: Integer): [bigint, bigint] {
 // anywhere, and a union drops it.
 export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
-// `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
-// `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
-// they hold, a Lock as its lock word, then what it holds.
-export type InteriorType = { kind: "interior"; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
+// `Atomic<T>`, `Lock<T>`, `RwLock<T>` and `Cell<T>`: a value changed through a shared reference,
+// so a `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as
+// what they hold, a Lock and an RwLock as a lock word, then what they hold.
+export type InteriorType = { kind: "interior"; which: "Atomic" | "Lock" | "RwLock" | "Cell"; of: Type; fields: Field[] };
+
+// Whether an interior type is laid out as a lock word, then what it holds.
+export const isLock = (t: InteriorType) => t.which === "Lock" || t.which === "RwLock";
 
 // `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
 // every clone is the same value, read and changed from any thread.
@@ -458,7 +461,7 @@ export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = fa
 // await a task's result.
 export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "handle", throughRefs);
 
-export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
+export const INTERIORS = new Set(["Atomic", "Lock", "RwLock", "Cell"]);
 
 // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
 // shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
@@ -1426,7 +1429,7 @@ export function newTyping() {
 
   // The signatures of callbacks that run while a lock is held, so their bodies can't await; and
   // of those changing a shared value, whose interior-mutable parts others borrow unlocked.
-  const lockCallbacks = new WeakSet<FunctionType>();
+  const lockCallbacks = new WeakMap<FunctionType, string>();
   const sharedCallbacks = new WeakSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type

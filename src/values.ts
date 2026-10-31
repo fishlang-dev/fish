@@ -156,8 +156,9 @@ export type Context = {
   generator: boolean;
   // Whether the program runs on the async runtime: its `main` is async.
   runtime: boolean;
-  // Whether the body is a callback a lock is held for, and whether that lock is a shared value's.
-  locked: boolean;
+  // The method holding a lock while the body runs as its callback, and whether that lock is a
+  // shared value's.
+  locked: string | undefined;
   sharing: boolean;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean;
@@ -2560,7 +2561,7 @@ export function expressions(ctx: Context) {
   function interiorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
     where(callee, t);
     if (t.which === "Cell") return cellCall(e, callee, t);
-    if (t.which === "Lock") return lockCall(e, callee, t);
+    if (t.which === "Lock" || t.which === "RwLock") return lockCall(e, callee, t);
     if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
     const takes: Record<string, number> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
     if (!(callee.name in takes)) throw new CompileError(`'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
@@ -3488,29 +3489,34 @@ export function expressions(ctx: Context) {
   }
 
   // `lock.update(v => ...)`: the callback changes what the lock holds while it is locked, and
-  // gives what the callback gives. A closure can't return a reference, so nothing it gives
-  // borrows from the value once the lock is released.
+  // gives what the callback gives; an RwLock's `read` lends it read-only, beside other readers.
+  // A closure can't return a reference, so nothing it gives borrows from the value once the
+  // lock is released.
   function lockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, sharing = false): { type: Type; what: string } {
-    if (callee.name !== "update") throw new CompileError(`'Lock' has no method '${callee.name}'; 'update' runs a callback with what it holds`, callee.start, callee.end);
-    if (linked(callee)) throw unsupported("optional chains calling 'Lock' methods", callee);
-    if (e.args.length !== 1) throw new CompileError("'update' takes 1 argument, a callback like 'v => ...'", e.start, e.end);
+    const method = callee.name;
+    if (method !== "update" && !(method === "read" && t.which === "RwLock")) {
+      const has = t.which === "RwLock" ? "'read' runs a callback with a read-only view of what it holds, and 'update' with a mutable one" : "'update' runs a callback with what it holds";
+      throw new CompileError(`'${t.which}' has no method '${method}'; ${has}`, callee.start, callee.end);
+    }
+    if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
+    if (e.args.length !== 1) throw new CompileError(`'${method}' takes 1 argument, a callback like 'v => ...'`, e.start, e.end);
     const callback = e.args[0]!;
-    if (callback.kind !== "arrow") throw unsupported("callbacks passed to 'update' by name; write the arrow function in place", callback);
-    const held = refType(lower(t.of), true);
+    if (callback.kind !== "arrow") throw unsupported(`callbacks passed to '${method}' by name; write the arrow function in place`, callback);
+    const held = refType(lower(t.of), method === "update");
     const signature = functionType(["value"], [held], "void");
-    lockCallbacks.add(signature);
+    lockCallbacks.set(signature, method);
     if (sharing) sharedCallbacks.add(signature);
     expect(callback, signature);
     const c = value(callback);
-    if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1) throw new CompileError(`'update' passes its callback a '${show(held)}'`, callback.start, callback.end);
-    if (c.params[0] !== undefined) passedExactly("update", held, c.params[0], callback.kind === "arrow" ? callback.params[0] : undefined, callback);
-    return { type: c.returns, what: "'update'" };
+    if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1) throw new CompileError(`'${method}' passes its callback a '${show(held)}'`, callback.start, callback.end);
+    if (c.params[0] !== undefined) passedExactly(method, held, c.params[0], callback.kind === "arrow" ? callback.params[0] : undefined, callback);
+    return { type: c.returns, what: `'${method}'` };
   }
 
   // `await p`: the future runs to completion, the async function stopping while it is pending,
   // and gives its value, or raises its error as a call would. It moves into the await.
   function awaited(e: Extract<Expr, { kind: "unary" }>): Type {
-    if (ctx.locked) throw new CompileError("'update' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the update, then await", e.start, e.end);
+    if (ctx.locked) throw new CompileError(`'${ctx.locked}' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the ${ctx.locked}, then await`, e.start, e.end);
     if (!ctx.async || ctx.syncMain) throw new CompileError("'await' can only be used inside an 'async' function", e.start, e.end);
     if (!ctx.awaitable.has(e)) throw new CompileError("'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
     awaitedNow.add(e.operand);
