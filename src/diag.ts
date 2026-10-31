@@ -36,15 +36,12 @@ export class CompileError extends Error {
   sources: Source[] = [];
   names: Names = { local: new Set(), madeUp: new Map() };
 
-  constructor(code: string, message: string, start: number, end?: number, note?: Note);
-  constructor(message: string, start: number, end?: number, note?: Note);
-  constructor(a: string, b: string | number, c?: number, d?: number | Note, e?: Note) {
-    const coded = typeof b === "string";
-    super(coded ? b : a);
-    this.code = coded ? a : "";
-    this.start = coded ? c! : b;
-    this.end = (coded ? (d as number | undefined) : c) ?? this.start + 1;
-    this.note = coded ? e : (d as Note | undefined);
+  constructor(code: string, message: string, start: number, end: number = start + 1, note?: Note) {
+    super(message);
+    this.code = code;
+    this.start = start;
+    this.end = end;
+    this.note = note;
   }
 }
 
@@ -91,7 +88,7 @@ export function formatError(e: CompileError, path: string, program: string, kind
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];
   };
-  const head = e.code && (kind === "error" || kind === "warning") ? `${kind}[${e.code}]` : kind;
+  const head = kind === "error" || kind === "warning" ? `${kind}[${e.code}]` : kind;
   return [...lines(head, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
 }
 
