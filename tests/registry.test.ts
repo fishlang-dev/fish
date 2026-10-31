@@ -162,13 +162,13 @@ test("archives that don't match, hold links or paths outside, fail to download, 
   publish("reg-b", "huge", "1.0.0", `export function f(): i64 { return 1; }\n`);
   Bun.spawnSync(["truncate", "-s", "65M", join(ARCHIVES, "huge", "1.0.0.tar.gz")]);
   const refused = (name: string) => build(app(`b-${name}`, { [name]: "^1.0.0" }, `import { f } from "${name}";`, "f()"), url, cache).err;
-  expect(refused("linked")).toBe("fish.toml:5:1: error: can't use 'linked' 1.0.0 from the registry: its archive holds 'src/lib.fsh', which isn't a plain file or directory");
-  expect(refused("absolute")).toBe("fish.toml:5:1: error: can't use 'absolute' 1.0.0 from the registry: its archive holds '/tmp/fish-evil.fsh', a path that leads outside it");
-  expect(refused("climbing")).toBe("fish.toml:5:1: error: can't use 'climbing' 1.0.0 from the registry: its archive holds '../../evil.fsh', a path that leads outside it");
-  expect(refused("tampered")).toStartWith("fish.toml:5:1: error: can't use 'tampered' 1.0.0 from the registry: its archive at file://");
+  expect(refused("linked")).toBe("fish.toml:5:1: error[E0906]: can't use 'linked' 1.0.0 from the registry: its archive holds 'src/lib.fsh', which isn't a plain file or directory");
+  expect(refused("absolute")).toBe("fish.toml:5:1: error[E0906]: can't use 'absolute' 1.0.0 from the registry: its archive holds '/tmp/fish-evil.fsh', a path that leads outside it");
+  expect(refused("climbing")).toBe("fish.toml:5:1: error[E0906]: can't use 'climbing' 1.0.0 from the registry: its archive holds '../../evil.fsh', a path that leads outside it");
+  expect(refused("tampered")).toStartWith("fish.toml:5:1: error[E0906]: can't use 'tampered' 1.0.0 from the registry: its archive at file://");
   expect(refused("tampered")).toEndWith("doesn't match the sha256 the registry lists");
-  expect(refused("gone")).toStartWith("fish.toml:5:1: error: can't use 'gone' 1.0.0 from the registry: its archive isn't at file://");
-  expect(refused("bomb")).toBe("fish.toml:5:1: error: can't use 'bomb' 1.0.0 from the registry: its archive expands past 256 MiB");
+  expect(refused("gone")).toStartWith("fish.toml:5:1: error[E0906]: can't use 'gone' 1.0.0 from the registry: its archive isn't at file://");
+  expect(refused("bomb")).toBe("fish.toml:5:1: error[E0906]: can't use 'bomb' 1.0.0 from the registry: its archive expands past 256 MiB");
   expect(refused("huge")).toEndWith("is larger than 64 MiB");
   expect(Bun.spawnSync(["test", "-e", "/tmp/fish-evil.fsh"]).success).toBe(false);
   expect(Bun.spawnSync(["find", cache, "-name", "evil.fsh"]).stdout.toString()).toBe("");
@@ -188,7 +188,7 @@ test("fish.lock pins registry versions, a locked build needs no index, and a cha
   expect(ran(join(dir, "target", "debug", "app"))).toBe("15\n");
   const url2 = publish("reg-c", "num", "2.0.0", `export function n(): i64 { return 20; }\n`);
   writeFileSync(join(dir, "fish.toml"), `[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\nnum = { version = "^2.0.0" }\n`);
-  expect(build(dir, url2, cache, "--locked").err).toBe("fish.lock:1:1: error: fish.lock is out of date with fish.toml, and --locked keeps it as it is; build without --locked to update it, then commit it");
+  expect(build(dir, url2, cache, "--locked").err).toBe("fish.lock:1:1: error[E0906]: fish.lock is out of date with fish.toml, and --locked keeps it as it is; build without --locked to update it, then commit it");
   expect(build(dir, url2, cache)).toEqual({ code: 0, err: "" });
   expect(lock()).toContain(`name = "num"\nversion = "2.0.0"`);
   expect(ran(join(dir, "target", "debug", "app"))).toBe("20\n");
@@ -269,13 +269,13 @@ test("the registry and the archive's own fish.toml must agree, and one name can'
   publishWith("reg-g", "liar", "1.0.0", `[package]\nname = "liar"\nversion = "1.0.0"\n[dependencies]\nhelper = { version = "^2.0.0" }\n`, { "src/lib.fsh": `import { h } from "helper";\nexport function l(): i64 { return h(); }\n` }, { helper: "^1.0.0" });
   const url = publish("reg-g", "greet", "1.0.0", `export function g(): i64 { return 5; }\n`, { util: "^1.0.0" });
   publish("reg-g", "util", "1.0.0", "");
-  expect(build(app("g1", { liar: "^1.0.0" }, `import { l } from "liar";`, "l()"), url, cache).err).toBe("fish.toml:5:1: error: the registry lists other dependencies for 'liar' 1.0.0 than its own fish.toml declares");
+  expect(build(app("g1", { liar: "^1.0.0" }, `import { l } from "liar";`, "l()"), url, cache).err).toBe("fish.toml:5:1: error[E0906]: the registry lists other dependencies for 'liar' 1.0.0 than its own fish.toml declares");
   const clash = app("g2", { greet: "^1.0.0" }, `import { g } from "greet";`, "g()");
   writeFileSync(join(clash, "fish.toml"), `[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\ngreet = { version = "^1.0.0" }\nutil = { path = "../util" }\n`);
   mkdirSync(join(root, "apps", "util", "src"), { recursive: true });
   writeFileSync(join(root, "apps", "util", "fish.toml"), `[package]\nname = "util"\nversion = "1.0.0"\n`);
   writeFileSync(join(root, "apps", "util", "src", "lib.fsh"), "");
-  expect(build(clash, url, cache).err).toBe("fish.toml:5:1: error: 'util' comes from the registry for a registry package's dependency, but already comes from '../util' in this program");
+  expect(build(clash, url, cache).err).toBe("fish.toml:5:1: error[E0906]: 'util' comes from the registry for a registry package's dependency, but already comes from '../util' in this program");
 });
 
 test("without a lock the index is read as it is now, and concurrent first builds share one clone", async () => {
@@ -301,7 +301,7 @@ test("resolution settles before refusing, long chains settle, and cycles are ref
   const cache = join(root, "cache-i");
   publish("reg-i", "ca", "1.0.0", "", { cb: "^1.0.0" });
   const url = publish("reg-i", "cb", "1.0.0", "", { ca: "^1.0.0" });
-  expect(build(app("i", { ca: "^1.0.0" }, ``, "1"), url, cache).err).toBe("fish.toml:5:1: error: the registry packages ca -> cb -> ca depend on each other in a cycle");
+  expect(build(app("i", { ca: "^1.0.0" }, ``, "1"), url, cache).err).toBe("fish.toml:5:1: error[E0906]: the registry packages ca -> cb -> ca depend on each other in a cycle");
 }, 60_000);
 
 test("index versions are plain and unique, archives must be plain files, and GNU long names unpack", () => {
@@ -312,7 +312,7 @@ test("index versions are plain and unique, archives must be plain files, and GNU
   const url = publish("reg-j", "dev", "1.0.0", "");
   writeFileSync(join(root, "reg-j", "config.json"), JSON.stringify({ dl: "file:///dev/zero#{name}{version}" }));
   Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "dev"], { cwd: join(root, "reg-j") });
-  expect(build(app("j", { dev: "^1.0.0" }, ``, "1"), url, cache).err).toBe("fish.toml:5:1: error: can't use 'dev' 1.0.0 from the registry: its archive at file:///dev/zero#dev1.0.0 isn't a file");
+  expect(build(app("j", { dev: "^1.0.0" }, ``, "1"), url, cache).err).toBe("fish.toml:5:1: error[E0906]: can't use 'dev' 1.0.0 from the registry: its archive at file:///dev/zero#dev1.0.0 isn't a file");
   const long = "src/" + "a".repeat(120) + ".fsh";
   const gnu = publishWith("reg-k", "gnu", "1.0.0", `[package]\nname = "gnu"\nversion = "1.0.0"\n`, { "src/lib.fsh": `export function g(): i64 { return 7; }\n`, [long]: "" });
   const pythonGnu = Bun.spawnSync(["python3", "-c", `import tarfile,sys\nt=tarfile.open('${join(root, "gnu.tgz")}','w:gz',format=tarfile.GNU_FORMAT)\nt.add('${join(root, "src-packages", "gnu", "1.0.0")}', arcname='.')\nt.close()`]);

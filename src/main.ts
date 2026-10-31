@@ -26,6 +26,7 @@ import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts
 import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, stripTests, type Test } from "./tests.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
+import { explain } from "./codes.ts";
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 import { rustShim, type Shim } from "./rust.ts";
@@ -396,7 +397,7 @@ function lintPaths(paths: string[], fixing: boolean): number {
       }
       const found = migrations(parseWithComments(src, { last: 0 }), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
       if (at.endsWith(".ts")) found.unshift({ rule: "A10", action: "auto", start: 0, end: 0, message: `the file becomes '${basename(at, ".ts")}.fsh', its Fish name; 'fishc lint --fix' renames it` });
-      for (const hit of found) console.log(formatError(new CompileError(hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
+      for (const hit of found) console.log(formatError(new CompileError("E0802", hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
       hits += found.length;
       if (found.length > 0) changed++;
     } catch (e) {
@@ -519,6 +520,13 @@ else if (import.meta.main) {
   const [command, named] = positionals;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
+  if (command === "explain") {
+    if (positionals.length !== 2 || Object.keys(values).some((k) => k !== "panic")) fail("usage: fishc explain <code>");
+    const text = explain(named!);
+    if (text === undefined) fail(`fishc explain: '${named}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
+    console.log(text);
+    process.exit(0);
+  }
   if (command === "survey") {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
@@ -751,7 +759,7 @@ else if (import.meta.main) {
     });
   }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.

@@ -8,7 +8,9 @@ import type { Package } from "./modules.ts";
 // searched from there as Node would.
 
 type Request = { specifier: string; dir: string; index: number }[];
-type Result = { code: string } | { index: number; message: string };
+// The bundled JS, or a refusal with its code: a missing package, or one needing a module Fish's
+// JS lacks.
+type Result = { js: string } | { index: number; message: string; code: string };
 type BuildLog = { message: string; position?: { file?: string } | null };
 
 // Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's
@@ -18,9 +20,9 @@ export function bundle(packages: Package[], used: number[]): string {
   const run = Bun.spawnSync([process.execPath, import.meta.path], { stdin: new TextEncoder().encode(JSON.stringify(request)) });
   if (run.exitCode !== 0) throw new Error(`bundling the program's packages failed:\n${run.stderr.toString()}`);
   const result = JSON.parse(run.stdout.toString()) as Result;
-  if ("code" in result) return result.code;
+  if ("js" in result) return result.js;
   const at = packages[result.index]!.at;
-  throw new CompileError(result.message, at.start, at.end);
+  throw new CompileError(result.code, result.message, at.start, at.end);
 }
 
 // The Node modules Fish's std has, as bundled JS sees them: `path` as Node's POSIX path written
@@ -315,8 +317,8 @@ async function main(request: Request): Promise<Result> {
     const r = owner(log?.position?.file ?? "");
     const said = (log?.message ?? otherwise).replace(/\s*Maybe you need to "bun install"\?$/, "");
     const bun = /cannot import Bun builtin: "([^"]+)"/.exec(said)?.[1];
-    if (bun) return { index: r.index, message: `'${r.specifier}' needs Bun's own '${bun}' module, which a package's JS can't use in Fish yet` };
-    return { index: r.index, message: `'${r.specifier}' has no JS Fish could bundle: ${said}` };
+    if (bun) return { index: r.index, code: "E1005", message: `'${r.specifier}' needs Bun's own '${bun}' module, which a package's JS can't use in Fish yet` };
+    return { index: r.index, code: "E0901", message: `'${r.specifier}' has no JS Fish could bundle: ${said}` };
   };
   let built: Awaited<ReturnType<typeof Bun.build>>;
   try {
@@ -349,7 +351,7 @@ async function main(request: Request): Promise<Result> {
   const builtIns = Object.entries(inputs).flatMap(([file, input]) => (input as { imports: { path: string; external?: boolean }[] }).imports
     .filter((i) => i.external && process.getBuiltinModule(i.path) !== undefined).map((i) => ({ importer: resolve(file), name: i.path.replace(/^node:/, "") })));
   if (builtIns.length > 0) return builtInUsed(request, builtIns[0]!, inputs, virtual);
-  return { code: await built.outputs[0]!.text() };
+  return { js: await built.outputs[0]!.text() };
 }
 
 // A Node built-in the bundle would need, said of the program's import that reaches it, through
@@ -366,7 +368,7 @@ function builtInUsed(request: Request, used: { importer: string; name: string },
   const user = packageOf(used.importer);
   const through = user === undefined || r.specifier === user || r.specifier.startsWith(`${user}/`) ? "" : ` through '${user}'`;
   const runtime = used.name === "bun" || used.name.startsWith("bun:") ? "Bun's own" : "Node's";
-  return { index: r.index, message: `'${r.specifier}' needs ${runtime} '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
+  return { index: r.index, code: "E1005", message: `'${r.specifier}' needs ${runtime} '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
 }
 
 if (import.meta.main) console.log(JSON.stringify(await main(JSON.parse(await Bun.stdin.text()) as Request)));

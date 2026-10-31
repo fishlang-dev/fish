@@ -145,7 +145,7 @@ class A {
 function main() {
   print(new A().#m())
 }
-// error: 6:9: error: property '#m' is not accessible outside class 'A' because it has a private identifier
+// error: 6:9: error[E0709]: property '#m' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_accessor
 class A {
   get #g(): i64 { return 1 }
@@ -154,7 +154,7 @@ class A {
 function main() {
   print(new A().#g)
 }
-// error: 6:9: error: property '#g' is not accessible outside class 'A' because it has a private identifier
+// error: 6:9: error[E0709]: property '#g' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_write
 class A {
   #n = 1
@@ -164,7 +164,7 @@ function main() {
   let a = new A()
   a.#n = 2
 }
-// error: 7:3: error: property '#n' is not accessible outside class 'A' because it has a private identifier
+// error: 7:3: error[E0709]: property '#n' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_subclass_field
 class A {
   #n = 1
@@ -177,7 +177,7 @@ class B extends A {
 function main() {
   print(new B().read())
 }
-// error: 6:24: error: property '#n' is not accessible outside class 'A' because it has a private identifier
+// error: 6:24: error[E0709]: property '#n' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_subclass_method
 class A {
   #m(): i64 { return 1 }
@@ -190,7 +190,7 @@ class B extends A {
 function main() {
   print(new B().read())
 }
-// error: 6:24: error: property '#m' is not accessible outside class 'A' because it has a private identifier
+// error: 6:24: error[E0709]: property '#m' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_subclass_accessor
 class A {
   get #g(): i64 { return 1 }
@@ -203,7 +203,7 @@ class B extends A {
 function main() {
   print(new B().read())
 }
-// error: 6:24: error: property '#g' is not accessible outside class 'A' because it has a private identifier
+// error: 6:24: error[E0709]: property '#g' is not accessible outside class 'A' because it has a private identifier
 // case: access_hash_in
 class A {
   #n = 1
@@ -213,7 +213,7 @@ class A {
 function main() {
   print(new A().has(new A()))
 }
-// error: 3:36: error: '#n in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling
+// error: 3:36: error[E0802]: '#n in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling
 // case: access_hash_modifier
 class Account {
   private #pin = 1
@@ -275,4 +275,4 @@ class B extends A {
 }
 
 function main() {}
-// error: 7:15: error: cannot assign to 'this.#x' because 'this' is read-only here
+// error: 7:15: error[E0206]: cannot assign to 'this.#x' because 'this' is read-only here

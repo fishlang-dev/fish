@@ -127,7 +127,7 @@ test("a compile error in a test is reported as a build reports it", () => {
   const { code, out, err } = fishc(pkg("broken", { "src/main.fsh": 'function main() {}\ntest("typed", () => {\n  const n: i64 = "two";\n});\n' }));
   expect(code).toBe(1);
   expect(out).toBe("");
-  expect(err).toBe(`src/main.fsh:3:18: error: type '"two"' is not assignable to type 'i64'\n 3 |   const n: i64 = "two";\n   |                  ^^^^^\n`);
+  expect(err).toBe(`src/main.fsh:3:18: error[E0101]: type '"two"' is not assignable to type 'i64'\n 3 |   const n: i64 = "two";\n   |                  ^^^^^\n`);
 });
 
 test("outside a package, fishc test says where it runs", () => {
@@ -168,7 +168,7 @@ test("a test name used twice in a package is refused at its second use", () => {
   });
   const { code, err } = fishc(dir);
   expect(code).toBe(1);
-  expect(err).toBe(`src/b.fsh:2:6: error: there is already a test named 'same' in 'src/a.fsh'; give each test a name of its own\n 2 | test("same", () => {});\n   |      ^^^^^^\n`);
+  expect(err).toBe(`src/b.fsh:2:6: error[E1106]: there is already a test named 'same' in 'src/a.fsh'; give each test a name of its own\n 2 | test("same", () => {});\n   |      ^^^^^^\n`);
 });
 
 const SYSTEM = "declare function system(command: Ptr<u8>): i32;\nfunction main() {}\n";

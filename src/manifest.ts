@@ -38,7 +38,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
   let current: Table = { start: 0, end: 0, keys: new Map() };
   tables.set("", current);
   let at = 0;
-  const unread = (start: number, what: string) => new CompileError(`${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
+  const unread = (start: number, what: string) => new CompileError("E0904", `${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
   const space = () => {
     while (at < src.length && (src[at] === " " || src[at] === "\t")) at++;
   };
@@ -46,7 +46,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
     space();
     if (src[at] === "#") while (at < src.length && src[at] !== "\n") at++;
     if (src.startsWith("\r\n", at)) at++;
-    if (at < src.length && src[at] !== "\n") throw new CompileError("expected the end of the line here", at, at + 1);
+    if (at < src.length && src[at] !== "\n") throw new CompileError("E0904", "expected the end of the line here", at, at + 1);
     at++;
   };
   const key = (): Spanned<string> => {
@@ -56,7 +56,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
       return { value: s.value, start, end: at };
     }
     while (at < src.length && /[A-Za-z0-9_-]/.test(src[at]!)) at++;
-    if (at === start) throw new CompileError("expected a key here", start, start + 1);
+    if (at === start) throw new CompileError("E0904", "expected a key here", start, start + 1);
     if (src[at] === ".") throw unread(at, "a dotted key");
     return { value: src.slice(start, at), start, end: at };
   };
@@ -67,7 +67,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
     at++;
     let value = "";
     while (src[at] !== quote) {
-      if (at >= src.length || src[at] === "\n") throw new CompileError("this string isn't closed on its line", start, at);
+      if (at >= src.length || src[at] === "\n") throw new CompileError("E0904", "this string isn't closed on its line", start, at);
       if (quote === '"' && src[at] === "\\") {
         const escape = src[at + 1];
         const simple: Record<string, string> = { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
@@ -79,7 +79,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
         const hex = escape === "u" ? 4 : escape === "U" ? 8 : 0;
         const digits = src.slice(at + 2, at + 2 + hex);
         const code = parseInt(digits, 16);
-        if (hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new CompileError("this escape isn't one TOML has", at, at + 2);
+        if (hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new CompileError("E0904", "this escape isn't one TOML has", at, at + 2);
         value += String.fromCodePoint(code);
         at += 2 + hex;
         continue;
@@ -94,11 +94,11 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
   const entry = (keys: Entries) => {
     const k = key();
     space();
-    if (src[at] !== "=") throw new CompileError("expected '=' after the key", at, at + 1);
+    if (src[at] !== "=") throw new CompileError("E0904", "expected '=' after the key", at, at + 1);
     at++;
     space();
     const v = value();
-    if (keys.has(k.value)) throw new CompileError(`'${k.value}' is given twice`, k.start, k.end);
+    if (keys.has(k.value)) throw new CompileError("E0904", `'${k.value}' is given twice`, k.start, k.end);
     keys.set(k.value, { key: k, value: v });
   };
   // `{ a = 1, b = "x" }`, on one line, as TOML has it.
@@ -115,7 +115,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
       entry(keys);
       space();
       if (src[at] === "}") break;
-      if (src[at] !== ",") throw new CompileError("expected ',' or '}' in this inline table", at, at + 1);
+      if (src[at] !== ",") throw new CompileError("E0904", "expected ',' or '}' in this inline table", at, at + 1);
       at++;
       space();
     }
@@ -131,7 +131,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
     at += word.length;
     if (word === "true" || word === "false") return { value: word === "true", start, end: at };
     if (/^[+-]?(0|[1-9]\d*)$/.test(word)) return { value: Number(word), start, end: at };
-    if (word === "") throw new CompileError("expected a value after '='", start, start + 1);
+    if (word === "") throw new CompileError("E0904", "expected a value after '='", start, start + 1);
     throw unread(start, "this value");
   };
   // Blank space, line ends and comments, which an array may hold between its values.
@@ -149,11 +149,11 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
     const values: Spanned<TomlValue>[] = [];
     at++;
     for (gap(); src[at] !== "]"; gap()) {
-      if (at >= src.length) throw new CompileError("this array isn't closed", start, start + 1);
+      if (at >= src.length) throw new CompileError("E0904", "this array isn't closed", start, start + 1);
       values.push(value());
       gap();
       if (src[at] === "]") break;
-      if (src[at] !== ",") throw new CompileError("expected ',' or ']' in this array", at, at + 1);
+      if (src[at] !== ",") throw new CompileError("E0904", "expected ',' or ']' in this array", at, at + 1);
       at++;
     }
     at++;
@@ -172,7 +172,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
       space();
       const name = key();
       space();
-      if (!src.startsWith(array ? "]]" : "]", at)) throw new CompileError(`expected '${array ? "]]" : "]"}' to close the table's name`, at, at + 1);
+      if (!src.startsWith(array ? "]]" : "]", at)) throw new CompileError("E0904", `expected '${array ? "]]" : "]"}' to close the table's name`, at, at + 1);
       at += array ? 2 : 1;
       current = { start, end: at, keys: new Map() };
       const had = tables.get(name.value);
@@ -180,7 +180,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
         if (had) had.push(current);
         else tables.set(name.value, [current]);
       } else if (had !== undefined) {
-        throw new CompileError(`the table [${name.value}] is given twice`, start, at);
+        throw new CompileError("E0904", `the table [${name.value}] is given twice`, start, at);
       } else tables.set(name.value, current);
       endOfLine();
       continue;
@@ -198,37 +198,37 @@ export function readManifest(src: string, dir: string): Manifest {
   const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib", "edition"], dependencies: [], "rust-dependencies": [], registry: ["url"] };
   for (const [name, found] of tables) {
     const table = Array.isArray(found) ? found[0]! : found;
-    if (!(name in known) || Array.isArray(found)) throw new CompileError(`a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`, table.start, table.end);
+    if (!(name in known) || Array.isArray(found)) throw new CompileError("E0905", `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`, table.start, table.end);
     for (const { key } of table.keys.values()) {
       if (name !== "dependencies" && name !== "rust-dependencies" && !known[name]!.includes(key.value)) {
-        throw new CompileError(name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
+        throw new CompileError("E0905", name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
       }
     }
   }
   const pkg = tables.get("package") as Table | undefined;
-  if (!pkg) throw new CompileError(`${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
+  if (!pkg) throw new CompileError("E0905", `${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
   const text = (field: string): Spanned<string> | undefined => {
     const found = pkg.keys.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError(`'${field}' is a string, as in ${field} = "..."`, found.value.start, found.value.end);
+    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string, as in ${field} = "..."`, found.value.start, found.value.end);
     return found?.value as Spanned<string> | undefined;
   };
-  const required = (field: string): Spanned<string> => text(field) ?? (() => { throw new CompileError(`[package] needs a '${field}'`, pkg.start, pkg.end); })();
+  const required = (field: string): Spanned<string> => text(field) ?? (() => { throw new CompileError("E0905", `[package] needs a '${field}'`, pkg.start, pkg.end); })();
   const name = required("name");
-  if (!validName(name.value)) throw new CompileError(NAME_RULE, name.start, name.end);
+  if (!validName(name.value)) throw new CompileError("E0905", NAME_RULE, name.start, name.end);
   const version = required("version");
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/.test(version.value)) {
-    throw new CompileError("a version is MAJOR.MINOR.PATCH, as in \"0.1.0\", with an optional pre-release such as \"1.0.0-beta.1\"", version.start, version.end);
+    throw new CompileError("E0905", "a version is MAJOR.MINOR.PATCH, as in \"0.1.0\", with an optional pre-release such as \"1.0.0-beta.1\"", version.start, version.end);
   }
   const file = (field: string, fallback: string) => {
     const found = text(field);
-    if (found && !found.value.endsWith(".fsh")) throw new CompileError(`the ${field} is a .fsh file, as in ${field} = "${fallback}"`, found.start, found.end);
-    if (found && (isAbsolute(found.value) || normalize(found.value).split(sep)[0] === "..")) throw new CompileError(`the ${field} is a file inside the package, as in ${field} = "${fallback}"`, found.start, found.end);
+    if (found && !found.value.endsWith(".fsh")) throw new CompileError("E0905", `the ${field} is a .fsh file, as in ${field} = "${fallback}"`, found.start, found.end);
+    if (found && (isAbsolute(found.value) || normalize(found.value).split(sep)[0] === "..")) throw new CompileError("E0905", `the ${field} is a file inside the package, as in ${field} = "${fallback}"`, found.start, found.end);
     return found?.value ?? fallback;
   };
   const entry = file("entry", "src/main.fsh");
   const lib = file("lib", "src/lib.fsh");
   const edition = text("edition");
-  if (edition && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError(`'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
+  if (edition && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
   const listed = tables.get("dependencies") as Table | undefined;
   const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
   const crates = tables.get("rust-dependencies") as Table | undefined;
@@ -237,11 +237,11 @@ export function readManifest(src: string, dir: string): Manifest {
   const spelled = new Map<string, string>();
   for (const d of rustDependencies ?? []) {
     const other = spelled.get(d.name.replace(/-/g, "_"));
-    if (other !== undefined) throw new CompileError(`'${d.name}' and '${other}' are the same crate in Rust, which reads '-' as '_'; list it once`, d.start, d.end);
+    if (other !== undefined) throw new CompileError("E0905", `'${d.name}' and '${other}' are the same crate in Rust, which reads '-' as '_'; list it once`, d.start, d.end);
     spelled.set(d.name.replace(/-/g, "_"), d.name);
   }
   const registry = (tables.get("registry") as Table | undefined)?.keys.get("url")?.value;
-  if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
+  if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("E0905", "the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
   return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(rustDependencies && { rustDependencies }), ...(registry && { registry: registry.value as string }), dir };
 }
 
@@ -252,31 +252,31 @@ export const validCrate = (name: string) => /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.tes
 // `features`, `default-features`, and `path`, or `git` with one of `rev`, `tag` and `branch`.
 function rustDependency(key: Spanned<string>, value: Spanned<TomlValue>): RustDependency {
   const at = { name: key.value, start: key.start, end: value.end };
-  if (!validCrate(key.value)) throw new CompileError(`'${key.value}' isn't a crate name; a crate's name is letters, digits, '_' and '-', starting with a letter or '_'`, key.start, key.end);
+  if (!validCrate(key.value)) throw new CompileError("E0905", `'${key.value}' isn't a crate name; a crate's name is letters, digits, '_' and '-', starting with a letter or '_'`, key.start, key.end);
   if (typeof value.value === "string") return { ...at, version: value.value };
   const form = "a Rust dependency is a version, as in \"1.2\", or a table as Cargo takes it, as in { version = \"1.2\", features = [\"derive\"] }, { path = \"../crate\" } or { git = \"https://...\", rev = \"<commit>\" }";
-  if (!(value.value instanceof Map)) throw new CompileError(form, value.start, value.end);
+  if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
   const entries = value.value;
   const keys = ["version", "features", "default-features", "path", "git", "rev", "tag", "branch"];
   for (const { key: k } of entries.values()) {
-    if (!keys.includes(k.value)) throw new CompileError(`a Rust dependency has no key '${k.value}'; it has ${keys.join(", ")}`, k.start, k.end);
+    if (!keys.includes(k.value)) throw new CompileError("E0905", `a Rust dependency has no key '${k.value}'; it has ${keys.join(", ")}`, k.start, k.end);
   }
   const text = (field: string): Spanned<string> | undefined => {
     const found = entries.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError(`'${field}' is a string`, found.value.start, found.value.end);
+    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string`, found.value.start, found.value.end);
     return found?.value as Spanned<string> | undefined;
   };
   const [version, path, git, rev, tag, branch] = ["version", "path", "git", "rev", "tag", "branch"].map(text);
   const features = entries.get("features")?.value;
   const named = Array.isArray(features?.value) ? features.value : undefined;
-  if (features && (!named || named.some((f) => typeof f.value !== "string"))) throw new CompileError("'features' is a list of strings, as in features = [\"derive\"]", features.start, features.end);
+  if (features && (!named || named.some((f) => typeof f.value !== "string"))) throw new CompileError("E0905", "'features' is a list of strings, as in features = [\"derive\"]", features.start, features.end);
   const defaults = entries.get("default-features")?.value;
-  if (defaults && typeof defaults.value !== "boolean") throw new CompileError("'default-features' is true or false", defaults.start, defaults.end);
-  if (path && git) throw new CompileError("a Rust dependency comes from a path or from git, not both", value.start, value.end);
-  if (!version && !path && !git) throw new CompileError(form, value.start, value.end);
+  if (defaults && typeof defaults.value !== "boolean") throw new CompileError("E0905", "'default-features' is true or false", defaults.start, defaults.end);
+  if (path && git) throw new CompileError("E0905", "a Rust dependency comes from a path or from git, not both", value.start, value.end);
+  if (!version && !path && !git) throw new CompileError("E0905", form, value.start, value.end);
   const pins = [rev, tag, branch].filter((p) => p !== undefined);
-  if (pins.length > 0 && !git) throw new CompileError("rev, tag and branch choose a git dependency's commit; this one isn't from git", pins[0]!.start, pins[0]!.end);
-  if (pins.length > 1) throw new CompileError("a git dependency takes one of rev, tag and branch", pins[1]!.start, pins[1]!.end);
+  if (pins.length > 0 && !git) throw new CompileError("E0905", "rev, tag and branch choose a git dependency's commit; this one isn't from git", pins[0]!.start, pins[0]!.end);
+  if (pins.length > 1) throw new CompileError("E0905", "a git dependency takes one of rev, tag and branch", pins[1]!.start, pins[1]!.end);
   return {
     ...at, ...(version && { version: version.value }), ...(named && { features: named.map((f) => f.value as string) }), ...(defaults && { defaultFeatures: defaults.value as boolean }),
     ...(path && { path: path.value }), ...(git && { git: git.value }), ...(rev && { rev: rev.value }), ...(tag && { tag: tag.value }), ...(branch && { branch: branch.value }),
@@ -286,30 +286,30 @@ function rustDependency(key: Spanned<string>, value: Spanned<TomlValue>): RustDe
 // A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.
 function dependency(key: Spanned<string>, value: Spanned<TomlValue>): Dependency {
   const at = { name: key.value, start: key.start, end: value.end };
-  if (!validName(key.value)) throw new CompileError(`'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
+  if (!validName(key.value)) throw new CompileError("E0905", `'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
   const form = "a dependency is a table naming where it comes from, as in { version = \"^1.2.0\" }, { path = \"../util\" } or { git = \"https://...\", rev = \"<commit>\" }";
-  if (!(value.value instanceof Map)) throw new CompileError(form, value.start, value.end);
+  if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
   const entries = value.value;
   const text = (field: string): Spanned<string> | undefined => {
     const found = entries.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError(`'${field}' is a string`, found.value.start, found.value.end);
+    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string`, found.value.start, found.value.end);
     return found?.value as Spanned<string> | undefined;
   };
   for (const { key: k } of entries.values()) {
-    if (!["version", "path", "git", "rev"].includes(k.value)) throw new CompileError(`a dependency has no key '${k.value}'; it has version, path, or git and rev`, k.start, k.end);
+    if (!["version", "path", "git", "rev"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev`, k.start, k.end);
   }
   const [version, path, git, rev] = [text("version"), text("path"), text("git"), text("rev")];
-  if ([version, path, git].filter(Boolean).length > 1) throw new CompileError("a dependency comes from one place: the registry by version, a path, or git", value.start, value.end);
+  if ([version, path, git].filter(Boolean).length > 1) throw new CompileError("E0905", "a dependency comes from one place: the registry by version, a path, or git", value.start, value.end);
   if (version) {
-    if (rev) throw new CompileError("rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
-    if (!parseRange(version.value)) throw new CompileError(`'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
+    if (rev) throw new CompileError("E0905", "rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
+    if (!parseRange(version.value)) throw new CompileError("E0905", `'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
     return { ...at, version: version.value };
   }
   if (path) return { ...at, path: path.value };
-  if (!git) throw new CompileError(form, value.start, value.end);
-  if (git.value.startsWith("-")) throw new CompileError("a git URL can't start with '-'", git.start, git.end);
-  if (!rev) throw new CompileError("a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
-  if (!/^[0-9a-f]{7,40}$/.test(rev.value)) throw new CompileError("rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move", rev.start, rev.end);
+  if (!git) throw new CompileError("E0905", form, value.start, value.end);
+  if (git.value.startsWith("-")) throw new CompileError("E0905", "a git URL can't start with '-'", git.start, git.end);
+  if (!rev) throw new CompileError("E0905", "a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
+  if (!/^[0-9a-f]{7,40}$/.test(rev.value)) throw new CompileError("E0905", "rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move", rev.start, rev.end);
   return { ...at, git: git.value, rev: rev.value };
 }
 
@@ -333,11 +333,11 @@ export function loadManifest(file: string, needs?: "entry" | "lib"): Manifest {
       const at = pkg.keys.get(field)?.value ?? pkg;
       const path = join(manifest.dir, manifest[field]);
       if (!existsSync(path)) {
-        if (field === needs) throw new CompileError(`the ${field} '${manifest[field]}' doesn't exist; create it, or name another with ${field} = "..."`, at.start, at.end);
+        if (field === needs) throw new CompileError("E0905", `the ${field} '${manifest[field]}' doesn't exist; create it, or name another with ${field} = "..."`, at.start, at.end);
         continue;
       }
       // A dependency's link can't carry the file out of the package either; the program's own may.
-      if (needs === "lib" && !realpathSync(path).startsWith(realpathSync(manifest.dir) + sep)) throw new CompileError(`the ${field} '${manifest[field]}' leads outside the package; it is a file inside it`, at.start, at.end);
+      if (needs === "lib" && !realpathSync(path).startsWith(realpathSync(manifest.dir) + sep)) throw new CompileError("E0905", `the ${field} '${manifest[field]}' leads outside the package; it is a file inside it`, at.start, at.end);
     }
     return manifest;
   } catch (e) {
@@ -350,7 +350,7 @@ export function fieldError(file: string, field: "entry" | "lib", message: string
   const src = readFileSync(file, "utf8");
   const pkg = parseToml(src).get("package") as Table;
   const at = pkg.keys.get(field)?.value ?? pkg;
-  return inManifest(new CompileError(message, at.start, at.end), file, src);
+  return inManifest(new CompileError("E0905", message, at.start, at.end), file, src);
 }
 
 // Has a compile error found in the manifest at `file` render against that file.

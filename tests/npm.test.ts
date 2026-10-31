@@ -62,7 +62,7 @@ test("a wrong argument is refused in TypeScript's terms", () => {
   expect(stops({
     "node_modules/case/index.d.ts": CASE,
     "main.fsh": "import { camelCase } from \"case\";\nfunction main() { const s = camelCase(5); }\n",
-  })).toContain("error: argument of type 'i64' is not assignable to parameter of type 'string'");
+  })).toContain("error[E0101]: argument of type 'i64' is not assignable to parameter of type 'string'");
 });
 
 test("a declaration Fish can't type is refused where it is declared, noting the call", () => {
@@ -70,7 +70,7 @@ test("a declaration Fish can't type is refused where it is declared, noting the 
     "node_modules/case/index.d.ts": "export declare function counts(m: Map<string, number>): void;\n",
     "main.fsh": "import { counts } from \"case\";\nfunction main() { counts(new Map<string, f64>()); }\n",
   });
-  expect(out).toContain("node_modules/case/index.d.ts:1:35: error: 'counts' from 'case' takes a 'Map<string, number>', which can't cross between Fish and JS yet: Fish has no JS form for it");
+  expect(out).toContain("node_modules/case/index.d.ts:1:35: error[E1005]: 'counts' from 'case' takes a 'Map<string, number>', which can't cross between Fish and JS yet: Fish has no JS form for it");
   expect(out).toContain("main.fsh:2:19: note: 'counts' is called here");
 });
 
@@ -82,7 +82,7 @@ test("consts, interfaces, object types and classes type-check as JS handles", ()
 });
 
 test("a handle's members, a Fish value for a shape, and a class are refused in TypeScript's terms", () => {
-  const refused = (body: string) => stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": `import { run, Box, show, anything } from "lib";\nfunction main() { ${body} }\n` }).split("\n")[0]!.replace(/^.*error: /, "");
+  const refused = (body: string) => stops({ "node_modules/lib/index.d.ts": LIB, "main.fsh": `import { run, Box, show, anything } from "lib";\nfunction main() { ${body} }\n` }).split("\n")[0]!.replace(/^.*error\[\w+\]: /, "");
   expect(refused("run({ name: 5 });")).toBe("argument of type '{ name: i64 }' is not assignable to parameter of type 'Options': property 'name' is a 'i64', not a 'string'");
   expect(refused("run({ deep: true });")).toBe("argument of type '{ deep: boolean }' is not assignable to parameter of type 'Options': property 'name' is missing");
   expect(refused("const r = run({ name: \"a\" }); r.count = 1;")).toBe("'count' is read-only in its declaration");
@@ -102,16 +102,16 @@ test("a generic declaration is typed for each call's type arguments", () => {
 test("each signature of a function declared more than once is tried in order", () => {
   const OV = "export declare function format(d: number): string;\nexport declare function format(d: string, pattern: string): string;\nexport declare function format(d: boolean[]): number;\n";
   expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() {\n  const a: string = format(1.5);\n  const b: string = format(\"x\", \"yyyy\");\n  const c: f64 = format([true]);\n}\n" })).toMatch(TYPE_CHECKED);
-  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a = format(true); }\n" })).toContain("error: no signature of 'format' takes (boolean); it takes (d: number), (d: string, pattern: string), (d: boolean[])");
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a = format(true); }\n" })).toContain("error[E0507]: no signature of 'format' takes (boolean); it takes (d: number), (d: string, pattern: string), (d: boolean[])");
   // The first that takes the arguments gives the result.
-  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n" })).toContain("error: type 'string' is not assignable to type 'number'");
+  expect(stops({ "node_modules/ov/index.d.ts": OV, "main.fsh": "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n" })).toContain("error[E0101]: type 'string' is not assignable to type 'number'");
 });
 
 const WHOLE = {"node_modules/dflt/index.d.ts": "export default function slug(s: string): string;\n", "node_modules/ns/index.d.ts": "export declare function a(n: number): string;\nexport declare const b: boolean;\n", "node_modules/lodashy/index.d.ts": "declare namespace _ {\n  function chunk<T>(xs: T[], n: number): T[][];\n  const VERSION: string;\n}\nexport = _;\n", "node_modules/lo/index.d.ts": "interface LoDashStatic {\n  chunk<T>(xs: T[], size?: number): T[][];\n  camelCase(s?: string): string;\n  VERSION: string;\n}\ndeclare const _: LoDashStatic;\nexport = _;\n"};
 
 test("default, namespace and export = imports reach a package's declarations", () => {
   expect(stops({ ...WHOLE, "main.fsh": "import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n" })).toMatch(TYPE_CHECKED);
-  expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error: 'ns' has no export 'nope'");
+  expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error[E0902]: 'ns' has no export 'nope'");
 });
 
 test("a const of an interface with generic methods, as lodash declares itself", () => {
@@ -134,7 +134,7 @@ export declare function f(s: string): string;
 export declare function format(d: number): string;
 export declare function format(d: string): string;
 `;
-const first = (out: string) => out.split("\n")[0]!.replace(/^.*error: /, "");
+const first = (out: string) => out.split("\n")[0]!.replace(/^.*error\[\w+\]: /, "");
 
 test("a Fish value made a JsValue stops the program, and an import not called builds", () => {
   expect(first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "function main() { const o: JsValue = 5; }\n" }))).toStartWith("turning a Fish value into a JS value isn't supported yet");

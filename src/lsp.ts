@@ -62,7 +62,7 @@ function diagnose(session: Session, path: string, text: string, read: (path: str
     const uri = pathToFileURL(path).href;
     const warnings = checked.warnings.flatMap((w) => {
       const at = located(path, text, sources, w.start, w.end);
-      return at?.uri === uri ? [{ range: at.range, severity: 2, source: "fish", message: shown(w.message, w.names) }] : [];
+      return at?.uri === uri ? [{ range: at.range, severity: 2, code: w.code, source: "fish", message: shown(w.message, w.names) }] : [];
     });
     return { diagnostics: warnings, checked };
   } catch (e) {
@@ -71,12 +71,12 @@ function diagnose(session: Session, path: string, text: string, read: (path: str
     const at = located(path, text, e.sources, e.start, e.end);
     const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
     const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
-    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
+    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, code: e.code, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
     const elsewhere = sourceOf(text, path, e.start, e.sources);
     const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
     if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
     const start = { line: 0, character: 0 };
-    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
+    return { diagnostics: [{ range: { start, end: start }, severity: 1, code: e.code, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
   }
 }
 

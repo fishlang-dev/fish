@@ -44,14 +44,14 @@ function escape(src: string, i: number): [string, number] {
   if (c === "\r" && src[i + 2] === "\n") return ["", i + 3];
   if (c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029") return ["", i + 2];
   if (c === "0" && !/[0-9]/.test(src[i + 2] ?? "")) return ["\0", i + 2];
-  if (/[0-9]/.test(c)) throw new CompileError("octal escapes are not allowed; use '\\x' or '\\u'", i, i + 2);
+  if (/[0-9]/.test(c)) throw new CompileError("E0002", "octal escapes are not allowed; use '\\x' or '\\u'", i, i + 2);
   const hex = c === "x" ? /^[0-9a-fA-F]{2}/.exec(src.slice(i + 2))
     : c === "u" ? /^(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})/.exec(src.slice(i + 2))
     : undefined;
-  if (hex === null) throw new CompileError(`invalid escape '\\${c}'`, i, i + 2);
+  if (hex === null) throw new CompileError("E0002", `invalid escape '\\${c}'`, i, i + 2);
   if (hex) {
     const code = parseInt(hex[0].replace(/[{}]/g, ""), 16);
-    if (code > 0x10ffff) throw new CompileError("unicode escape is out of range", i, i + 2 + hex[0].length);
+    if (code > 0x10ffff) throw new CompileError("E0002", "unicode escape is out of range", i, i + 2 + hex[0].length);
     return [String.fromCodePoint(code), i + 2 + hex[0].length];
   }
   return [c, i + 2];
@@ -62,7 +62,7 @@ function escape(src: string, i: number): [string, number] {
 function template(src: string, i: number): [string, number, boolean] {
   let value = "";
   for (;;) {
-    if (i >= src.length) throw new CompileError("unterminated template literal", i);
+    if (i >= src.length) throw new CompileError("E0002", "unterminated template literal", i);
     if (src[i] === "`") return [value, i + 1, false];
     if (src.startsWith("${", i)) return [value, i + 2, true];
     if (src[i] === "\\") {
@@ -151,7 +151,7 @@ export function lexer(src: string, from = 0): Lexer {
       let inClass = false;
       for (i++; src[i] !== "/" || inClass; i++) {
         const c = src[i];
-        if (c === undefined || c === "\n" || c === "\r") throw new CompileError("unterminated regular expression", slash.start, i);
+        if (c === undefined || c === "\n" || c === "\r") throw new CompileError("E0002", "unterminated regular expression", slash.start, i);
         if (c === "\\") i++;
         else if (c === "[") inClass = true;
         else if (c === "]") inClass = false;
@@ -177,7 +177,7 @@ export function lexer(src: string, from = 0): Lexer {
       comment("line", start);
     } else if (src.startsWith("/*", i)) {
       const close = src.indexOf("*/", i + 2);
-      if (close < 0) throw new CompileError("unterminated comment", i, i + 2);
+      if (close < 0) throw new CompileError("E0002", "unterminated comment", i, i + 2);
       if (src.slice(i, close).includes("\n")) newlineBefore = true;
       i = close + 2;
       comment("block", start);
@@ -211,7 +211,7 @@ export function lexer(src: string, from = 0): Lexer {
       let value = "";
       i++;
       while (src[i] !== c) {
-        if (i >= src.length || src[i] === "\n") throw new CompileError("unterminated string literal", start, i);
+        if (i >= src.length || src[i] === "\n") throw new CompileError("E0002", "unterminated string literal", start, i);
         if (src[i] === "\\") {
           const [escaped, end] = escape(src, i);
           value += escaped;
@@ -225,7 +225,7 @@ export function lexer(src: string, from = 0): Lexer {
     } else {
       // `a?.5:1` is a conditional, so `?.` before a digit is `?` then a number.
       const p = PUNCT.find((p) => src.startsWith(p, i) && !(p === "?." && /[0-9]/.test(src[i + 2] ?? "")));
-      if (!p) throw new CompileError(`unexpected character '${c}'`, i);
+      if (!p) throw new CompileError("E0002", `unexpected character '${c}'`, i);
       i += p.length;
       if (substitutions.length > 0 && (p === "{" || p === "}")) substitutions[substitutions.length - 1]! += p === "{" ? 1 : -1;
       const t = token("punct", p, start);

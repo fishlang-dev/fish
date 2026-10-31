@@ -25,13 +25,13 @@ export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, {
   const made = parsed.get(e);
   if (made) return made;
   const template = e.template;
-  if (template.kind !== "template") throw new CompileError("a quote is followed by a template literal", template.start, template.end);
+  if (template.kind !== "template") throw new CompileError("E1105", "a quote is followed by a template literal", template.start, template.end);
   // The text as written, so a string's or a regex's escapes reach the parser as they would.
   const written = template.raw.map((q) => q.replace(/\\(`|\$\{)/g, "$1"));
   const text = written.map((q, i) => (i === 0 ? q : ` ${SPLICE}${i - 1} ${q}`)).join("");
   const fail = (error: unknown): never => {
     if (!(error instanceof CompileError)) throw error;
-    throw new CompileError(`this quote's text doesn't parse: ${error.message}`, e.start, e.end);
+    throw new CompileError("E1105", `this quote's text doesn't parse: ${error.message}`, e.start, e.end);
   };
   let quote: Quote;
   if (asType) {
@@ -60,7 +60,7 @@ export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, {
       } catch (error) {
         fail(error);
       }
-      if (stmts.length !== 1) throw new CompileError(`a quote holds one expression, statement or declaration, not ${stmts.length}`, e.start, e.end);
+      if (stmts.length !== 1) throw new CompileError("E1105", `a quote holds one expression, statement or declaration, not ${stmts.length}`, e.start, e.end);
       quote = { tree: stmts[0]!, category: "AstStmt", holes: template.exprs, asExpressions: new Set(), names: new Set() };
     }
   }
@@ -105,13 +105,13 @@ function spliceOf(node: unknown): number | undefined {
 export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>, at: Span): Category[] {
   const found: (Category | undefined)[] = q.holes.map(() => undefined);
   walk(typing, q.tree, types[q.category], types, q, (i, category) => {
-    if (i >= q.holes.length) throw new CompileError(`'${SPLICE}${i}' is the name a quote's splices are parsed under, so a quote can't use it`, at.start, at.end);
+    if (i >= q.holes.length) throw new CompileError("E1105", `'${SPLICE}${i}' is the name a quote's splices are parsed under, so a quote can't use it`, at.start, at.end);
     found[i] = category;
   });
   return found.map((c, i) => {
     if (c) return c;
     const hole = q.holes[i]!;
-    throw new CompileError("a splice in a quote stands for an expression, a statement or a type; splicing a name isn't supported yet", hole.start ?? at.start, hole.end ?? at.end);
+    throw new CompileError("E1105", "a splice in a quote stands for an expression, a statement or a type; splicing a name isn't supported yet", hole.start ?? at.start, hole.end ?? at.end);
   });
 }
 
@@ -328,6 +328,6 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
 
 // An integer an Ast holds, as an `i64` until big integers.
 function inRange(n: bigint, at: Span): bigint {
-  if (n < -(1n << 63n) || n >= 1n << 63n) throw new CompileError(`an Ast holds an integer as an 'i64', which can't hold ${n}`, at.start, at.end);
+  if (n < -(1n << 63n) || n >= 1n << 63n) throw new CompileError("E1105", `an Ast holds an integer as an 'i64', which can't hold ${n}`, at.start, at.end);
   return n;
 }
