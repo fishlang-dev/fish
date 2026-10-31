@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
-import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
+import { NodeMap, WeakNodeMap, nextId } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { ANY_REGEX, heldArgument, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, optionRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
@@ -32,7 +33,7 @@ export function paramName(p: Param): string {
 // Type nodes the checker makes for a type it already knows, as a rewritten call's type arguments.
 // Made while checking a generic body's definition, they name its placeholders, which each
 // instance swaps for what it binds them to.
-export const presetTypes = new WeakMap<TypeNode, Type>();
+export const presetTypes = new WeakNodeMap<TypeNode, Type>();
 
 // The classes every program's prelude declares.
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
@@ -80,7 +81,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   const recursives = new Map<string, RecursiveType>();
   const recursiveAliases = new Map<RecursiveType, TypeAlias>();
-  const traits = new Map<object, Map<string, InterfaceType>>();
+  const traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   const combined = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
@@ -620,7 +621,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         const [params, result] = withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => paramType(p)), resolveType(returns)] as const);
         const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
         if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
-        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
+        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: nextId(), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);
       } else {

@@ -12,6 +12,7 @@ import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { kindTests } from "./narrow.ts";
 import { allFields, arrayType, callableOf, sameCallable, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { NodeMap } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -145,14 +146,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // In a closure, where each variable it captures lives, loaded from its environment.
   let captured = new Map<Local, string>();
   // The value of an Option an optional chain's link has already evaluated, to read through.
-  const known = new Map<Expr, string>();
+  const known = new NodeMap<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
   // the slot its error goes in.
   const handlers: { label: string; slot: string; depth: number; floor: number }[] = [];
   // The `finally` regions enclosing the code being emitted, innermost last.
   const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
-  const exits = new Map<Stmt, { exit: string; next?: string; depth: number }>();
+  const exits = new NodeMap<Stmt, { exit: string; next?: string; depth: number }>();
   // Values the statement being emitted made and nothing took over, released when it ends.
   // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
   let pending: { v: string; type: Type; slot?: string }[] = [];
@@ -162,20 +163,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The scopes matches and pipes open for themselves.
   const transient = new WeakSet<object>();
   // The slot each C string in a loop's condition or update was given when the loop began.
-  const reserved = new Map<Expr, string>();
+  const reserved = new NodeMap<Expr, string>();
   // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
   // resumes at in order, where it starts, and where it gives that it has finished.
   let resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
   // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
   let framed = new Set<string>();
   // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
-  const arms = new Map<Stmt, { slot: string; type: Type } | undefined>();
+  const arms = new NodeMap<Stmt, { slot: string; type: Type } | undefined>();
   // What each enclosing scope owns, outermost first, dropped as it ends or is left.
   let scopes: { slot: string; type: Type }[][] = [];
   // Receivers copied into slots for owning methods, whose leftovers drop after the call.
   const spills: { slot: string; type: Type; copy: { v: string; type: Type } }[] = [];
   // The index values an assignment ran ahead of its value, by index expression.
-  const fixed = new Map<Expr, string>();
+  const fixed = new NodeMap<Expr, string>();
   // Each literal's string block, made once.
   const texts = new Map<string, string>();
   const bigConstants = new Map<bigint, string>();

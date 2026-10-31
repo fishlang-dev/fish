@@ -4,13 +4,14 @@ import { JS_TYPEOF, kindTests, literalValue, TYPEOF, typeofTest, type Kind } fro
 import type { Expr, Span } from "./parser.ts";
 import { baseOf, field, fits, isNumeric, isPlainJs, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
+import { NodeMap } from "./nodes.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
 
 // What these rules need from expression checking.
 export type Union = {
-  types: Map<Expr, Type>;
-  coercions: Map<Expr, Type>;
+  types: NodeMap<Expr, Type>;
+  coercions: NodeMap<Expr, Type>;
   value(e: Expr): Type;
   excess(e: Expr, to: Type): void;
   // The class a name declares, unless a variable shadows it.
@@ -22,7 +23,7 @@ export type Union = {
 // The shape a fresh object literal takes when its literal-valued properties fit the literal
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
-export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type: Type; apply(coercions: Map<Expr, Type>): void } | undefined {
+export function literalShape(e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply(coercions: NodeMap<Expr, Type>): void } | undefined {
   to = unfold(to);
   // Meeting a union, it takes the shape of the first member it can, as a nested literal of a
   // recursive type does.
@@ -35,7 +36,7 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
   }
   // An array literal takes the shape of the array it meets, each element shaped as its element.
   if (e.kind === "array" && typeof to !== "string" && to.kind === "array" && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
-    const steps: ((coercions: Map<Expr, Type>) => void)[] = [];
+    const steps: ((coercions: NodeMap<Expr, Type>) => void)[] = [];
     for (const x of e.elements as Expr[]) {
       const have = types.get(x)!;
       const shape = fits(have, to.element) ? undefined : literalShape(x, to.element, types);
@@ -53,7 +54,7 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
   // A literal with spreads takes its fields' types from them, which no literal narrows.
   if (e.kind !== "object" || typeof to === "string" || to.kind !== "object" || e.props.some((p) => p.kind === "spread")) return undefined;
   const fields: Field[] = [];
-  const steps: ((coercions: Map<Expr, Type>) => void)[] = [];
+  const steps: ((coercions: NodeMap<Expr, Type>) => void)[] = [];
   const own = types.get(e) as Exclude<Type, string>;
   for (const p of e.props) {
     const name = p.kind === "shorthand" ? p.name : (p as { key: string }).key;
@@ -82,7 +83,7 @@ export function literalShape(e: Expr, to: Type, types: Map<Expr, Type>): { type:
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
 // A mutating method call likewise needs its receiver in one member.
-export function intoMember(target: Expr, types: Map<Expr, Type>, action = "assign to") {
+export function intoMember(target: Expr, types: NodeMap<Expr, Type>, action = "assign to") {
   for (let e = target; e.kind === "member"; e = e.object) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;

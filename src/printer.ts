@@ -2,6 +2,7 @@
 // a document (src/doc.ts) and laid out at 80 columns.
 
 import { CompileError } from "./diag.ts";
+import { WeakNodeMap, nextId } from "./nodes.ts";
 import {
   align, breakParent, conditionalGroup, fill, group, groupId, hardline, ifBreak, indent, indentIfBreak, join, label, line,
   lineSuffix, lineSuffixBoundary, literalline, print, softline, type Doc,
@@ -57,7 +58,7 @@ function normalize(v: unknown): unknown {
   if (typeof v === "bigint") return `${v}n`;
   if (!v || typeof v !== "object") return v;
   const node: Record<string, unknown> = {};
-  for (const [k, x] of Object.entries(v)) if (k !== "start" && k !== "end") node[k] = normalize(x);
+  for (const [k, x] of Object.entries(v)) if (k !== "start" && k !== "end" && k !== "id") node[k] = normalize(x);
   if (node.kind === "new" && node.args === undefined) node.args = [];
   if (node.kind === "regex" && typeof node.flags === "string") node.flags = [...node.flags].sort().join("");
   for (const k of ["key", "name"]) {
@@ -115,7 +116,7 @@ function printOnce(program: Stmt[], src: string, comments: Comment[]): string {
     attached = attach(program, comments, src);
     for (let attempt = 0; ; attempt++) {
       visited = new Set();
-      printedCache = new WeakMap();
+      printedCache = new WeakNodeMap();
       for (const p of attached.all) p.printed = false;
       const out = render(program, src);
       const lost = attached.all.filter((p) => !p.printed);
@@ -1047,7 +1048,7 @@ function expr(e: Expr, key: string, parent: Path, src: string): Doc {
 // An expression with the parentheses its place needs, keeping its label.
 // Each expression's document, printed once per place as Prettier caches it: hugging prints an
 // argument a second time, and without the cache nested callbacks would cost 2^depth.
-let printedCache = new WeakMap<Expr, { parent: unknown; key: string; doc: Doc }>();
+let printedCache = new WeakNodeMap<Expr, { parent: unknown; key: string; doc: Doc }>();
 
 function printed(path: At<"expr">, src: string, opts: Opts = {}): Doc {
   const plain = opts.expandFirstArg === undefined && opts.expandLastArg === undefined && opts.assignmentLayout === undefined && !opts.deferTrailing;
@@ -1240,7 +1241,7 @@ function needsParens(path: At<"expr">): boolean {
   // A guard is read at binary precedence.
   if (key === "guard" && up.sort === "arm") return ["conditional", "arrow", "yield", "assign", "sequence", "throw"].includes(form(e)) || isPipe(e);
   // An object literal's spread reads its value as an array's or a call's spread does.
-  if (up.sort === "prop" && up.node.kind === "spread") return needsParens({ ...path, parent: at({ kind: "spread", value: e, start: up.node.start, end: up.node.end }, "properties", up) });
+  if (up.sort === "prop" && up.node.kind === "spread") return needsParens({ ...path, parent: at({ id: nextId(), kind: "spread", value: e, start: up.node.start, end: up.node.end }, "properties", up) });
   if (up.sort !== "expr") {
     if (stmtKind(up) === "for") return false;
     if (e.kind === "sequence") return true;
@@ -2525,7 +2526,7 @@ function interfaceDoc(s: Interface, path: At<"stmt">, src: string): Doc {
   const heritage = heritageList("extends", s.extends, s.extends.length > 1, breakHeritage, path, src);
   const header = breakHeritage ? group([...named, indent(heritage)]) : [...named, heritage];
   // Members print as an object type's do, so they hang off an object type standing for the body.
-  const owner: At<"type"> = { sort: "type", node: { kind: "object", members: s.members, start: s.start, end: s.end }, key: "body", parent: path };
+  const owner: At<"type"> = { sort: "type", node: { id: nextId(), kind: "object", members: s.members, start: s.start, end: s.end }, key: "body", parent: path };
   const members = s.members.map((m) => [typeMember(m, owner, src), ";"]);
   return ["interface", header, " ", membersBlock(s.members, members, s.members, src)];
 }
@@ -2752,13 +2753,13 @@ function macroDecorators(decorators: Expr[] | undefined, doc: Doc, path: Path, s
 // `|>`. The tree's `pipe` node is read through this view.
 function pipeAsBinary(e: Of<"pipe">): Of<"binary"> {
   // `|>` isn't one of TypeScript's operators, so the view stretches BinaryOp to hold it.
-  const view: Of<"binary"> = { kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
+  const view: Of<"binary"> = { id: nextId(), kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
   viewed.set(view, e);
   return view;
 }
 
 // The pipe each binary view stands for, which its comments attach to.
-const viewed = new WeakMap<Expr, Expr>();
+const viewed = new WeakNodeMap<Expr, Expr>();
 
 // Whether laying `doc` out must break a line: a hard line or a group already broken.
 function willBreak(doc: Doc): boolean {

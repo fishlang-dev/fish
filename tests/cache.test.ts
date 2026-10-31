@@ -181,8 +181,10 @@ writeFileSync(HTTP_PROGRAM, `async function main(): Promise<void> {
 // How many times one process parsed std over two checks with the cache at `cache`.
 function stdParsesIn(cache: string): string {
   const script = `import { stdFor, stdParses } from ${JSON.stringify(STD)};
+// Each copy's nodes have ids of their own, so the copies are compared without them.
+const bare = (v) => Array.isArray(v) ? v.map(bare) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== "id").map(([k, x]) => [k, bare(x)])) : v;
 const [a, b] = [stdFor([]), stdFor([])];
-if (Bun.deepEquals(a, b)) console.log(stdParses.count);`;
+if (Bun.deepEquals(bare(a), bare(b))) console.log(stdParses.count);`;
   const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache } });
   expect(run.stderr.toString()).toBe("");
   return run.stdout.toString().trim();

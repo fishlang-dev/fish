@@ -4,6 +4,7 @@ import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
 import { isNode, named, surveyHits, type Node } from "./migrate.ts";
+import { renumber } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -271,7 +272,7 @@ export function grade(score: number): string {
 function captures(program: Stmt[]): number[] {
   const found: number[] = [];
   try {
-    hoistLocals(structuredClone(program), (local) => found.push(local.start));
+    hoistLocals(renumber(structuredClone(program)), (local) => found.push(local.start));
   } catch {
     return [];
   }

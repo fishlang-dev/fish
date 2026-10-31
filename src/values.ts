@@ -22,6 +22,7 @@ import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, kindTests, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, nextId, renumber } from "./nodes.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -62,11 +63,11 @@ const printable = (t: Type): boolean =>
 
 // What expression checking needs from the program and the function it is in.
 export type Context = {
-  types: Map<Expr, Type>;
-  locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
-  coercions: Map<Expr, Type>;
-  calls: Map<Expr, Instance>;
-  setters: Map<Expr, Instance>;
+  types: NodeMap<Expr, Type>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
+  coercions: NodeMap<Expr, Type>;
+  calls: NodeMap<Expr, Instance>;
+  setters: NodeMap<Expr, Instance>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   enums: Map<string, EnumInfo>;
@@ -84,7 +85,7 @@ export type Context = {
   resultOf(instance: Instance, at: Span): Type;
   // What a call's returned reference borrows from, and the record of it for each call.
   sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[];
-  borrowsFrom: Map<Expr, Expr[]>;
+  borrowsFrom: NodeMap<Expr, Expr[]>;
   classOf(t: ClassType): ClassInfo;
   instanceOf(f: Body, bindings?: Map<string, Type>): Instance;
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
@@ -121,8 +122,8 @@ export type Context = {
   // Checks a match arm's block, whose `return`s give the arm its value: each value and its type.
   block(arm: Extract<Stmt, { kind: "block" }>, wanted: boolean): [Expr, Type][];
   // What each match pattern tests, for codegen.
-  patterns: Map<Pattern, PatternInfo>;
-  copiesOut: Set<Expr>;
+  patterns: NodeMap<Pattern, PatternInfo>;
+  copiesOut: NodeSet<Expr>;
   // Declares a name a pattern binds, read-only, in the arm's scope.
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
@@ -152,7 +153,7 @@ export type Context = {
   sharing: boolean;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean;
-  awaitable: Set<Expr>;
+  awaitable: NodeSet<Expr>;
   // Whether the body is a closure written inside `unsafe`.
   unsafe: boolean;
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
@@ -183,59 +184,59 @@ export type Context = {
 
 // The member reads a pipe wrote in for its topic. A generic body is checked once, so whether one
 // is a stored field or a getter's is only known for each instance.
-export const substituted = new WeakSet<Expr>();
+export const substituted = new WeakNodeSet<Expr>();
 
 // The element types written on `Array.of<T>(...)` calls, which became array literals.
-const ofElements = new WeakMap<Expr, TypeNode>();
+const ofElements = new WeakNodeMap<Expr, TypeNode>();
 // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
-const fills = new WeakSet<Expr>();
-const filling = new WeakSet<Expr>();
+const fills = new WeakNodeSet<Expr>();
+const filling = new WeakNodeSet<Expr>();
 // Calls whose trailing arguments have been packed into their rest parameter's array.
-const packed = new WeakSet<Expr>();
+const packed = new WeakNodeSet<Expr>();
 // The pairs of a `new Map([[k, v]])` given no types, each a tuple of what it holds.
-const pairs = new WeakSet<Expr>();
+const pairs = new WeakNodeSet<Expr>();
 
 // The `FixedArray.filled` calls, by the fixed array each makes.
-export const fixedFills = new WeakSet<Expr>();
+export const fixedFills = new WeakNodeSet<Expr>();
 // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
 // gathered into one array.
-export const stringBuilds = new WeakMap<Expr, "units" | "points">();
+export const stringBuilds = new WeakNodeMap<Expr, "units" | "points">();
 // The parameters of the closures declared functions named as values became: the function as
 // written, its parameters' names, and which of them take values a caller would have to clone.
-const namedParams = new WeakMap<Param, { fn: string; names: string[]; clones: boolean[] }>();
+const namedParams = new WeakNodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>();
 // Their types, resolved where the function is declared.
-export const presetParams = new WeakMap<Param, Type>();
+export const presetParams = new WeakNodeMap<Param, Type>();
 // The `fill length` checks that panic on a negative length.
-export const lengthChecks = new WeakSet<Expr>();
+export const lengthChecks = new WeakNodeSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
-export const fileCalls = new WeakSet<Expr>();
+export const fileCalls = new WeakNodeSet<Expr>();
 // The blocking calls the std's sync file module is written over, by their name.
-export const syncFileCalls = new WeakMap<Expr, string>();
+export const syncFileCalls = new WeakNodeMap<Expr, string>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
-export const printCalls = new WeakSet<Expr>();
+export const printCalls = new WeakNodeSet<Expr>();
 // node:util's `format` calls.
-export const formatCalls = new WeakSet<Expr>();
+export const formatCalls = new WeakNodeSet<Expr>();
 // The ways several Promises are awaited at once.
 type Combiner = "all" | "race" | "allSettled" | "any";
 const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
 // The timer calls written in a program, rewritten into the std's own, and the async arrows
 // running their callbacks.
-const timerSets = new WeakSet<Expr>();
-export const timerWrappers = new WeakSet<Expr>();
+const timerSets = new WeakNodeSet<Expr>();
+export const timerWrappers = new WeakNodeSet<Expr>();
 // The name each rewritten timer call was written with, for messages about it.
-export const timerNames = new WeakMap<Expr, string>();
+export const timerNames = new WeakNodeMap<Expr, string>();
 // The timer globals, Node's and the browser's.
 const TIMER_CALLS = new Set(["setTimeout", "setInterval", "clearTimeout", "clearInterval"]);
 // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
-export const combinedCalls = new WeakSet<Expr>();
+export const combinedCalls = new WeakNodeSet<Expr>();
 // The operands of an `await`, while they are checked.
-const awaitedNow = new WeakSet<Expr>();
+const awaitedNow = new WeakNodeSet<Expr>();
 // node:util's `inspect` calls.
-export const inspectCalls = new WeakSet<Expr>();
+export const inspectCalls = new WeakNodeSet<Expr>();
 // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
-const deepEqualities = new WeakSet<Expr>();
+const deepEqualities = new WeakNodeSet<Expr>();
 // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
-const parsedArgs = new WeakSet<Expr>();
+const parsedArgs = new WeakNodeSet<Expr>();
 
 // What a literal format does with the arguments after it, as the runtime's routine reads it:
 // the specifier each one it takes is given to, and where those left, appended, start.
@@ -259,18 +260,18 @@ export function formatPlan(format: string, count: number): { specs: string[]; re
 }
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
-export const printed = new WeakSet<Expr>();
+export const printed = new WeakNodeSet<Expr>();
 // The `Date.now()` and `performance.now()` calls, by which each is.
-export const clocks = new WeakMap<Expr, "Date.now" | "performance.now">();
+export const clocks = new WeakNodeMap<Expr, "Date.now" | "performance.now">();
 // The `JSON.stringify` and `JSON.parse` calls, by which each is.
-export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
+export const jsonCalls = new WeakNodeMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
-export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
+export const parses = new WeakNodeMap<Expr, "parseInt" | "parseFloat" | "Number">();
 // Calls of the global `assert`, which panics where it is called.
-export const asserts = new WeakSet<Expr>();
+export const asserts = new WeakNodeSet<Expr>();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
-export const regexStringCalls = new WeakMap<Expr, string>();
+export const regexStringCalls = new WeakNodeMap<Expr, string>();
 
 // What a string method given a regex gives, from the regex: one whose captures aren't known may
 // have one that takes no part. Each instance of a generic body works it out from its own regex.
@@ -282,15 +283,15 @@ export function regexStringType(name: string, rx: RegexType, unknown: boolean): 
   return "string";
 }
 // The regex method calls, by method.
-export const regexCalls = new WeakMap<Expr, "test" | "exec">();
+export const regexCalls = new WeakNodeMap<Expr, "test" | "exec">();
 // The `new RegExp(...)` expressions, which are regexes known while compiling.
-export const regexNews = new WeakSet<Expr>();
+export const regexNews = new WeakNodeSet<Expr>();
 // A regex's flag properties, by the flag each reads.
 export const REGEX_FLAGS: Record<string, string> = { hasIndices: "d", global: "g", ignoreCase: "i", multiline: "m", dotAll: "s", unicode: "u", unicodeSets: "v", sticky: "y" };
 // The `toFixed` calls.
-export const fixedPrints = new WeakSet<Expr>();
+export const fixedPrints = new WeakNodeSet<Expr>();
 // The `Math` calls and constants, which codegen lowers itself.
-export const maths = new WeakSet<Expr>();
+export const maths = new WeakNodeSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
 export const MATH_FLOAT: Record<string, number> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
@@ -302,21 +303,21 @@ export const MATH_CONSTANTS: Record<string, number> = {
 };
 
 // The calls a tagged template became, the only calls yet that fill a rest parameter.
-const tagCalls = new WeakSet<Expr>();
+const tagCalls = new WeakNodeSet<Expr>();
 // The `equals` each class's `===` calls.
 export const equalities = new WeakMap<ClassType, Instance>();
 
 // Each quote, by the Ast types it was checked with, for comptime to build its value from.
-export const quotes = new WeakMap<Expr, Record<Category, Type>>();
+export const quotes = new WeakNodeMap<Expr, Record<Category, Type>>();
 
 // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
 // body's next instance checks again as tuples.
-const tupleLiterals = new WeakSet<Expr>();
+const tupleLiterals = new WeakNodeSet<Expr>();
 
 const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
 // A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
-export const restStarts = new WeakMap<Expr, number>();
+export const restStarts = new WeakNodeMap<Expr, number>();
 
 // How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`.
 export function restText(e: Expr, text: (e: Expr) => string): string | undefined {
@@ -327,7 +328,7 @@ export function restText(e: Expr, text: (e: Expr) => string): string | undefined
 
 // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
 // through a Dyn: values, not places.
-export const computed = new WeakSet<Expr>();
+export const computed = new WeakNodeSet<Expr>();
 
 // For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
 // each interface method runs, then for each field the getter supplying it, or none when it is
@@ -340,75 +341,75 @@ export const dynMembers = new Map<string, DynTable>();
 export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
 // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
 // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
-const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
+const promiseVariants = new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>();
 // The reads of a package's consts that can't be converted, refused once the program is checked.
 export const jsUses: Expr[] = [];
 // The calls into a package, whose arguments cross by copy, so nothing moves into them.
-export const jsCrossings = new WeakSet<Expr>();
+export const jsCrossings = new WeakNodeSet<Expr>();
 // The function each of a package's signatures is checked as, by its declaration.
-export const jsBodies = new WeakMap<object, Body>();
+export const jsBodies = new WeakNodeMap<Stmt, Body>();
 // A package's classes, by name: what `new` and their statics are checked against.
 export const jsClasses = new Map<string, Interface>();
 // Where each of a package's functions is first called, noted on a refusal of its declaration.
 export const jsCalledAt = new WeakMap<object, Expr>();
 // The std's timer calls, by which one each is.
-export const timerCalls = new WeakMap<Expr, "timerSet" | "timerNext" | "timerClear">();
+export const timerCalls = new WeakNodeMap<Expr, "timerSet" | "timerNext" | "timerClear">();
 // The test hook's `jsEvaluate(source)` calls, each running a JS module.
-export const jsEvaluations = new WeakSet<Expr>();
+export const jsEvaluations = new WeakNodeSet<Expr>();
 // The `v === null` and `v === undefined` tests of a JsValue: what is tested, and for which.
-export const jsEmptyTests = new WeakMap<Expr, [Expr, "null" | "undefined"]>();
+export const jsEmptyTests = new WeakNodeMap<Expr, [Expr, "null" | "undefined"]>();
 // The reads of a package's consts, by the export each reads.
-export const jsExports = new WeakMap<Expr, JsName>();
+export const jsExports = new WeakNodeMap<Expr, JsName>();
 // The calls of a package's functions, by the export each calls, with the signature checked.
-export const jsCalls = new WeakMap<Expr, JsName>();
+export const jsCalls = new WeakNodeMap<Expr, JsName>();
 // The values given to JS, converted by the call or write that gives them.
-export const jsGiven = new WeakSet<Expr>();
+export const jsGiven = new WeakNodeSet<Expr>();
 // A handle's property reads and writes, and its method calls.
-export const jsMembers = new WeakSet<Expr>();
-export const jsMethods = new WeakSet<Expr>();
+export const jsMembers = new WeakNodeSet<Expr>();
+export const jsMethods = new WeakNodeSet<Expr>();
 // `new` of a package's class, and its static members read or called, by the class's export.
-export const jsNews = new WeakMap<Expr, JsName>();
-export const jsStatics = new WeakMap<Expr, JsName>();
+export const jsNews = new WeakNodeMap<Expr, JsName>();
+export const jsStatics = new WeakNodeMap<Expr, JsName>();
 // Which declared parameters of a handle's method, a constructor or a static method a call takes
 // are optional, written with `?`, which JS may leave out: an empty value is undefined there.
-export const jsOptionalOf = new WeakMap<Expr, boolean[]>();
+export const jsOptionalOf = new WeakNodeMap<Expr, boolean[]>();
 // The `get`, `at` and `has` calls on a JsValue.
-export const jsAccessors = new WeakSet<Expr>();
-export const dynCalls = new WeakMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
+export const jsAccessors = new WeakNodeSet<Expr>();
+export const dynCalls = new WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
-  const expecting = new Map<Expr, FunctionType>();
+  const expecting = new NodeMap<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
-  const wanted = new Map<Expr, Type>();
+  const wanted = new NodeMap<Expr, Type>();
   // The T a `new Promise` or `Promise.resolve` is awaited where a T is wanted for.
-  const awaitedAs = new Map<Expr, Type>();
+  const awaitedAs = new NodeMap<Expr, Type>();
   // The pairs of JS shapes being compared, each taken to fit while it is.
   const comparing = new Map<object, Set<object>>();
   // Arrows checked to own what they capture, being stored.
-  const owning = new WeakSet<Expr>();
+  const owning = new WeakNodeSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
   // a generic function takes a tuple, which are a tuple of their own elements' types.
-  const tuples = new Map<Expr, ObjectType>();
-  const shaped = new WeakSet<Expr>();
+  const tuples = new NodeMap<Expr, ObjectType>();
+  const shaped = new WeakNodeSet<Expr>();
   // Those passed where the tuple has optional or rest elements take its shape, by its type node.
-  const shapedBy = new WeakMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
-  const fixedLiterals = new Map<Expr, FixedType>();
+  const shapedBy = new WeakNodeMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
+  const fixedLiterals = new NodeMap<Expr, FixedType>();
   // The place an assignment is checking as its target, while it does.
   let writing: Expr | undefined;
   // The assignment an expression statement is, whose value nothing uses.
   let statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
-  const once = new WeakSet<Expr>();
+  const once = new WeakNodeSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
-  const objects = new WeakSet<Expr>();
+  const objects = new WeakNodeSet<Expr>();
   const oversized: Extract<Expr, { kind: "int" }>[] = [];
   // How many \`unsafe\` blocks enclose the code being checked.
   let unsafeDepth = ctx.unsafe ? 1 : 0;
   // Literals found to fit the type they were given, `-9223372036854775808` among them.
-  const fitted = new Set<Expr>();
+  const fitted = new NodeSet<Expr>();
   // Powers of literals whose exponent no u32 holds, unless they became floats.
   const powers: [Expr, Expr][] = [];
   const unions: Union = {
@@ -679,7 +680,7 @@ export function expressions(ctx: Context) {
       if (borrowed) coerce(e.value, type, topic, "");
       return ctx.arm(() => {
         ctx.bind("%", topic, e);
-        e.body = topics(e.body, (at) => ({ kind: "ident", name: "%", start: at.start, end: at.end }));
+        e.body = topics(e.body, (at) => ({ id: nextId(), kind: "ident", name: "%", start: at.start, end: at.end }));
         if (!wanted) return effect(e.body), "void";
         const given = value(e.body);
         if (holdsRef(given)) throw new CompileError("a pipe over a value can't give a reference yet, since the value is dropped once the pipe ends; give a copy with '.clone()'", e.start, e.end);
@@ -688,12 +689,12 @@ export function expressions(ctx: Context) {
     }
     const place = e.value;
     const body = topics(e.body, (at) => {
-      const copy = spanned(structuredClone(place), at);
+      const copy = spanned(renumber(structuredClone(place)), at);
       for (let m: Expr = copy; m.kind === "member" || m.kind === "index"; m = m.object) if (m.kind === "member") substituted.add(m);
       return copy;
     });
-    for (const key of Object.keys(e)) delete (e as Record<string, unknown>)[key];
-    Object.assign(e, body);
+    for (const key of Object.keys(e)) if (key !== "id") delete (e as Record<string, unknown>)[key];
+    Object.assign(e, body, { id: e.id });
     if (wanted) return value(e);
     effect(e);
     return "void";
@@ -1044,7 +1045,7 @@ export function expressions(ctx: Context) {
       if (e.typeArgs.length > 0) throw new CompileError("'fill' takes no type argument; write the element type on the array, as in 'new Array<u8>(n).fill(0)'", e.start, e.end);
       if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
       const [n, x] = [made.args[0]!, e.args[0]!];
-      Object.assign(e, { callee: { kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
+      Object.assign(e, { callee: { id: nextId(), kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
       fills.add(e);
       return call(e);
     }
@@ -1180,7 +1181,7 @@ export function expressions(ctx: Context) {
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
       const given = e.args[0]!;
       if (given.kind === "arrow" && given.async && given.params.length === 0) {
-        e.args[0] = { kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+        e.args[0] = { id: nextId(), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
       }
       const t = value(e.args[0]!);
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
@@ -1416,7 +1417,7 @@ export function expressions(ctx: Context) {
     q.asExpressions.clear();
     q.names.clear();
     const at = { start: e.start, end: e.end };
-    const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
+    const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ id: nextId(), kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
     holesOf(q, types, e).forEach((category, i) => {
       const hole = q.holes[i]!;
       const t = value(hole);
@@ -1445,8 +1446,8 @@ export function expressions(ctx: Context) {
     if (target.params.length !== 2 || !target.params[1]!.rest) throw new CompileError(`'${tag.name}' can't be a tag: a tag takes ${shape}`, tag.start, tag.end);
     if (template.kind !== "template") throw new CompileError("a tag is followed by a template literal", template.start, template.end);
     const at = { start: template.start, end: template.end };
-    const strings: Expr = { kind: "array", elements: template.quasis.map((value) => ({ kind: "string", value, ...at })), ...at };
-    const values: Expr = { kind: "array", elements: template.exprs, ...at };
+    const strings: Expr = { id: nextId(), kind: "array", elements: template.quasis.map((value): Expr => ({ id: nextId(), kind: "string", value, ...at })), ...at };
+    const values: Expr = { id: nextId(), kind: "array", elements: template.exprs, ...at };
     Object.assign(e, { kind: "call", callee: tag, args: [strings, values], optional: false });
     tagCalls.add(e);
   }
@@ -1558,8 +1559,8 @@ export function expressions(ctx: Context) {
     if (odd) throw unsupported(odd.comptime ? "generic functions with comptime parameters used as values" : odd.rest ? "generic functions with rest parameters used as values" : "generic functions with defaulted parameters used as values", e);
     // Its parameters keep the names it declares, unless one would hide it.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== name ? p.pattern.name : `arg${i}`));
-    const params: Param[] = names.map((n) => ({ ...at, pattern: { kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
-    const call: Expr = { kind: "call", callee: { kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n) => ({ kind: "ident", name: n, ...at })), optional: false, ...at };
+    const params: Param[] = names.map((n): Param => ({ ...at, id: nextId(), pattern: { id: nextId(), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const call: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: nextId(), kind: "ident", name: n, ...at })), optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
   }
@@ -1645,13 +1646,13 @@ export function expressions(ctx: Context) {
     // A parameter keeps its name unless it would hide the function, or has none of its own.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== written && p.pattern.name !== f.name ? p.pattern.name : `${written}-arg${i}`));
     const clones = types.map((t) => !isCopy(t));
-    const params: Param[] = f.params.map((p, i) => ({ ...at, pattern: { kind: "ident", name: names[i]!, ...at }, type: undefined, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const params: Param[] = f.params.map((p, i): Param => ({ ...at, id: nextId(), pattern: { id: nextId(), kind: "ident", name: names[i]!, ...at }, type: undefined, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
     params.forEach((p, i) => {
       presetParams.set(p, types[i]!);
       namedParams.set(p, { fn: written, names, clones });
     });
-    const args: Expr[] = names.map((n) => ({ kind: "ident", name: n, ...at }));
-    const call: Expr = { kind: "call", callee: { kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
+    const args: Expr[] = names.map((n): Expr => ({ id: nextId(), kind: "ident", name: n, ...at }));
+    const call: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
   }
@@ -1678,7 +1679,7 @@ export function expressions(ctx: Context) {
     const called = closureBody(lower(local.type) as ClosureType);
     ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, from]) => {
       // A closure captures it here, where the variable is named only through the function.
-      const mine = ctx.reach(from as Local, { kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
+      const mine = ctx.reach(from as Local, { id: nextId(), kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
       if (called.changed?.has(alias)) changesLocal(mine, "", "change", at, false);
       return mine;
     }));
@@ -1731,7 +1732,7 @@ export function expressions(ctx: Context) {
     if (!kind) throw new CompileError(`'String' has no '${callee.name}' yet; it has 'fromCharCode' and 'fromCodePoint'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError(`'String.${callee.name}' takes no type arguments`, e.start, e.end);
     const at = { start: e.args[0]?.start ?? e.end, end: e.args.at(-1)?.end ?? e.end };
-    const gathered: Expr = e.args.length === 1 && stringBuilds.has(e) ? e.args[0]! : { kind: "array", elements: e.args, ...at };
+    const gathered: Expr = e.args.length === 1 && stringBuilds.has(e) ? e.args[0]! : { id: nextId(), kind: "array", elements: e.args, ...at };
     const many = arrayType(kind[1]);
     expect(gathered, many);
     const t = value(gathered);
@@ -1843,7 +1844,7 @@ export function expressions(ctx: Context) {
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
-      Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
+      Object.assign(e, { callee: { id: nextId(), kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
       return call(e);
     }
     if (readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
@@ -2010,7 +2011,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`type '${show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
     }
     // Optional elements left out are empty.
-    for (let i = fixed.length; i < elements.length; i++) fixed.push({ kind: "null", start: e.end, end: e.end } as Expr);
+    for (let i = fixed.length; i < elements.length; i++) fixed.push({ id: nextId(), kind: "null", start: e.end, end: e.end } as Expr);
     fixed.forEach((x, i) => {
       const t = value(x);
       coerce(x, t, elements[i]!, `type '${show(t)}' is not assignable to type '${show(elements[i]!)}'`);
@@ -2019,14 +2020,14 @@ export function expressions(ctx: Context) {
     const many: Expr[] = [];
     if (tuple.rest !== undefined) {
       const rest = arrayType(tuple.rest);
-      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
+      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { id: nextId(), kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
       expect(extra, rest);
       const t = value(extra);
       coerce(extra, t, rest, `type '${show(t)}' is not assignable to type '${show(rest)}'`);
       many.push(extra);
     }
     if (e.kind === "array") {
-      Object.assign(e, { kind: "object", props: [...fixed, ...many].map((value, i) => ({ kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })) });
+      Object.assign(e, { kind: "object", props: [...fixed, ...many].map((value, i) => ({ id: nextId(), kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })) });
       delete (e as { elements?: unknown }).elements;
       tupleLiterals.add(e);
     }
@@ -2071,9 +2072,9 @@ export function expressions(ctx: Context) {
     // Past a rest tuple's fixed elements, an index reads its array, panicking past the end.
     if (n >= BigInt(count) && (object as ObjectType).rest !== undefined) {
       const at = { start: e.index.start, end: e.index.end };
-      const array: Expr = { kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
+      const array: Expr = { id: nextId(), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
       restStarts.set(array, count);
-      Object.assign(e, { object: array, index: { kind: "int", value: n - BigInt(count), ...at } });
+      Object.assign(e, { object: array, index: { id: nextId(), kind: "int", value: n - BigInt(count), ...at } });
       return false;
     }
     if (n >= BigInt(count)) throw new CompileError(`tuple type '${show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
@@ -2092,7 +2093,7 @@ export function expressions(ctx: Context) {
   // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
   function filled(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "filled") throw new CompileError(`'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
-    const written = e.typeArgs.length > 0 ? resolveType({ kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
+    const written = e.typeArgs.length > 0 ? resolveType({ id: nextId(), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
     if (!written || !isFixed(written)) throw new CompileError("say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'FixedArray.filled' takes the value to fill it with", e.start, e.end);
     clonable(written.element, e, "FixedArray.filled");
@@ -2279,7 +2280,7 @@ export function expressions(ctx: Context) {
   // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
   function jsonParse(e: Call): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
-    const [written = { kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
+    const [written = { id: nextId(), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
     if (others.length > 0) throw new CompileError("'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
     const text = e.args[0];
@@ -2373,10 +2374,10 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 0) throw new CompileError("'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
     const [source, f] = e.args as [Expr, Expr | undefined];
-    const prelude = (name: string, args: Expr[]): Expr => ({ kind: "call", callee: { kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
+    const prelude = (name: string, args: Expr[]): Expr => ({ id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
     const prop = source.kind === "object" && source.props.length === 1 ? source.props[0]! : undefined;
     const written = prop?.kind === "property" && prop.key === "length" ? prop.value
-      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
+      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { id: nextId(), kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
     const length = written && arrayLength(written, false);
     let made: Expr;
     if (length) {
@@ -2385,20 +2386,20 @@ export function expressions(ctx: Context) {
     } else {
       const t = value(source);
       const held = isRefType(t) ? t.to : t;
-      if (isArray(held)) made = f ? source : { kind: "call", callee: { kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+      if (isArray(held)) made = f ? source : { id: nextId(), kind: "call", callee: { id: nextId(), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(held)) made = prelude("array chars", [source]);
       else if (yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
       else throw new CompileError(`'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${show(t)}'`, source.start, source.end);
     }
-    if (f) made = { kind: "call", callee: { kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
-    Object.assign(e, made, { start: e.start, end: e.end });
+    if (f) made = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
+    Object.assign(e, made, { id: e.id, start: e.start, end: e.end });
     return call(e as Call);
   }
 
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
   // `panics` a negative one ending the program at n.
   function arrayLength(n: Expr, panics: boolean): Expr {
-    const checked: Expr = { kind: "call", callee: { kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
+    const checked: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
     if (panics) lengthChecks.add(checked);
     return checked;
   }
@@ -2428,11 +2429,11 @@ export function expressions(ctx: Context) {
     const t = value(source);
     const held = lower(isRefType(t) ? t.to : t);
     const at = { start: source.start, end: source.end };
-    const made = (callee: Expr, args: Expr[] = []): Expr => ({ kind: "call", callee, args, typeArgs: [], optional: false, ...at });
+    const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
-    if (stringLike(held)) from = made({ kind: "ident", name: "array chars", ...at }, [source]);
-    else if (yieldsOf(held) !== undefined) from = made({ kind: "ident", name: "array collect", ...at }, [source]);
-    else if (typeof held !== "string" && held.kind === "map") from = made({ kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
+    if (stringLike(held)) from = made({ id: nextId(), kind: "ident", name: "array chars", ...at }, [source]);
+    else if (yieldsOf(held) !== undefined) from = made({ id: nextId(), kind: "ident", name: "array collect", ...at }, [source]);
+    else if (typeof held !== "string" && held.kind === "map") from = made({ id: nextId(), kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
     else if (!isArray(held)) throw new CompileError(`'...' spreads an array, a string, a generator, a Map or a Set, not '${show(t)}'`, source.start, source.end);
     if (from) {
       once.add(source);
@@ -2457,7 +2458,7 @@ export function expressions(ctx: Context) {
     if (list.length < fixed) return;
     const rest = list.splice(fixed);
     const at = rest.length > 0 ? { start: rest[0]!.start, end: rest.at(-1)!.end } : { start: e.end - 1, end: e.end - 1 };
-    list.push({ kind: "array", elements: rest, ...at });
+    list.push({ id: nextId(), kind: "array", elements: rest, ...at });
     packed.add(e);
   }
 
@@ -2887,8 +2888,8 @@ export function expressions(ctx: Context) {
     const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
     const typeArgs = [...(gives === "void" ? [] : [presetNode(gives, e)]), ...(rejects ? [presetNode(error, e)] : [])];
     const at = { start: e.start, end: e.end };
-    const cell: Expr = { kind: "call", callee: { kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
-    Object.assign(e, { kind: "call", callee: { kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
+    const cell: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
+    Object.assign(e, { kind: "call", callee: { id: nextId(), kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
     if (gives !== "void") {
       const resolves = rejects ? "" : " resolve";
       promiseVariants.set(cell, { name: `promise cell${resolves}`, typeArgs });
@@ -2905,7 +2906,7 @@ export function expressions(ctx: Context) {
 
   // A type argument for a rewritten call, standing for a type already known.
   function presetNode(t: Type, at: Span): TypeNode {
-    const made: TypeNode = { kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
+    const made: TypeNode = { id: nextId(), kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
     presetTypes.set(made, t);
     return made;
   }
@@ -2913,12 +2914,12 @@ export function expressions(ctx: Context) {
   // `setTimeout(callback, ms)`, `setInterval` and their clears, rewritten as the std's timers.
   function timerCall(e: Call, name: string) {
     const at = { start: e.start, end: e.end };
-    const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
+    const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { id: nextId(), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     if (e.args.some((a) => a.kind === "spread")) throw new CompileError(`'${name}' takes its arguments written out, not spread`, e.start, e.end);
     if (name === "clearTimeout" || name === "clearInterval") {
       if (e.args.length > 1) throw new CompileError(`'${name}' takes the timer to clear`, e.start, e.end);
-      return helper("timeout clear", [e.args[0] ?? { kind: "null", ...at }]);
+      return helper("timeout clear", [e.args[0] ?? { id: nextId(), kind: "null", ...at }]);
     }
     if (e.args.length === 0) throw new CompileError(`'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
     if (!ctx.runtime && !ctx.async) throw new CompileError(`'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
@@ -2940,18 +2941,18 @@ export function expressions(ctx: Context) {
     });
     const span = { start: callback.start, end: callback.end };
     // Each run passes its own copy of a value that doesn't copy, as each of node's runs passes it.
-    const given = passed.map((x): Expr => (x.kind === "ident" && !isCopy(value(x)) ? { kind: "call", callee: { kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
-    const run: Expr = { kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
-    const body: Expr = givesPromise(callback) ? { kind: "unary", op: "await", operand: run, ...span } : run;
+    const given = passed.map((x): Expr => (x.kind === "ident" && !isCopy(value(x)) ? { id: nextId(), kind: "call", callee: { id: nextId(), kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
+    const run: Expr = { id: nextId(), kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
+    const body: Expr = givesPromise(callback) ? { id: nextId(), kind: "unary", op: "await", operand: run, ...span } : run;
     // An async arrow taking nothing is what the timer keeps, so its captures are made once.
     const own = callback.kind === "arrow" && callback.async && callback.params.length === 0 && Array.isArray(callback.body);
     const kept: Expr = own ? callback
-      : { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
-    const wrapper: Expr = givesPromise(callback) ? { kind: "call", callee: { kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
+      : { id: nextId(), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ id: nextId(), kind: "expr", expr: body, ...span }], ...span };
+    const wrapper: Expr = givesPromise(callback) ? { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
     timerWrappers.add(kept);
-    const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
-    const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
-    helper("timerSet", [wrapper, ms, { kind: "bool", value: name === "setInterval", ...at }, loop]);
+    const loop: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
+    const ms = e.args[1] ?? { id: nextId(), kind: "int", value: 0n, ...at };
+    helper("timerSet", [wrapper, ms, { id: nextId(), kind: "bool", value: name === "setInterval", ...at }, loop]);
     timerSets.add(e);
   }
 
@@ -2986,7 +2987,7 @@ export function expressions(ctx: Context) {
     const gives = resolveType(e.typeArgs[0]!);
     const error = ctx.throwsDeclared() ?? classes.get("Error")!.type;
     const at = { start: e.start, end: e.end };
-    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
+    Object.assign(e, { callee: { id: nextId(), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
     if (gives !== "void") promiseVariants.set(e, { name: "promise with resolvers", typeArgs: e.typeArgs });
   }
 
@@ -3008,13 +3009,13 @@ export function expressions(ctx: Context) {
       if (typeof given !== "string" && (given?.kind === "future" || given?.kind === "handle" || (given?.kind === "dyn" && promiseElement(given.of) !== undefined))) {
         throw new CompileError("'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
       }
-      Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
+      Object.assign(e, { callee: { id: nextId(), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
       return;
     }
     if (e.args.length === 0) throw new CompileError("'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
     const gives = written ?? met ?? "void";
     const reason = value(e.args[0]!);
-    Object.assign(e, { callee: { kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
+    Object.assign(e, { callee: { id: nextId(), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
     if (gives !== "void") promiseVariants.set(e, { name: "promise reject", typeArgs: e.typeArgs });
   }
 
@@ -3179,7 +3180,7 @@ export function expressions(ctx: Context) {
     // A generic one is typed for the call's type arguments, written or inferred.
     if (method.generic) {
       // An optional parameter left out is undefined, as JS gives it.
-      while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ kind: "null", start: e.end, end: e.end });
+      while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ id: nextId(), kind: "null", start: e.end, end: e.end });
       jsCrossings.add(e);
       jsOptionalOf.set(e, method.optional ?? []);
       const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
@@ -3280,7 +3281,7 @@ export function expressions(ctx: Context) {
     params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
     jsArgs(e, params, constructor.map((p) => p.optional));
     jsNews.set(e, c.js!);
-    return resolveType({ kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
+    return resolveType({ id: nextId(), kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
 
   // A package's class and the classes it extends, nearest first: a class without its own
@@ -4071,7 +4072,7 @@ export function expressions(ctx: Context) {
         const written = ofElements.get(e);
         if (written) {
           // Resolved as an array's element is, so references and functions get the same rules.
-          const element = (resolveType({ kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
+          const element = (resolveType({ id: nextId(), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
           for (const x of e.elements as Expr[]) {
             expect(x, element);
             const t = value(x);
@@ -4098,7 +4099,7 @@ export function expressions(ctx: Context) {
         // A spread gives an array's elements: those of an array itself, or of what a string, a
         // generator, a Map or a Set gives, as `Array.from` would. Its elements type the others
         // when nothing else does.
-        const spreads = new Map<Expr, Type>();
+        const spreads = new NodeMap<Expr, Type>();
         for (const x of elements) if (x.kind === "spread") spreads.set(x, spreadElements(x));
         const first = [...spreads.values()][0];
         if (first !== undefined && !wanted.has(e)) for (const x of elements) if (x.kind !== "spread") expect(x, first);
@@ -4516,7 +4517,7 @@ export function expressions(ctx: Context) {
   // empty value can't tell apart.
   function jsEmpty(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
-      if (!isEmpty(other, locals as Map<Expr, Local>)) continue;
+      if (!isEmpty(other, locals as NodeMap<Expr, Local>)) continue;
       const t = value(subject);
       once.add(subject);
       if (!isPlainJs(isRefType(t) ? t.to : t)) return undefined;

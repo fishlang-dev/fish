@@ -4,10 +4,14 @@ import { isToken, lexer, type Comment, type Token } from "./lexer.ts";
 import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
+import { nextId, type Id } from "./nodes.ts";
 
 export type Span = { start: number; end: number };
 
-export type TypeNode = Span & (
+// `id` is not part of `Span`, so spreading a span never copies one.
+export type { Id };
+
+export type TypeNode = Span & Id & (
   // Keyword types are refs too; `name` is dotted for qualified names, e.g. "A.B".
   | { kind: "ref"; name: string; args: TypeNode[] }
   // A string, number, bigint or bool literal, or `-` applied to a number or bigint.
@@ -31,7 +35,7 @@ export type TypeNode = Span & (
   | { kind: "predicate"; asserts: boolean; name: string; type: TypeNode | undefined }
 );
 
-export type Expr = Span & (
+export type Expr = Span & Id & (
   // Every integer form, in any base.
   | { kind: "int"; value: bigint }
   // Has a fraction or an exponent.
@@ -95,7 +99,7 @@ export type Expr = Span & (
   | { kind: "assertion"; type: TypeNode; expr: Expr }
 );
 
-export type Stmt = Span & (
+export type Stmt = Span & Id & (
   | { kind: "expr"; expr: Expr }
   | { kind: "let"; keyword: "let" | "const" | "var"; declarations: Declarator[] }
   | { kind: "return"; value: Expr | undefined }
@@ -141,12 +145,12 @@ export type Stmt = Span & (
   | { kind: "exportAsNamespace"; name: string }
 ) | TypeAlias | Interface | Func | (ClassNode & { kind: "class" });
 
-export type TupleElement = Span & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
+export type TupleElement = Span & Id & { name: string | undefined; optional: boolean; rest: boolean; type: TypeNode };
 
 // A string name covers identifier, string and number keys; an Expr is a computed `[key]`.
 export type PropertyName = string | Expr;
 
-export type TypeMember = Span & (
+export type TypeMember = Span & Id & (
   | { kind: "property"; name: PropertyName; optional: boolean; readonly: boolean; type: TypeNode | undefined }
   | { kind: "method"; name: PropertyName; optional: boolean; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
   | { kind: "call" | "construct"; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
@@ -154,7 +158,7 @@ export type TypeMember = Span & (
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returns: TypeNode | undefined }
 );
 
-export type ObjectProp = Span & (
+export type ObjectProp = Span & Id & (
   | { kind: "property"; key: PropertyName; value: Expr }
   // A default, as in `{ a = 1 }`, is only valid once the literal turns out to be a pattern.
   | { kind: "shorthand"; name: string; default: Expr | undefined }
@@ -168,7 +172,7 @@ export type Modifier =
   | "public" | "private" | "protected" | "static" | "readonly" | "abstract"
   | "override" | "declare" | "accessor" | "async";
 
-export type ClassNode = Span & {
+export type ClassNode = Span & Id & {
   // Undefined for an anonymous class expression or `export default class`.
   name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
   // An instantiation expression when written with type arguments, as in `extends Base<T>`.
@@ -178,7 +182,7 @@ export type ClassNode = Span & {
 };
 
 // A private name is a string starting with "#". A missing body is an overload signature.
-export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } & (
+export type ClassMember = Span & Id & { modifiers: Modifier[]; decorators: Expr[] } & (
   | { kind: "field"; name: PropertyName; optional: boolean; definite: boolean; type: TypeNode | undefined; init: Expr | undefined }
   | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
       params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
@@ -190,12 +194,12 @@ export type ClassMember = Span & { modifiers: Modifier[]; decorators: Expr[] } &
 
 // `this` is an identifier pattern named "this".
 // `modifiers` make a constructor parameter a parameter property, as in `private readonly x`.
-export type Param = Span & {
+export type Param = Span & Id & {
   pattern: Pattern; type: TypeNode | undefined; optional: boolean; rest: boolean; default: Expr | undefined;
   modifiers: Modifier[]; decorators: Expr[]; comptime: boolean;
 };
 
-export type Pattern = Span & (
+export type Pattern = Span & Id & (
   | { kind: "ident"; name: string }
   | { kind: "object"; props: PatternProp[]; rest: Pattern | undefined }
   // A hole, as in `[, b]`, is undefined.
@@ -217,30 +221,30 @@ export type Pattern = Span & (
 );
 
 // `body` reads like an arrow function's: an expression, or a block's statements.
-export type MatchArm = Span & { pattern: Pattern; guard: Expr | undefined; body: Expr | Extract<Stmt, { kind: "block" }> };
+export type MatchArm = Span & Id & { pattern: Pattern; guard: Expr | undefined; body: Expr | Extract<Stmt, { kind: "block" }> };
 
 // In `{ a }` the value is the identifier pattern `a`.
-export type PatternProp = Span & { key: PropertyName; value: Pattern };
+export type PatternProp = Span & Id & { key: PropertyName; value: Pattern };
 
 // `name` may be a string, as in `import { "a-b" as ab }`.
-export type Specifier = Span & { name: string; alias: string | undefined; typeOnly: boolean };
+export type Specifier = Span & Id & { name: string; alias: string | undefined; typeOnly: boolean };
 
-export type EnumMember = Span & { name: string; init: Expr | undefined; payload: TypeNode[] | undefined };
+export type EnumMember = Span & Id & { name: string; init: Expr | undefined; payload: TypeNode[] | undefined };
 
 // `default:` has no test.
-export type SwitchCase = Span & { test: Expr | undefined; body: Stmt[] };
+export type SwitchCase = Span & Id & { test: Expr | undefined; body: Stmt[] };
 
-export type Declarator = Span & { target: Pattern; type: TypeNode | undefined; init: Expr | undefined };
+export type Declarator = Span & Id & { target: Pattern; type: TypeNode | undefined; init: Expr | undefined };
 
-export type TypeParam = Span & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
+export type TypeParam = Span & Id & { name: string; constraint: TypeNode | undefined; default: TypeNode | undefined; modifiers: ("const" | "in" | "out")[] };
 
 // `decorators`, on these and on functions, are the macros applied to them.
 // A package's type, declared in its `.d.ts`, sets `js`: an object type alias is then a JS handle.
-export type TypeAlias = Span & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[]; js?: JsName };
+export type TypeAlias = Span & Id & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[]; js?: JsName };
 
 // A package's interface or class, from its `.d.ts`, sets `js`, its values JS handles; a class
 // also has `jsClass`, its constructors' parameters and its statics.
-export type Interface = Span & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[];
+export type Interface = Span & Id & { kind: "interface"; name: string; typeParams: TypeParam[]; extends: TypeNode[]; members: TypeMember[]; decorators?: Expr[];
   js?: JsName; jsClass?: { constructors: Param[][]; statics: TypeMember[] };
   // The declaration a package's interface was copied from, which every copy of it is typed by.
   jsSource?: Stmt };
@@ -252,7 +256,7 @@ export type JsName = { module: string; package: number; name: string; const?: tr
   // A function declared with several signatures: its other signatures, in the order declared.
   overloads?: Func[] };
 
-export type Func = Span & {
+export type Func = Span & Id & {
   // `macro` marks `macro function`, a comptime function over syntax trees.
   kind: "function"; name: string; async: boolean; generator: boolean; macro: boolean;
   // Undefined for an overload signature or a `declare function`. `throws` is the error type.
@@ -439,7 +443,7 @@ export function decorated(c: Cursor, start: number, decorators: Expr[]): Stmt {
     || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
   if (!at) throw c.error("expected a class, function, type, interface or enum after decorators");
   const s = statement(c);
-  return { ...s, decorators, start } as Stmt;
+  return { ...s, id: nextId(), decorators, start } as Stmt;
 }
 
 // Only `export default function` may leave out the name, so `name` is "" there.
@@ -457,7 +461,7 @@ export function func(c: Cursor, anonymous = false): Func {
   let body: Stmt[] | undefined;
   if (c.at("{")) body = block(c);
   else endStatement(c);
-  return { kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
+  return { id: nextId(), kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
 }
 
 export function block(c: Cursor): Stmt[] {
@@ -481,19 +485,19 @@ function body(c: Cursor): Stmt[] {
 export function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
-  if (c.at("{")) return { kind: "block", body: block(c), start, end: c.end() };
+  if (c.at("{")) return { id: nextId(), kind: "block", body: block(c), start, end: c.end() };
   // Both are contextual: in TypeScript `comptime {` and `macro function` are syntax errors.
   if (c.at("comptime") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
     c.next();
-    return { kind: "comptime", body: block(c), start, end: c.end() };
+    return { id: nextId(), kind: "comptime", body: block(c), start, end: c.end() };
   }
   if (c.at("unsafe") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
     c.next();
-    return { kind: "unsafe", body: block(c), start, end: c.end() };
+    return { id: nextId(), kind: "unsafe", body: block(c), start, end: c.end() };
   }
   if (c.at("macro") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore) {
     c.next();
-    return { ...func(c), macro: true, start };
+    return { ...func(c), id: nextId(), macro: true, start };
   }
   const decorators = decoratorList(c);
   if (atClass(c)) return classDeclaration(c, start, decorators);
@@ -501,7 +505,7 @@ export function statement(c: Cursor): Stmt {
   if (decorators.length > 0) return decorated(c, start, decorators);
   const declaration = atDeclarationKeyword(c);
   if (declaration) return declaration;
-  if (c.at(";")) return { kind: "empty", start, end: c.next().end };
+  if (c.at(";")) return { id: nextId(), kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
   if (c.at("for")) return forStatement(c);
@@ -511,11 +515,11 @@ export function statement(c: Cursor): Stmt {
     const label = c.next().text;
     c.next();
     const labeled = statement(c);
-    return { kind: "labeled", label, body: labeled, start, end: labeled.end };
+    return { id: nextId(), kind: "labeled", label, body: labeled, start, end: labeled.end };
   }
   if (c.at("do")) return doWhileStatement(c);
   if (c.at("interface")) return interfaceDeclaration(c);
-  const s: Stmt = c.at("debugger") ? { kind: "debugger", start, end: c.next().end }
+  const s: Stmt = c.at("debugger") ? { id: nextId(), kind: "debugger", start, end: c.next().end }
     : atTypeAlias(c) ? typeAlias(c)
     : simpleStatement(c);
   endStatement(c);
@@ -529,7 +533,7 @@ function ifStatement(c: Cursor): Stmt {
   c.expect(")");
   const then = body(c);
   const otherwise = c.eat("else") ? body(c) : undefined;
-  return { kind: "if", cond, then, else: otherwise, start, end: c.end() };
+  return { id: nextId(), kind: "if", cond, then, else: otherwise, start, end: c.end() };
 }
 
 function whileStatement(c: Cursor): Stmt {
@@ -538,7 +542,7 @@ function whileStatement(c: Cursor): Stmt {
   const cond = sequence(c);
   c.expect(")");
   const loop = body(c);
-  return { kind: "while", cond, body: loop, start, end: c.end() };
+  return { id: nextId(), kind: "while", cond, body: loop, start, end: c.end() };
 }
 
 // `for (init; test; update)`, `for (left in right)`, `for (left of right)` and `for await`.
@@ -555,15 +559,15 @@ function forStatement(c: Cursor): Stmt {
     // `for...in` takes any expression; `for...of` one without a top-level comma.
     const right = kind === "forIn" ? sequence(c) : expression(c);
     c.expect(")");
-    return { kind, await: isAwait, left, right, body: body(c), start, end: c.end() };
+    return { id: nextId(), kind, await: isAwait, left, right, body: body(c), start, end: c.end() };
   }
   c.expect(";");
   const test = c.at(";") ? undefined : sequence(c);
   c.expect(";");
   const update = c.at(")") ? undefined : sequence(c);
   c.expect(")");
-  const initStmt: Stmt | undefined = declared ?? (expr && { kind: "expr", expr, start: expr.start, end: expr.end });
-  return { kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
+  const initStmt: Stmt | undefined = declared ?? (expr && { id: nextId(), kind: "expr", expr, start: expr.start, end: expr.end });
+  return { id: nextId(), kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
 }
 
 function switchStatement(c: Cursor): Stmt {
@@ -584,9 +588,9 @@ function switchStatement(c: Cursor): Stmt {
       if (c.peek().kind === "eof") throw c.error("expected '}'");
       body.push(statement(c));
     }
-    cases.push({ test, body, start: caseStart, end: c.end() });
+    cases.push({ id: nextId(), test, body, start: caseStart, end: c.end() });
   }
-  return { kind: "switch", discriminant, cases, start, end: c.end() };
+  return { id: nextId(), kind: "switch", discriminant, cases, start, end: c.end() };
 }
 
 function tryStatement(c: Cursor): Stmt {
@@ -606,7 +610,7 @@ function tryStatement(c: Cursor): Stmt {
   }
   const finalizer = c.eat("finally") ? block(c) : undefined;
   if (!handler && !finalizer) throw c.error("expected 'catch' or 'finally'");
-  return { kind: "try", block: tried, param, paramType, handler, finalizer, start, end: c.end() };
+  return { id: nextId(), kind: "try", block: tried, param, paramType, handler, finalizer, start, end: c.end() };
 }
 
 // The `;` after `do...while (x)` is optional even on the same line, unlike other statements.
@@ -618,7 +622,7 @@ function doWhileStatement(c: Cursor): Stmt {
   const cond = sequence(c);
   c.expect(")");
   c.eat(";");
-  return { kind: "doWhile", body: loop, cond, start, end: c.end() };
+  return { id: nextId(), kind: "doWhile", body: loop, cond, start, end: c.end() };
 }
 
 const atDeclaration = (c: Cursor) => c.at("let") || c.at("const") || c.at("var");
@@ -629,7 +633,7 @@ function declaration(c: Cursor): Stmt {
   const declarations: Declarator[] = [];
   do declarations.push(declarator(c));
   while (c.eat(","));
-  return { kind: "let", keyword, declarations, start, end: c.end() };
+  return { id: nextId(), kind: "let", keyword, declarations, start, end: c.end() };
 }
 
 function simpleStatement(c: Cursor): Stmt {
@@ -639,23 +643,23 @@ function simpleStatement(c: Cursor): Stmt {
     const kind = c.next().text as "break" | "continue";
     // A label must be on the same line, as with `return`'s value.
     const label = c.peek().kind === "ident" && !c.peek().newlineBefore && !RESERVED.has(c.peek().text) ? c.next().text : undefined;
-    return { kind, label, start, end: c.end() };
+    return { id: nextId(), kind, label, start, end: c.end() };
   }
   if (c.at("throw")) {
     c.next();
     if (c.peek().newlineBefore) throw new CompileError("a line break is not allowed after 'throw'", start, c.peek().start);
     const value = sequence(c);
-    return { kind: "throw", value, start, end: value.end };
+    return { id: nextId(), kind: "throw", value, start, end: value.end };
   }
   if (c.at("return")) {
     const end = c.next().end;
     // A newline after `return` ends the statement, as in JavaScript.
-    if (c.at(";") || c.at("}") || c.peek().newlineBefore || c.peek().kind === "eof") return { kind: "return", value: undefined, start, end };
+    if (c.at(";") || c.at("}") || c.peek().newlineBefore || c.peek().kind === "eof") return { id: nextId(), kind: "return", value: undefined, start, end };
     const value = sequence(c);
-    return { kind: "return", value, start, end: value.end };
+    return { id: nextId(), kind: "return", value, start, end: value.end };
   }
   const expr = sequence(c);
-  return { kind: "expr", expr, start, end: expr.end };
+  return { id: nextId(), kind: "expr", expr, start, end: expr.end };
 }
 
 function declarator(c: Cursor): Declarator {
@@ -663,7 +667,7 @@ function declarator(c: Cursor): Declarator {
   const target = bindingPattern(c);
   const type = c.at(":") ? annotation(c) : undefined;
   const init = c.eat("=") ? expression(c) : undefined;
-  return { target, type, init, start, end: c.end() };
+  return { id: nextId(), target, type, init, start, end: c.end() };
 }
 
 // `type` is contextual: only a name following on the same line makes it a declaration.
@@ -678,7 +682,7 @@ function typeAlias(c: Cursor): TypeAlias {
   const typeParams = typeParameters(c);
   c.expect("=");
   const t = type(c);
-  return { kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
+  return { id: nextId(), kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
 }
 
 function interfaceDeclaration(c: Cursor): Interface {
@@ -692,7 +696,7 @@ function interfaceDeclaration(c: Cursor): Interface {
   }
   c.expect("{");
   const members = typeMembers(c);
-  return { kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
+  return { id: nextId(), kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.

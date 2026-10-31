@@ -5,6 +5,13 @@ import ts from "typescript5";
 import { lexer } from "../src/lexer.ts";
 import { parseWithComments, type Stmt } from "../src/parser.ts";
 
+// A tree without its nodes' ids, which differ between two parses of the same text.
+function withoutIds(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(withoutIds);
+  if (!v || typeof v !== "object") return v;
+  return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "id").map(([k, x]) => [k, withoutIds(x)]));
+}
+
 // Each comment as [kind, text], and that its span holds exactly its text.
 function comments(src: string): [string, string][] {
   const found = parseWithComments(src).comments;
@@ -103,7 +110,7 @@ test("blanking every test program's comments leaves the same parse, so recording
       }
       const plain = blanked(src);
       expect(parseWithComments(plain).comments).toEqual([]);
-      expect([f, parseWithComments(plain).program]).toEqual([f, tree]);
+      expect([f, withoutIds(parseWithComments(plain).program)]).toEqual([f, withoutIds(tree)]);
       compared++;
     }
   }

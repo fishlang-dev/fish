@@ -1,5 +1,6 @@
 import { CompileError, LOCAL_NAMES } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { NodeMap, NodeSet, nextId } from "./nodes.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -81,16 +82,16 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
       if (params.length > 0 && local.kind === "enum" && !Array.isArray((local as { typeParams?: unknown }).typeParams)) {
         throw new CompileError(`the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
       }
-      const args: TypeNode[] = params.map((p) => ({ kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
+      const args: TypeNode[] = params.map((p): TypeNode => ({ id: nextId(), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
       const own = local.typeParams?.length ?? 0;
-      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p })), ...(local.typeParams ?? [])] });
+      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId() })), ...(local.typeParams ?? [])] });
       return { name, mangled, args, own, values: local.kind === "class" || local.kind === "enum" };
     });
     for (const r of renames) for (const s of stmts) rename(s, r);
     for (const s of stmts) visit(s, ctx);
     for (const local of locals) {
       hoisted.push(local);
-      stmts[stmts.indexOf(local)] = { kind: "empty", start: local.start, end: local.end };
+      stmts[stmts.indexOf(local)] = { id: nextId(), kind: "empty", start: local.start, end: local.end };
     }
   };
 
@@ -100,8 +101,8 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
 
 // The outer type parameters each local uses, itself or through a local it names, in the order
 // the body declares them.
-function generics(locals: Local[], typeParams: TypeParam[]): Map<Local, TypeParam[]> {
-  const used = new Map(locals.map((l) => [l, new Set(typeParams.filter((p) => refersTo(l, p.name) && !(l.typeParams ?? []).some((q) => q.name === p.name)))]));
+function generics(locals: Local[], typeParams: TypeParam[]): NodeMap<Local, TypeParam[]> {
+  const used = new NodeMap(locals.map((l) => [l, new NodeSet(typeParams.filter((p) => refersTo(l, p.name) && !(l.typeParams ?? []).some((q) => q.name === p.name)))]));
   for (let grew = true; grew; ) {
     grew = false;
     for (const l of locals) {
@@ -115,7 +116,7 @@ function generics(locals: Local[], typeParams: TypeParam[]): Map<Local, TypePara
       }
     }
   }
-  return new Map(locals.map((l) => [l, typeParams.filter((p) => used.get(l)!.has(p))]));
+  return new NodeMap(locals.map((l) => [l, typeParams.filter((p) => used.get(l)!.has(p))]));
 }
 
 function what(local: Local): string {

@@ -12,6 +12,7 @@ import { HANDLE, RUST_NAME, rustClassNodes, rustNames, rustSymbol } from "./rust
 import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
+import { NodeMap, nextId } from "./nodes.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
@@ -25,7 +26,7 @@ export const FILE_SPAN = 2 ** 24;
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 // `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
 // `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: Map<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
+export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: NodeMap<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
@@ -76,7 +77,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     if (!path.startsWith("std:")) rustBlocks.set(key, statements.flatMap((s) => rustBlock(s) ?? []));
     statements = statements.filter((s) => !rustBlock(s));
-    const module: Module = { path: key, file, base, src: text, statements, targets: new Map(), globals: new Map(), pkg: fish && !path.startsWith("std:") ? packageOf(fish, key)?.dir : undefined };
+    const module: Module = { path: key, file, base, src: text, statements, targets: new NodeMap(), globals: new Map(), pkg: fish && !path.startsWith("std:") ? packageOf(fish, key)?.dir : undefined };
     modules.push(module);
     byPath.set(key, module);
     for (const s of statements) {
@@ -135,7 +136,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     if (known) return known.base;
     const base = modules.length * FILE_SPAN;
     sources.push({ base, src: text, file: relative(dirname(entry), file) });
-    const holder: Module = { path: key, file: relative(dirname(entry), file), base, src: text, statements: [], targets: new Map(), globals: new Map() };
+    const holder: Module = { path: key, file: relative(dirname(entry), file), base, src: text, statements: [], targets: new NodeMap(), globals: new Map() };
     modules.push(holder);
     byPath.set(key, holder);
     return base;
@@ -183,7 +184,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
       for (const s of [made, ...overloads]) shiftSpans(s, base);
-      statements.push(exported ? ({ kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
+      statements.push(exported ? ({ id: nextId(), kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
       for (const n of refers) {
         const found = declared.resolve(n);
         if (found) pending.push({ declared: found, name: n });
@@ -196,10 +197,10 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
       const own = unwrapped(defaulted.at) as { name?: unknown };
       const local = typeof own.name === "string" && !declaredHere.has(own.name) ? own.name : `${specifier} default`;
       add(defaulted, local, false, s, "default");
-      statements.push({ kind: "exportNamed", typeOnly: false, specifiers: [{ name: local, alias: "default", typeOnly: false, start: s.start, end: s.end }], module: undefined, start: s.start, end: s.end });
+      statements.push({ id: nextId(), kind: "exportNamed", typeOnly: false, specifiers: [{ id: nextId(), name: local, alias: "default", typeOnly: false, start: s.start, end: s.end }], module: undefined, start: s.start, end: s.end });
     }
     for (let next = pending.shift(); next; next = pending.shift()) add(next.declared, next.name, false, next.declared.at);
-    const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new Map(), globals: new Map(), whole: whole !== undefined };
+    const module: Module = { path: `pkg:${modules.length}`, file: specifier, base: modules.length * FILE_SPAN, src: "", statements, targets: new NodeMap(), globals: new Map(), whole: whole !== undefined };
     modules.push(module);
     byPath.set(module.path, module);
     return module;
@@ -241,7 +242,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     if (blocks.length === 0) throw new CompileError(`no file of this package declares the functions of '${crate}'; declare them in one, as in 'declare module "rust:${crate}" { export function f(x: i64): i64; }'`, s.start, s.end);
     if (blocks.length > 1) throw new CompileError(`'rust:${crate}' is declared twice in this package; declare its functions in one place`, blocks[1]!.start, blocks[1]!.end);
     rust.push({ dependency, dir: pkg.dir });
-    const module: Module = { path: key, file: `rust:${crate}`, base: modules.length * FILE_SPAN, src: "", statements: (blocks[0]!.body ?? []).map((st) => rustFunction(crate, st)), targets: new Map(), globals: new Map() };
+    const module: Module = { path: key, file: `rust:${crate}`, base: modules.length * FILE_SPAN, src: "", statements: (blocks[0]!.body ?? []).map((st) => rustFunction(crate, st)), targets: new NodeMap(), globals: new Map() };
     modules.push(module);
     byPath.set(key, module);
     return module;
@@ -265,14 +266,14 @@ function rustBlock(s: Stmt) {
 // name, at the Rust path `@rust` gives from the crate's root, or else at the same name there.
 function rustFunction(crate: string, s: Stmt): Stmt {
   const f = s.kind === "export" ? s.body : s;
-  if (f.kind === "class") return { kind: "export", body: rustClass(crate, f), start: s.start, end: s.end };
+  if (f.kind === "class") return { id: nextId(), kind: "export", body: rustClass(crate, f), start: s.start, end: s.end };
   if (f.kind !== "function") throw new CompileError(`a Rust module declares the crate's functions and types, as in 'export function f(x: i64): i64;' or 'export class Counter { ... }'`, s.start, s.end);
   if (f.body !== undefined) throw new CompileError("a Rust function is declared without a body; the crate has its body", f.start, f.end);
   if (!RUST_NAME.test(f.name)) throw new CompileError(`'${f.name}' can't name a Rust function; use letters, digits and '_'`, f.start, f.end);
   const path = rustPath(f.decorators ?? [], f.name, "function");
-  const declared: Func = { ...f, decorators: undefined };
+  const declared: Func = { ...f, id: nextId(), decorators: undefined };
   rustNames.set(declared, { crate, path, symbol: rustSymbol(crate, path) });
-  return { kind: "export", body: declared, start: s.start, end: s.end };
+  return { id: nextId(), kind: "export", body: declared, start: s.start, end: s.end };
 }
 
 // A Rust type declared as a class: a handle holding the boxed Rust value, whose constructor,
@@ -293,15 +294,15 @@ function rustClass(crate: string, c: Extract<Stmt, { kind: "class" }>): Stmt {
     if (m.modifiers.some((x) => x !== "static")) throw new CompileError("a Rust type's members take no modifiers but 'static'", m.start, m.end);
     if (m.kind === "method" && !RUST_NAME.test(named)) throw new CompileError(`'${named}' can't name a Rust function; use letters, digits and '_'`, m.start, m.end);
     const member = rustPath(m.decorators, named, "member");
-    const declared = { ...m, decorators: [], body: [] } as ClassMember;
+    const declared = { ...m, id: nextId(), decorators: [], body: [] } as ClassMember;
     rustNames.set(declared, { crate, path: `${path}::${member}`, symbol: rustSymbol(crate, `${path}::${member}`) });
     return declared;
   });
   // The one field, the address of the boxed value, which nothing in Fish reads; the IR holds it
   // as a pointer. It is a number to the checker, so the handle crosses threads as its type does.
   const at = { start: c.start, end: c.start };
-  const handle: ClassMember = { kind: "field", name: HANDLE, optional: false, definite: false, type: { kind: "ref", name: "usize", args: [], ...at }, init: undefined, modifiers: [], decorators: [], ...at };
-  const declared = { ...c, decorators: [], members: [handle, ...members] };
+  const handle: ClassMember = { id: nextId(), kind: "field", name: HANDLE, optional: false, definite: false, type: { id: nextId(), kind: "ref", name: "usize", args: [], ...at }, init: undefined, modifiers: [], decorators: [], ...at };
+  const declared = { ...c, id: nextId(), decorators: [], members: [handle, ...members] };
   rustClassNodes.set(declared, { crate, path, name: c.name });
   return declared;
 }
@@ -573,7 +574,7 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
         l.exports.set("default", { local: value.name });
         continue;
       }
-      const declaration: Stmt = s.declaration ?? { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: "default", start: s.start, end: s.end }, type: undefined, init: value, start: s.start, end: s.end }], start: s.start, end: s.end };
+      const declaration: Stmt = s.declaration ?? { id: nextId(), kind: "let", keyword: "const", declarations: [{ id: nextId(), target: { id: nextId(), kind: "ident", name: "default", start: s.start, end: s.end }, type: undefined, init: value, start: s.start, end: s.end }], start: s.start, end: s.end };
       if ((declaration.kind === "function" || declaration.kind === "class") && declaration.name === undefined) declaration.name = "default";
       declare(declaration);
       l.exports.set("default", { local: namesOf(declaration)[0] ?? "default" });
@@ -584,7 +585,7 @@ function linkOf(module: Module, index: number, library: boolean): Linked {
     if (!l.body.some((s) => s.kind === "function" && s.name === sp.name)) continue;
     const at = l.body.findIndex((s) => s.kind === "function" && s.name === sp.name && s.body !== undefined);
     if (at < 0 || (sp.alias !== undefined && sp.alias !== sp.name)) throw cOnly(sp);
-    l.body[at] = { kind: "export", body: l.body[at]!, start: l.body[at]!.start, end: l.body[at]!.end };
+    l.body[at] = { id: nextId(), kind: "export", body: l.body[at]!, start: l.body[at]!.start, end: l.body[at]!.end };
     l.own.get(sp.name)!.fixed = true;
   }
   for (const [name, from] of module.globals) if (!l.own.has(name) && !l.imports.has(name) && !spaces.has(name)) spaces.set(name, { from, explicit: false });
@@ -657,18 +658,18 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     // `env.HOME` and `env[k]` on a table imported by name call it with the key.
     const imported = n.object as { kind?: string; name?: string; start?: number; end?: number } | undefined;
     if ((n.kind === "member" || n.kind === "index") && !n.optional && imported?.kind === "ident" && valued.get(imported.name!) === "table" && !hidden.has(imported.name!)) {
-      const key = n.kind === "member" ? { kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
+      const key = n.kind === "member" ? { id: nextId(), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
       walk(key, hidden);
-      const callee = { kind: "ident", name: imported.name, start: imported.start, end: imported.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
+      const callee = { id: nextId(), kind: "ident", name: imported.name, start: imported.start, end: imported.end };
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [key], optional: false });
       return true;
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
       if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
-      const callee = { kind: "ident", name: n.name, start: n.start, end: n.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
+      const callee = { id: nextId(), kind: "ident", name: n.name, start: n.start, end: n.end };
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
       return true;
     }
@@ -677,10 +678,10 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
       const alias = `${keyed.owner}:${keyed.name}`;
       if (!bound.has(alias)) bind(alias, keyed.space.from, keyed.name, n as unknown as Span);
       bound.add(alias);
-      const key = n.kind === "member" ? { kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
+      const key = n.kind === "member" ? { id: nextId(), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
       walk(key, hidden);
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end") delete n[k];
-      Object.assign(n, { kind: "call", callee: { kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
+      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
+      Object.assign(n, { kind: "call", callee: { id: nextId(), kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
       return true;
     }
     // A call's callee is the function itself; a value member elsewhere reads through its function.
@@ -715,9 +716,9 @@ function throughSpaces(body: Stmt[], spaces: Map<string, { from: Module; explici
     const alias = `${owner}:${name}`;
     if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
     bound.add(alias);
-    for (const key of Object.keys(n)) if (key !== "start" && key !== "end") delete n[key];
-    const ident = { kind: "ident", name: alias, start: n.start, end: n.end };
-    Object.assign(n, read && kind === "value" ? { kind: "call", callee: ident, typeArgs: [], args: [], optional: false } : ident);
+    for (const key of Object.keys(n)) if (key !== "start" && key !== "end" && key !== "id") delete n[key];
+    const ident = { id: nextId(), kind: "ident", name: alias, start: n.start, end: n.end };
+    Object.assign(n, read && kind === "value" ? { kind: "call", callee: ident, typeArgs: [], args: [], optional: false } : { ...ident, id: n.id });
     return true;
   };
   walk(body, new Set());
@@ -825,7 +826,7 @@ export function renameIn(v: unknown, to: (name: string) => string | undefined, s
   if (node.kind === "shorthand") {
     const as = to(node.name as string);
     // `{ x }` keeps its key while its value takes the new name.
-    if (as !== undefined) Object.assign(node, { kind: "property", key: node.name, value: { kind: "ident", name: as, start: node.start, end: node.end } });
+    if (as !== undefined) Object.assign(node, { kind: "property", key: node.name, value: { id: nextId(), kind: "ident", name: as, start: node.start, end: node.end } });
   } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
   if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
   Object.values(node).forEach((x) => renameIn(x, to, seen));
@@ -834,6 +835,6 @@ export function renameIn(v: unknown, to: (name: string) => string | undefined, s
 // A syntax tree as text, its keys in order and without its spans.
 function shapeOf(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(shapeOf).join(",")}]`;
-  if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => k !== "start" && k !== "end").sort().map((k) => `${k}:${shapeOf((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => k !== "start" && k !== "end" && k !== "id").sort().map((k) => `${k}:${shapeOf((v as Record<string, unknown>)[k])}`).join(",")}}`;
   return typeof v === "bigint" ? `${v}n` : JSON.stringify(v) ?? "";
 }

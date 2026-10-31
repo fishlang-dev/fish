@@ -5,6 +5,7 @@ import {
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters, typeReference } from "./types.ts";
+import { nextId } from "./nodes.ts";
 
 // Declarations beyond functions, aliases and interfaces: classes with their members,
 // modifiers and decorators; enums; namespaces; and ambient `declare` forms.
@@ -26,7 +27,7 @@ export function atDeclarationKeyword(c: Cursor): Stmt | undefined {
   if (c.at("declare") && sameLine && (DECLARABLE.has(next.text) && next.kind === "ident")) {
     c.next();
     const body = c.at("global") ? namespaceDeclaration(c) : statement(c);
-    return { kind: "declare", body, start, end: body.end };
+    return { id: nextId(), kind: "declare", body, start, end: body.end };
   }
   return undefined;
 }
@@ -49,9 +50,9 @@ function enumDeclaration(c: Cursor): Stmt {
     if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a member name", t);
     const payload = c.eat("(") ? c.list(() => type(c), ")") : undefined;
     const init = c.eat("=") ? expression(c) : undefined;
-    return { name: t.text, init, payload, start: t.start, end: c.end() };
+    return { id: nextId(), name: t.text, init, payload, start: t.start, end: c.end() };
   }, "}");
-  return { kind: "enum", name, const: isConst, typeParams, members, start, end: c.end() };
+  return { id: nextId(), kind: "enum", name, const: isConst, typeParams, members, start, end: c.end() };
 }
 
 // `namespace A.B { }`, `module A { }`, `module "m" { }`, `declare module "m";`, `global { }`.
@@ -62,16 +63,16 @@ function namespaceDeclaration(c: Cursor): Stmt {
   const quoted = !global && c.peek().kind === "string";
   let name = global ? "global" : quoted ? c.next().text : c.ident().text;
   while (!quoted && !global && c.eat(".")) name += "." + c.ident().text;
-  if (c.at("{")) return { kind: "namespace", name, quoted, global, body: block(c), start, end: c.end() };
+  if (c.at("{")) return { id: nextId(), kind: "namespace", name, quoted, global, body: block(c), start, end: c.end() };
   endStatement(c);
-  return { kind: "namespace", name, quoted, global, body: undefined, start, end: c.end() };
+  return { id: nextId(), kind: "namespace", name, quoted, global, body: undefined, start, end: c.end() };
 }
 
 export const atClass = (c: Cursor) => c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore);
 
 export function classDeclaration(c: Cursor, start: number, decorators: Expr[]): Stmt {
   const abstract = c.eat("abstract");
-  return { kind: "class", ...classNode(c, start, abstract, decorators) };
+  return { kind: "class", ...classNode(c, start, abstract, decorators), id: nextId() };
 }
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
@@ -93,7 +94,7 @@ export function classNode(c: Cursor, start: number, abstract: boolean, decorator
     if (c.peek().kind === "eof") throw c.error("expected '}'");
     if (!c.eat(";")) members.push(classMember(c));
   }
-  return { name, abstract, decorators, typeParams, extends: heritage, implements: implemented, members, start, end: c.end() };
+  return { id: nextId(), name, abstract, decorators, typeParams, extends: heritage, implements: implemented, members, start, end: c.end() };
 }
 
 // Any left-hand-side expression, as in `extends mixin(Base)`; type arguments after it, as
@@ -102,7 +103,7 @@ function baseClass(c: Cursor): Expr {
   const base = leftHandSide(c);
   if (!c.eat("<")) return base;
   const typeArgs = c.list(() => type(c), ">");
-  return { kind: "instantiation", expr: base, typeArgs, start: base.start, end: c.end() };
+  return { id: nextId(), kind: "instantiation", expr: base, typeArgs, start: base.start, end: c.end() };
 }
 
 const MODIFIERS = new Set(["public", "private", "protected", "static", "readonly", "abstract", "override", "declare", "accessor", "async"]);
@@ -120,27 +121,27 @@ function classMember(c: Cursor): ClassMember {
   }
   const member = { modifiers, decorators, start };
   if (modifiers.length === 1 && modifiers[0] === "static" && c.at("{")) {
-    return { ...member, modifiers: [], kind: "staticBlock", body: block(c), end: c.end() };
+    return { id: nextId(), ...member, modifiers: [], kind: "staticBlock", body: block(c), end: c.end() };
   }
   if (c.at("[") && c.peek(1).kind === "ident" && isToken(c.peek(2), ":")) {
     c.next();
     const params = parameters(c, "]");
     const valueType = annotation(c);
     endMember(c);
-    return { ...member, kind: "index", params, type: valueType, end: c.end() };
+    return { id: nextId(), ...member, kind: "index", params, type: valueType, end: c.end() };
   }
   if ((c.at("get") || c.at("set")) && startsName(c.peek(1)) && !isToken(c.peek(1), "*")) {
     const kind = c.next().text as "get" | "set";
     const name = memberName(c);
     const params = parameters(c);
     const returnType = returnAnnotation(c);
-    return { ...member, kind, name, params, returnType, body: memberBody(c), end: c.end() };
+    return { id: nextId(), ...member, kind, name, params, returnType, body: memberBody(c), end: c.end() };
   }
   if (c.at("constructor") && isToken(c.peek(1), "(")) {
     c.next();
     const params = parameters(c);
     const throws = throwsClause(c);
-    return { ...member, kind: "constructor", params, ...(throws && { throws }), body: memberBody(c), end: c.end() };
+    return { id: nextId(), ...member, kind: "constructor", params, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const generator = c.eat("*");
   const name = memberName(c);
@@ -150,13 +151,13 @@ function classMember(c: Cursor): ClassMember {
     const params = parameters(c);
     const returnType = returnAnnotation(c);
     const throws = throwsClause(c);
-    return { ...member, kind: "method", name, optional, generator, typeParams, params, returnType, ...(throws && { throws }), body: memberBody(c), end: c.end() };
+    return { id: nextId(), ...member, kind: "method", name, optional, generator, typeParams, params, returnType, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const definite = !optional && c.eat("!");
   const fieldType = c.at(":") ? annotation(c) : undefined;
   const init = c.eat("=") ? expression(c) : undefined;
   endMember(c);
-  return { ...member, kind: "field", name, optional, definite, type: fieldType, init, end: c.end() };
+  return { id: nextId(), ...member, kind: "field", name, optional, definite, type: fieldType, init, end: c.end() };
 }
 
 // An overload signature or an abstract member has no body.
@@ -178,16 +179,16 @@ export function decoratorList(c: Cursor): Expr[] {
       c.expect(")");
     } else {
       const first = c.ident();
-      e = { kind: "ident", name: first.text, start: first.start, end: first.end };
+      e = { id: nextId(), kind: "ident", name: first.text, start: first.start, end: first.end };
       while (c.eat(".")) {
         const name = c.next();
         if (name.kind !== "ident" && name.kind !== "private") throw c.error("expected a property name", name);
-        e = { kind: "member", object: e, name: name.text, optional: false, start: e.start, end: name.end };
+        e = { id: nextId(), kind: "member", object: e, name: name.text, optional: false, start: e.start, end: name.end };
       }
     }
     if (c.eat("(")) {
       const args = c.list(() => expression(c), ")");
-      e = { kind: "call", callee: e, typeArgs: [], args, optional: false, start: e.start, end: c.end() };
+      e = { id: nextId(), kind: "call", callee: e, typeArgs: [], args, optional: false, start: e.start, end: c.end() };
     }
     decorators.push(e);
   }
@@ -226,7 +227,7 @@ function importDeclaration(c: Cursor): Stmt {
       while (c.eat(".")) entity += "." + c.next().text;
     }
     endStatement(c);
-    return { kind: "importEquals", typeOnly, name, require: module, entity, start, end: c.end() };
+    return { id: nextId(), kind: "importEquals", typeOnly, name, require: module, entity, start, end: c.end() };
   }
   let fallback: string | undefined;
   let namespace: string | undefined;
@@ -247,7 +248,7 @@ function importDeclaration(c: Cursor): Stmt {
   const module = moduleName(c);
   const attributes = c.eat("with") || (c.at("assert") && !c.peek().newlineBefore && c.eat("assert")) ? expression(c) : undefined;
   endStatement(c);
-  return { kind: "import", typeOnly, defer, default: fallback, namespace, named, module, attributes, start, end: c.end() };
+  return { id: nextId(), kind: "import", typeOnly, defer, default: fallback, namespace, named, module, attributes, start, end: c.end() };
 }
 
 // `import type from "m"` imports a default named `type`; `type` modifies only when an import
@@ -269,7 +270,7 @@ export function specifiers(c: Cursor): Specifier[] {
     const typeOnly = c.at("type") && named && !(isToken(next, "as") && after.kind === "ident" && !isToken(after, "as")) && c.eat("type");
     const name = specifierName(c);
     const alias = c.eat("as") ? specifierName(c) : undefined;
-    return { name, alias, typeOnly, start, end: c.end() };
+    return { id: nextId(), name, alias, typeOnly, start, end: c.end() };
   }, "}");
 }
 
@@ -292,33 +293,33 @@ export function exportDeclaration(c: Cursor, start: number, decorators: Expr[]):
   if (c.eat("default")) {
     const classStart = decorators.length > 0 ? start : c.peek().start;
     const all = [...decorators, ...decoratorList(c)];
-    if (atClass(c)) return { kind: "exportDefault", declaration: classDeclaration(c, classStart, all), value: undefined, start, end: end() };
+    if (atClass(c)) return { id: nextId(), kind: "exportDefault", declaration: classDeclaration(c, classStart, all), value: undefined, start, end: end() };
     if (all.length > 0) throw c.error("expected a class after decorators");
     if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) {
-      return { kind: "exportDefault", declaration: func(c, true), value: undefined, start, end: end() };
+      return { id: nextId(), kind: "exportDefault", declaration: func(c, true), value: undefined, start, end: end() };
     }
-    if (c.at("interface")) return { kind: "exportDefault", declaration: statement(c), value: undefined, start, end: end() };
+    if (c.at("interface")) return { id: nextId(), kind: "exportDefault", declaration: statement(c), value: undefined, start, end: end() };
     const value = expression(c);
     endStatement(c);
-    return { kind: "exportDefault", declaration: undefined, value, start, end: end() };
+    return { id: nextId(), kind: "exportDefault", declaration: undefined, value, start, end: end() };
   }
   if (decorators.length > 0 || c.at("@")) {
     const classStart = decorators.length > 0 ? start : c.peek().start;
     const all = [...decorators, ...decoratorList(c)];
     const body = atClass(c) ? classDeclaration(c, classStart, all) : decorated(c, classStart, all);
-    return { kind: "export", body, start, end: end() };
+    return { id: nextId(), kind: "export", body, start, end: end() };
   }
   if (c.eat("=")) {
     const value = expression(c);
     endStatement(c);
-    return { kind: "exportAssign", value, start, end: end() };
+    return { id: nextId(), kind: "exportAssign", value, start, end: end() };
   }
   if (c.at("as") && isToken(c.peek(1), "namespace")) {
     c.next();
     c.next();
     const name = c.ident().text;
     endStatement(c);
-    return { kind: "exportAsNamespace", name, start, end: end() };
+    return { id: nextId(), kind: "exportAsNamespace", name, start, end: end() };
   }
   // `export type { A }` and `export type * from`, but `export type A = B` is an alias.
   const typeOnly = c.at("type") && (isToken(c.peek(1), "{") || isToken(c.peek(1), "*")) && c.eat("type");
@@ -327,14 +328,14 @@ export function exportDeclaration(c: Cursor, start: number, decorators: Expr[]):
     c.expect("from");
     const module = moduleName(c);
     endStatement(c);
-    return { kind: "exportAll", typeOnly, alias, module, start, end: end() };
+    return { id: nextId(), kind: "exportAll", typeOnly, alias, module, start, end: end() };
   }
   if (c.at("{")) {
     const list = specifiers(c);
     const module = c.eat("from") ? moduleName(c) : undefined;
     endStatement(c);
-    return { kind: "exportNamed", typeOnly, specifiers: list, module, start, end: end() };
+    return { id: nextId(), kind: "exportNamed", typeOnly, specifiers: list, module, start, end: end() };
   }
   const body = statement(c);
-  return { kind: "export", body, start, end: body.end };
+  return { id: nextId(), kind: "export", body, start, end: body.end };
 }
