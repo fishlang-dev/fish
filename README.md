@@ -36,11 +36,14 @@ function main() {
 Ownership errors read in TypeScript terms:
 
 ```
-main.fsh:6:15: error: 'account.balance' can't be used here because 'account' was moved
+main.fsh:6:15: error[E0201]: 'account.balance' can't be used here because 'account' was moved
  6 |   console.log(account.balance)
    |               ^^^^^^^^^^^^^^^
 main.fsh:5:9: note: 'account' moved here: passing it to 'close' hands it over, as if 'close' kept it; pass 'account.clone()' to keep a copy
 ```
+
+Every error has a code, and `fishc explain E0201` says what it means, what TypeScript would
+have done, and how to fix it.
 
 ## Status
 

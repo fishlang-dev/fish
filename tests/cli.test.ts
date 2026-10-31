@@ -159,3 +159,11 @@ test("fishc run builds and runs a program with its arguments and exit code", () 
   expect(bad.out).toBe("");
   expect(bad.err).toContain("error[E0101]:");
 });
+
+test("fishc explain prints a code's explanation, and refuses a code that isn't one", () => {
+  const explained = fishc(root, "explain", "e0201");
+  expect([explained.code, explained.out.split("\n")[0], explained.err]).toEqual([0, "E0201: use of a moved value", ""]);
+  expect(explained.out).toContain("In TypeScript, both names would refer to the same object");
+  expect(fishc(root, "explain", "E9999")).toEqual({ code: 2, out: "", err: "fishc explain: 'E9999' isn't an error code; a code looks like E0201 or W0001, as an error shows it\n" });
+  expect(fishc(root, "explain").err).toBe("usage: fishc explain <code>\n");
+});
