@@ -7145,8 +7145,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const object = shared as ObjectType | ClassType;
     const result = temp();
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${fieldPath(object, e.name).join(", ")}`);
-    // A field read through an interface or object parameter takes the type its bound declares.
-    return convert(result, field(object, e.name)!.type, types.get(e)!);
+    // A field read through an interface or object parameter takes the type its bound declares. A
+    // class's field keeps its type as written, `?` markers included, which lowering drops.
+    return convert(result, lower(field(object, e.name)!.type), types.get(e)!);
   }
 
   // A nested function's environment built for one call, in a slot of its own.

@@ -114,3 +114,15 @@ function main() { print(f(5)) }
 class C { constructor(public a: i64, public b?: i64) {} }
 function main() { const c = new C(1); print(c.a, c.b) }
 // expect: 1 null
+// case: optional_field_in_class_array
+// A class's array of objects with an optional field reads as the type the field declares.
+type Token = { start: usize; raw?: string; subs?: usize[] }
+class Tokens {
+  list: Token[] = [{ start: 1, subs: [7, 8] }, { start: 2 }]
+  last(): Token { return { ...this.list[this.list.length - 1]! } }
+}
+function main() {
+  const t = new Tokens()
+  print(t.list.length, t.list[0]!.start, t.list[0]!.subs!.length, t.last().start, t.last().raw ?? "none")
+}
+// expect: 2 1 2 2 none
