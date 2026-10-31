@@ -1,10 +1,10 @@
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
-import { CompileError, indexText } from "./diag.ts";
+import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
-import { restText, MAP_CHANGES } from "./values.ts";
+import { indexText, restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
 import { field, holdsHandle, holdsPart, holdsMut, optionRef, redundantBang, bare, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { nextId, NodeMap } from "./nodes.ts";
