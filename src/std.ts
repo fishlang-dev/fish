@@ -2267,6 +2267,9 @@ class URLSearchParams {
 const URL_NAMES = ["URL", "URLSearchParams"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
+// std's top-level names for its own code: a program can't use them as std means them, so no
+// suggestion offers them.
+export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
 const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.

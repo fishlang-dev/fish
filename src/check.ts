@@ -1,7 +1,8 @@
 import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
-import { STD_BASE, stdFor } from "./std.ts";
+import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
+import { FILE_SPAN, fileNames } from "./modules.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
@@ -117,6 +118,8 @@ type Outer = {
   lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
   // The binding a name refers to, without capturing it.
   peek(name: string): Local | undefined;
+  // The names of the bindings in scope, for suggesting one.
+  inScope(): string[];
   // This body's binding for a variable of a body around it, capturing it if need be.
   reach(l: Local, at?: Expr | ObjectProp): Local;
   narrowed(l: Local): Type | undefined;
@@ -379,6 +382,7 @@ function macroShape(f: Func) {
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 export function check(written: Stmt[], library = false, macros = false, module = false): Checked {
+  const files = fileNames.get(written);
   resetTypes();
   resetEnums();
   lifts = 0;
@@ -525,6 +529,16 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
+  // The name the file holding `at` writes for a top-level name, or nothing when that file can't
+  // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
+  const reachedAs = (name: string, at: number): string | undefined => {
+    const file = files?.get(at - (at % FILE_SPAN));
+    const written = file?.get(name);
+    if (written !== undefined) return written;
+    if (files && [...files.values()].some((f) => f.has(name))) return undefined;
+    return STD_INTERNAL.has(name) || name.startsWith("__") ? undefined : name;
+  };
+  const reached = (names: Iterable<string>, at: number) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
   const main = byName.get("main");
   if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
 
@@ -544,6 +558,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
+    classNames: (at) => reached(classes.keys(), at),
   });
   classes.forEach(register);
   const { classNamed, construct, start, define } = genericClasses({
@@ -552,7 +567,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
   infersAliases((name) => aliases.get(name));
   const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
-    (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)));
+    (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)),
+    (at) => reached([...aliases.keys(), ...classes.keys(), ...templates.keys(), ...interfaces.keys(), ...enums.keys()], at));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   lowersInterfaces(interfaceInstance);
@@ -1230,6 +1246,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
+      names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
+      classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
@@ -1856,7 +1874,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner);
-      withSight(inSight, () => checkInstance(inner, { lookup, peek, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
+      withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       // A closure owning what it captures holds a nested function it uses as made here, so it
@@ -2412,6 +2430,10 @@ export function check(written: Stmt[], library = false, macros = false, module =
         if (local) return local;
       }
       return outer?.peek(name);
+    }
+
+    function inScope(): string[] {
+      return [...scopes.slice(hidden ? 1 : 0).flatMap((scope) => [...scope.keys()]), ...(outer?.inScope() ?? [])];
     }
 
     // By the binding itself, not its name, which a body in between may have taken for another.

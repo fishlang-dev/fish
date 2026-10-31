@@ -3,6 +3,7 @@ import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
+import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
@@ -21,9 +22,11 @@ type Checker = {
   instanceOf(f: Body): Instance;
   definition(f: Body): Instance;
   checkBody(i: Instance): void;
+  // The names of the classes a use at `at` reaches, for suggesting one.
+  classNames(at: number): string[];
 };
 
-export function registry({ classes, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
+export function registry({ classes, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -54,7 +57,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     if (linked.has(c) || c.baseName === undefined) return;
     if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = classes.get(c.baseName);
-    if (!base) throw new CompileError(`cannot find class '${c.baseName}'`, c.node.extends!.start, c.node.extends!.end);
+    if (!base) throw new CompileError(`cannot find class '${c.baseName}'${didYouMean(c.baseName, classNames(c.node.extends!.start))}`, c.node.extends!.start, c.node.extends!.end);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(base.type);
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);

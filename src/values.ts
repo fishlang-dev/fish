@@ -5,6 +5,7 @@ import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { Direct, Narrowing } from "./overloads.ts";
 import { CompileError, indexText } from "./diag.ts";
+import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
@@ -94,6 +95,10 @@ export type Context = {
   // of a body around it, captured if need be.
   peek(name: string): Local | undefined;
   reach(l: Local, at?: Expr | ObjectProp): Local;
+  // The names a use at `at` reaches, its bindings in scope then top-level values, for suggesting one.
+  names(at: number): string[];
+  // The names of the classes, generic ones included, a use at `at` reaches.
+  classNames(at: number): string[];
   // Records the bindings a call of a nested function builds its environment from.
   envOf(e: Expr, of: Instance, env: Local[]): void;
   // Whether a binding is the one a sync nested function's declaration makes.
@@ -1354,7 +1359,7 @@ export function expressions(ctx: Context) {
     if (target && (target as { macro?: boolean }).macro) throw new CompileError(`'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
-      throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+      throw new CompileError(`unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }
     if (target.foreign && !target.rust) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
     if (target.js) jsCalls.set(e, target.js);
@@ -1435,7 +1440,7 @@ export function expressions(ctx: Context) {
   function untag(e: Extract<Expr, { kind: "tagged" }>) {
     const { tag, template } = e;
     const target = tag.kind === "ident" && !lookup(tag.name) ? byName.get(tag.name) : undefined;
-    if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'`, tag.start, tag.end);
+    if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'${didYouMean(tag.name, ctx.names(tag.start))}`, tag.start, tag.end);
     if (!target || tag.kind !== "ident") throw new CompileError("a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
     const shape = `'comptime strings: TemplateStringsArray, ...values: T[]'`;
     if (!tagStrings(target.params[0])) {
@@ -1756,7 +1761,7 @@ export function expressions(ctx: Context) {
       return { type: "string", what: "'concat'" };
     }
     const method = STRING_METHODS[callee.name];
-    if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
+    if (!method) throw new CompileError(`strings have no method '${callee.name}' yet${didYouMean(callee.name, Object.keys(STRING_METHODS))}`, callee.start, callee.end);
     const [params, returns, required] = method;
     if (e.args.length < required || e.args.length > params.length) {
       const count = required === params.length ? `${required}` : `${required} or ${params.length}`;
@@ -1829,7 +1834,7 @@ export function expressions(ctx: Context) {
   // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or
   // gives an empty Option. Both change the array.
   function arrayCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
-    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet`, callee.start, callee.end);
+    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -2655,7 +2660,7 @@ export function expressions(ctx: Context) {
   function mapCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
     const name = callee.name;
     const kind = t.set ? "Set" : "Map";
-    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet`, callee.start, callee.end);
+    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet${didYouMean(name, t.set ? SET_METHODS : MAP_METHODS)}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported(`optional chains calling '${kind}' methods`, callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     const count = MAP_ARGUMENTS[name]!;
@@ -3471,7 +3476,7 @@ export function expressions(ctx: Context) {
     const inner = lower(t.of);
     if (typeof inner !== "string" && inner.kind === "class") classOf(inner);
     const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
-    if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'${didYouMean(e.name, memberNames(inner))}`, e.start, e.end);
     if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
     // A Rust value is reached only under the lock, and a read here would copy its handle out.
     let rust: RustClass | undefined;
@@ -3619,7 +3624,7 @@ export function expressions(ctx: Context) {
   function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
-    if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
     if (typeArgs.length > 0 && typeArgs.length !== data.params.length) {
       const n = data.params.length;
       throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, e.start, e.end);
@@ -3763,7 +3768,7 @@ export function expressions(ctx: Context) {
   function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Extract<Type, { kind: "param" | "interface" }>): { type: Type; what: string } {
     const trait = receiver.kind === "param" ? receiver.bound : receiver;
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
-    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${receiver.name}'${didYouMean(callee.name, memberNames(receiver))}`, callee.start, callee.end);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
@@ -3924,14 +3929,14 @@ export function expressions(ctx: Context) {
       const found = inherited(named, "statics", name);
       const property = found ? undefined : staticOf(named, name);
       if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${property.declaring.type.name}', not a method; read it as '${named.type.name}.${name}'`, callee.start, callee.end);
-      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
+      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'${didYouMean(name, staticNames(named))}`, callee.start, callee.end);
       visible(found.access, found.owner!, name, callee);
       return found;
     }
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
-    if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'${didYouMean(name, memberNames(type))}`, callee.start, callee.end);
     visible(found.access, found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);
     else if (found.self!.mutable) mutates(object, name);
@@ -3944,7 +3949,7 @@ export function expressions(ctx: Context) {
     if (!base) throw new CompileError("'super' can only be used in a class that extends another", callee.start, callee.end);
     if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
     const found = inherited(classOf(base), "methods", callee.name);
-    if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'${didYouMean(callee.name, memberNames(base))}`, callee.start, callee.end);
     visible(found.access, found.owner!, callee.name, callee);
     if (found.self!.mutable && !self!.mutable) {
       throw new CompileError(`cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
@@ -3957,12 +3962,45 @@ export function expressions(ctx: Context) {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (!access || access === "public" || owner === declaring) return;
-    if (access === "protected" && owner && derives(owner, declaring)) return;
+    if (accessible(access, declaring)) return;
     const message = name.startsWith("#")
       ? `property '${name}' is not accessible outside class '${declaring.name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
+  }
+
+  function accessible(access: Access | undefined, declaring: ClassType): boolean {
+    return !access || access === "public" || owner === declaring || (access === "protected" && owner !== undefined && derives(owner, declaring));
+  }
+
+  // The members of a type this body can reach, for suggesting one: an object's fields; a
+  // class's fields, methods and accessors with its bases', those private or protected only where
+  // accessible; an interface's or a Dyn's fields and methods.
+  function memberNames(t: Type | undefined): string[] {
+    if (t === undefined || typeof t === "string") return [];
+    if (t.kind === "ref") return memberNames(t.to);
+    if (t.kind === "param") return memberNames(t.bound);
+    if (t.kind === "dyn") return memberNames(t.of);
+    if (t.kind === "interface") return [...t.fields, ...t.methods].map((m) => m.name);
+    if (t.kind === "object") return t.fields.map((f) => f.name);
+    if (t.kind !== "class") return [];
+    const names: string[] = [];
+    for (let c: ClassInfo | undefined = classOf(t); c; c = c.base) {
+      const declaring = c.type;
+      names.push(...declaring.fields.filter((f) => accessible(f.access, declaring)).map((f) => f.name));
+      for (const table of [c.methods, c.getters, c.setters]) for (const [name, body] of table) if (accessible(body.access, declaring)) names.push(name);
+    }
+    return names;
+  }
+
+  // A class's static members, with its bases', for suggesting one.
+  function staticNames(c: ClassInfo): string[] {
+    const names: string[] = [];
+    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+      for (const [name, body] of b.statics) if (accessible(body.access, b.type)) names.push(name.replace(/^[gs]et /, ""));
+      for (const [name, f] of b.staticFields) if (accessible(f.access, b.type)) names.push(name);
+    }
+    return names;
   }
 
   // The class whose own fields include `name`: `t` itself or a base it embeds.
@@ -4072,7 +4110,7 @@ export function expressions(ctx: Context) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
             : enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
-            : `cannot find name '${e.name}'`;
+            : `cannot find name '${e.name}'${didYouMean(e.name, ctx.names(e.start))}`;
           throw new CompileError(message, e.start, e.end);
         }
         if (!reachable(local)) {
@@ -4148,7 +4186,7 @@ export function expressions(ctx: Context) {
         if (named?.data) return variant(e, named, true);
         if (named) {
           const found = named.members.get(e.name);
-          if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
+          if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'${didYouMean(e.name, named.members.keys())}`, e.start, e.end);
           return found;
         }
         if (e.object.kind === "ident") objects.add(e.object);
@@ -4173,7 +4211,7 @@ export function expressions(ctx: Context) {
         // A Map's or a Set's one property is its size, the number of entries it holds.
         if (typeof object !== "string" && object.kind === "map") {
           if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "size") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "size") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'${didYouMean(e.name, ["size", ...(object.set ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -4185,7 +4223,7 @@ export function expressions(ctx: Context) {
         }
         // A fixed array's one property is its length, known while compiling.
         if (isFixed(object)) {
-          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'${didYouMean(e.name, ["length"])}`, e.start, e.end);
           load();
           return "usize";
         }
@@ -4195,14 +4233,14 @@ export function expressions(ctx: Context) {
           if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
           // A shared value's array is read as a copy, which has only the room it needs.
           if (e.name === "capacity" && ctx.copiesOut.has(e.object)) throw new CompileError(`a shared value's array is read as a copy, so read its capacity inside '${placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
-          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'${didYouMean(e.name, ["length", "capacity", ...ARRAY_METHODS])}`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
         // A string's one property is its length in UTF-16 code units.
         if (stringLike(object)) {
           if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(STRING_METHODS)])}`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -4219,7 +4257,7 @@ export function expressions(ctx: Context) {
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
-        if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+        if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'${didYouMean(e.name, memberNames(object))}`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
         // Through a type parameter the field has its bound's type, and in an instance the
         // concrete class may give it with a getter.
@@ -4388,7 +4426,7 @@ export function expressions(ctx: Context) {
         }
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
-        if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+        if (!c) throw new CompileError(`only a class can be constructed with 'new'${e.callee.kind === "ident" && !lookup(e.callee.name) ? didYouMean(e.callee.name, ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
         const rust = rustClassOf(c.type);
         if (rust && !c.constructor.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
         constructs(c.constructor, list, argTypes);
@@ -5205,7 +5243,7 @@ export function expressions(ctx: Context) {
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
     const local = lookup(p.name, p);
-    if (!local) throw new CompileError(`cannot find name '${p.name}'`, p.start, p.end);
+    if (!local) throw new CompileError(`cannot find name '${p.name}'${didYouMean(p.name, ctx.names(p.start))}`, p.start, p.end);
     if (!reachable(local)) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
@@ -5518,7 +5556,7 @@ export function expressions(ctx: Context) {
     const index = t.of.methods.findIndex((m) => m.name === callee.name);
     const m = t.of.methods[index];
     if (!m) {
-      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : "";
+      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : didYouMean(callee.name, memberNames(t));
       throw new CompileError(`property '${callee.name}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
@@ -5576,7 +5614,7 @@ export function expressions(ctx: Context) {
     if (linked(e)) throw unsupported("optional chains through a Dyn", e);
     const f = t.of.fields.find((x) => x.name === e.name);
     if (!f) {
-      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : "";
+      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : didYouMean(e.name, memberNames(t));
       throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
     }
     // A copy of an Atomic, a Lock or a Dyn would change apart from the original.

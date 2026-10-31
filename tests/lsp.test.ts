@@ -168,6 +168,19 @@ test("a document's error is published at its place, and cleared when fixed or cl
   expect(await s.proc.exited).toBe(0);
 }, 20_000);
 
+test("a misspelled name's diagnostic suggests the near name", async () => {
+  const src = "function main() {\n  const count = 1;\n  print(cont);\n}\n";
+  const uri = Bun.pathToFileURL(file("suggest.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  const [d] = diagnostics(await s.next(published(uri)));
+  expect(d!.message).toBe("cannot find name 'cont'; did you mean 'count'?");
+  expect(d!.range.start).toEqual({ line: 2, character: 8 });
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
 test("a document that can't be checked is logged, and the server keeps serving", async () => {
   const uri = Bun.pathToFileURL(join(dir, "never-saved.fsh")).href;
   const s = await started();
