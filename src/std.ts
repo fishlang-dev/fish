@@ -381,14 +381,19 @@ class Headers {
   }
 }
 
-type RequestInit = { method?: string; headers?: Headers; body?: string; signal?: AbortSignal };
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
+
+// A body given as text or bytes, as the bytes sent.
+function __httpBody(body: string | u8[]): u8[] {
+  return typeof body === "string" ? new TextEncoder().encode(body) : body;
+}
 
 class Request {
   method: string;
   url: string;
   path: string;
   headers: Headers;
-  body: string;
+  body: u8[];
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -398,7 +403,7 @@ class Request {
     this.path = __urlRequestPath(url);
     let method = "GET";
     let headers = new Headers();
-    let body = "";
+    let body: u8[] = [];
     let signal = new AbortController().signal;
     if (init !== null) {
       const m = init.method;
@@ -406,7 +411,7 @@ class Request {
       const h = init.headers;
       if (h !== null) headers = h;
       const b = init.body;
-      if (b !== null) body = b;
+      if (b !== null) body = __httpBody(b);
       const s = init.signal;
       if (s !== null) signal = s;
     }
@@ -416,13 +421,19 @@ class Request {
     this.signal = signal;
   }
 
+  // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return this.body;
+    return new TextDecoder().decode(this.body);
+  }
+
+  // The body's bytes as they were sent.
+  async bytes(): Promise<u8[]> {
+    return this.body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(this.body);
+    return JSON.parse<T>(new TextDecoder().decode(this.body));
   }
 
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
@@ -442,11 +453,13 @@ class Response {
   status: i64;
   statusText: string;
   headers: Headers;
-  body: string;
+  body: u8[];
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
 
-  constructor(body?: string | null, init?: ResponseInit) {
+  // A text body is typed 'text/plain;charset=UTF-8' unless the headers say otherwise; bytes are
+  // given no type, as Bun does.
+  constructor(body?: string | u8[] | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
     let headers = new Headers();
@@ -458,15 +471,15 @@ class Response {
       const h = init.headers;
       if (h !== null) headers = h;
     }
-    let text = "";
-    if (body !== null) {
-      text = body;
+    let bytes: u8[] = [];
+    if (typeof body === "string") {
+      bytes = new TextEncoder().encode(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
-    }
+    } else if (body !== null) bytes = body;
     this.status = status;
     this.statusText = statusText;
     this.headers = headers;
-    this.body = text;
+    this.body = bytes;
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -474,7 +487,7 @@ class Response {
   static json<T>(data: Ref<T>, init?: ResponseInit): Response {
     let res = new Response(null, init);
     if (!res.headers.has("content-type")) res.headers.set("content-type", "application/json");
-    res.body = JSON.stringify(data);
+    res.body = new TextEncoder().encode(JSON.stringify(data));
     return res;
   }
 
@@ -482,13 +495,19 @@ class Response {
     return this.status >= 200 && this.status < 300;
   }
 
+  // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return this.body;
+    return new TextDecoder().decode(this.body);
+  }
+
+  // The body's bytes as they were sent.
+  async bytes(): Promise<u8[]> {
+    return this.body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(this.body);
+    return JSON.parse<T>(new TextDecoder().decode(this.body));
   }
 }
 
@@ -614,8 +633,9 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
         if (got.length === 0) return;
         for (const b of got) buffer.push(b);
       }
-      const body = new TextDecoder().decode(Http1.take(buffer, 0, length));
-      buffer = Http1.take(buffer, length, buffer.length as i64);
+      // The buffer becomes the body, so a large one isn't copied; what came after it is kept.
+      let body = buffer;
+      buffer = body.splice(length);
       const keep = Http1.keepAlive(head);
       const method = head.method;
       const version = head.version;
@@ -624,7 +644,9 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const signal = client.signal;
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
-      const req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, body: body, signal: signal });
+      // The body is set after, not passed in init, which would copy it.
+      let req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, signal: signal });
+      req.body = body;
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
       let res: Response;
@@ -633,7 +655,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       } catch (e) {
         done.abort();
         await watching;
-        await conn.write(new TextEncoder().encode(Http1.responseText(new Response("", { status: 500 }), false, true, version)), AbortSignal.timeout(30000));
+        await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
         return;
       }
       done.abort();
@@ -643,8 +665,8 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A response that can't be sent as it stands, like a header value holding a line break,
       // goes out as a 500 instead.
-      const text = Http1.sendable(res) ? Http1.responseText(res, method === "HEAD", close, version) : Http1.responseText(new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
-      await conn.write(new TextEncoder().encode(text), AbortSignal.timeout(30000));
+      if (Http1.sendable(res)) await Http1.send(conn, res, method === "HEAD", close, version);
+      else await Http1.send(conn, new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
       if (close) return;
     }
   } catch (e) {
@@ -864,7 +886,21 @@ class Http1 {
   // Answers a request the server won't serve, and ends the connection.
   static async refuse(conn: Ref<TcpStream>, status: i64): Promise<void> throws IoError | AbortError {
     const res = new Response(Http1.reasonPhrase(status) + "\\n", { status: status });
-    await conn.write(new TextEncoder().encode(Http1.responseText(res, false, true, "HTTP/1.1")), AbortSignal.timeout(30000));
+    await Http1.send(conn, res, false, true, "HTTP/1.1");
+  }
+
+  // Writes a response. A small body goes out in one write with its head, since a second small
+  // write can wait on the client's delayed ACK; a large one is written as it is, not copied.
+  static async send(conn: Ref<TcpStream>, res: Response, head: boolean, close: boolean, version: string): Promise<void> throws IoError | AbortError {
+    let out = new TextEncoder().encode(Http1.responseText(res, head, close, version));
+    const sends = !head && res.status !== 204 && res.status !== 304;
+    if (!sends || res.body.length <= 16384) {
+      if (sends) for (const b of res.body) out.push(b);
+      await conn.write(out, AbortSignal.timeout(30000));
+      return;
+    }
+    await conn.write(out, AbortSignal.timeout(30000));
+    await conn.write(res.body, AbortSignal.timeout(30000));
   }
 
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
@@ -884,8 +920,8 @@ class Http1 {
     return Http1.take(buffer, at, buffer.length as i64);
   }
 
-  // The bytes from start to end, as a new array.
-  // ponytail: copies byte by byte; array slicing would save a large body two or three copies.
+  // The bytes from start to end, as a new array, for heads and other small pieces; a body is
+  // split off its buffer with splice instead of copied.
   static take(buffer: Ref<u8[]>, start: i64, end: i64): u8[] {
     let out: u8[] = [];
     for (let i = start as usize; i < (end as usize); i++) out.push(buffer[i]);
@@ -922,7 +958,7 @@ class Http1 {
 
   // A request's line, headers and body, as fetch sends it: the caller's headers in their order,
   // the framing and Host its own.
-  static requestText(req: Ref<Request>, authority: string, path: string): string throws IoError {
+  static requestBytes(req: Ref<Request>, authority: string, path: string): u8[] throws IoError {
     if (!Http1.isToken(req.method)) throw new IoError("can't fetch '" + req.url + "': '" + req.method + "' isn't a method name");
     let text = req.method + " " + path + " HTTP/1.1\\r\\nhost: " + authority + "\\r\\n";
     let bad = "";
@@ -933,9 +969,11 @@ class Http1 {
     if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
     if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
     if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
-    const size = new TextEncoder().encode(req.body).length as i64;
+    const size = req.body.length as i64;
     if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
-    return text + "connection: close\\r\\n\\r\\n" + req.body;
+    let out = new TextEncoder().encode(text + "connection: close\\r\\n\\r\\n");
+    for (const b of req.body) out.push(b);
+    return out;
   }
 
   // The next bytes of a response, which must come before the connection ends.
@@ -982,7 +1020,8 @@ class Http1 {
           const got = await Http1.more(conn, signal, "the response's body ended");
           for (const b of got) buffer.push(b);
         }
-        body = Http1.take(buffer, 0, length);
+        body = buffer;
+        body.splice(length);
       } else {
         body = buffer;
         while (true) {
@@ -992,7 +1031,7 @@ class Http1 {
         }
       }
       let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
-      res.body = new TextDecoder().decode(body);
+      res.body = body;
       return res;
     }
   }
@@ -1130,7 +1169,7 @@ class Http1 {
     return fine;
   }
 
-  // A response's status line, headers and body, as sent.
+  // A response's status line and headers, as sent.
   // The server frames the body itself, so a handler's own framing headers are left out; 204
   // and 304 have no body at all.
   static responseText(res: Ref<Response>, head: boolean, close: boolean, version: string): string {
@@ -1142,15 +1181,12 @@ class Http1 {
     });
     const bodiless = res.status === 204 || res.status === 304;
     if (!bodiless) {
-      const size = new TextEncoder().encode(res.body).length;
-      text = text + "content-length: " + String(size as i64) + "\\r\\n";
+      text = text + "content-length: " + String(res.body.length as i64) + "\\r\\n";
     }
     text = text + "date: " + httpDate() + "\\r\\n";
     if (close) text = text + "connection: close\\r\\n";
     else if (version === "HTTP/1.0") text = text + "connection: keep-alive\\r\\n";
-    text = text + "\\r\\n";
-    if (!head && !bodiless) text = text + res.body;
-    return text;
+    return text + "\\r\\n";
   }
 
   static reasonPhrase(status: i64): string {
@@ -1187,7 +1223,7 @@ async function fetch(input: string | Request | URL, init?: RequestInit): Promise
   const req = __urlFetchRequest(input, init);
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
-  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
+  const sent = Http1.requestBytes(req, to.authority, to.path);
   const conn = await TcpStream.connect(to.host, to.port, signal.clone());
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
@@ -1206,7 +1242,7 @@ function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): R
     const h = init.headers;
     if (h !== null) req.headers = h;
     const b = init.body;
-    if (b !== null) req.body = b;
+    if (b !== null) req.body = __httpBody(b);
     const s = init.signal;
     if (s !== null) req.signal = s;
   }

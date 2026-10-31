@@ -17,6 +17,44 @@ async function main(): Promise<void> {
   await attempt({ headerTimeout: -5 });
   await attempt({ port: 0, idleTimeout: -1 });
 }
+// case: http_binary
+// expect: got 0 255 195|text 3 true|again 3
+// expect: HTTP/1.1 200 OK|content-length: 3|content-type: false
+// expect: body 3|0 255 195
+// Bytes that aren't UTF-8 pass through serve untouched: req.bytes() gives them as sent, text()
+// decodes them with U+FFFD and can follow, and a u8[] response sends them with their length and
+// no content type.
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const bytes = await req.bytes();
+    const text = await req.text();
+    const again = await req.bytes();
+    console.log("got " + String(bytes[0]) + " " + String(bytes[1]) + " " + String(bytes[2]) + "|text " + String(text.length) + " " + String(text.endsWith("��")) + "|again " + String(again.length));
+    return new Response(bytes);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+  let raw = new TextEncoder().encode("POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 3\r\n\r\n");
+  raw.push(0);
+  raw.push(255);
+  raw.push(195);
+  await conn.write(raw);
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  const head = new TextDecoder().decode(all).split("\r\n\r\n")[0];
+  const lines = head.split("\r\n");
+  let length = "";
+  for (const line of lines) if (line.startsWith("content-length")) length = line;
+  console.log(lines[0] + "|" + length + "|content-type: " + String(head.includes("content-type")));
+  const n = all.length - head.length - 4;
+  console.log("body " + String(n) + "|" + String(all[all.length - 3]) + " " + String(all[all.length - 2]) + " " + String(all[all.length - 1]));
+}
 // case: http_body_limit
 // expect: at the limit|HTTP/1.1 200 OK|0123456789
 // expect: over the limit|HTTP/1.1 413 Content Too Large|true

@@ -49,7 +49,7 @@ function main() {
   const p: P = { a: undefined, b: null };
   shown(p);
   console.log(p, new C());
-  console.log(JSON.stringify(p), show(p), show([p.clone()]), Response.json(p).body);
+  console.log(JSON.stringify(p), show(p), show([p.clone()]), new TextDecoder().decode(Response.json(p).body));
 }
 // case: print_deep_and_signs
 // expect: { a: { b: { c: [Object], e: [], f: [Array], g: {}, h: [P] } } }
