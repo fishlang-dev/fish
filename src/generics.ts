@@ -70,7 +70,9 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     }
   }
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
+    // A type parameter holds its values, so a closure meeting one is boxed into a stored callable.
     arg = widenEnum(arg);
+    if (typeof arg !== "string" && (arg.kind === "closure" || arg.kind === "function")) arg = heldArgument(arg);
     const earlier = bindings.get(node.name);
     // A literal and its base type, as a string literal and a callback taking a string give,
     // agree on the base type, as TypeScript widens them.

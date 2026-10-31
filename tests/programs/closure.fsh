@@ -186,7 +186,7 @@ function main() {
 }
 // expect: 7 7
 // case: closure_escapes_generic
-// A closure in a value returned from a function can't borrow its locals.
+// A closure given for a type parameter is stored, so it can't borrow its locals.
 class S { constructor(public n: i64) {} }
 function wrap<T>(t: T) { return { v: t } }
 function mk() {
@@ -204,7 +204,7 @@ function main() {
   const f = w.v
   print(f())
 }
-// error: can't return a reference to 's', which belongs to this function
+// error: this closure borrows 's', but a stored callable owns what it captures
 // case: closure_field_initializer
 // Storing a closure in a field needs the heap, which isn't built yet.
 class H {

@@ -242,3 +242,110 @@ function main() {
   const c = new Box<(x: i64) => i64>(add1);
   console.log(c.value(3));
 }
+// case: fta_inferred_closure_reaches_type_arguments
+// expect: lit
+// expect: w1
+// expect: w3
+// expect: 5
+// expect: w2
+// A closure inferred for a generic function's T is boxed, so T inside the body, given to a class,
+// a Lock, a Cell, a Map or a Channel, is the same stored callable the caller passed.
+class Box<T> {
+  value: T;
+  constructor(value: T) {
+    this.value = value;
+  }
+}
+function wrap<T>(x: T): Box<T> {
+  return new Box(x);
+}
+function lockIt<T>(x: T): Lock<T> {
+  return new Lock<T>(x);
+}
+function cell<T>(x: T): Cell<T> {
+  return new Cell(x);
+}
+function single<V>(v: V): Map<string, V> {
+  let m = new Map<string, V>();
+  m.set("k", v);
+  return m;
+}
+async function carry<T>(x: T): Promise<T> {
+  const ch = new Channel<T>(1);
+  await ch.send(x);
+  const got = await ch.receive();
+  return got!;
+}
+async function main(): Promise<void> {
+  console.log(wrap(() => "lit").value());
+  const s = "w" + "";
+  const l = lockIt(move () => s + "1");
+  console.log(l.update((f) => f()));
+  const t = "w" + "";
+  const c = cell(move () => t + "3");
+  const old = c.replace(move () => "x");
+  console.log(old());
+  const m = single(() => 5);
+  console.log(m.get("k")!());
+  const u = "w" + "";
+  const f = await carry(move () => u + "2");
+  console.log(f());
+}
+// case: fta_inferred_closure_meets_boxed
+// expect: w!
+// expect: xyz xyz
+// expect: other
+// The closure is boxed to agree with T already decided as a callable, and arrays of T hold it.
+function store<T>(m: Mut<Map<string, T>>, k: string, x: T) {
+  m.set(k, x);
+}
+function dup<T>(x: T): T[] {
+  return [x.clone(), x];
+}
+function pick<T>(a: T, b: T, first: boolean): T {
+  if (first) return a;
+  return b;
+}
+function main() {
+  let m = new Map<string, () => string>();
+  const s = "w" + "";
+  store(m, "a", move () => s + "!");
+  console.log(m.get("a")!());
+  const t = "x" + "y";
+  const zs = dup(move () => t + "z");
+  console.log(zs[0](), zs[1]());
+  const q = "w" + "";
+  console.log(pick(move () => q, () => "other", false)());
+}
+// case: fta_parameter_names_ignored
+// expect: 2
+// expect: 3
+// expect: 3
+// Parameter names don't make a different function type, in a type argument too.
+class Box<T> {
+  value: T;
+  constructor(value: T) {
+    this.value = value;
+  }
+}
+function use(b: Box<(n: i64) => i64>): i64 {
+  return b.value(1);
+}
+function take(c: Channel<(q: i64) => i64>) {
+  c.close();
+}
+function main() {
+  const a = new Box<(m: i64) => i64>((m) => m + 1);
+  console.log(use(a));
+  let m = new Map<string, (n: i64) => i64>();
+  let m2: Map<string, (x: i64) => i64> = m;
+  m2.set("a", (x) => x);
+  console.log(m2.get("a")!(3));
+  take(new Channel<(n: i64) => i64>(1));
+  const l = new Lock<(n: i64) => i64>((n) => n);
+  const l2: Lock<(z: i64) => i64> = l;
+  const f: (n: i64) => i64 = (n) => n * 3;
+  const xs: ((n: i64) => i64)[] = [f];
+  const ys: ((x: i64) => i64)[] = xs;
+  console.log(ys[0](1));
+}
