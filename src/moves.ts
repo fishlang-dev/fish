@@ -18,16 +18,16 @@ import { nextId, NodeMap } from "./nodes.ts";
 // Where a place moved, the note explaining it, and the pass of each loop it moved on. A place
 // is a local's id, or `this`, followed by a field path, like `3.inner.x`.
 // A variable declared without a value is moved from the start, `unassigned`.
-type Move = { start: number; end: number; note: string; passes: NodeMap<Stmt, number>; unassigned?: boolean };
+type Move = { start: usize; end: usize; note: string; passes: NodeMap<Stmt, usize>; unassigned?: boolean };
 
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
 // A `for...of` loop lends its array for as long as it runs, as a call lends for its duration.
-type Loan = { place: string; mutable: boolean; start: number; end: number; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
+type Loan = { place: string; mutable: boolean; start: usize; end: usize; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
 
 // The places moved, and the loans made, on the way here, or null where control can't reach.
 // Loans are keyed by where they were made.
-type State = { moves: Map<string, Move>; loans: Map<number, Loan> } | null;
+type State = { moves: Map<string, Move>; loans: Map<f64, Loan> } | null;
 
 // How a consuming use hands a value over, as the note says it, given how the place reads.
 type Consumer = (place: string) => string;
@@ -74,13 +74,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const nexts = new NodeMap<Stmt, State>();
   // The guards running now, by where each starts: a guard's loan lasts only while it runs, even
   // in a state an error carried out of it.
-  const guarding = new Set<number>();
+  const guarding = new Set<usize>();
   // What each `for...of` over an array reached through a reference holds while it runs.
   const loopHolders = new NodeMap<Stmt, Local>();
   // How each match arm's block hands on what its `return`s give, as its match does.
   const arms = new NodeMap<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
-  const passes = new NodeMap<Stmt, number>();
+  const passes = new NodeMap<Stmt, usize>();
   const last = lastUses(body, instance);
   const byId = new Map([...locals.values()].map((l) => [l.id, l]));
   // What `this` keeps stays held to the end of the body, and after it.
@@ -138,13 +138,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Checks that no borrow of a variable that has gone out of scope by `end` is still held by a
   // variable from outside, and used after. A variable that is itself a reference only copies a
   // pointer to what it borrows, whose own loans are checked where that ends.
-  function dropped(gone: Set<Local>, end: number) {
+  function dropped(gone: Set<Local>, end: usize) {
     if (!state || gone.size === 0) return;
     const ids = new Map([...gone].map((l) => [String(l.id), l]));
     for (const loan of state.loans.values()) {
       const root = ids.get(loan.place.split(".")[0]!);
       if (!root || isRef(root.type)) continue;
-      const outside = [...loan.holders].filter((h) => !gone.has(h) && (last.get(h) ?? -1) > end);
+      const outside = [...loan.holders].filter((h) => !gone.has(h) && (last.get(h) ?? -1) > (end as f64));
       if (outside.length === 0) continue;
       const lent = pathOf(loan.place);
       throw new CompileError(`'${lent}' doesn't live long enough: ${named(outside).join(" and ")} still ${outside.length > 1 ? "borrow" : "borrows"} it after its block ends`, loan.start, loan.end, {
@@ -930,14 +930,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return [...new Set(holders.map((h) => (h.name === "for...of" ? "a 'for...of' loop" : `'${h.name}'`)))];
   }
 
-  function free(place: string, e: Named, access: Access, at: number = e.start) {
+  function free(place: string, e: Named, access: Access, at: usize = e.start) {
     if (!state) return;
     for (const loan of state.loans.values()) {
       if (!overlaps(loan.place, place) || !live(loan, at)) continue;
       if (!loan.mutable && (access === "read" || access === "lend")) continue;
       const lent = pathOf(loan.place);
       const verb = { read: "use", change: "change", move: "move", lend: "lend", "lend mutably": "mutably lend" }[access];
-      const holders = [...loan.holders].filter((h) => (last.get(h) ?? -1) > at);
+      const holders = [...loan.holders].filter((h) => (last.get(h) ?? -1) > (at as f64));
       const holder = loan.loop ? `a 'for...of' loop is reading '${lent}'`
         : loan.guard ? `a match guard is reading '${lent}', and later arms still test it`
         : loan.call
@@ -957,13 +957,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Other loans are keyed by whole numbers, or a temporary's by a half, so these keys and a
   // call's captures and an assignment's hold below take other fractions of an offset, which
   // never equal those.
-  function partKey(part: Named, i: number): number {
+  function partKey(part: Named, i: usize): f64 {
     return part.start + (i + 1) / 8192;
   }
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
   // A loan is keyed by where it starts, or by `key` for one no source offset may share.
-  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at: number = e.start, key: number = e.start) {
+  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at: usize = e.start, key: f64 = e.start as f64) {
     free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
     state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
@@ -1199,7 +1199,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return heldBy(root);
   }
 
-  function paramName(i: number): string {
+  function paramName(i: usize): string {
     const p = f.params[i]!.pattern;
     return p.kind === "ident" ? p.name : `parameter ${i + 1}`;
   }
@@ -1232,13 +1232,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // A loan lasts while one of its holders may still be used, or for its call.
-  function live(loan: Loan, at: number): boolean {
+  function live(loan: Loan, at: usize): boolean {
     if (loan.guard) return guarding.has(loan.start);
-    return loan.call !== undefined || [...loan.holders].some((h) => (last.get(h) ?? -1) > at);
+    return loan.call !== undefined || [...loan.holders].some((h) => (last.get(h) ?? -1) > (at as f64));
   }
 
   // Changing a place needs it free of loans; a setter changes the object it is called on.
-  function change(target: Expr, at: number = target.start) {
+  function change(target: Expr, at: usize = target.start) {
     const changed = setters.has(target) && target.kind === "member" ? target.object : target;
     const place = key(changed);
     if (place !== undefined) free(place, changed, "change", at);
@@ -1246,7 +1246,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Assigning a place gives it a value again, along with everything inside it, but nothing
   // can be assigned inside a value that has moved, nor while it is lent.
-  function assign(target: Expr, at: number) {
+  function assign(target: Expr, at: usize) {
     const place = key(target);
     if (place === undefined || setters.has(target)) {
       if (target.kind === "member") expr(target.object);
@@ -1494,7 +1494,7 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): Map<Local, number> {
+function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): Map<Local, f64> {
   const { holdsRef } = tables.typing;
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
@@ -1502,13 +1502,13 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
     const t = coercions.get(a) ?? types.get(a);
     return t !== undefined && holdsRef(t);
   };
-  const last = new Map<Local, number>();
+  const last = new Map<Local, f64>();
   const loops: Stmt[] = [];
   const declared = new Map<Local, Stmt[]>();
-  const used = (local: Local | undefined, at: number) => {
+  const used = (local: Local | undefined, at: usize) => {
     if (!local || !holdsRef(local.type)) return;
     const outer = loops.find((l) => !(declared.get(local) ?? []).includes(l));
-    last.set(local, Math.max(last.get(local) ?? -1, at, outer?.end ?? at));
+    last.set(local, Math.max(last.get(local) ?? -1, at as f64, (outer?.end ?? at) as f64));
   };
   const stmts = (list: Stmt[]) => list.forEach(stmt);
   function stmt(s: Stmt) {
@@ -1568,7 +1568,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
         return;
     }
   }
-  function expr(e: Expr, call?: number) {
+  function expr(e: Expr, call?: usize) {
     switch (e.kind) {
       case "ident":
         // A nested function used as a value uses what its closure lends from here.

@@ -15,7 +15,7 @@ export type Baseline = { failing: Record<string, string>; count: number };
 // main.ts runs, and it starts from its own top-level code rather than a main().
 export function survey(src = join(import.meta.dir, "..", "src")): Record<string, string | null> {
   const mirror = mkdtempSync(join(tmpdir(), "fish-selfhost-"));
-  const files = readdirSync(src).filter((f) => f.endsWith(".ts")).sort();
+  const files = readdirSync(src).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")).sort();
   try {
     for (const f of files) {
       const text = readFileSync(join(src, f), "utf8").replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.fsh$1");

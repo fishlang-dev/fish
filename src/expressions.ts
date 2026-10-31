@@ -12,7 +12,7 @@ import { nextId } from "./nodes.ts";
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
 // Binding power of each binary operator, as in TypeScript. All are left-associative but `**`.
-const PRECEDENCE: Record<BinaryOp, number> = {
+const PRECEDENCE: Record<BinaryOp, usize> = {
   "??": 1,
   "||": 2,
   "&&": 3,
@@ -126,7 +126,7 @@ function conditional(c: Cursor): Expr {
 const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "&&=", "||=", "??="]);
 
 // Like `>>`, `>>=`, `>>>=` and `<<=` arrive as separate adjacent tokens and are rejoined here.
-function assignOperator(c: Cursor): [AssignOp, number] | undefined {
+function assignOperator(c: Cursor): [AssignOp, usize] | undefined {
   const t = c.peek();
   if (t.kind !== "punct") return undefined;
   if (ASSIGN_OPERATORS.has(t.text)) return [t.text as AssignOp, 1];
@@ -190,11 +190,11 @@ const atTypeOperator = (c: Cursor) => (c.at("as") || c.at("satisfies")) && !c.pe
 
 // The operator at the cursor and how many tokens it spans. The lexer emits `>` alone so that
 // `A<B<C>>` closes two generics; `>>`, `>>>` and `>=` are rejoined here from adjacent tokens.
-function binaryOperator(c: Cursor): [BinaryOp, number] | undefined {
+function binaryOperator(c: Cursor): [BinaryOp, usize] | undefined {
   const t = c.peek();
   if (t.kind === "ident") return t.text === "instanceof" || (t.text === "in" && c.inAllowed) ? [t.text, 1] : undefined;
   if (t.kind !== "punct") return undefined;
-  const adjacent = (i: number, text: string) => isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
+  const adjacent = (i: usize, text: string) => isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
   if (t.text === "<") {
     // `<<=` arrives as `<` then `<=`, and is an assignment.
     if (adjacent(1, "<=")) return undefined;
@@ -329,7 +329,7 @@ function newExpression(c: Cursor): Expr {
 }
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
-export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; raw: string[]; parts: T[]; start: number; end: number } {
+export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
   const first = c.next();
   const quasis = [first.text];
   const raw = [first.raw ?? ""];
@@ -430,7 +430,7 @@ function matchHead(c: Cursor): Expr {
   return subject;
 }
 
-function matchExpression(c: Cursor, start: number, subject: Expr): Expr {
+function matchExpression(c: Cursor, start: usize, subject: Expr): Expr {
   c.expect("{");
   const arms = c.list(() => matchArm(c), "}");
   return { id: nextId(c.ids), kind: "match", subject, arms, start, end: c.end() };
@@ -486,7 +486,7 @@ function objectProp(c: Cursor): ObjectProp {
     const value = expression(c);
     return { id: nextId(c.ids), kind: "spread", value, start, end: value.end };
   }
-  const named = (offset: number) => isPropertyName(c.peek(offset)) || isToken(c.peek(offset), "[") || isToken(c.peek(offset), "*");
+  const named = (offset: usize) => isPropertyName(c.peek(offset)) || isToken(c.peek(offset), "[") || isToken(c.peek(offset), "*");
   const async = c.at("async") && named(1) && !c.peek(1).newlineBefore && c.eat("async");
   const generator = c.eat("*");
   if (!async && !generator && (c.at("get") || c.at("set")) && named(1)) {

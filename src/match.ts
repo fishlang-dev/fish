@@ -27,7 +27,7 @@ export type PatternTest =
   | { kind: "array"; element: Type; items: Pattern[] };
 export type PatternInfo = { type: Type } & PatternTest;
 
-export type LiteralValue = string | bigint | boolean | number | null;
+export type LiteralValue = string | bigint | boolean | f64 | null;
 
 // What an object pattern can take apart: an object, an instance, or a type parameter bounded by
 // an object type or an interface, as a parameter typed with one is.
@@ -148,7 +148,7 @@ function fieldTypes(c: Case): Type[] {
 }
 
 // The patterns for a case's fields when `p` can match a value of that case, or undefined.
-function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
+function specialize(ids: Ids, p: Pattern, c: Case, arity: usize, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
   const found = info(p);
   const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: nextId(ids), kind: "wildcard", start: p.start, end: p.end }));
   // On an Option, a pattern for a value is a pattern for what `Some` holds.

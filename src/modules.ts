@@ -27,7 +27,7 @@ export const FILE_SPAN = 2 ** 24;
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 // `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
 // `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: NodeMap<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
+export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: NodeMap<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
@@ -37,7 +37,7 @@ export type RustCrate = { dependency: RustDependency; dir: string };
 
 // The file a source offset is in, among a compilation's `files`, as written relative to the
 // entry's directory.
-export function fileAt(files: Compilation["files"], offset: number): string {
+export function fileAt(files: Compilation["files"], offset: usize): string {
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
@@ -130,7 +130,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
   };
   // A declaration file a package's declarations come from: given its own place in the program's
   // offsets, so a message about a declaration shows its line.
-  const declarationFile = (file: string, text: string = readFileSync(file, "utf8")): number => {
+  const declarationFile = (file: string, text: string = readFileSync(file, "utf8")): usize => {
     const key = `dts:${file}`;
     const known = byPath.get(key);
     if (known) return known.base;
@@ -174,13 +174,13 @@ export function load(compilation: Compilation, entry: string, src: string = read
       declaredHere.set(name, declared);
       let made: Stmt;
       try {
-        made = jsDeclaration(ids, declared, name, specifier, index, at, as);
+        made = jsDeclaration(ids, declared, name, specifier, index as usize, at, as);
       } catch (e) {
         // A declaration only referred to that Fish can't take is left out, refused where named.
         if (exported || !(e instanceof CompileError)) throw e;
         return;
       }
-      const overloads = jsOverloads(ids, declared, made, name, specifier, index);
+      const overloads = jsOverloads(ids, declared, made, name, specifier, index as usize);
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
       for (const s of [made, ...overloads]) shiftSpans(s, base);
@@ -336,12 +336,12 @@ function unwrapped(s: Stmt): Stmt {
 }
 
 // The members of a name a file reaches, as `ns.f`, each where it is first reached.
-function membersUsed(statements: Stmt[], name: string): { name: string; start: number; end: number }[] {
-  const found = new Map<string, { name: string; start: number; end: number }>();
+function membersUsed(statements: Stmt[], name: string): { name: string; start: usize; end: usize }[] {
+  const found = new Map<string, { name: string; start: usize; end: usize }>();
   const walk = (v: unknown) => {
     if (Array.isArray(v)) return v.forEach(walk);
     if (typeof v !== "object" || v === null) return;
-    const n = v as { kind?: string; object?: { kind?: string; name?: string }; name?: string; start?: number; end?: number };
+    const n = v as { kind?: string; object?: { kind?: string; name?: string }; name?: string; start?: usize; end?: usize };
     if (n.kind === "member" && n.object?.kind === "ident" && n.object.name === name && !found.has(n.name!)) found.set(n.name!, { name: n.name!, start: n.start!, end: n.end! });
     Object.values(v).forEach(walk);
   };
@@ -424,7 +424,7 @@ export function resolveSpecifier(from: string, specifier: string, at: Span): str
 type Decl = { name: string; unique: string; fixed: boolean };
 type Linked = {
   module: Module;
-  index: number;
+  index: usize;
   // The file's declarations with exports unwrapped, imports and re-exports left out.
   body: Stmt[];
   own: Map<string, Decl>;
@@ -537,7 +537,7 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
 // suffix out.
 const apart = (name: string, l: Linked) => `${name}-fsh${l.index}`;
 
-function linkOf(ids: Ids, module: Module, index: number, library: boolean): Linked {
+function linkOf(ids: Ids, module: Module, index: usize, library: boolean): Linked {
   const entry = index === 0;
   const l: Linked = { module, index, body: [], own: new Map(), imports: new Map(), exports: new Map(), stars: [], used: new Set() };
   const bind = (alias: string, from: Module, name: string, at: Span) => {
@@ -665,10 +665,10 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     };
     if (n.kind === "assign" && (n.target as { kind?: string }).kind !== undefined && table((n.target as { object?: unknown }).object)) {
       const t = table((n.target as { object?: unknown }).object)!;
-      throw new CompileError(`setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
+      throw new CompileError(`setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as usize, n.end as usize);
     }
     // `env.HOME` and `env[k]` on a table imported by name call it with the key.
-    const imported = n.object as { kind?: string; name?: string; start?: number; end?: number } | undefined;
+    const imported = n.object as { kind?: string; name?: string; start?: usize; end?: usize } | undefined;
     if ((n.kind === "member" || n.kind === "index") && !n.optional && imported?.kind === "ident" && valued.get(imported.name!) === "table" && !hidden.has(imported.name!)) {
       const key = n.kind === "member" ? { id: nextId(ids), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
       walk(key, hidden);
@@ -679,7 +679,7 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
-      if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
+      if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as usize, n.end as usize);
       const callee = { id: nextId(ids), kind: "ident", name: n.name, start: n.start, end: n.end };
       for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
@@ -719,12 +719,12 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
     if (!exports.includes(name)) {
       // A package's module holds only the members the file uses, so what else it has isn't listed.
-      if (space.explicit && space.from.whole) throw new CompileError(`'${space.from.file}' has no export '${name}'`, n.start as number, n.end as number);
-      if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
+      if (space.explicit && space.from.whole) throw new CompileError(`'${space.from.file}' has no export '${name}'`, n.start as usize, n.end as usize);
+      if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
       return false;
     }
     const kind = valuesOf(space.from)[name];
-    if (read && kind === "table") throw new CompileError(`'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as number, n.end as number);
+    if (read && kind === "table") throw new CompileError(`'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as usize, n.end as usize);
     const alias = `${owner}:${name}`;
     if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
     bound.add(alias);
@@ -774,13 +774,13 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
 
 // The std calls typed by their encoding, by module: which read, which write, and which take it
 // among other options, at the argument given.
-const ENCODED: Record<string, Record<string, "read" | "write" | number>> = {
+const ENCODED: Record<string, Record<string, "read" | "write" | usize>> = {
   "std:fs/promises": { readFile: "read", writeFile: "write" },
   "std:fs": { readFileSync: "read", writeFileSync: "write" },
   "std:child_process": { spawnSync: 2, execFileSync: 2, execSync: 1 },
 };
 
-const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][number]) => (p.kind === "property" && p.key === "encoding") || (p.kind === "shorthand" && p.name === "encoding");
+const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][usize]) => (p.kind === "property" && p.key === "encoding") || (p.kind === "shorthand" && p.name === "encoding");
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
 // it isn't a literal, or the object holds anything else and `others` doesn't allow it.

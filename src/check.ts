@@ -38,7 +38,7 @@ export type { Body } from "./classes.ts";
 type Func = Declared & { body: Stmt[] };
 
 // A local generic function's name stands for the function it was lifted to, `generic`.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -58,7 +58,7 @@ export type Instance = {
   bindings: Map<string, Type>;
   concrete: boolean;
   // How many generic instantiations led to this one, which bounds instantiations that never end.
-  depth: number;
+  depth: usize;
   // Its return type, written or inferred.
   returns: Type;
   // Every value expression's type.
@@ -113,7 +113,7 @@ export type Instance = {
   made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
   // Each call of a type predicate that narrows its argument: the predicate's type, and whether
   // its true and its false answers narrow, which codegen checks against the argument's tag.
-  predicates?: NodeMap<Expr, { index: number; type: Type; yes: boolean; no: boolean }>;
+  predicates?: NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -123,7 +123,7 @@ export type Instance = {
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: Map<Local, number>; loops: NodeMap<Stmt, number>; awaits: NodeMap<Expr, number> };
+  frame?: { locals: Map<Local, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -151,7 +151,7 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 // What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
 // `loop` is the loop it labels, if any. A match arm's block is where its `return`s go, with
 // whether the match gives a value and what they gave.
-type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: number; wanted?: boolean; gives?: [Expr, Type][] };
+type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: usize; wanted?: boolean; gives?: [Expr, Type][] };
 
 // The names a pattern binds.
 function namesIn(p: Pattern): string[] {
@@ -256,10 +256,10 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const { typing } = instance.tables;
   const { leafFuture, lower, lentPromise, nextResult, yieldsOf, promiseInterface } = typing;
   const fields: Field[] = [{ name: "state", type: "i32" }];
-  const locals = new Map<Local, number>();
-  const loops = new NodeMap<Stmt, number>();
+  const locals = new Map<Local, usize>();
+  const loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
-  const awaits = new NodeMap<Expr, number>();
+  const awaits = new NodeMap<Expr, usize>();
   const add = (l: Local) => {
     if (locals.has(l)) return;
     locals.set(l, fields.length);
@@ -547,14 +547,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   }
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
   // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
-  const reachedAs = (name: string, at: number): string | undefined => {
+  const reachedAs = (name: string, at: usize): string | undefined => {
     const file = files?.get(at - (at % FILE_SPAN));
     const written = file?.get(name);
     if (written !== undefined) return written;
     if (files && [...files.values()].some((f) => f.has(name))) return undefined;
     return STD_INTERNAL.has(name) || name.startsWith("__") ? undefined : name;
   };
-  const reached = (names: Iterable<string>, at: number) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
+  const reached = (names: Iterable<string>, at: usize) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
   const main = byName.get("main");
   if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
 
@@ -1302,13 +1302,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // narrows only when nothing assigns to its name.
     const facts: Facts[] = [];
     // The list being checked and the place in it, for a statement that becomes several.
-    let siblings: { list: Stmt[]; at: number } | undefined;
+    let siblings: { list: Stmt[]; at: usize } | undefined;
     // For each enclosing `try`, the errors its block raises so far, where and of what type.
     const handlers: [Expr | Stmt, Type][][] = [];
     // How many comptime blocks or expressions the code being checked is inside, and for each
     // block, how many targets were open when it began, which nothing inside may jump to.
     let comptimeDepth = 0;
-    const floors: number[] = [];
+    const floors: usize[] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
     const changed: Local[] = [];
     // The expression an expression statement being checked consists of.
@@ -1318,7 +1318,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A capture narrows as a variable of the closure's would.
     const narrowable = (l: Local) => (captures?.has(l) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && l.type.mutable);
     // How many scopes enclose each binding's declaration.
-    const depths = new Map<Local, number>();
+    const depths = new Map<Local, usize>();
     // Bindings declared directly in a switch case body whose checking has finished.
     const caseOnly = new Set<Local>();
     // A call of a function whose result is `x is T` narrows its argument for x to T.
@@ -1326,7 +1326,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const target = calls.get(call);
       const p = target?.body.returnType;
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
-      const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
+      const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
       const type = withScope(target.bindings, () => resolveType(p.type!));
       return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
     };
@@ -1754,7 +1754,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // in the list being checked, so the names own the parts as Rust's `let` does. A nested
     // pattern is a declaration of its own, destructured in turn. A default is taken when its
     // part is null.
-    function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: number } | undefined): undefined {
+    function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: usize } | undefined): undefined {
       if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
       // A place is read part by part where it is, so only the parts named move out of it, as in
       // Rust; any other value goes to a variable named for the pattern, as messages show it.
@@ -1966,7 +1966,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
 
     // Facts proven before a statement that carry past it, less any it gave another member.
-    function current(proven: Facts, mark: number): Facts {
+    function current(proven: Facts, mark: usize): Facts {
       const gone = changed.slice(mark);
       return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
     }
@@ -2080,7 +2080,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
 
     // A parameter's type is written, or else the one the function type the closure meets gives.
-    function closureParam(p: Param, i: number, expected: FunctionType | undefined): Type {
+    function closureParam(p: Param, i: usize, expected: FunctionType | undefined): Type {
       const given = expected?.params[i];
       if (expected && !given && !p.type) {
         const n = expected.params.length;
@@ -2793,7 +2793,7 @@ const describes = (t: Type) => isInterface(t) || (typeof t !== "string" && t.kin
 const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 // What a returned reference borrows from: a parameter, by index, or `this`.
-export type Origin = number | "this";
+export type Origin = usize | "this";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 

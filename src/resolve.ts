@@ -63,7 +63,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
 export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
-  conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: number) => string[]) {
+  conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: usize) => string[]) {
   const { declaredTypes, defaulted, presetTypes, ids } = tables;
   const { typing } = tables;
   const {

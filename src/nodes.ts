@@ -3,22 +3,22 @@
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
 // Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
-export type Id = { id: number };
+export type Id = { id: usize };
 
 // The counter ids come from, the last one given. Each compilation holds its own, which serves
 // every tree it parses or makes, at any time, so none share an id; a tree parsed on its own, as
 // the formatter's, has a counter of its own.
-export type Ids = { last: number };
+export type Ids = { last: usize };
 
 // A fresh id from `ids`.
-export function nextId(ids: Ids): number {
+export function nextId(ids: Ids): usize {
   return ++ids.last;
 }
 
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the
 // first one it got. `next` gives the ids.
-export function renumber<T>(tree: T, next: () => number): T {
+export function renumber<T>(tree: T, next: () => usize): T {
   const seen = new Set<unknown>();
   const walk = (v: unknown): void => {
     if (typeof v !== "object" || v === null || seen.has(v)) return;
@@ -34,7 +34,7 @@ export function renumber<T>(tree: T, next: () => number): T {
 
 // The node behind each id is kept, so a different object arriving with an id already in use, a
 // copy that kept its original's id, fails loudly instead of reading or replacing its entry.
-function idOf(node: Id, known: Id | undefined): number {
+function idOf(node: Id, known: Id | undefined): usize {
   const id = node.id;
   if (typeof id !== "number") throw new Error(`internal error: a ${(node as { kind?: string }).kind ?? "node"} node has no id`);
   if (known !== undefined && known !== node) throw new Error(`internal error: two nodes share id ${id}`);
@@ -43,13 +43,13 @@ function idOf(node: Id, known: Id | undefined): number {
 
 // A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys.
 export class NodeMap<K extends Id, V> {
-  private table = new Map<number, { node: K; value: V }>();
+  private table = new Map<usize, { node: K; value: V }>();
 
   constructor(entries?: Iterable<readonly [K, V]>) {
     if (entries) for (const [node, value] of entries) this.set(node, value);
   }
 
-  get size(): number {
+  get size(): usize {
     return this.table.size;
   }
 
@@ -97,13 +97,13 @@ export class NodeMap<K extends Id, V> {
 
 // A `Set` of nodes, keyed by their ids, holding each node as a `Set` holds its members.
 export class NodeSet<K extends Id> {
-  private table = new Map<number, K>();
+  private table = new Map<usize, K>();
 
   constructor(nodes?: Iterable<K>) {
     if (nodes) for (const n of nodes) this.add(n);
   }
 
-  get size(): number {
+  get size(): usize {
     return this.table.size;
   }
 
@@ -142,8 +142,8 @@ export class NodeSet<K extends Id> {
 // its node is collected; like a `WeakMap`, it can't be iterated. Unlike one, it holds each value
 // strongly, so a value that reaches its own node keeps that node alive.
 export class WeakNodeMap<K extends Id, V> {
-  private table = new Map<number, { node: WeakRef<K>; value: V }>();
-  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
+  private table = new Map<usize, { node: WeakRef<K>; value: V }>();
+  private gone = new FinalizationRegistry<usize>((id) => this.table.delete(id));
 
   get(node: K): V | undefined {
     return this.table.get(idOf(node, this.table.get(node.id)?.node.deref()))?.value;
@@ -167,8 +167,8 @@ export class WeakNodeMap<K extends Id, V> {
 
 // A `WeakSet` of nodes, keyed by their ids, holding each only weakly as `WeakNodeMap` does.
 export class WeakNodeSet<K extends Id> {
-  private table = new Map<number, WeakRef<K>>();
-  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
+  private table = new Map<usize, WeakRef<K>>();
+  private gone = new FinalizationRegistry<usize>((id) => this.table.delete(id));
 
   has(node: K): boolean {
     return this.table.has(idOf(node, this.table.get(node.id)?.deref()));

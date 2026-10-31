@@ -21,7 +21,7 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 // A tuple with optional elements has `required`, the count before them; each optional one holds
 // `T | null`. A tuple ending in `...T[]` has `rest`, T, and holds those elements as an array in
 // its field `...`.
-export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: number; rest?: Type };
+export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: usize; rest?: Type };
 
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
@@ -55,7 +55,7 @@ export type ParamType = { kind: "param"; name: string; bound: Bound | undefined;
 export type LiteralType = {
   kind: "literal"; value: string | bigint | boolean; fields: Field[];
   // For an enum's member: the enum, unique to its declaration, and the enum's own type.
-  owner?: { enum: string; member: string; id: number; of?: Type };
+  owner?: { enum: string; member: string; id: usize; of?: Type };
 };
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
@@ -82,7 +82,7 @@ export type ArrayType = { kind: "array"; element: Type; fields: Field[] };
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
-export type FixedType = { kind: "fixed"; element: Type; size: number; fields: Field[] };
+export type FixedType = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
 // runtime, its entries kept in insertion order.
 export type MapType = { kind: "map"; key: Type; value: Type; set: boolean; fields: Field[] };
@@ -113,7 +113,7 @@ export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
 export type Integer = "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize";
 export type Numeric = Integer | "f32" | "f64";
 
-export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
+export const INTEGERS: Record<Integer, { bits: usize; signed: boolean }> = {
   i8: { bits: 8, signed: true }, i16: { bits: 16, signed: true }, i32: { bits: 32, signed: true },
   i64: { bits: 64, signed: true }, i128: { bits: 128, signed: true }, isize: { bits: 64, signed: true },
   u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
@@ -258,7 +258,7 @@ export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void",
 // Over an array of `Promise<T>` values, `array` is its type, and the frame holds the array, the
 // values and a flag per future instead. `aggregate` is the AggregateError an `any` throws when
 // every future fails.
-export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: number; end: number } };
+export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: usize; end: usize } };
 const thrownBy = (f: FutureType | HandleType | DynType): Type | undefined => (f.kind === "dyn" ? undefined : f.throws);
 
 // `yieldNow()`'s future, which is pending once, then done.
@@ -495,7 +495,7 @@ export function field(t: Exclude<Type, string>, name: string): Field | undefined
 }
 
 // The indices that reach a field inside a value of `t`, through any embedded bases.
-export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
+export function fieldPath(t: ObjectType | ClassType, name: string): usize[] {
   const embeds = t.kind === "class" && t.base;
   const i = t.fields.findIndex((f) => f.name === name);
   if (i >= 0) return [i + (embeds ? 1 : 0)];
@@ -1292,7 +1292,7 @@ export function newTyping() {
 
   const refs = new Map<string, RefType>();
 
-  function fixedType(element: Type, size: number): FixedType {
+  function fixedType(element: Type, size: usize): FixedType {
     const key = `fixed ${size} ${keyOf(element)}`;
     let t = fixeds.get(key);
     if (!t) {
@@ -1366,7 +1366,7 @@ export function newTyping() {
   const maps = new Map<string, MapType>();
 
   // The variant `member` of an enum declaration (by its unique id) with these type arguments.
-  function variantType(enumName: string, id: number, member: string, args: Type[], payload: Type[]): VariantType {
+  function variantType(enumName: string, id: usize, member: string, args: Type[], payload: Type[]): VariantType {
     const key = `variant ${id} ${member} <${args.map(keyOf).join(",")}>`;
     let t = variants.get(key);
     if (!t) {
@@ -1543,7 +1543,7 @@ export function newTyping() {
   }
 
   // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
-  function tupleType(elements: Type[], required: number = elements.length, rest?: Type): ObjectType {
+  function tupleType(elements: Type[], required: usize = elements.length, rest?: Type): ObjectType {
     const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${keyOf(rest)}`}`;
     let t = interned.get(key);
     if (!t) {

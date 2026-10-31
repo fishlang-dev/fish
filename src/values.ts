@@ -100,9 +100,9 @@ export type Context = {
   peek(name: string): Local | undefined;
   reach(l: Local, at?: Expr | ObjectProp): Local;
   // The names a use at `at` reaches, its bindings in scope then top-level values, for suggesting one.
-  names(at: number): string[];
+  names(at: usize): string[];
   // The names of the classes, generic ones included, a use at `at` reaches.
-  classNames(at: number): string[];
+  classNames(at: usize): string[];
   // Records the bindings a call of a nested function builds its environment from.
   envOf(e: Expr, of: Instance, env: Local[]): void;
   dynOf(e: Expr, table: DynTable): void;
@@ -168,7 +168,7 @@ export type Context = {
   // Records a whole write through a narrowed mutable reference that may change its member.
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
-  depthOf(l: Local): number;
+  depthOf(l: Local): usize;
   // A written type, as this body sees it.
   resolveType(t: TypeNode): Type;
   // An arrow function's type, its body checked; and the instance a closure type runs.
@@ -180,9 +180,9 @@ export type Context = {
   resolveWith(t: TypeNode, scope: Map<string, Type>): Type;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
-  implicitOf(f: Body): Map<number, Bound>;
+  implicitOf(f: Body): Map<usize, Bound>;
   // The type an arrow argument of a generic body is checked against, once the others are known.
-  callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined;
+  callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined;
   // Rejects a constructor call lending a value mutably as a type parameter that would let its
   // read-only fields be written.
   constructs(f: Body, args: Expr[], argTypes: Type[]): void;
@@ -198,7 +198,7 @@ const TIMER_CALLS = new Set(["setTimeout", "setInterval", "clearTimeout", "clear
 
 // What a literal format does with the arguments after it, as the runtime's routine reads it:
 // the specifier each one it takes is given to, and where those left, appended, start.
-export function formatPlan(format: string, count: number): { specs: string[]; rest: number } {
+export function formatPlan(format: string, count: usize): { specs: string[]; rest: usize } {
   const specs: string[] = [];
   let taken = 0;
   let last = 0;
@@ -245,12 +245,12 @@ export function integerMethod(name: string): [string, string] | undefined {
   return family && INTEGER_METHODS[family]!.includes(operation!) ? [family, operation!] : undefined;
 }
 // `Math`'s functions on f64, by how many numbers each takes.
-export const MATH_FLOAT: Record<string, number> = {
+export const MATH_FLOAT: Record<string, usize> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
   sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1, asinh: 1, acosh: 1, atanh: 1,
   pow: 2, atan2: 2, hypot: 2,
 };
-export const MATH_CONSTANTS: Record<string, number> = {
+export const MATH_CONSTANTS: Record<string, f64> = {
   PI: Math.PI, E: Math.E, LN2: Math.LN2, LN10: Math.LN10, LOG2E: Math.LOG2E, LOG10E: Math.LOG10E, SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
 };
 
@@ -1433,7 +1433,7 @@ export function expressions(ctx: Context) {
   }
 
   // A call gives every parameter but the optional ones it leaves out, which come last.
-  function arity(given: number, params: Param[], at: Span) {
+  function arity(given: usize, params: Param[], at: Span) {
     // A rest parameter's array is packed from what follows the others, when they are all given.
     if (params.at(-1)?.rest && given < params.length - 1) {
       const least = params.filter((p) => !p.optional && !p.rest).length;
@@ -1935,7 +1935,7 @@ export function expressions(ctx: Context) {
       const t = value(a);
       coerce(a, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
     };
-    const counts: Record<string, [number, number, string]> = {
+    const counts: Record<string, [usize, usize, string]> = {
       shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
       splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
       reserve: [1, 1, "a count of elements to make room for"], shrinkToFit: [0, 0, "no arguments"],
@@ -2519,7 +2519,7 @@ export function expressions(ctx: Context) {
   // must be a plain value a raw write can't leave dangling, moving along by elements, and
   // telling whether it points anywhere.
   function pointerCall(e: Call, callee: Extract<Expr, { kind: "member" }>, p: PointerType): { type: Type; what: string } {
-    const counts: Record<string, number> = { read: 0, write: 1, offset: 1, isNull: 0 };
+    const counts: Record<string, usize> = { read: 0, write: 1, offset: 1, isNull: 0 };
     if (!(callee.name in counts)) throw new CompileError(`raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
     needsUnsafe(`'${callee.name}' on a raw pointer`, callee);
     if (linked(callee)) throw unsupported("optional chains calling raw pointer methods", callee);
@@ -2559,7 +2559,7 @@ export function expressions(ctx: Context) {
     if (t.which === "Cell") return cellCall(e, callee, t);
     if (t.which === "Lock") return lockCall(e, callee, t);
     if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
-    const takes: Record<string, number> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
+    const takes: Record<string, usize> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
     if (!(callee.name in takes)) throw new CompileError(`'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'Atomic' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : `${takes[callee.name]} arguments`}`, e.start, e.end);
@@ -2597,7 +2597,7 @@ export function expressions(ctx: Context) {
   // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
   // the old one, and `replace` puts one in and gives the old one back.
   function cellCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
-    const takes: Record<string, number> = { get: 0, set: 1, replace: 1 };
+    const takes: Record<string, usize> = { get: 0, set: 1, replace: 1 };
     if (!(callee.name in takes)) throw new CompileError(`'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'Cell' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
@@ -2761,7 +2761,7 @@ export function expressions(ctx: Context) {
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
-    const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
+    const methods: Record<string, usize> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
       : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
@@ -3334,7 +3334,7 @@ export function expressions(ctx: Context) {
   }
 
   // A numeric literal's value, negated or not: a bigint for an integer, a number for a float.
-  function numberLiteral(a: Expr): bigint | number | undefined {
+  function numberLiteral(a: Expr): bigint | f64 | undefined {
     if (a.kind === "int") return a.value;
     if (a.kind === "float") return a.value;
     if (a.kind === "unary" && a.op === "-") {
@@ -5988,7 +5988,7 @@ const syncFileSignatures = ({ arrayType, tupleType }: Typing): Record<string, [T
 });
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.
-const stringMethods = ({ unionType, arrayType }: Typing): Record<string, [Type[], Type, number]> => ({
+const stringMethods = ({ unionType, arrayType }: Typing): Record<string, [Type[], Type, usize]> => ({
   charCodeAt: [["usize"], "u16", 1],
   at: [["i64"], unionType(["string", "null"]), 1],
   charAt: [["i64"], "string", 1],
@@ -6042,7 +6042,7 @@ const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHe
 // A Map's and a Set's methods, how many arguments each takes, and those changing it.
 const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
 const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
-const MAP_ARGUMENTS: Record<string, number> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
+const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 

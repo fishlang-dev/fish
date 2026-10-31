@@ -15,7 +15,7 @@ const KINDS: Partial<Record<Stmt["kind"], string>> = { enum: "an enum", namespac
 // its types lowered to Fish's and marked as JS. A function stays one, a const becomes a function
 // read as a value, an interface or an object type alias a JS handle's shape, and a class the
 // shape of its instances with its constructors and statics. Its spans stay those of its file.
-export function jsDeclaration(ids: Ids, declared: Declared, name: string, specifier: string, pkg: number, at: Span, exported: string = name): Stmt {
+export function jsDeclaration(ids: Ids, declared: Declared, name: string, specifier: string, pkg: usize, at: Span, exported: string = name): Stmt {
   const d = unwrap(renumber(structuredClone(declared.at), () => nextId(ids)));
   const js: JsName = { module: specifier, package: pkg, name: exported };
   lowerTypes(d);
@@ -48,7 +48,7 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
 
 // The other signatures of a function declared more than once, each as a function of its own,
 // named apart; the first declared is `name`'s, which lists them, as a call tries them in order.
-export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: string, specifier: string, pkg: number): Stmt[] {
+export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: string, specifier: string, pkg: usize): Stmt[] {
   const first = unwrap(declared.at);
   if (first.kind !== "function" || made.kind !== "function") return [];
   const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);

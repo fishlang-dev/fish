@@ -38,7 +38,7 @@ export function fishFiles(dir: string, problem: Problem, top = true): string[] {
 // Formats the files `paths` name, a directory standing for its `.fsh` files, rewriting those that
 // change; with `check`, writes nothing and lists them instead. Gives the exit code: 1 when a file
 // isn't formatted under `check` or couldn't be formatted, else 0.
-export function formatPaths(paths: string[], check: boolean): number {
+export function formatPaths(paths: string[], check: boolean): i64 {
   let code = 0;
   const problem = (message: string) => {
     console.error(message);
@@ -80,7 +80,7 @@ export function formatPaths(paths: string[], check: boolean): number {
 
 // Formats standard input to standard output; with `check`, writes nothing and gives 1 when the
 // input isn't formatted.
-export function formatStdin(check: boolean): number {
+export function formatStdin(check: boolean): i64 {
   let code = 0;
   const problem = (message: string) => {
     console.error(message);
@@ -123,7 +123,7 @@ function formatted(text: string, name: string, problem: Problem): string | undef
 
 // Writes all of `bytes` to `fd` before returning, as the process may exit straight after and a
 // pipe takes only part of a large write at once.
-function writeAll(fd: number, bytes: Buffer) {
+function writeAll(fd: i32, bytes: Buffer) {
   for (let at = 0; at < bytes.length; ) {
     try {
       at += writeSync(fd, bytes, at, bytes.length - at);
@@ -180,9 +180,9 @@ export function rewrite(file: string, text: string, original: Buffer, to?: strin
 
 // Writes `bytes` over `file` in place, never through a link swapped in since it was looked at;
 // if the write fails partway, as when the disk is full, the original bytes are put back.
-function inPlace(file: string, bytes: Buffer, original: Buffer, seen: { dev: number; ino: number }): string | undefined {
+function inPlace(file: string, bytes: Buffer, original: Buffer, seen: { dev: u64; ino: u64 }): string | undefined {
   const changed = "it changed while it was being formatted";
-  let fd: number;
+  let fd: i32;
   try {
     fd = openSync(file, constants.O_WRONLY | constants.O_NOFOLLOW);
   } catch (e) {

@@ -469,7 +469,7 @@ export function dependencyOf(packages: Package[], file: string): Package | undef
 
 // The library file a bare import names, when the package holding the importing file depends on
 // a Fish package of that name; undefined sends it on to npm's packages.
-export function dependencyLib(packages: Package[], from: string, specifier: string, at: { start: number; end: number }): string | undefined {
+export function dependencyLib(packages: Package[], from: string, specifier: string, at: { start: usize; end: usize }): string | undefined {
   const owner = packageOf(packages, from);
   if (!owner) return undefined;
   const scoped = specifier.startsWith("@");

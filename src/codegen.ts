@@ -52,7 +52,7 @@ const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, 
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
-function floatConstant(value: number, type: "f32" | "f64"): string {
+function floatConstant(value: f64, type: "f32" | "f64"): string {
   const view = new DataView(new ArrayBuffer(8));
   view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
   return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
@@ -167,7 +167,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   let labels = 0;
   // Each variable's number in the function being emitted, which tells apart two of one name.
   // Counted per function, so a function's IR doesn't change with the program around it.
-  let numbered = new Map<Local, number>();
+  let numbered = new Map<Local, usize>();
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   // The instance being emitted, and the tables its checking produced.
@@ -181,11 +181,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const known = new NodeMap<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
   // the slot its error goes in.
-  const handlers: { label: string; slot: string; depth: number; floor: number }[] = [];
+  const handlers: { label: string; slot: string; depth: usize; floor: usize }[] = [];
   // The `finally` regions enclosing the code being emitted, innermost last.
   const finallies: Region[] = [];
   // Where a `break` and a `continue` go for each statement they can name.
-  const exits = new NodeMap<Stmt, { exit: string; next?: string; depth: number }>();
+  const exits = new NodeMap<Stmt, { exit: string; next?: string; depth: usize }>();
   // Values the statement being emitted made and nothing took over, released when it ends.
   // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
   let pending: { v: string; type: Type; slot?: string }[] = [];
@@ -223,7 +223,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const inspectors = new Map<Type, string>();
   // Each async instance's awaits, by the state it is paused in at each: the frame field the
   // awaited future is in, and its type, for cancelling it there.
-  const awaitsOf = new Map<Instance, { state: number; field: number; type: Type }[]>();
+  const awaitsOf = new Map<Instance, { state: usize; field: usize; type: Type }[]>();
   // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
   // cancel function is wanted for.
   const combinePolls = new Map<FutureType, string>();
@@ -322,7 +322,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
     // given, which already holds its parameters.
     if (resuming) {
-      const field = (at: string, i: number) => {
+      const field = (at: string, i: usize) => {
         allocas.push(`  ${at} = getelementptr ${resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
         framed.add(at);
       };
@@ -655,7 +655,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (name in MATH_FLOAT && name !== "round") return call(`@fsh_math_${name}`, args);
     const [x] = args as [string];
     const float = isFloat(type);
-    const number = (n: number) => (float ? floatConstant(n, type) : String(n));
+    const number = (n: f64) => (float ? floatConstant(n, type) : String(n));
     if (name === "round") {
       const down = call("@llvm.floor.f64", [x]);
       const up = op(`fcmp oge double ${op(`fsub double ${x}, ${down}`)}, ${floatConstant(0.5, "f64")}`);
@@ -1044,7 +1044,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // The byte offset of part `i` of an LLVM struct type, or with no `i`, the type's size.
-  function offsetOf(type: string, i?: number): string {
+  function offsetOf(type: string, i?: usize): string {
     const [at, n] = [temp(), temp()];
     emit(i === undefined ? `${at} = getelementptr ${type}, ptr null, i64 1` : `${at} = getelementptr ${type}, ptr null, i64 0, i32 ${i}`);
     emit(`${n} = ptrtoint ptr ${at} to i64`);
@@ -1452,7 +1452,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // Arguments going to JS, each a new JS value in a buffer of boxes the call gives up; `optional`
   // says which parameters JS may leave out, so an empty value is undefined there.
-  function jsArgv(args: Expr[], optional: (i: number) => boolean): string {
+  function jsArgv(args: Expr[], optional: (i: usize) => boolean): string {
     const boxes = args.map((a, i) => {
       jsSite = a;
       const to = coercions.get(a);
@@ -1489,7 +1489,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // Which parameters of the method, constructor or static a call takes are written with `?`.
-  function optionalAt(call: Expr): (i: number) => boolean {
+  function optionalAt(call: Expr): (i: usize) => boolean {
     const optional = jsOptionalOf.get(call) ?? [];
     return (i) => optional[i] === true;
   }
@@ -1865,7 +1865,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // tuple by each element, an object by each property, and a handle's shape by having each
   // property it can't leave out, its literal properties matching. Nothing it reads throws.
   function jsMatches(box: string, m: Type): string {
-    const is = (kind: number, s = "null", d = "0.0") => {
+    const is = (kind: i32, s = "null", d = "0.0") => {
       const [r, b] = [temp(), temp()];
       emit(`${r} = call i32 @fsh_rt_js_is(ptr ${box}, i32 ${kind}, ptr ${s}, double ${d})`);
       emit(`${b} = icmp ne i32 ${r}, 0`);
@@ -1980,7 +1980,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // What `fsh_rt_js_is` takes to test for a literal: its kind, and its text or number.
-  function jsLiteral(value: string | bigint | boolean): [number, string, string] {
+  function jsLiteral(value: string | bigint | boolean): [i32, string, string] {
     if (typeof value === "string") return [5, text(value), "0.0"];
     if (typeof value === "boolean") return [value ? 7 : 6, "null", "0.0"];
     return [8, "null", floatConstant(Number(value), "f64")];
@@ -2465,7 +2465,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // The function in a vtable's slot after its drop, copy and clone.
-  function vslot(table: string, i: number): string {
+  function vslot(table: string, i: usize): string {
     const [at, fn] = [temp(), temp()];
     emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${3 + i}`);
     emit(`${fn} = load ptr, ptr ${at}`);
@@ -2572,7 +2572,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
-  function loopSlot(s: Stmt, i: number, type: string): string {
+  function loopSlot(s: Stmt, i: usize, type: string): string {
     return resuming ? `%loop${current.frame!.loops.get(s)! + i}` : alloca(type);
   }
 
@@ -3448,7 +3448,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // An array's element `i`, and where it lives.
-  function loadElement(data: string, element: Type, i: number): { v: string; at: string } {
+  function loadElement(data: string, element: Type, i: usize): { v: string; at: string } {
     const [at, v] = [temp(), temp()];
     emit(`${at} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
     emit(`${v} = load ${llvm(element)}, ptr ${at}`);
@@ -3456,7 +3456,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // A pointer to part `i` of an aggregate in memory.
-  function partAt(type: string, at: string, i: number): string {
+  function partAt(type: string, at: string, i: usize): string {
     const part = temp();
     emit(`${part} = getelementptr ${type}, ptr ${at}, i32 0, i32 ${i}`);
     return part;
@@ -3494,12 +3494,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
-  function parts(type: Exclude<Type, string>): [Type, number][] {
+  function parts(type: Exclude<Type, string>): [Type, usize][] {
     // A Lock is its word, then what it holds.
     if (type.kind === "interior") return type.which === "Lock" ? [[type.of, 1]] : [];
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
-    const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
-    return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
+    const base: [Type, usize][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
+    return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, usize] => [f.type, i + base.length])];
   }
 
   // A copy of a value, holding its own reference to each string in it.
@@ -3916,17 +3916,17 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
-  function jsonFields(c: ClassType): { name: string; type: Type; path: number[]; omit?: boolean }[] {
+  function jsonFields(c: ClassType): { name: string; type: Type; path: usize[]; omit?: boolean }[] {
     return c.base ? [...jsonFields(c.base).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
   }
 
-  function ownJsonFields(c: ClassType, offset: number) {
+  function ownJsonFields(c: ClassType, offset: usize) {
     return c.fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
   }
 
   // An object's fields; one spelled `x?: T` is left out while empty, so whether a comma is
   // needed is known only as the fields are written.
-  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: number[]; omit?: boolean }[]) {
+  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[]) {
     jsonRaw(w, "{");
     const dynamic = fields.some((f) => f.omit);
     const wrote = dynamic ? alloca("i1") : "";
@@ -4044,14 +4044,14 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // What each argument's description needs: a literal format says which specifier takes each,
   // so only that is built; one read at run time may ask anything of any.
-  function formatNeeds(args: Expr[]): { text: boolean; depth: number }[] {
+  function formatNeeds(args: Expr[]): { text: boolean; depth: i64 }[] {
     const [first] = args;
     if (first?.kind !== "string" || args.length < 2) {
       const inspected = !formats(args);
       return args.map(() => (inspected ? { text: false, depth: 2 } : { text: true, depth: 4 }));
     }
     const { specs, rest } = formatPlan(first.value, args.length);
-    const DEPTHS: Record<string, number> = { s: 0, O: 2, o: 4 };
+    const DEPTHS: Record<string, i64> = { s: 0, O: 2, o: 4 };
     return args.map((_, i) => {
       if (i === 0 || i >= rest) return { text: false, depth: 2 };
       const spec = specs[i - 1]!;
@@ -4062,14 +4062,14 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // An argument's description: its kind and value, and for a value with parts its String(x) when
   // `need.text` and its inspect tree, cut at `need.depth`, when that isn't -1. A union is
   // described by its member.
-  function describe(at: string, v: string, type: Type, need: { text: boolean; depth: number }) {
+  function describe(at: string, v: string, type: Type, need: { text: boolean; depth: i64 }) {
     const t = lower(type);
-    const put = (index: number, of: string, x: string) => {
+    const put = (index: usize, of: string, x: string) => {
       const p = temp();
       emit(`${p} = getelementptr ${FARG}, ptr ${at}, i32 0, i32 ${index}`);
       emit(`store ${of} ${x}, ptr ${p}`);
     };
-    const whole = (kind: number, x: string) => {
+    const whole = (kind: i32, x: string) => {
       put(0, "i32", String(kind));
       put(1, "i64", x);
     };
@@ -4448,7 +4448,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // An Error as Node prints one with its stack left out: its header, then the fields beyond
   // Error's own and its cause, read through what ErrorLike gives.
   // `shell`, past the depth, it keeps only whether it has more than its header to show.
-  function errorTree(v: string, t: ClassType, fields: { name: string; type: Type; path: number[]; omit?: boolean }[], depth: string, shell = false): string {
+  function errorTree(v: string, t: ClassType, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[], depth: string, shell = false): string {
     const blank = () => {
       const b = temp();
       emit(`${b} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
@@ -4806,7 +4806,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // An array's elements, each pushed as it is read; a failure drops what was read. `after` reads
   // on from a rest tuple's fixed elements, `from` of them, which `undo` drops on a failure.
-  function readElements(r: string, t: ArrayType, after?: { from: number; undo: () => void }): string {
+  function readElements(r: string, t: ArrayType, after?: { from: usize; undo: () => void }): string {
     const array = alloca(ARRAY);
     emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
     const undo = () => {
@@ -4864,7 +4864,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const opened = temp();
     emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
     jsonGuard(opened, "i32");
-    const read: { v: string; type: Type; i: number }[] = [];
+    const read: { v: string; type: Type; i: usize }[] = [];
     // Optional elements are read into slots, empty until read, since the array may end first.
     const required = t.required ?? order.length;
     const slots = order.slice(required).map(({ f, i }) => {
@@ -4884,7 +4884,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const what = rest ? `an array of at least ${order.length}` : required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
     const finish = label();
     // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
-    const step = (n: number, wanted: 0 | 1) => {
+    const step = (n: usize, wanted: 0 | 1) => {
       const [more, readable, right] = [temp(), temp(), temp()];
       emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
       emit(`${readable} = icmp sge i32 ${more}, 0`);
@@ -4935,7 +4935,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // An object's fields by key, in any order, unknown keys passed over and a repeated key's
   // last value kept, as JavaScript reads them; a missing field is an error unless it may be
   // empty. A failure drops the fields read so far.
-  function readObject(r: string, t: Exclude<Type, string>, fields: { name: string; type: Type; path: number[] }[]) {
+  function readObject(r: string, t: Exclude<Type, string>, fields: { name: string; type: Type; path: usize[] }[]) {
     const slots = fields.map((f) => ({ ...f, slot: alloca(llvm(lower(f.type))), seen: alloca("i1") }));
     for (const f of slots) emit(`store i1 false, ptr ${f.seen}`);
     const undo = () => {
@@ -5981,7 +5981,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const t = llvm(type.element);
     const at = receiver(callee.object);
     const [lengthAt, dataAt] = [temp(), temp()];
-    const field = (to: string, i: number) => emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
+    const field = (to: string, i: usize) => emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
     if (callee.name === "push") {
       appended(at, type.element, owned(e.args[0]!));
       return undefined;
@@ -6332,7 +6332,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // Releases the values made since `mark` that nothing took over, newest first.
-  function settle(mark: number = floor) {
+  function settle(mark: usize = floor) {
     for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
   }
 
@@ -6345,7 +6345,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // Drops what the scopes from `depth` inward own, innermost and newest first, emptying each.
-  function drop(depth: number) {
+  function drop(depth: usize) {
     for (const scope of scopes.slice(depth).reverse()) {
       for (const { slot, type } of [...scope].reverse()) {
         const v = temp();
@@ -6429,7 +6429,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         emit(`${status} = call i32 @fsh_rt_fs_stat(ptr ${path}, i32 ${follow}, ptr ${numbers}, ptr ${mtime}, ptr ${parts})`);
         read = () => {
           const tuple = types.get(e) as ObjectType;
-          const number = (i: number) => {
+          const number = (i: usize) => {
             const [at, v] = [temp(), temp()];
             emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
             emit(`${v} = load i64, ptr ${at}`);
@@ -6845,9 +6845,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
   // Arguments past `taken` run for their effects only.
-  function argValues(args: Expr[], target: Instance, taken: number = args.length): string[] {
+  function argValues(args: Expr[], target: Instance, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
-    const passed = (i: number) => !target.body.params[i]?.comptime;
+    const passed = (i: usize) => !target.body.params[i]?.comptime;
     const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of target.body.params.slice(args.length)) {
@@ -7177,13 +7177,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // A tuple's fixed elements in order, with where each is in its fields, and its rest array's.
-  function tupleOrder(t: ObjectType): [{ f: Field; i: number }[], { f: Field; i: number } | undefined] {
+  function tupleOrder(t: ObjectType): [{ f: Field; i: usize }[], { f: Field; i: usize } | undefined] {
     const all = t.fields.map((f, i) => ({ f, i }));
     return [all.filter(({ f }) => f.name !== "...").sort((a, b) => Number(a.f.name) - Number(b.f.name)), all.find(({ f }) => f.name === "...")];
   }
 
   // `write`, for a tuple's element `n`, only when it is within `length`, when one is known.
-  function present(length: string | undefined, n: number, write: () => void) {
+  function present(length: string | undefined, n: usize, write: () => void) {
     if (length === undefined) return write();
     const [within, yes, after] = [temp(), label(), label()];
     emit(`${within} = icmp ult i64 ${n}, ${length}`);
@@ -7346,7 +7346,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       emit(`${v} = load ${type}, ptr ${from}`);
       return v;
     };
-    const part = (whole: string, i: number) => {
+    const part = (whole: string, i: usize) => {
       const v = temp();
       emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
       return v;
@@ -7507,7 +7507,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
   // control left, each way out with how to resume it, the labels made before the region, and
   // how many catches and scopes enclosed it.
-  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: number; handlers: number; depth: number; floor: number; slots: Map<string, { slot: string; type: Type }> };
+  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: usize; handlers: usize; depth: usize; floor: usize; slots: Map<string, { slot: string; type: Type }> };
 
   function enter(): Region {
     const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, floor, slots: new Map() };
@@ -7541,9 +7541,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
   // each `finally` whose region it leaves.
-  function jump(to: string, depth: number) {
+  function jump(to: string, depth: usize) {
     const region = finallies.at(-1);
-    if (region && Number(to.slice(1)) < region.start) {
+    if (region && (Number(to.slice(1)) as usize) < region.start) {
       drop(region.depth);
       return exit(region, `jump ${to}`, () => jump(to, depth));
     }
@@ -7628,7 +7628,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // A poll result with `tag`, and the value or the error it carries.
-  function polled(f: FutureType, tag: number, v?: string, error?: string): string {
+  function polled(f: FutureType, tag: u8, v?: string, error?: string): string {
     let made = temp();
     emit(`${made} = insertvalue ${pollType(f)} zeroinitializer, i8 ${tag}, 0`);
     for (const [part, at, type] of [[v, 1, f.gives], [error, 2, f.throws]] as const) {
@@ -7656,7 +7656,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // Polls the future in frame field `field`, at `at`, until it is done, this future or async
   // generator pending meanwhile; then it is finished and dropped, and gives its value, or its
   // error is raised at `e`.
-  function suspend(inner: FutureType | HandleType | DynType, at: string, field: number, e: Expr): string | undefined {
+  function suspend(inner: FutureType | HandleType | DynType, at: string, field: usize, e: Expr): string | undefined {
     // A boxed future polls as a future giving what its Promise does, and throws nothing.
     const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
     const g = resuming!;
@@ -7708,7 +7708,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (array) return combineArray(t, name, kind, array, at as Expr);
     const saved = { allocas, body, temps, labels, block, pending, scopes };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const field = (i: number) => {
+    const field = (i: usize) => {
       const p = temp();
       emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
       return p;
@@ -7718,15 +7718,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       return gives === "void" ? "null" : gives;
     };
     // What each future's slot keeps: its value, its outcome, or for `any` its error.
-    const kept = (i: number) => t.frame[2 + 3 * i]!.type;
-    const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
+    const kept = (i: usize) => t.frame[2 + 3 * i]!.type;
+    const finishWith = (tag: u8, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
     const finished = (at: string, f: Type) => {
       const old = temp();
       emit(`${old} = load ${llvm(f)}, ptr ${at}`);
       emit(`store ${llvm(f)} zeroinitializer, ptr ${at}`);
       dispose(old, f);
     };
-    const cancelOthers = (except: number) => futures.forEach((f, j) => {
+    const cancelOthers = (except: usize) => futures.forEach((f, j) => {
       if (j !== except) whileWaiting(field(3 + 3 * j), () => cancelAt(field(1 + 3 * j), f));
     });
     futures.forEach((f, i) => {
@@ -7827,13 +7827,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     // What the values array keeps: each value, or for `allSettled` its outcome.
     const keptType = (t.frame[2]!.type as ArrayType).element;
     const element = llvm(keptType);
-    const field = (i: number) => {
+    const field = (i: usize) => {
       const p = temp();
       emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
       return p;
     };
     const [futuresAt, valuesAt, flagsAt] = [field(1), field(2), field(3)];
-    const part = (at: string, i: number) => {
+    const part = (at: string, i: usize) => {
       const p = temp();
       emit(`${p} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
       return p;
@@ -7861,7 +7861,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const [valuesData, flagsData] = [temp(), temp()];
     emit(`${valuesData} = load ptr, ptr ${part(valuesAt, 0)}`);
     emit(`${flagsData} = load ptr, ptr ${part(flagsAt, 0)}`);
-    const finishWith = (tag: number, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
+    const finishWith = (tag: u8, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
     // Each index below `n`, in a loop of its own.
     const each = (body: (i: string, next: string) => void) => {
       const index = alloca("i64");
@@ -8045,7 +8045,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     }
     if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW) return;
     const frame = t.frame;
-    const load = (i: number, of: string) => {
+    const load = (i: usize, of: string) => {
       const [p, v] = [temp(), temp()];
       emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
       emit(`${v} = load ${of}, ptr ${p}`);
@@ -8088,7 +8088,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // A combined future over an array cancels each future its flags say is waiting.
   function combinedArrayCancel(at: string, t: FutureType, array: ArrayType) {
-    const field = (i: number, j: number, of: string) => {
+    const field = (i: usize, j: usize, of: string) => {
       const [p, q, v] = [temp(), temp(), temp()];
       emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
       emit(`${q} = getelementptr ${ARRAY}, ptr ${p}, i32 0, i32 ${j}`);
@@ -8212,7 +8212,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         signal = [sig, flag];
       }
       if (socket) {
-        const [made, field] = [alloca(leaf.method === "read" ? ARRAY : "ptr"), (i: number) => {
+        const [made, field] = [alloca(leaf.method === "read" ? ARRAY : "ptr"), (i: usize) => {
           const [ptr, v] = [temp(), temp()];
           emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
           return [ptr, v] as const;
@@ -8521,7 +8521,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // An IoError from the parts the runtime gave at `parts`: its message, code, system call and
   // path, the path empty where the runtime gave none.
   function ioError(parts: string, io: ClassType): string {
-    const part = (i: number) => {
+    const part = (i: usize) => {
       const [at, v] = [temp(), temp()];
       emit(`${at} = getelementptr [4 x ptr], ptr ${parts}, i32 0, i32 ${i}`);
       emit(`${v} = load ptr, ptr ${at}`);
@@ -8584,7 +8584,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
     drop("%v");
     const lines = [...allocas, ...body];
-    [allocas, body, temps, labels, block] = saved as unknown as [string[], string[], number, number, string];
+    [allocas, body, temps, labels, block] = saved as unknown as [string[], string[], usize, usize, string];
     return lines;
   }
 
@@ -9430,7 +9430,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       // Numbers are copied from constant data, so a large table is one copy, not a store each.
       if (v.items.length > 0 && (isInteger(type.element) || isFloat(type.element))) {
         const element = type.element;
-        const items = v.items.map((x) => `${t} ${typeof untagged(x) === "number" ? floatConstant(untagged(x) as number, element as "f32" | "f64") : String(untagged(x))}`);
+        const items = v.items.map((x) => `${t} ${typeof untagged(x) === "number" ? floatConstant(untagged(x) as f64, element as "f32" | "f64") : String(untagged(x))}`);
         const contents = `[${n} x ${t}] [${items.join(", ")}]`;
         const table = `@.table.${stableId("table", contents)}`;
         if (!tables.has(table)) globals.push(`${table} = private unnamed_addr constant ${contents}`);
@@ -9500,14 +9500,14 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A match built from the starts and ends the runtime wrote at `slots`: slices of s, with null
   // for a group that took no part.
   function matchValue(regexT: RegexType, match: ObjectType, s: string, slots: string): string {
-    const at = (k: number) => {
+    const at = (k: usize) => {
       const [p, v] = [temp(), temp()];
       emit(`${p} = getelementptr i64, ptr ${slots}, i64 ${k}`);
       emit(`${v} = load i64, ptr ${p}`);
       return v;
     };
     // A group's text, or null when it took no part; one of a name's groups that took part.
-    const capture = (indexes: number[], type: Type) => {
+    const capture = (indexes: usize[], type: Type) => {
       if (type === "string") {
         const v = temp();
         emit(`${v} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${at(indexes[0]! * 2)}, i64 ${at(indexes[0]! * 2 + 1)}, i32 2)`);
@@ -9748,8 +9748,8 @@ const STRIDE = 64;
 
 // Where every STRIDE-th UTF-16 unit of a string is: its character's byte offset times two,
 // plus one when the unit is a pair's second half.
-function breadcrumbs(text: string): number[] {
-  const crumbs: number[] = [];
+function breadcrumbs(text: string): usize[] {
+  const crumbs: usize[] = [];
   let at = 0;
   for (let unit = 0; unit < text.length; unit++) {
     const c = text.charCodeAt(unit);
@@ -9762,19 +9762,19 @@ function breadcrumbs(text: string): number[] {
 }
 
 // A string's WTF-8 bytes: UTF-8, with a lone surrogate in its 3-byte form.
-function wtf8(text: string): number[] {
-  const out: number[] = [];
+function wtf8(text: string): u8[] {
+  const out: u8[] = [];
   for (let i = 0; i < text.length; i++) {
-    let c = text.charCodeAt(i);
+    let c = text.charCodeAt(i) as u32;
     const next = text.charCodeAt(i + 1);
     if (c >= 0xd800 && c < 0xdc00 && next >= 0xdc00 && next < 0xe000) {
-      c = 0x10000 + ((c - 0xd800) << 10) + (next - 0xdc00);
+      c = 0x10000 + ((c - 0xd800) << 10) + ((next as u32) - 0xdc00);
       i++;
     }
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    if (c < 0x80) out.push(c as u8);
+    else if (c < 0x800) out.push((0xc0 | (c >> 6)) as u8, (0x80 | (c & 63)) as u8);
+    else if (c < 0x10000) out.push((0xe0 | (c >> 12)) as u8, (0x80 | ((c >> 6) & 63)) as u8, (0x80 | (c & 63)) as u8);
+    else out.push((0xf0 | (c >> 18)) as u8, (0x80 | ((c >> 12) & 63)) as u8, (0x80 | ((c >> 6) & 63)) as u8, (0x80 | (c & 63)) as u8);
   }
   return out;
 }

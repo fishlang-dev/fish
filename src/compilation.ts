@@ -30,15 +30,15 @@ import type { DynTable } from "./values.ts";
 // declaration it reaches takes in the program, to the name the file writes for it.
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 export type Compilation = {
-  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string }[]; rust: RustTables;
-  enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>;
+  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
+  enumInits: [usize, usize, string][]; fileNames: WeakMap<Stmt[], Map<usize, Map<string, string>>>; generated: WeakNodeSet<Id>;
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
 // whatever was compiled before it: its enums, which tells enums of one name apart, the generic
 // functions lifted out of bodies, destructuring assignments, macro expansions, and the constants
 // macros give values.
-export type Counts = { enums: number; lifts: number; destructures: number; expansions: number; constants: number };
+export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize };
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did.
@@ -57,7 +57,7 @@ export type Session = {
   digests: Map<string, string>;
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
-  std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: number };
+  std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: usize };
 };
 
 export function newSession(): Session {
@@ -193,7 +193,7 @@ export type Tables = {
   // body's next instance checks again as tuples.
   tupleLiterals: WeakNodeSet<Expr>;
   // A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
-  restStarts: WeakNodeMap<Expr, number>;
+  restStarts: WeakNodeMap<Expr, usize>;
   // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
   // through a Dyn: values, not places.
   computed: WeakNodeSet<Expr>;
@@ -239,7 +239,7 @@ export type Tables = {
   jsOptionalOf: WeakNodeMap<Expr, boolean[]>;
   // The `get`, `at` and `has` calls on a JsValue.
   jsAccessors: WeakNodeSet<Expr>;
-  dynCalls: WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>;
+  dynCalls: WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>;
 
   // Each generic class's statics, declared with its first instance.
   genericStatics: WeakNodeMap<ClassNode, Map<string, Body>>;
@@ -354,7 +354,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     equalities: new WeakMap<ClassType, Instance>(),
     quotes: new WeakNodeMap<Expr, Record<Category, Type>>(),
     tupleLiterals: new WeakNodeSet<Expr>(),
-    restStarts: new WeakNodeMap<Expr, number>(),
+    restStarts: new WeakNodeMap<Expr, usize>(),
     computed: new WeakNodeSet<Expr>(),
     dynMembers: new Map<string, DynTable>(),
     boxedMembers: new WeakNodeMap<Expr, DynType>(),
@@ -376,7 +376,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     jsStatics: new WeakNodeMap<Expr, JsName>(),
     jsOptionalOf: new WeakNodeMap<Expr, boolean[]>(),
     jsAccessors: new WeakNodeSet<Expr>(),
-    dynCalls: new WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>(),
+    dynCalls: new WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>(),
     genericStatics: new WeakNodeMap<ClassNode, Map<string, Body>>(),
     classScopes: new WeakMap<TypeParam[], Map<string, Type>>(),
     aliases: new Map<string, TypeAlias>(),

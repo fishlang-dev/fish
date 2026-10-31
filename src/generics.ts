@@ -272,9 +272,9 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
   const sharedPlaceholders = new Map<TypeParam[], Map<string, Type>>();
-  const implicits = new Map<Body, Map<number, Bound>>();
+  const implicits = new Map<Body, Map<usize, Bound>>();
   // Which implicit parameters are references to their type, and how.
-  const lent = new Map<Body, Map<number, RefType>>();
+  const lent = new Map<Body, Map<usize, RefType>>();
   const definitions = new Map<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
@@ -287,7 +287,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // The type an arrow given as a generic body's argument is checked against: its parameter's
   // function type, with the type parameters the other arguments, or the written type
   // arguments, have decided. What it gives decides the rest, through \`infer\`.
-  function callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined {
+  function callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
     const written = f.params[i]?.type;
     const params = typeParamsOf(f);
     // A parameter written as a type parameter given a function type, by the call as in
@@ -375,7 +375,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   }
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
-  function lentAs(f: Body, i: number, t: Type | undefined): Type | undefined {
+  function lentAs(f: Body, i: usize, t: Type | undefined): Type | undefined {
     const ref = lent.get(f)?.get(i);
     return t && ref ? refType(t, ref.mutable, ref.life) : t;
   }
@@ -576,7 +576,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
 
   // A function-typed parameter's bound as the body sees it: written in terms of the type
   // parameters the body itself holds, so calling it with one of them fits.
-  function sameParams(f: Body, i: number, bound: Bound, scope: Map<string, Type>): Bound {
+  function sameParams(f: Body, i: usize, bound: Bound, scope: Map<string, Type>): Bound {
     const written = f.params[i]!.type!;
     const t = withScope(scope, () => resolveType(written));
     const own = typeof t !== "string" && t.kind === "ref" ? t.to : t;
@@ -609,7 +609,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // A parameter typed with an interface or an object type is an implicit type parameter, so
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's.
-  function implicitOf(f: Body): Map<number, Bound> {
+  function implicitOf(f: Body): Map<usize, Bound> {
     let found = implicits.get(f);
     if (found) return found;
     found = new Map();
@@ -618,7 +618,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
-    const borrows = new Map<number, RefType>();
+    const borrows = new Map<usize, RefType>();
     lent.set(f, borrows);
     withScope(scope, () => f.params.forEach((p, i) => {
       const written = p.type && resolveType(p.type);
