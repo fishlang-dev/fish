@@ -208,10 +208,76 @@ async function* one(): Promise<i64> { yield 1; }
 
 async function main() {}
 // case: async_generator_throws
-// error: generators that throw are not supported yet
+async function* fetchAll(urls: string[]): AsyncGenerator<string> throws string {
+  for (const u of urls) {
+    await sleep(1);
+    if (u === "down") throw "unreachable host: " + u;
+    yield "page " + u;
+  }
+}
+
+class Feed {
+  items: string[];
+  constructor(items: string[]) { this.items = items; }
+  async *each(): AsyncGenerator<string> throws string {
+    for (const s of this.items) {
+      await sleep(1);
+      if (s === "") throw "empty item";
+      yield s + "!";
+    }
+  }
+}
+
+async function main() {
+  let g = fetchAll(["a", "down", "b"]);
+  try {
+    const r = await g.next();
+    if (r.done === false) console.log(r.value);
+    await g.next();
+    console.log("unreachable");
+  } catch (e) {
+    console.log("caught", e);
+  }
+  try {
+    const after = await g.next();
+    console.log("after", after.done);
+  } catch (e) {
+    console.log("not again", e);
+  }
+  try {
+    for await (const p of fetchAll(["x", "down"])) console.log(p);
+  } catch (e) {
+    console.log("loop caught", e);
+  }
+  const f = new Feed(["q" + 1, ""]);
+  try {
+    for await (const s of f.each()) console.log(s);
+  } catch (e) {
+    console.log("method caught", e);
+  }
+}
+// expect: page a
+// expect: caught unreachable host: down
+// expect: after true
+// expect: page x
+// expect: loop caught unreachable host: down
+// expect: q1!
+// expect: method caught empty item
+// case: async_generator_throws_undeclared
 async function* one(): AsyncGenerator<i64> throws string { yield 1; }
 
-async function main() {}
+async function main() {
+  let g = one();
+  await g.next();
+}
+// error: 'main' must declare 'throws string' after its return type since this Promise can throw 'string'
+// case: async_generator_throws_dyn
+async function* one(): AsyncGenerator<i64> throws string { yield 1; }
+
+async function main() {
+  let d: Dyn<AsyncGenerator<i64>> = one();
+}
+// error: type 'AsyncGenerator<i64> throws string' is not assignable to type 'Dyn<AsyncGenerator<i64>>': its 'next' throws 'string', which 'AsyncGenerator<i64>' doesn't
 // case: for_await_generator
 async function* ticks(n: i64): AsyncGenerator<string> {
   for (let i = 0; i < n; i++) {

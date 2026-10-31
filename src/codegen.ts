@@ -8180,7 +8180,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const target = generatorOf.get(leaf.of as GeneratorType)!;
       unwinding(`call ${pollType(shape)} ${symbol(target)}(ptr ${generator}, ptr %cx)`, result);
       emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     } else if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
@@ -8392,7 +8392,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         startBlock(join);
         emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
-      } else if (leaf) error = abortError(thrown);
+      } else if (leaf && leaf.method !== "next") error = abortError(thrown);
       else if (why) error = joinError(why, tag, result, (inner as HandleType).joined!, thrown);
       else {
         error = temp();
