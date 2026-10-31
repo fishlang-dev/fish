@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { shared } from "./compilation.ts";
 import { CompileError, locate } from "./diag.ts";
 import { parseWithComments, type Stmt } from "./parser.ts";
 
@@ -207,7 +208,7 @@ function parsedFile(file: string, lookup: Lookup): Parsed {
     const src = readFileSync(file, "utf8");
     try {
       // A package's JSDoc `@throws` tags describe JS throws, which reach Fish as panics, not errors.
-      made = { src, statements: parseWithComments(src).program };
+      made = { src, statements: parseWithComments(src, shared.ids).program };
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
       const { line, col } = locate(src, e.start);

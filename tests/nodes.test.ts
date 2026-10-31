@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
+import { shared } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
 import { flatten, load } from "../src/modules.ts";
@@ -61,7 +62,7 @@ function corpus(): { name: string; file: string; src: string }[] {
 
 test("every node of the compiler's own source has an id of its own", () => {
   const ids = new Map<number, object>();
-  const problems = readdirSync(src).filter((f) => f.endsWith(".ts")).flatMap((f) => audit(parse(readFileSync(join(src, f), "utf8")), ids, f));
+  const problems = readdirSync(src).filter((f) => f.endsWith(".ts")).flatMap((f) => audit(parse(readFileSync(join(src, f), "utf8"), shared.ids), ids, f));
   expect(problems).toEqual([]);
 });
 
@@ -72,7 +73,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
     let written: Stmt[] = [];
     try {
       if (p.src.includes("// mode: parse")) {
-        problems.push(...audit(parse(p.src), ids, p.name));
+        problems.push(...audit(parse(p.src, shared.ids), ids, p.name));
         continue;
       }
       const loaded = load(p.file, p.src);

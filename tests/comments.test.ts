@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript5";
+import { shared } from "../src/compilation.ts";
 import { lexer } from "../src/lexer.ts";
 import { parseWithComments, type Stmt } from "../src/parser.ts";
 
@@ -14,7 +15,7 @@ function withoutIds(v: unknown): unknown {
 
 // Each comment as [kind, text], and that its span holds exactly its text.
 function comments(src: string): [string, string][] {
-  const found = parseWithComments(src).comments;
+  const found = parseWithComments(src, shared.ids).comments;
   for (const c of found) expect(src.slice(c.start, c.end)).toBe(c.text);
   return found.map((c) => [c.kind, c.text]);
 }
@@ -22,7 +23,7 @@ function comments(src: string): [string, string][] {
 test("line, block, doc and shebang comments are kept with their spans, in order", () => {
   const src = `#!/usr/bin/env fishc\n// one\n/** doc */\nfunction main() { /* two\n lines */ const x = 1; // end\n}\n`;
   expect(comments(src)).toEqual([["shebang", "#!/usr/bin/env fishc"], ["line", "// one"], ["block", "/** doc */"], ["block", "/* two\n lines */"], ["line", "// end"]]);
-  const at = parseWithComments(src).comments[1]!;
+  const at = parseWithComments(src, shared.ids).comments[1]!;
   expect([at.start, at.end]).toEqual([21, 27]);
   expect(comments(`const x = 1;`)).toEqual([]);
   expect(comments(`// only a comment`)).toEqual([["line", "// only a comment"]]);
@@ -76,7 +77,7 @@ test("the compiler's own source holds the comments TypeScript's scanner finds", 
   expect(files.length).toBeGreaterThan(40);
   for (const f of files) {
     const text = readFileSync(join(import.meta.dir, "..", "src", f), "utf8");
-    const ours = parseWithComments(text).comments.map((c): [number, number] => [c.start, c.end]);
+    const ours = parseWithComments(text, shared.ids).comments.map((c): [number, number] => [c.start, c.end]);
     expect([f, ours]).toEqual([f, typescriptComments(text)]);
   }
 });
@@ -91,7 +92,7 @@ function programs(file: string): string[] {
 // The source with each comment's characters made spaces, its newlines kept.
 const blanked = (src: string) => {
   let out = src;
-  for (const c of parseWithComments(src).comments) out = out.slice(0, c.start) + c.text.replace(/[^\n]/g, " ") + out.slice(c.end);
+  for (const c of parseWithComments(src, shared.ids).comments) out = out.slice(0, c.start) + c.text.replace(/[^\n]/g, " ") + out.slice(c.end);
   return out;
 };
 
@@ -103,14 +104,14 @@ test("blanking every test program's comments leaves the same parse, so recording
     for (const src of programs(join(import.meta.dir, "programs", f))) {
       let tree: Stmt[];
       try {
-        tree = parseWithComments(src).program;
+        tree = parseWithComments(src, shared.ids).program;
       } catch (e) {
-        expect(() => parseWithComments(blanked(src))).toThrow((e as Error).message);
+        expect(() => parseWithComments(blanked(src), shared.ids)).toThrow((e as Error).message);
         continue;
       }
       const plain = blanked(src);
-      expect(parseWithComments(plain).comments).toEqual([]);
-      expect([f, withoutIds(parseWithComments(plain).program)]).toEqual([f, withoutIds(tree)]);
+      expect(parseWithComments(plain, shared.ids).comments).toEqual([]);
+      expect([f, withoutIds(parseWithComments(plain, shared.ids).program)]).toEqual([f, withoutIds(tree)]);
       compared++;
     }
   }

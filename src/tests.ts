@@ -1,9 +1,9 @@
 import { availableParallelism } from "node:os";
 import { relative } from "node:path";
-import { CompileError, madeUpNames } from "./diag.ts";
+import { freshId, shared } from "./compilation.ts";
+import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
-import { nextId } from "./nodes.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
 // their own file for `fishc test` and the language server, and run by a generated harness.
@@ -45,7 +45,7 @@ export function liftTests(modules: Module[]): Test[] {
       if (twin) throw new CompileError(`there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
       tests.push({ name: name.value, module, index: tests.length, async: body.async });
       const symbol = `test ${JSON.stringify(name.value)}`;
-      madeUpNames.set(symbol, `the test '${name.value}'`);
+      shared.names.madeUp.set(symbol, `the test '${name.value}'`);
       return lifted(symbol, body, s);
     });
   }
@@ -53,10 +53,10 @@ export function liftTests(modules: Module[]): Test[] {
 }
 
 function lifted(name: string, body: Body, at: Span): Func {
-  const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`) as [Func];
+  const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`, shared.ids) as [Func];
   placed(made, at);
-  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
-  return { ...made, id: nextId(), name, body: statements };
+  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: freshId(), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
+  return { ...made, id: freshId(), name, body: statements };
 }
 
 // Gives every node of a made tree the span `at`, where its parts are written.
@@ -89,7 +89,7 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
   exit(2);
 }
 `;
-  const made = parse(text);
+  const made = parse(text, shared.ids);
   const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
   const rename = (v: unknown) => {
     if (Array.isArray(v)) return v.forEach(rename);
@@ -105,7 +105,7 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 // Gives each file's `main` a name no program can write, since the harness is the program's
 // `main`; a test or function calling a file's `main` still reaches it.
 export function hideMains(modules: Module[]) {
-  madeUpNames.set("file main", "'main'");
+  shared.names.madeUp.set("file main", "'main'");
   for (const m of modules) renameIn(m.statements, (name) => (name === "main" ? "file main" : undefined));
 }
 

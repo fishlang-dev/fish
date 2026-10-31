@@ -1,8 +1,9 @@
+import { freshId, shared } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { WeakNodeMap, nextId, renumber } from "./nodes.ts";
+import { WeakNodeMap, renumber } from "./nodes.ts";
 import { field, unfold, unfolded, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -38,7 +39,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
   if (asType) {
     let tree: TypeNode;
     try {
-      tree = parseType(text);
+      tree = parseType(text, shared.ids);
     } catch (error) {
       tree = fail(error);
     }
@@ -49,7 +50,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
     const statement = startsStatement(text);
     let tree: Expr | Stmt | undefined;
     try {
-      tree = statement ? undefined : parseExpression(text);
+      tree = statement ? undefined : parseExpression(text, shared.ids);
     } catch {
       tree = undefined;
     }
@@ -57,7 +58,7 @@ export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Q
     else {
       let stmts: Stmt[] = [];
       try {
-        stmts = parse(text);
+        stmts = parse(text, shared.ids);
       } catch (error) {
         fail(error);
       }
@@ -231,7 +232,7 @@ const VARIANTS = new Set(["None"]);
 export type Free = Map<string, string>;
 
 function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, string>, free: Free): unknown {
-  const copy = renumber(structuredClone(tree));
+  const copy = renumber(structuredClone(tree), freshId);
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
     if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
@@ -283,7 +284,7 @@ function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, st
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
     if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
       const key = n.name;
-      const value = { id: nextId(), kind: "ident", name: renamed(key), start: n.start, end: n.end };
+      const value = { id: freshId(), kind: "ident", name: renamed(key), start: n.start, end: n.end };
       for (const k of Object.keys(n)) if (k !== "id") delete n[k];
       Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
     }

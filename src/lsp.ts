@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
+import { shared } from "./compilation.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
@@ -63,18 +64,18 @@ function diagnose(path: string, text: string, read: (path: string) => string): {
     const uri = pathToFileURL(path).href;
     const at = located(path, text, e.sources, e.start, e.end);
     const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
-    const related = [...(note ? [{ location: note, message: shown(e.note!.message) }] : [])];
-    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message), ...(related.length > 0 && { relatedInformation: related }) }] };
+    const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
+    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
     const elsewhere = sourceOf(text, path, e.start, e.sources);
     const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
-    if (at) related.unshift({ location: at, message: shown(e.message) });
+    if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
     const start = { line: 0, character: 0 };
-    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
+    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
   }
 }
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
-const named = (t: Type) => shown(written(show(t)));
+const named = (t: Type) => shown(written(show(t), shared.names), shared.names);
 
 // A hint after each fallible call and `await` in `text` within `range`, naming what it can throw.
 // A generic body's definition and its instances share nodes, so a place is hinted once.

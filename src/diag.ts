@@ -1,17 +1,23 @@
 
-// Names the compiler made up, as a message should show them: a test's function, `test "x"`, as
-// the test it is. Only names recorded here are rewritten, so text a user wrote is left alone.
-export const madeUpNames = new Map<string, string>();
+// The names a compilation made up, which a message shows as the user knows them. `local` holds
+// the names local declarations are hoisted under, 'Point@0', and a macro's private names,
+// 'helper@m0', each shown as written; `madeUp` maps a name like a test's function, `test "x"`, to
+// how it reads, as the test it is. Only names recorded here are rewritten, so text a user wrote,
+// like a string "user@1", is left alone.
+export type Names = { local: Set<string>; madeUp: Map<string, string> };
 
 // How a message reads: without the suffix a top-level name takes to tell it apart from another
 // file's (`helper-fsh2`), and with made-up names shown as the user knows them.
-export function shown(text: string): string {
-  for (const [name, display] of madeUpNames) {
+export function shown(text: string, names: Names): string {
+  for (const [name, display] of names.madeUp) {
     const quoted = new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-fsh\\d+)?'`, "g");
     text = text.replace(quoted, () => display);
   }
   return text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
 }
+
+// `text` with the hoisted names in it as they were written.
+export const written = (text: string, names: Names) => text.replace(/([\w$]+)@m?\d+/g, (m, name: string) => (names.local.has(m) ? name : m));
 
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: number; end: number };
@@ -19,25 +25,30 @@ export type Note = { message: string; start: number; end: number };
 // A file of a program other than the one an error is rendered against, from `base` on.
 export type Source = { base: number; src: string; file: string };
 
-// The names local declarations are hoisted under, 'Point@0', and a macro's private names,
-// 'helper@m0', shown as written. Only those are, so a string like "user@1" in a message stays.
-export const LOCAL_NAMES = new Set<string>();
-export const written = (text: string) => text.replace(/([\w$]+)@m?\d+/g, (m, name: string) => (LOCAL_NAMES.has(m) ? name : m));
-
 // A user-facing compile error pointing at a [start, end) source range. `sources` holds the
-// program's other files, when it spans several.
+// program's other files, when it spans several, and `names` the names its compilation made up,
+// both given by `named` where the error leaves the compilation.
 export class CompileError extends Error {
   start: number;
   end: number;
   note: Note | undefined;
   sources: Source[] = [];
+  names: Names = { local: new Set(), madeUp: new Map() };
 
   constructor(message: string, start: number, end: number = start + 1, note?: Note) {
-    super(written(message));
+    super(message);
     this.start = start;
     this.end = end;
-    this.note = note && { ...note, message: written(note.message) };
+    this.note = note;
   }
+}
+
+// Gives `e` the names its compilation made up, with the hoisted ones in its messages as written.
+export function named(e: CompileError, names: Names): CompileError {
+  e.message = written(e.message, names);
+  if (e.note) e.note = { ...e.note, message: written(e.note.message, names) };
+  e.names = names;
+  return e;
 }
 
 // Which source an offset is in: the entry file's, or another file's from `sources`, which ends
@@ -69,7 +80,7 @@ export function formatError(e: CompileError, path: string, program: string, kind
     const width = Math.max(1, Math.min(end, lineEnd) - start);
     const pad = " ".repeat(String(line).length);
     return [
-      `${file}:${line}:${col}: ${kind}: ${shown(message)}`,
+      `${file}:${line}:${col}: ${kind}: ${shown(message, e.names)}`,
       ` ${line} | ${src.slice(lineStart, lineEnd)}`,
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];

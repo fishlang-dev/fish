@@ -1,13 +1,14 @@
 import type { Checked } from "./check.ts";
 import { upcasts } from "./classes.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
-import { CompileError, LOCAL_NAMES } from "./diag.ts";
+import { freshId, shared } from "./compilation.ts";
+import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import { fits, show, type Type } from "./typing.ts";
-import { NodeMap, NodeSet, nextId, renumber } from "./nodes.ts";
+import { NodeMap, NodeSet, renumber } from "./nodes.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
 // it while compiling, and what the macro gives replaces it in its file, before the files are
@@ -126,7 +127,7 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError(`'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
     return t.name;
   });
-  const decl = { ...d, id: nextId(), decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
+  const decl = { ...d, id: freshId(), decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
   if (decl.kind === "class" || decl.kind === "enum") decl.derives = [...(decl.derives ?? []), ...names];
   if (decl.kind === "class" && names.includes("Eq") && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
     const fields = decl.members.flatMap((m) => {
@@ -137,13 +138,13 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     // A base's fields compare through the base's own `equals`.
     const parts = [...(decl.extends ? ["super.equals(other)"] : []), ...fields.map((f) => `this.${f} === other.${f}`)];
     const test = parts.length === 0 ? "true" : parts.join(" && ");
-    const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
+    const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`, shared.ids)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
     upcasts.add(`${at.start}:${at.end}`);
     decl.members = [...decl.members, method];
   }
-  return [exported ? ({ id: nextId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
+  return [exported ? ({ id: freshId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
 }
 
 // Gives every node of a tree one span, as code a decorator made.
@@ -171,7 +172,7 @@ function copied(loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, Stmt> } {
   const copies = new Map<Module, Module>();
   const of = new NodeMap<Stmt, Stmt>();
   for (const m of loaded.modules) {
-    const statements = renumber(structuredClone(m.statements));
+    const statements = renumber(structuredClone(m.statements), freshId);
     m.statements.forEach((s, i) => of.set(s, statements[i]!));
     copies.set(m, { ...m, statements, targets: new NodeMap() });
   }
@@ -302,7 +303,7 @@ function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]
     if (arg && t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
     const name = `__fishArgument${constants++}`;
     const at = { start: expr.start, end: expr.end };
-    const constant: Stmt = { id: nextId(), kind: "let", keyword: "const", declarations: [{ id: nextId(), target: { id: nextId(), kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
+    const constant: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: { id: freshId(), kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
     return { expr, syntax: false, constant, name };
   });
 }
@@ -422,7 +423,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   }
   const suffix = `@m${expansions++}`;
   const fresh = (name: string) => {
-    LOCAL_NAMES.add(`${name}${suffix}`);
+    shared.names.local.add(`${name}${suffix}`);
     return `${name}${suffix}`;
   };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
@@ -465,8 +466,8 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     // On an exported declaration, what the macro gives under names the program can see is
     // exported too; its private declarations aren't. A library's exports are C functions, so
     // there only the declaration's own name stays exported.
-    const visible = namesOf(decl).every((n) => !LOCAL_NAMES.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
-    return exported && !isExport(decl) && visible ? ({ id: nextId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
+    const visible = namesOf(decl).every((n) => !shared.names.local.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
+    return exported && !isExport(decl) && visible ? ({ id: freshId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
   });
 }
 
@@ -478,9 +479,9 @@ function stripped(decl: Decl, pending: Pending): { bare: Stmt; restore(given: De
   const members = decl.kind === "class" ? decl.members.map((m, i) => later(m, i, "member")) : [];
   const params = decl.kind === "function" ? decl.params.map((p, i) => later(p, i, "param")) : [];
   const clear = <T extends { decorators: Expr[] }>(x: T) => ({ ...x, decorators: [] });
-  const bare = decl.kind === "class" ? { ...decl, id: nextId(), decorators: [], members: decl.members.map(clear) }
-    : decl.kind === "function" ? { ...decl, id: nextId(), decorators: undefined, params: decl.params.map(clear) }
-    : { ...decl, id: nextId(), decorators: undefined };
+  const bare = decl.kind === "class" ? { ...decl, id: freshId(), decorators: [], members: decl.members.map(clear) }
+    : decl.kind === "function" ? { ...decl, id: freshId(), decorators: undefined, params: decl.params.map(clear) }
+    : { ...decl, id: freshId(), decorators: undefined };
   const name = namesOf(decl)[0];
   const restore = (given: Decl[]) => {
     const named = given.find((d) => d.kind === decl.kind && namesOf(d)[0] === name);
@@ -546,6 +547,6 @@ function nodeOf(v: Value): unknown {
   const node: Record<string, unknown> = {};
   for (const [k, x] of v.fields) node[k] = (k === "start" || k === "end") && typeof x === "bigint" ? Number(x) : nodeOf(x);
   // Ast values carry no ids, so each node made from one gets its own.
-  if ("start" in node) node.id = nextId();
+  if ("start" in node) node.id = freshId();
   return node;
 }

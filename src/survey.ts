@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { freshId, shared } from "./compilation.ts";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
@@ -144,7 +145,7 @@ function scanFile(path: string, file: string): FileScan {
   const findings: [string, Example][] = [];
   surveyed = path;
   try {
-    const program = parse(src);
+    const program = parse(src, shared.ids);
     scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
     // The reject and guided rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
     // find only what they can fix, so the survey counts those its own wider way.
@@ -272,7 +273,7 @@ export function grade(score: number): string {
 function captures(program: Stmt[]): number[] {
   const found: number[] = [];
   try {
-    hoistLocals(renumber(structuredClone(program)), (local) => found.push(local.start));
+    hoistLocals(renumber(structuredClone(program), freshId), (local) => found.push(local.start));
   } catch {
     return [];
   }
@@ -489,7 +490,7 @@ function stdHas(n: Node, specifier: string): boolean {
 
 // What a std module exports: its functions and its consts.
 function stdExports(name: string): Set<string> {
-  return new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
+  return new Set(parse(STD_MODULES[name]!, shared.ids).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
 }
 
 // The built-in an import names: its subpath when that has its own equivalent, else its module.

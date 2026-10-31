@@ -1,3 +1,4 @@
+import { shared } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { isToken, type Comment, type Token } from "./lexer.ts";
 import type { Edition } from "./manifest.ts";
@@ -64,7 +65,7 @@ const MERGING = new Set(["function", "class", "interface", "namespace", "enum"])
 export function fix(src: string, fsh?: Imported): { text: string; fixed: number } {
   let [text, fixed, edited] = [src, 0, false];
   for (let round = 0; round < 5; round++) {
-    const fixable = migrations(parseWithComments(text), text, fsh).filter((h) => (h.edits ?? []).length > 0).sort((a, b) => a.start - b.start);
+    const fixable = migrations(parseWithComments(text, shared.ids), text, fsh).filter((h) => (h.edits ?? []).length > 0).sort((a, b) => a.start - b.start);
     const taken: Edit[] = [];
     let count = 0;
     for (const { edits } of fixable) {
@@ -78,7 +79,7 @@ export function fix(src: string, fsh?: Imported): { text: string; fixed: number 
     for (const e of taken.map((e, i) => ({ e, i })).sort((a, b) => b.e.start - a.e.start || b.i - a.i)) text = text.slice(0, e.e.start) + e.e.text + text.slice(e.e.end);
     fixed += count;
   }
-  if (edited) parseWithComments(text);
+  if (edited) parseWithComments(text, shared.ids);
   return { text, fixed };
 }
 

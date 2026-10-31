@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { shared } from "../src/compilation.ts";
 import { buildAsync } from "../src/main.ts";
 import { compile, parsePattern, RegexSyntaxError } from "../src/regex.ts";
 
@@ -33,7 +34,7 @@ test("regex syntax is accepted and refused as JavaScript does", () => {
     }
     let fish = true;
     try {
-      parsePattern(p, f);
+      parsePattern(p, f, shared.regex);
     } catch (e) {
       if (!(e instanceof RegexSyntaxError)) throw e;
       fish = false;
@@ -63,7 +64,7 @@ function corpus(count: number): { p: string; f: string; s: string }[] {
     const f = MATCH_FLAGS[random(MATCH_FLAGS.length)]!;
     try {
       new RegExp(p, f);
-      compile(parsePattern(p, f));
+      compile(parsePattern(p, f, shared.regex), shared.regex);
     } catch {
       continue;
     }
@@ -92,7 +93,7 @@ test("regex exec agrees with JavaScript", async () => {
   const dir = mkdtempSync(join(tmpdir(), "fishc-regex-"));
   const file = join(dir, "exec.fsh");
   const lines = cases.map((c, i) => {
-    const parts = parsePattern(c.p, c.f).captures.map((g, k) => (g.optional ? `, m${i}[${k + 1}] ?? "-"` : `, m${i}[${k + 1}]`)).join("");
+    const parts = parsePattern(c.p, c.f, shared.regex).captures.map((g, k) => (g.optional ? `, m${i}[${k + 1}] ?? "-"` : `, m${i}[${k + 1}]`)).join("");
     return `  const m${i} = /${c.p}/${c.f}.exec(${JSON.stringify(c.s)});\n  if (m${i} === null) console.log("null"); else console.log(m${i}.index, m${i}[0]${parts});`;
   });
   writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
@@ -114,7 +115,7 @@ test("string methods taking a regex agree with JavaScript", async () => {
   const file = join(dir, "methods.fsh");
   const lines = cases.map((c, i) => {
     const s = JSON.stringify(c.s);
-    const optional = parsePattern(c.p, c.f).captures.some((g) => g.optional);
+    const optional = parsePattern(c.p, c.f, shared.regex).captures.some((g) => g.optional);
     const split = optional ? `${s}.split(/${c.p}/${c.f}).map((x) => x ?? "-").join("|")` : `${s}.split(/${c.p}/${c.f}).join("|")`;
     const all = `(${s}.match(/${c.p}/g${c.f}) ?? ["none"]).join("|")`;
     return `  let each${i} = "";\n  for (const m of ${s}.matchAll(/${c.p}/g${c.f})) each${i} += m.index + ":" + m[0] + ";";\n` +

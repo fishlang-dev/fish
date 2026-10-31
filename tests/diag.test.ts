@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CompileError, formatError, madeUpNames, shown } from "../src/diag.ts";
+import { CompileError, formatError, shown } from "../src/diag.ts";
 
 const src = "let a = 1\nuse(a)\n";
 
@@ -19,11 +19,11 @@ test("a note renders after the error at its own location", () => {
 });
 
 test("only names the compiler made up are rewritten in messages, never text a user wrote", () => {
-  madeUpNames.set('test "made"', "the test 'made'");
-  expect(shown(`'test "made"-fsh3' throws`)).toBe("the test 'made' throws");
-  expect(shown(`can't find the package 'test "\\x"'`)).toBe(`can't find the package 'test "\\x"'`);
-  expect(shown(`can't find 'test "other"'`)).toBe(`can't find 'test "other"'`);
-  expect(shown("'helper-fsh2' is unused")).toBe("'helper' is unused");
+  const names = { local: new Set<string>(), madeUp: new Map([['test "made"', "the test 'made'"]]) };
+  expect(shown(`'test "made"-fsh3' throws`, names)).toBe("the test 'made' throws");
+  expect(shown(`can't find the package 'test "\\x"'`, names)).toBe(`can't find the package 'test "\\x"'`);
+  expect(shown(`can't find 'test "other"'`, names)).toBe(`can't find 'test "other"'`);
+  expect(shown("'helper-fsh2' is unused", names)).toBe("'helper' is unused");
 });
 
 test("diagnostics import nothing, so they compile without the rest of the compiler", () => {

@@ -5,7 +5,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { CompileError, formatError, type Source } from "./diag.ts";
+import { shared } from "./compilation.ts";
+import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { locking, resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
@@ -84,12 +85,13 @@ function expanded(loaded: Loaded, library: boolean): Stmt[] {
   return flatten(loaded, library);
 }
 
-// Runs `run`, giving a compile error it throws the program's other files to render against.
+// Runs `run`, giving a compile error it throws the program's other files to render against, and
+// the names it made up.
 function withSources<T>(sources: Source[], run: () => T): T {
   try {
     return run();
   } catch (e) {
-    if (e instanceof CompileError) e.sources = sources;
+    if (e instanceof CompileError) named(e, shared.names).sources = sources;
     throw e;
   }
 }
@@ -321,7 +323,7 @@ function lintPaths(paths: string[], fixing: boolean): number {
         if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
         continue;
       }
-      parse(src);
+      parse(src, shared.ids);
       if (fixing) {
         const to = typescript ? `${path.slice(0, -3)}.fsh` : undefined;
         if (to && existsSync(to)) {
@@ -352,7 +354,7 @@ function lintPaths(paths: string[], fixing: boolean): number {
         }
         src = text;
       }
-      const found = migrations(parseWithComments(src), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
+      const found = migrations(parseWithComments(src, shared.ids), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
       if (at.endsWith(".ts")) found.unshift({ rule: "A10", action: "auto", start: 0, end: 0, message: `the file becomes '${basename(at, ".ts")}.fsh', its Fish name; 'fishc lint --fix' renames it` });
       for (const hit of found) console.log(formatError(new CompileError(hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
       hits += found.length;

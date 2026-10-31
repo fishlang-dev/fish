@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
+import { shared } from "../src/compilation.ts";
 import { CompileError, formatError } from "../src/diag.ts";
 import { buildAsync } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
@@ -55,7 +56,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
   const empty = { stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };
   try {
     if (src.includes("// mode: parse")) {
-      parse(src);
+      parse(src, shared.ids);
       return empty;
     }
     const out = join(tmp, name.replace(/\.fsh$/, "").replace(/[^\w.-]+/g, "_"));

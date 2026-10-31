@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { shared } from "../src/compilation.ts";
 import { parse, type Specifier, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Stmt, type TypeMember, type TypeNode } from "../src/parser.ts";
 
 // Prints a type with every composite part parenthesised, so the table shows how it grouped.
@@ -88,7 +89,7 @@ let src = "";
 
 function parseType(type: string): TypeNode {
   src = `function f(): ${type} {}`;
-  const [f] = parse(src);
+  const [f] = parse(src, shared.ids);
   if (f?.kind !== "function") throw new Error("expected a function");
   return f.returnType!;
 }
@@ -272,7 +273,7 @@ function showExpr(e: Expr): string {
 
 function parseExpr(expr: string): Expr {
   src = `function f() {\n  let x = ${expr}\n}`;
-  const [f] = parse(src);
+  const [f] = parse(src, shared.ids);
   const [s] = f?.kind === "function" ? f.body ?? [] : [];
   if (s?.kind !== "let") throw new Error("expected a let statement");
   return s.declarations[0]!.init!;
@@ -470,7 +471,7 @@ function showPattern(p: Pattern): string {
 
 function parseStatement(stmt: string): Stmt {
   src = `function f() {\n  ${stmt}\n}`;
-  const [f] = parse(src);
+  const [f] = parse(src, shared.ids);
   const [s] = f?.kind === "function" ? f.body ?? [] : [];
   if (!s) throw new Error("expected a statement");
   return s;
@@ -578,7 +579,7 @@ function showStmt(s: Stmt): string {
 
 function parseStatements(stmts: string): Stmt[] {
   src = `function f() {\n  ${stmts}\n}`;
-  const [f] = parse(src);
+  const [f] = parse(src, shared.ids);
   return f?.kind === "function" ? f.body ?? [] : [];
 }
 
@@ -775,7 +776,7 @@ for (const dir of ["src", "tests"]) {
   const path = join(import.meta.dir, "..", dir);
   for (const file of readdirSync(path).filter((f) => f.endsWith(".ts"))) {
     test(`${dir}/${file} parses`, () => {
-      parse(readFileSync(join(path, file), "utf8"));
+      parse(readFileSync(join(path, file), "utf8"), shared.ids);
     });
   }
 }
@@ -799,7 +800,7 @@ function documented(src: string): string {
     if ("throws" in n && n.throws) return n.throws as TypeNode;
     return Object.values(n).map(find).find((t) => t);
   };
-  const t = find(parse(src));
+  const t = find(parse(src, shared.ids));
   return t ? `${show(t)} at '${src.slice(t.start, t.end)}'` : "none";
 }
 
@@ -849,17 +850,17 @@ for (const [src, shape] of JSDOC_THROWS) {
 }
 
 test("a JSDoc @throws tag parses as the written clause does", () => {
-  const bare = (src: string) => JSON.stringify(parse(src), (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : v));
+  const bare = (src: string) => JSON.stringify(parse(src, shared.ids), (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : v));
   expect(bare("/** @throws {A | B<i64>} */ function f(): void {}")).toBe(bare("function f(): void throws A | B<i64> {}"));
   expect(bare("class C { /** @throws {E} */ m(): void {} }")).toBe(bare("class C { m(): void throws E {} }"));
 });
 
 test("JSDoc @throws errors point into the comment", () => {
-  expect(() => parse("/** @throws {string} */ function f() throws i64 {}")).toThrow(expect.objectContaining({
+  expect(() => parse("/** @throws {string} */ function f() throws i64 {}", shared.ids)).toThrow(expect.objectContaining({
     message: "the JSDoc says '@throws {string}' but the function says 'throws i64'; make them the same type, or keep one", start: 13, end: 19,
   }));
-  expect(() => parse("/** @throws {1} */ function f() throws 1 {}")).not.toThrow();
-  expect(() => parse("/** @throws {1} */ function f() throws 2 {}")).toThrow("the JSDoc says '@throws {1}' but the function says 'throws 2'");
+  expect(() => parse("/** @throws {1} */ function f() throws 1 {}", shared.ids)).not.toThrow();
+  expect(() => parse("/** @throws {1} */ function f() throws 2 {}", shared.ids)).toThrow("the JSDoc says '@throws {1}' but the function says 'throws 2'");
 });
 
 test("TypeScript with JSDoc types Fish can't read still parses", () => {

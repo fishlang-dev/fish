@@ -1,7 +1,8 @@
+import { freshId } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import type { Type } from "./typing.ts";
-import { WeakNodeMap, WeakNodeSet, nextId } from "./nodes.ts";
+import { WeakNodeMap, WeakNodeSet } from "./nodes.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional
 // parameter under a name no source can write, and the body starts with `const x: T = <it> ?? v`,
@@ -41,11 +42,11 @@ function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
     if ((p.pattern.kind === "object" || p.pattern.kind === "array") && !p.default && !p.rest) {
       const at = { start: p.pattern.start, end: p.pattern.end };
       const hidden = `argument ${i}`;
-      const binding: Stmt = { id: nextId(), kind: "let", keyword: "const", declarations: [{ id: nextId(), target: p.pattern, type: undefined, init: { id: nextId(), kind: "ident", name: hidden, ...at }, ...at }], ...at };
+      const binding: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: p.pattern, type: undefined, init: { id: freshId(), kind: "ident", name: hidden, ...at }, ...at }], ...at };
       prologues.add(binding);
       firsts.push(binding);
       renamed.set(p, "_");
-      Object.assign(p, { pattern: { id: nextId(), kind: "ident", name: hidden, ...at } });
+      Object.assign(p, { pattern: { id: freshId(), kind: "ident", name: hidden, ...at } });
       return;
     }
     if (!p.default) return;
@@ -63,26 +64,26 @@ function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
     const empty = p.default.kind === "null" || (p.default.kind === "ident" && p.default.name === "undefined");
     const at = { start: p.start, end: p.end };
     const hidden = `${name} given`;
-    const given: Expr = { id: nextId(), kind: "ident", name: hidden, ...at };
-    const init: Expr = { id: nextId(), kind: "binary", op: "??", left: given, right: p.default, start: p.default.start, end: p.default.end };
+    const given: Expr = { id: freshId(), kind: "ident", name: hidden, ...at };
+    const init: Expr = { id: freshId(), kind: "binary", op: "??", left: given, right: p.default, start: p.default.start, end: p.default.end };
     fallbacks.set(init, type);
-    const binding: Stmt = { id: nextId(), kind: "let", keyword: "const", declarations: [{ id: nextId(), target: { id: nextId(), kind: "ident", name, ...at }, type, init, ...at }], ...at };
+    const binding: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: { id: freshId(), kind: "ident", name, ...at }, type, init, ...at }], ...at };
     prologues.add(binding);
     firsts.push(binding);
-    Object.assign(p, { pattern: { ...p.pattern, id: nextId(), name: hidden }, type, optional: true, default: undefined });
+    Object.assign(p, { pattern: { ...p.pattern, id: freshId(), name: hidden }, type, optional: true, default: undefined });
     defaulted.set(p, { name, empty });
   });
   if (firsts.length === 0) return;
   if (Array.isArray(f.body)) f.body.unshift(...firsts);
   else {
     const value = f.body;
-    f.body = [...firsts, { id: nextId(), kind: "return", value, start: value.start, end: value.end }];
+    f.body = [...firsts, { id: freshId(), kind: "return", value, start: value.start, end: value.end }];
   }
 }
 
 // The type a literal default says: `1` an i64, `1.5` an f64, `"a"` a string, `true` a boolean.
 function literalType(e: Expr): TypeNode | undefined {
-  const ref = (name: string): TypeNode => ({ id: nextId(), kind: "ref", name, args: [], start: e.start, end: e.end });
+  const ref = (name: string): TypeNode => ({ id: freshId(), kind: "ref", name, args: [], start: e.start, end: e.end });
   if (e.kind === "unary" && e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) return literalType(e.operand);
   if (e.kind === "int") return ref("i64");
   if (e.kind === "float") return ref("f64");

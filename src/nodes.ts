@@ -5,17 +5,19 @@
 // Every node's own number, unique in the process, which the compiler's per-node tables key on.
 export type Id = { id: number };
 
-let last = 0;
+// The counter ids come from, the last one given. Whoever starts a compilation holds it, and one
+// counter serves every tree parsed or made, at any time, so none share an id.
+export type Ids = { last: number };
 
-// A fresh id, unique in this process, so trees parsed or made at different times never share one.
-export function nextId(): number {
-  return ++last;
+// A fresh id from `ids`.
+export function nextId(ids: Ids): number {
+  return ++ids.last;
 }
 
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the
 // first one it got. `next` gives the ids.
-export function renumber<T>(tree: T, next: () => number = nextId): T {
+export function renumber<T>(tree: T, next: () => number): T {
   const seen = new Set<unknown>();
   const walk = (v: unknown): void => {
     if (typeof v !== "object" || v === null || seen.has(v)) return;

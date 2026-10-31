@@ -1,8 +1,9 @@
 // Fish source printed in the one official style, Prettier's defaults: the program is turned into
 // a document (src/doc.ts) and laid out at 80 columns.
 
+import { freshId, shared } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import { WeakNodeMap, nextId } from "./nodes.ts";
+import { WeakNodeMap } from "./nodes.ts";
 import {
   align, breakParent, conditionalGroup, fill, group, groupId, hardline, ifBreak, indent, indentIfBreak, join, label, line,
   lineSuffix, lineSuffixBoundary, literalline, print, softline, type Doc,
@@ -17,11 +18,11 @@ import {
 // `src` formatted, ending in one newline, with line endings as `\n`; a parse error is a
 // CompileError at its place in `src`.
 export function format(src: string): string {
-  const parsed = parseWithComments(src);
+  const parsed = parseWithComments(src, shared.ids);
   // Prettier prints `\n` line endings whatever the source used; the source is read the same way.
   if (!src.includes("\r")) return printProgram(parsed.program, src, parsed.comments);
   const lf = src.replace(/\r\n?/g, "\n");
-  const { program, comments } = parseWithComments(lf);
+  const { program, comments } = parseWithComments(lf, shared.ids);
   return printProgram(program, lf, comments);
 }
 
@@ -103,7 +104,7 @@ export function assertSameProgram(before: string, after: Stmt[]) {
 // The formatter's own output parsed again; failing to parse is the formatter's bug, not the user's.
 function reparse(out: string): { program: Stmt[]; comments: Comment[] } {
   try {
-    return parseWithComments(out);
+    return parseWithComments(out, shared.ids);
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     throw new Error(`the formatter produced output that doesn't parse: ${e.message} at offset ${e.start}`);
@@ -1241,7 +1242,7 @@ function needsParens(path: At<"expr">): boolean {
   // A guard is read at binary precedence.
   if (key === "guard" && up.sort === "arm") return ["conditional", "arrow", "yield", "assign", "sequence", "throw"].includes(form(e)) || isPipe(e);
   // An object literal's spread reads its value as an array's or a call's spread does.
-  if (up.sort === "prop" && up.node.kind === "spread") return needsParens({ ...path, parent: at({ id: nextId(), kind: "spread", value: e, start: up.node.start, end: up.node.end }, "properties", up) });
+  if (up.sort === "prop" && up.node.kind === "spread") return needsParens({ ...path, parent: at({ id: freshId(), kind: "spread", value: e, start: up.node.start, end: up.node.end }, "properties", up) });
   if (up.sort !== "expr") {
     if (stmtKind(up) === "for") return false;
     if (e.kind === "sequence") return true;
@@ -2526,7 +2527,7 @@ function interfaceDoc(s: Interface, path: At<"stmt">, src: string): Doc {
   const heritage = heritageList("extends", s.extends, s.extends.length > 1, breakHeritage, path, src);
   const header = breakHeritage ? group([...named, indent(heritage)]) : [...named, heritage];
   // Members print as an object type's do, so they hang off an object type standing for the body.
-  const owner: At<"type"> = { sort: "type", node: { id: nextId(), kind: "object", members: s.members, start: s.start, end: s.end }, key: "body", parent: path };
+  const owner: At<"type"> = { sort: "type", node: { id: freshId(), kind: "object", members: s.members, start: s.start, end: s.end }, key: "body", parent: path };
   const members = s.members.map((m) => [typeMember(m, owner, src), ";"]);
   return ["interface", header, " ", membersBlock(s.members, members, s.members, src)];
 }
@@ -2753,7 +2754,7 @@ function macroDecorators(decorators: Expr[] | undefined, doc: Doc, path: Path, s
 // `|>`. The tree's `pipe` node is read through this view.
 function pipeAsBinary(e: Of<"pipe">): Of<"binary"> {
   // `|>` isn't one of TypeScript's operators, so the view stretches BinaryOp to hold it.
-  const view: Of<"binary"> = { id: nextId(), kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
+  const view: Of<"binary"> = { id: freshId(), kind: "binary", op: "|>" as BinaryOp, left: e.value, right: e.body, start: e.start, end: e.end };
   viewed.set(view, e);
   return view;
 }

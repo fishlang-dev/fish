@@ -1,4 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { shared } from "./compilation.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -8986,7 +8987,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const held = untagged(tagged) as string;
       const slash = held.indexOf("/");
       const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
-      return regex(regexType(pattern, flags, parsePattern(pattern, flags).captures));
+      return regex(regexType(pattern, flags, parsePattern(pattern, flags, shared.regex).captures));
     }
     if (typeof type !== "string" && type.kind === "union") {
       const member = memberOf(tagged, type);
@@ -9271,7 +9272,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const key = `${t.flags}/${t.pattern}`;
     const made = regexes.get(key);
     if (made) return made;
-    const program = compileRegex(parsePattern(t.pattern, t.flags));
+    const program = compileRegex(parsePattern(t.pattern, t.flags, shared.regex), shared.regex);
     const name = `@.regex.${stableId("regex", key)}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);
