@@ -2694,7 +2694,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       at = temp();
       emit(`${at} = load ptr, ptr ${held}`);
     }
-    const result = resume(generator, at);
+    const result = resume(generator, at, s.right);
     const [finished, more] = nextShapes(generator.yields);
     emit(`br i1 ${holds(result, nextResult(generator.yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
     startBlock(loop);
@@ -2810,12 +2810,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     return convert(made, more, nextResult(yields));
   }
 
-  // Runs a generator to its next `yield`, through a pointer to it.
-  function resume(generator: GeneratorType, at: string): string {
+  // Runs a generator to its next `yield`, through a pointer to it. An error it throws is
+  // raised at `raising`.
+  function resume(generator: GeneratorType, at: string, raising: Expr): string {
     const target = generatorOf.get(generator)!;
     const result = temp();
     unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at})`, result);
-    return result;
+    return generator.throws ? unpacked(resultType(target), result, nextResult(generator.yields), raising)! : result;
   }
 
   // `yield v`: the value goes back to `next()`'s caller, and the next call goes on from here.
@@ -6784,7 +6785,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         return made;
       }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "generator") {
-        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
+        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object), e);
         const type = nextResult((valueType(e.callee.object) as GeneratorType).yields);
         if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
         return result;
@@ -7487,14 +7488,18 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // What a generator gives back from a `yield` or its end: what `next()` gives, which an async
   // one's resume gives as ready.
   function yieldedAs(answer: string): string {
-    return current.generator?.async ? polled(pollOf(current), 1, answer) : answer;
+    if (current.generator?.async) return polled(pollOf(current), 1, answer);
+    if (!current.generator?.throws) return answer;
+    const made = temp();
+    emit(`${made} = insertvalue ${resultType(current)} zeroinitializer, ${llvm(nextResult(current.generator.yields))} ${answer}, 1`);
+    return made;
   }
 
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
     if (i.generator?.async) return pollType(pollOf(i));
-    if (i.generator) return llvm(nextResult(i.generator.yields));
+    if (i.generator) return i.generator.throws ? throwing(nextResult(i.generator.yields), i.generator.throws) : llvm(nextResult(i.generator.yields));
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
     return throwing(i.returns, i.throws);
@@ -7614,6 +7619,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       emit(`ret ${resultType(current)} ${polled(current.future, 2, undefined, error)}`);
       return;
     }
+    // A generator that throws is finished, as in JavaScript.
+    if (current.generator) emit("store i32 -1, ptr %state");
+    if (current.generator?.async) return emit(`ret ${resultType(current)} ${polled(pollOf(current), 2, undefined, error)}`);
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);

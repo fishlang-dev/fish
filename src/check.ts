@@ -401,7 +401,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const {
     fits, lowersVariants, lowersInterfaces, lowersClasses, promiseInterface, functionType, typeParameter, literalType, setJsError, jsUncalled, jsConverts, holdsRef,
     lower, show, blockType, jsTakes, uncrossable, jsView, replaced, stored, generatorType, generatorElement, futureType, promiseElement, lockCallbacks,
-    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, tupleType,
+    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, generatorThrows, tupleType,
   } = typing;
   const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
   const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations, equalities, madeArrows } = tables;
@@ -1269,7 +1269,6 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     let yielded = generator && declared ? generatorElement(declared, f.async === true) : undefined;
     if (generator && declared && !yielded) throw new CompileError(`${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
-    if (generator && f.throws) throw unsupported("generators that throw", f.throws);
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
     // give that, and calling it gives its own future, which runs nothing until awaited.
@@ -1455,6 +1454,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
+    // Advancing a generator runs its body, so that is what throws, not calling it.
+    if (generator && errorType) generator.throws = instance.concrete ? lower(errorType) : errorType;
     const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
@@ -2293,6 +2294,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const yields = yieldsOf(object);
           if (yields !== undefined) {
             if (isRef(through) && !through.mutable) throw new CompileError("a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+            const error = generatorThrows(object);
+            if (error) raise(s.right, error, "this generator");
             scopes.push(new Map());
             declare(d.target.name, yields, left.keyword === "let", false, left);
             within({ stmt: s, kind: "loop" }, () => scoped(s.body));
@@ -2478,6 +2481,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         throw new CompileError(`'for await' loops over an async generator or a Channel, not '${show(through)}'`, s.right.start, s.right.end);
       }
       if (yields !== undefined && isRef(through) && !through.mutable) throw new CompileError("a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+      const error = generatorThrows(object);
+      if (error) raise(s.right, error, "this generator");
       scopes.push(new Map());
       declare(name, yields ?? channel!, mutable, false, s.left as Stmt);
       within({ stmt: s, kind: "loop" }, () => scoped(s.body));

@@ -280,7 +280,7 @@ export function expressions(ctx: Context) {
     unusedDefaults, restStarts, upcasts, typing, ids, regex, files
   } = ctx.tables;
   const {
-    show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
+    show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, generatorThrows, pointerType, handleType, leafFuture,
     arrayType, timerCallback, jsUncalled, fits, jsTakes, promiseElement, genericFunctionType, stored: storedType, matchType, functionType, tupleType, regexType,
     holdsPattern, unjson, sameLowered, heldArgument, jsUntyped, jsOptional, uncrossable, keptByJs, jsConverts, interiorType, lockCallbacks, sharedCallbacks,
     combinedFuture, nextResult, lentPromise, promiseInterface, generatorElement, membersFor, wrapped, jsRead, literalType, objectType, sameCallable, partOfItself, unlocks, keyOf, joinedType,
@@ -1341,7 +1341,7 @@ export function expressions(ctx: Context) {
     // an abstract declaration says it may.
     const declared = callee.kind === "member" ? abstractDeclaration(callee, "methods") : undefined;
     const error = errorOf(instance) ?? (declared && errorOf(instanceOf(declared)));
-    if (error && !target.async) raise(e, error, `'${target.name}'`);
+    if (error && !target.async && !target.generator) raise(e, error, `'${target.name}'`);
     const type = resultOf(declared ? instanceOf(declared) : instance, e);
     const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what
@@ -3598,6 +3598,8 @@ export function expressions(ctx: Context) {
     if (isRefType(held)) coercions.set(callee.object, generator);
     if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
     changeable(callee.object, "advance");
+    const error = generatorThrows(generator);
+    if (!async && error) raise(e, error, "'next'");
     if (!async) return { type: nextResult(yields), what: "'next'" };
     const made = typeof generator !== "string" && generator.kind === "param" && generator.concrete ? generator.concrete : generator;
     return { type: typeof made !== "string" && made.kind === "generator" ? leafFuture("next", made) : promiseInterface(nextResult(yields)), what: "'next'" };

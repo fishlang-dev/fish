@@ -121,6 +121,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   if (typeof type !== "string" && type.kind === "generator") {
     const element = generatorElement(trait, type.async);
     if (element === undefined) return `${type.async ? "an async" : "a"} generator has only 'next', which type '${trait.name}' doesn't describe`;
+    if (type.throws) return `its 'next' throws '${show(type.throws)}', which '${trait.name}' doesn't`;
     return lower(type.yields) === lower(element) ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
   }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;

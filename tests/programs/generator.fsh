@@ -486,14 +486,114 @@ function main() {
 }
 // error: 'g' would keep borrowing this temporary
 // case: generator_throws
+function* parse(items: string[]): Generator<i64> throws string {
+  for (const s of items) {
+    if (s === "bad") throw "bad item: " + s;
+    yield s.length as i64;
+  }
+}
+
+function total(items: string[]): i64 throws string {
+  let sum = 0;
+  for (const n of parse(items)) sum += n;
+  return sum;
+}
+
+function main() {
+  let it = parse(["ab", "bad", "c"]);
+  try {
+    const a = it.next();
+    if (a.done === false) console.log("first", a.value);
+    it.next();
+    console.log("unreachable");
+  } catch (e) {
+    console.log("caught", e);
+  }
+  try {
+    const after = it.next();
+    console.log("after", after.done);
+  } catch (e) {
+    console.log("not again", e);
+  }
+  try {
+    for (const n of parse(["xyz", "bad"])) console.log("loop", n);
+  } catch (e) {
+    console.log("loop caught", e);
+  }
+  try {
+    console.log(total(["a", "bc"]));
+    console.log(total(["a", "bad"]));
+  } catch (e) {
+    console.log("total caught", e);
+  }
+}
+// expect: first 2
+// expect: caught bad item: bad
+// expect: after true
+// expect: loop 3
+// expect: loop caught bad item: bad
+// expect: 3
+// expect: total caught bad item: bad
+// case: generator_throws_passed_on
+function* digits(s: string): Generator<i64> throws string {
+  for (const c of s) {
+    if (c === "x") throw `not a digit: ${c}`;
+    yield c.length as i64;
+  }
+}
+
+function main(): void throws string {
+  for (const d of digits("12")) console.log(d);
+  let g = digits("x");
+  g.next();
+}
+// expect: 1
+// expect: 1
+// fails: not a digit: x
+// case: generator_throws_undeclared
+function* g(): Generator<i64> throws string {
+  yield 1;
+  throw "no";
+}
+
+function main() {
+  let it = g();
+  it.next();
+}
+// error: 'main' must declare 'throws string' after its return type since 'next' can throw 'string'
+// case: generator_throws_loop_undeclared
+function* g(): Generator<i64> throws string {
+  throw "no";
+}
+
+function main() {
+  for (const x of g()) console.log(x);
+}
+// error: since this generator can throw 'string'
+// case: generator_throws_not_generator
+function* g(): Generator<i64> throws string {
+  yield 1;
+}
+
+function sum(g: Generator<i64>): i64 {
+  let total = 0;
+  for (const v of g) total += v;
+  return total;
+}
+
+function main() {
+  console.log(sum(g()));
+}
+// error: its 'next' throws 'string', which 'Generator<i64>' doesn't
+// case: generator_throws_helper
 function* g(): Generator<i64> throws string {
   yield 1;
 }
 
 function main() {
-  const it = g();
+  const doubled = g().map((x) => x * 2);
 }
-// error: generators that throw are not supported yet
+// error: throws 'string'
 // case: generator_wrong_element
 function* words(): Generator<string> {
   yield "a";
