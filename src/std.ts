@@ -34,6 +34,112 @@ function __arrayCollect<T>(g: Generator<T>): T[] {
   for (const x of g) out.push(x);
   return out;
 }
+function* __iterMap<T, U>(g: Generator<T>, f: (value: T, index: i64) => U): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    yield f(x, i);
+    i++;
+  }
+}
+function* __iterFilter<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): Generator<T> {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) yield x;
+    i++;
+  }
+}
+function* __iterTake<T>(g: Generator<T>, n: i64): Generator<T> {
+  if (n === 0) return;
+  let i = 0;
+  for (const x of g) {
+    yield x;
+    i++;
+    if (i === n) return;
+  }
+}
+function* __iterDrop<T>(g: Generator<T>, n: i64): Generator<T> {
+  let i = 0;
+  for (const x of g) {
+    if (i < n) i++;
+    else yield x;
+  }
+}
+function* __iterFlatMap<T, U>(g: Generator<T>, f: (value: T, index: i64) => U[]): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    // ponytail: each element is cloned, since a loop over an array lends them; moving them out
+    // needs an owning loop over arrays.
+    const ys = f(x, i);
+    for (const y of ys) yield y.clone();
+    i++;
+  }
+}
+function* __iterFlatMapGenerator<T, U, G extends Generator<U>>(g: Generator<T>, f: (value: T, index: i64) => G): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    const ys = f(x, i);
+    yield* ys;
+    i++;
+  }
+}
+function __iterReduce<T, A>(g: Generator<T>, f: (accumulator: A, value: T, index: i64) => A, init: A): A {
+  let acc = init;
+  let i = 0;
+  for (const x of g) {
+    acc = f(acc, x, i);
+    i++;
+  }
+  return acc;
+}
+// The fold in a one-element tuple, so a 'T' that may itself be null isn't taken for empty.
+function __iterReduceFirst<T>(g: Generator<T>, f: (accumulator: T, value: T, index: i64) => T): [T] | null {
+  let it = g;
+  const first = it.next();
+  if (first.done === true) return null;
+  let acc = first.value;
+  let i = 1;
+  for (const x of it) {
+    acc = f(acc, x, i);
+    i++;
+  }
+  return [acc];
+}
+function __iterForEach<T>(g: Generator<T>, f: (value: T, index: i64) => void) {
+  let i = 0;
+  for (const x of g) {
+    f(x, i);
+    i++;
+  }
+}
+function __iterSome<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): boolean {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) return true;
+    i++;
+  }
+  return false;
+}
+function __iterEvery<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): boolean {
+  let i = 0;
+  for (const x of g) {
+    if (!f(x, i)) return false;
+    i++;
+  }
+  return true;
+}
+function __iterFind<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): T | null {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) return x;
+    i++;
+  }
+  return null;
+}
+// The count 'take' or 'drop' was given, or nothing when it is negative, which panics at the call.
+function __iterCount(n: i64): i64 | null {
+  if (n < 0) return null;
+  return n;
+}
 function __arrayRange(n: i64): i64[] {
   let out: i64[] = [];
   for (let i = 0; i < n; i++) out.push(i);
@@ -3100,7 +3206,7 @@ function hideHelpers(nodes: unknown) {
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
   const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-  if (hidden && typeof node.name === "string" && /^__(array|promise|timer|timeout|router|url)/.test(node.name)) {
+  if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);

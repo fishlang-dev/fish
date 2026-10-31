@@ -8340,7 +8340,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;
         const v = value(e.expr);
-        panicIf(holds(v, option, ["null"]), "called `Option::unwrap()` on a `None` value", e);
+        // The checker's own unwraps, as of an iterator helper's count, say why they panic.
+        panicIf(holds(v, option, ["null"]), (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
         return convert(v, option, types.get(e)!);
       }
       case "ident": {
