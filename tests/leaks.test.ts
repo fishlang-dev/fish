@@ -209,5 +209,5 @@ test("FISH_LEAKS=1 still counts in an ordinary build", () => {
 test("the usage text lists --leaks", () => {
   const bad = Bun.spawnSync(["bun", MAIN, "build", "x.fsh", "--panic=no"], { cwd: root });
   expect(bad.exitCode).toBe(2);
-  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]");
+  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--emit-llvm]");
 });
