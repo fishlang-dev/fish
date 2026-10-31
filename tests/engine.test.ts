@@ -159,7 +159,7 @@ test("reading a property of undefined panics", async () => {
   writeFileSync(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default undefined;");\n  const w = v.get("x");\n}\n`);
   await buildAsync(file, `${file}.out`);
   const run = Bun.spawnSync([`${file}.out`]);
-  expect(run.stderr.toString()).toBe(`panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\n`);
+  expect(run.stderr.toString()).toBe(`panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\nstack backtrace:\n   0: main at ${file}:4:13\n`);
   expect(run.exitCode).toBe(101);
 });
 
@@ -196,7 +196,7 @@ test.each([
   await buildAsync(file, `${file}.out`);
   const run = Bun.spawnSync([`${file}.out`], { env: { ...process.env, FISH_LEAKS: "1" } });
   expect(run.stdout.toString()).toBe("before\n");
-  expect(run.stderr.toString()).toBe(`panicked at fish:engine:3:10:\nuncaught exception in JS: ${reason}\n`);
+  expect(run.stderr.toString()).toBe(`panicked at fish:engine:3:10:\nuncaught exception in JS: ${reason}\nstack backtrace:\n   0: main at ${file}:4:13\n`);
   expect(run.exitCode).toBe(101);
 });
 

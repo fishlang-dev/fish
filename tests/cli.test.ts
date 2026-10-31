@@ -125,3 +125,13 @@ test("a dependency's TS-compat file is refused where the dependency is built", (
   expect(code).toBe(1);
   expect(err).toBe(`../../words/src/lib.fsh:1:1: error: ${COMPAT}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`);
 });
+
+test("only a debug build keeps frames for panic backtraces", () => {
+  const at = dir("backtrace-frames", { "main.fsh": "function twice(n: i64): i64 {\n  return n * 2;\n}\nfunction main() {\n  console.log(twice(3));\n}\n" });
+  const debug = fishc(at, "build", "main.fsh", "--emit-llvm");
+  expect(debug.code).toBe(0);
+  expect(debug.out).toContain("store ptr %fsh.site, ptr @fsh_rt_frames");
+  const release = fishc(at, "build", "main.fsh", "--release", "--emit-llvm");
+  expect(release.code).toBe(0);
+  expect(release.out).not.toMatch(/fsh_rt_frames|%fsh\.(site|name|link|prev)/);
+});

@@ -522,12 +522,56 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
 static int32_t fsh_tokens = 0;
 static _Thread_local int32_t fsh_token = 0;
 
+// A debug build's shadow stack: a frame for each of the program's own functions that is running,
+// pushed on entry and popped on return by the program's IR, naming the function and the call it
+// is making. A release build never touches it.
+typedef struct fsh_frame { const char *site; const char *name; struct fsh_frame *prev; } fsh_frame;
+_Thread_local fsh_frame *fsh_rt_frames = NULL;
+// Where the task this thread is polling was spawned, and the panic's "panicked at" line.
+static _Thread_local const char *fsh_spawned_at = NULL;
+static _Thread_local const char *fsh_panic_line = NULL;
+
+static void fsh_panic_at(const char *at) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fsh_panic_line = at;
+}
+
+// The stack, innermost first, numbered as Rust's is. The innermost frame is where the panic
+// happened, unless that is inside std or one of its built-in modules, whose frames are hidden:
+// then it is the frame's call into std.
+static void fsh_backtrace(void) {
+  if (!fsh_rt_frames) return;
+  fputs("stack backtrace:\n", stderr);
+  const char *at = fsh_panic_line && strncmp(fsh_panic_line, "panicked at ", 12) == 0 ? fsh_panic_line + 12 : NULL;
+  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "node:", 5) == 0 || strncmp(at, "fish:", 5) == 0)) at = NULL;
+  int64_t n = 0;
+  for (fsh_frame *f = fsh_rt_frames; f; f = f->prev, n++) {
+    if (n == 64) {
+      int64_t rest = 0;
+      for (; f; f = f->prev) rest++;
+      fprintf(stderr, "... %lld more frames\n", (long long)rest);
+      break;
+    }
+    if (n == 0 && at) fprintf(stderr, "%4lld: %s at %.*s\n", (long long)n, f->name, (int)strcspn(at, "\n") - 1, at);
+    else if (f->site) fprintf(stderr, "%4lld: %s at %s\n", (long long)n, f->name, f->site);
+    else fprintf(stderr, "%4lld: %s\n", (long long)n, f->name);
+  }
+  if (fsh_spawned_at) fprintf(stderr, "spawned at %s\n", fsh_spawned_at);
+}
+
 void fsh_rt_panic(const char *message) {
   static _Thread_local struct _Unwind_Exception exception;
   fsh_token = 0;
   fsh_panic_began = 1;
   fflush(NULL);
   fputs(message, stderr);
+  if (strncmp(message, "panicked at ", 12) == 0) fsh_panic_line = message;
+  fsh_backtrace();
+  fsh_panic_line = NULL;
+  // An unwind pops no frame, and a drop it runs may panic again: that panic starts from nothing,
+  // rather than walking frames the unwind already left. A task's poller gets its own stack back.
+  fsh_rt_frames = NULL;
   if (fsh_panic_abort) abort();
   exception.exception_class = 0x46495348; // "FISH"
   _Unwind_ForcedUnwind(&exception, fsh_unwound, NULL);
@@ -563,8 +607,7 @@ static void fsh_array_room(fsh_array *a, int64_t need, int64_t size) {
 // negative count is no count at all.
 void fsh_rt_array_grow(fsh_array *a, int64_t more, int64_t size, const char *at) {
   if (more < 0 || more > INT64_MAX / (size ? size : 1) - a->length) {
-    fflush(NULL);
-    fputs(at, stderr);
+    fsh_panic_at(at);
     fsh_rt_panic("capacity overflow\n");
   }
   if (a->length + more <= a->capacity) return;
@@ -1033,8 +1076,7 @@ fsh_str *fsh_rt_str_from_units(const uint16_t *units, int64_t n) {
 fsh_str *fsh_rt_str_from_points(const uint32_t *points, int64_t n, const char *where) {
   for (int64_t i = 0; i < n; i++) {
     if (points[i] <= 0x10FFFF) continue;
-    fflush(NULL);
-    fputs(where, stderr);
+    fsh_panic_at(where);
     char reason[64];
     snprintf(reason, sizeof reason, "invalid code point %u\n", points[i]);
     fsh_rt_panic(reason);
@@ -1047,8 +1089,7 @@ fsh_str *fsh_rt_str_from_points(const uint32_t *points, int64_t n, const char *w
 #define FSH_MAX_BYTES ((int64_t)1 << 40)
 
 static void fsh_too_long(const char *at) {
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fsh_rt_panic("invalid string length\n");
 }
 
@@ -1116,16 +1157,14 @@ fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   char reason[96];
   snprintf(reason, sizeof reason, "index out of bounds: the len is %lld but the index is %llu\n", (long long)length, (unsigned long long)index);
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fsh_rt_panic(reason);
 }
 
 // A panic whose reason is a string the program made, as an assertion's message; at is the
 // "panicked at" line.
 void fsh_rt_panic_string(const char *at, fsh_str *reason) {
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fwrite(reason->bytes, 1, reason->length, stderr);
   fsh_rt_panic("\n");
 }
@@ -1147,8 +1186,7 @@ void fsh_rt_rust_panicked(fsh_rust_message **out, const char *message, size_t le
 
 // The Fish panic a Rust panic becomes at its call; at is the "panicked at" line.
 void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fwrite(reason->bytes, 1, reason->length, stderr);
   fsh_rt_panic("\n");
 }
@@ -3075,8 +3113,7 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n, const char *where) {
       if (next == 'j') {
         fsh_rt_free(b.p);
         fsh_fargs_free(args, n);
-        fflush(NULL);
-        fputs(where, stderr);
+        fsh_panic_at(where);
         fsh_rt_panic("'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead\n");
       }
       fsh_farg *x = &args[++a];
@@ -3230,6 +3267,9 @@ struct fsh_task {
   fsh_task *prev, *next;
   int64_t frame_size;
   int64_t output_size;
+  // In a debug build, the call that spawned it, which its backtraces end with: for a task std
+  // spawned with none of the program's frames below, the call that spawned the task doing so.
+  const char *spawned;
   char memory[];
 };
 
@@ -3330,7 +3370,15 @@ static void fsh_unlink(fsh_task *t) {
 // ran. Finished, its output is kept and whoever awaits it is woken.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
+  // its frames behind for this reset to drop.
+  fsh_frame *frames = fsh_rt_frames;
+  const char *spawned = fsh_spawned_at;
+  fsh_rt_frames = NULL;
+  fsh_spawned_at = t->spawned;
   int32_t result = t->poll(t, t->memory);
+  fsh_rt_frames = frames;
+  fsh_spawned_at = spawned;
   if (result == 3) {
     pthread_mutex_lock(&fsh_alive_lock);
     fsh_panicked = 1;
@@ -3401,6 +3449,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   t->refs = 2;
   t->joiner = NULL;
   t->state = FSH_QUEUED;
+  t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
@@ -3425,6 +3474,7 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   t->refs = 2;
   t->joiner = NULL;
   t->state = FSH_QUEUED;
+  t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
