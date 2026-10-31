@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Glob } from "bun";
 import * as prettier from "prettier";
-import { shared } from "../src/compilation.ts";
 import type { Comment } from "../src/lexer.ts";
 import { parse, parseWithComments } from "../src/parser.ts";
 import { format, programShape } from "../src/printer.ts";
@@ -64,7 +63,7 @@ function programs(file: string): [string, string][] {
 }
 const units = files.flatMap(programs);
 
-const tree = (src: string) => programShape(parse(src, shared.ids));
+const tree = (src: string) => programShape(parse(src, { last: 0 }));
 
 // A comment as the formatter may rewrite it: trailing space trimmed, and a JSDoc-shaped block
 // comment's lines read without their indentation.
@@ -75,13 +74,13 @@ function commentText(c: Comment): string {
   return lines.every((l) => l.startsWith("*")) ? lines.map((l) => l.trimEnd()).join("\n") : text;
 }
 
-const comments = (src: string) => parseWithComments(src, shared.ids).comments.map(commentText);
+const comments = (src: string) => parseWithComments(src, { last: 0 }).comments.map(commentText);
 
 for (const [name, src] of units) {
   test(`${name} formats keeping its comments, parses back to the same tree and formats the same again`, () => {
     const reason = refused.get(name);
     if (reason !== undefined) {
-      expect(() => parse(src, shared.ids), `${name} is listed as refused (${reason}) but parses`).toThrow();
+      expect(() => parse(src, { last: 0 }), `${name} is listed as refused (${reason}) but parses`).toThrow();
       return;
     }
     const formatted = format(src);

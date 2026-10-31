@@ -209,7 +209,7 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
 const constName = (c: Instance) => c.body.name.slice("const ".length);
 
 function interpreter(tables: Tables) {
-  const { equalities, quotes, restStarts, stringBuilds, timerNames, parsedQuotes, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing } = tables;
+  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files } = tables;
   const { show } = typing;
   let steps = 0;
   let depth = 0;
@@ -238,8 +238,8 @@ function interpreter(tables: Tables) {
   // How consts reading each other in a ring do it, naming their files when they are in several.
   function cycle(ring: Instance[]): string {
     if (ring.length < 2) return "";
-    const files = new Set(ring.map((c) => fileAt(c.body.start)));
-    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${files.size > 1 ? ` in '${fileAt(c.body.start)}'` : ""}`);
+    const ringFiles = new Set(ring.map((c) => fileAt(files, c.body.start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, c.body.start)}'` : ""}`);
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
@@ -476,7 +476,7 @@ function interpreter(tables: Tables) {
       case "tagged": {
         const types = quotes.get(e);
         if (!types) return unsupported("this tagged template", e);
-        const q = quoted(parsedQuotes, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
+        const q = quoted(tables, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.

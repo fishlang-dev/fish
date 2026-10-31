@@ -60,12 +60,6 @@ export function join(separator: Doc, docs: Doc[]): Doc[] {
   return parts;
 }
 
-let groupIds = 0;
-// A name for a group, so an `ifBreak` elsewhere can ask how it was printed.
-export function groupId(name: string): string {
-  return `${name}#${++groupIds}`;
-}
-
 type Mode = "break" | "flat";
 type Indentation = { value: string; length: number };
 type Command = { ind: Indentation; mode: Mode; doc: Doc };

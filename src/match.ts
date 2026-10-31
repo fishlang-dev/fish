@@ -1,4 +1,4 @@
-import { freshId } from "./compilation.ts";
+import { nextId, type Ids } from "./nodes.ts";
 import type { Expr, Pattern } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
 import type { ClassType, Field, LiteralType, ObjectType, ParamType, Type, VariantType, Typing } from "./typing.ts";
@@ -116,7 +116,7 @@ type Row = Pattern[];
 // A value no row covers, as it reads in a message, or undefined when every value is covered.
 // This is the usefulness check Rust's compiler uses: the first column is split by the case each
 // value of its type falls into, keeping the rows whose first pattern can match that case.
-export function uncovered(typing: Typing, rows: Row[], types: Type[], recorded: (p: Pattern) => PatternInfo | undefined): string[] | undefined {
+export function uncovered(typing: Typing, ids: Ids, rows: Row[], types: Type[], recorded: (p: Pattern) => PatternInfo | undefined): string[] | undefined {
   // The wildcards made while splitting columns were never checked, and match anything.
   const info = (p: Pattern): PatternInfo => recorded(p) ?? { kind: "any", type: "void" };
   if (types.length === 0) return rows.length === 0 ? [] : undefined;
@@ -126,10 +126,10 @@ export function uncovered(typing: Typing, rows: Row[], types: Type[], recorded: 
     const fields = fieldTypes(c);
     const kept: Row[] = [];
     for (const [p, ...tail] of expanded) {
-      const parts = specialize(p!, c, fields.length, info);
+      const parts = specialize(ids, p!, c, fields.length, info);
       if (parts) kept.push([...parts, ...tail]);
     }
-    const missing = uncovered(typing, kept, [...fields, ...rest], recorded);
+    const missing = uncovered(typing, ids, kept, [...fields, ...rest], recorded);
     if (missing) return [render(typing, c, missing.slice(0, fields.length)), ...missing.slice(fields.length)];
   }
   return undefined;
@@ -148,9 +148,9 @@ function fieldTypes(c: Case): Type[] {
 }
 
 // The patterns for a case's fields when `p` can match a value of that case, or undefined.
-function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
+function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
   const found = info(p);
-  const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: freshId(), kind: "wildcard", start: p.start, end: p.end }));
+  const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: nextId(ids), kind: "wildcard", start: p.start, end: p.end }));
   // On an Option, a pattern for a value is a pattern for what `Some` holds.
   if (c.kind === "some" && found.kind !== "some" && found.kind !== "none" && found.kind !== "any") return [p];
   switch (found.kind) {
@@ -167,7 +167,7 @@ function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => Pa
     case "object": {
       // A field the pattern leaves out matches anything.
       if (c.kind !== "object" || !found.shapes.includes(c.type)) return undefined;
-      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: freshId(), kind: "wildcard", start: p.start, end: p.end });
+      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: nextId(ids), kind: "wildcard", start: p.start, end: p.end });
     }
     default:
       return undefined;

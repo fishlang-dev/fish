@@ -3,7 +3,6 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { shared } from "./compilation.ts";
 import { MAX_DOWNLOAD, MAX_UNPACKED } from "./dependencies.ts";
 import { firstLine, git } from "./git.ts";
 import { loadManifest, MANIFEST, readManifest, type Manifest } from "./manifest.ts";
@@ -86,7 +85,7 @@ function readsBack(files: { path: string; data: Uint8Array }[], lib: string) {
       seen.add(file);
       let program: Stmt[];
       try {
-        program = parse(readFileSync(file, "utf8"), shared.ids);
+        program = parse(readFileSync(file, "utf8"), { last: 0 });
       } catch (e) {
         throw new Error(`${relative(at, file)} doesn't parse: ${e instanceof Error ? e.message : e}`);
       }
@@ -119,7 +118,7 @@ export function unsafeUses(files: { path: string; text: string }[]): UnsafeUse[]
   for (const { path, text } of files.filter((f) => f.path.endsWith(".fsh"))) {
     let program: Stmt[];
     try {
-      program = parse(text, shared.ids);
+      program = parse(text, { last: 0 });
     } catch (e) {
       throw new Error(`${path} doesn't parse: ${e instanceof Error ? e.message : e}`);
     }

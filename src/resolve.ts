@@ -1,8 +1,8 @@
-import { freshId, type Tables } from "./compilation.ts";
+import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { NodeMap } from "./nodes.ts";
+import { nextId, NodeMap } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { ANY_REGEX, familyHeld, jsShape, type RecursiveType, field, isFloat, splitTemplate, textFits, holdsHandle, holdsPart, type BlockType, isInteger, type MapType, type ArrayType, optionRef, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
@@ -62,7 +62,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // type parameters, and resolved again per set of type arguments.
 export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
   conforms: (from: Type, to: Type, at: Span) => boolean) {
-  const { declaredTypes, defaulted, presetTypes } = tables;
+  const { declaredTypes, defaulted, presetTypes, ids } = tables;
   const { typing } = tables;
   const {
     lowersRecursive, keyOf, recursiveType, show, standsFor, heldArgument, holdsRef, holdsPattern, variantType, unionType, holdsBlock, lower, stored,
@@ -625,7 +625,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
         const [params, result] = withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => paramType(p)), resolveType(returns)] as const);
         const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
         if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
-        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: freshId(), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
+        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: nextId(ids), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
         t.methods.push(method);
       } else {
@@ -862,7 +862,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
-    const f: Field = m.optional ? optionalField(m.name, unionMember(m.type)) : withoutUndefined(m.type) ? { name: m.name, type: resolveType(m.type), optional: "undefined" } : { name: m.name, type: resolveType(m.type) };
+    const f: Field = m.optional ? optionalField(m.name, unionMember(m.type)) : withoutUndefined(ids, m.type) ? { name: m.name, type: resolveType(m.type), optional: "undefined" } : { name: m.name, type: resolveType(m.type) };
     return { ...f, type: storable(typing, f.type, m), ...(m.readonly && { readonly: true }) };
   }
 }

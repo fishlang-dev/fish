@@ -2,11 +2,12 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-// Every node's own number, unique in the process, which the compiler's per-node tables key on.
+// Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
 export type Id = { id: number };
 
-// The counter ids come from, the last one given. Whoever starts a compilation holds it, and one
-// counter serves every tree parsed or made, at any time, so none share an id.
+// The counter ids come from, the last one given. Each compilation holds its own, which serves
+// every tree it parses or makes, at any time, so none share an id; a tree parsed on its own, as
+// the formatter's, has a counter of its own.
 export type Ids = { last: number };
 
 // A fresh id from `ids`.

@@ -1,4 +1,4 @@
-import { freshId, shared, type Tables } from "./compilation.ts";
+import type { Tables } from "./compilation.ts";
 import { fileAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
@@ -22,7 +22,7 @@ import { holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
-import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -256,7 +256,7 @@ export function expressions(ctx: Context) {
     ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
     promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
-    unusedDefaults, restStarts, parsedQuotes, upcasts, typing
+    unusedDefaults, restStarts, upcasts, typing, ids, regex, files
   } = ctx.tables;
   const {
     show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
@@ -533,7 +533,7 @@ export function expressions(ctx: Context) {
       if (arm.body.kind === "block") return ctx.block(arm.body, wanted);
       return [[arm.body, wanted ? value(arm.body) : result(arm.body)]];
     }));
-    const example = uncovered(typing, e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
+    const example = uncovered(typing, ids, e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
     if (example) throw new CompileError(missing(typing, example[0]!, subject), e.start, e.subject.end + 1);
     if (!wanted) return "void";
     // Arms that only throw give nothing, so some other arm has to.
@@ -569,7 +569,7 @@ export function expressions(ctx: Context) {
       if (borrowed) coerce(e.value, type, topic, "");
       return ctx.arm(() => {
         ctx.bind("%", topic, e);
-        e.body = topics(e.body, (at) => ({ id: freshId(), kind: "ident", name: "%", start: at.start, end: at.end }));
+        e.body = topics(e.body, (at) => ({ id: nextId(ids), kind: "ident", name: "%", start: at.start, end: at.end }));
         if (!wanted) return effect(e.body), "void";
         const given = value(e.body);
         if (holdsRef(given)) throw new CompileError("a pipe over a value can't give a reference yet, since the value is dropped once the pipe ends; give a copy with '.clone()'", e.start, e.end);
@@ -578,7 +578,7 @@ export function expressions(ctx: Context) {
     }
     const place = e.value;
     const body = topics(e.body, (at) => {
-      const copy = spanned(renumber(structuredClone(place), freshId), at);
+      const copy = spanned(renumber(structuredClone(place), () => nextId(ids)), at);
       for (let m: Expr = copy; m.kind === "member" || m.kind === "index"; m = m.object) if (m.kind === "member") substituted.add(m);
       return copy;
     });
@@ -934,7 +934,7 @@ export function expressions(ctx: Context) {
       if (e.typeArgs.length > 0) throw new CompileError("'fill' takes no type argument; write the element type on the array, as in 'new Array<u8>(n).fill(0)'", e.start, e.end);
       if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
       const [n, x] = [made.args[0]!, e.args[0]!];
-      Object.assign(e, { callee: { id: freshId(), kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
+      Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [arrayLength(n, true), x], typeArgs: made.typeArgs });
       fills.add(e);
       return call(e);
     }
@@ -1070,7 +1070,7 @@ export function expressions(ctx: Context) {
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
       const given = e.args[0]!;
       if (given.kind === "arrow" && given.async && given.params.length === 0) {
-        e.args[0] = { id: freshId(), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+        e.args[0] = { id: nextId(ids), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
       }
       const t = value(e.args[0]!);
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
@@ -1092,7 +1092,7 @@ export function expressions(ctx: Context) {
     }
     // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
     // each a job on the runtime's blocking pool.
-    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && fileAt(e.start).startsWith("node:")) {
+    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && fileAt(files, e.start).startsWith("node:")) {
       const reading = callee.name === "fileRead";
       if (e.args.length !== (reading ? 1 : 2)) throw new CompileError(`'${callee.name}' takes ${reading ? "a path" : "a path and the bytes"}`, e.start, e.end);
       const path = value(e.args[0]!);
@@ -1106,7 +1106,7 @@ export function expressions(ctx: Context) {
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
-    const sync = callee.kind === "ident" && fileAt(e.start).startsWith("node:") ? syncFileSignatures(typing)[callee.name] : undefined;
+    const sync = callee.kind === "ident" && fileAt(files, e.start).startsWith("node:") ? syncFileSignatures(typing)[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
       const name = (callee as Extract<Expr, { kind: "ident" }>).name;
@@ -1137,7 +1137,7 @@ export function expressions(ctx: Context) {
       value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
     }
-    if (callee.kind === "ident" && callee.name === "jsEvaluate" && fileAt(e.start) === "fish:engine") {
+    if (callee.kind === "ident" && callee.name === "jsEvaluate" && fileAt(files, e.start) === "fish:engine") {
       coerce(e.args[0]!, value(e.args[0]!), "string", "a module's source is a 'string'");
       jsEvaluations.add(e);
       return { type: blockType("JsValue"), what: "'jsEvaluate'" };
@@ -1171,7 +1171,7 @@ export function expressions(ctx: Context) {
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
-    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(e.start).startsWith("node:")) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
+    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(files, e.start).startsWith("node:")) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
@@ -1208,7 +1208,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
     // node:util's functions that take any values, as Node's do, given their meaning here.
-    const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    const util = target && callee.kind === "ident" && fileAt(files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
       if (e.optional) throw new CompileError("'format' is always there, so it is called without '?.'", e.start, e.end);
       refuseSpread(e.args);
@@ -1227,7 +1227,7 @@ export function expressions(ctx: Context) {
     if (util === "parseArgs" && !parsedArgs.has(e)) {
       if (e.optional) throw new CompileError("'parseArgs' is always there, so it is called without '?.'", e.start, e.end);
       refuseSpread(e.args);
-      e.args = parseArgsArgs(e);
+      e.args = parseArgsArgs(ids, e);
       parsedArgs.add(e);
     }
     // Fish's value equality, which `===` already is.
@@ -1302,11 +1302,11 @@ export function expressions(ctx: Context) {
   // `quoteType`, a type's; each splice takes a node of the category its place holds.
   function quote(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
     if (e.typeArgs.length > 0) throw new CompileError("a quote takes no type arguments", e.start, e.end);
-    const q = quoted(parsedQuotes, e, asType);
+    const q = quoted(ctx.tables, e, asType);
     q.asExpressions.clear();
     q.names.clear();
     const at = { start: e.start, end: e.end };
-    const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ id: freshId(), kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
+    const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ id: nextId(ids), kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
     holesOf(typing, q, types, e).forEach((category, i) => {
       const hole = q.holes[i]!;
       const t = value(hole);
@@ -1335,8 +1335,8 @@ export function expressions(ctx: Context) {
     if (target.params.length !== 2 || !target.params[1]!.rest) throw new CompileError(`'${tag.name}' can't be a tag: a tag takes ${shape}`, tag.start, tag.end);
     if (template.kind !== "template") throw new CompileError("a tag is followed by a template literal", template.start, template.end);
     const at = { start: template.start, end: template.end };
-    const strings: Expr = { id: freshId(), kind: "array", elements: template.quasis.map((value): Expr => ({ id: freshId(), kind: "string", value, ...at })), ...at };
-    const values: Expr = { id: freshId(), kind: "array", elements: template.exprs, ...at };
+    const strings: Expr = { id: nextId(ids), kind: "array", elements: template.quasis.map((value): Expr => ({ id: nextId(ids), kind: "string", value, ...at })), ...at };
+    const values: Expr = { id: nextId(ids), kind: "array", elements: template.exprs, ...at };
     Object.assign(e, { kind: "call", callee: tag, args: [strings, values], optional: false });
     tagCalls.add(e);
   }
@@ -1448,8 +1448,8 @@ export function expressions(ctx: Context) {
     if (odd) throw unsupported(odd.comptime ? "generic functions with comptime parameters used as values" : odd.rest ? "generic functions with rest parameters used as values" : "generic functions with defaulted parameters used as values", e);
     // Its parameters keep the names it declares, unless one would hide it.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== name ? p.pattern.name : `arg${i}`));
-    const params: Param[] = names.map((n): Param => ({ ...at, id: freshId(), pattern: { id: freshId(), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
-    const call: Expr = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: freshId(), kind: "ident", name: n, ...at })), optional: false, ...at };
+    const params: Param[] = names.map((n): Param => ({ ...at, id: nextId(ids), pattern: { id: nextId(ids), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: nextId(ids), kind: "ident", name: n, ...at })), optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
   }
@@ -1535,13 +1535,13 @@ export function expressions(ctx: Context) {
     // A parameter keeps its name unless it would hide the function, or has none of its own.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== written && p.pattern.name !== f.name ? p.pattern.name : `${written}-arg${i}`));
     const clones = types.map((t) => !isCopy(t));
-    const params: Param[] = f.params.map((p, i): Param => ({ ...at, id: freshId(), pattern: { id: freshId(), kind: "ident", name: names[i]!, ...at }, type: undefined, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const params: Param[] = f.params.map((p, i): Param => ({ ...at, id: nextId(ids), pattern: { id: nextId(ids), kind: "ident", name: names[i]!, ...at }, type: undefined, optional: p.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
     params.forEach((p, i) => {
       presetParams.set(p, types[i]!);
       namedParams.set(p, { fn: written, names, clones });
     });
-    const args: Expr[] = names.map((n): Expr => ({ id: freshId(), kind: "ident", name: n, ...at }));
-    const call: Expr = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
+    const args: Expr[] = names.map((n): Expr => ({ id: nextId(ids), kind: "ident", name: n, ...at }));
+    const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
   }
@@ -1568,7 +1568,7 @@ export function expressions(ctx: Context) {
     const called = closureBody(lower(local.type) as ClosureType);
     ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, from]) => {
       // A closure captures it here, where the variable is named only through the function.
-      const mine = ctx.reach(from as Local, { id: freshId(), kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
+      const mine = ctx.reach(from as Local, { id: nextId(ids), kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
       if (called.changed?.has(alias)) changesLocal(mine, "", "change", at, false);
       return mine;
     }));
@@ -1621,7 +1621,7 @@ export function expressions(ctx: Context) {
     if (!kind) throw new CompileError(`'String' has no '${callee.name}' yet; it has 'fromCharCode' and 'fromCodePoint'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError(`'String.${callee.name}' takes no type arguments`, e.start, e.end);
     const at = { start: e.args[0]?.start ?? e.end, end: e.args.at(-1)?.end ?? e.end };
-    const gathered: Expr = e.args.length === 1 && stringBuilds.has(e) ? e.args[0]! : { id: freshId(), kind: "array", elements: e.args, ...at };
+    const gathered: Expr = e.args.length === 1 && stringBuilds.has(e) ? e.args[0]! : { id: nextId(ids), kind: "array", elements: e.args, ...at };
     const many = arrayType(kind[1]);
     expect(gathered, many);
     const t = value(gathered);
@@ -1733,7 +1733,7 @@ export function expressions(ctx: Context) {
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
-      Object.assign(e, { callee: { id: freshId(), kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
+      Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
       return call(e);
     }
     if (readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
@@ -1900,7 +1900,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`type '${show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
     }
     // Optional elements left out are empty.
-    for (let i = fixed.length; i < elements.length; i++) fixed.push({ id: freshId(), kind: "null", start: e.end, end: e.end } as Expr);
+    for (let i = fixed.length; i < elements.length; i++) fixed.push({ id: nextId(ids), kind: "null", start: e.end, end: e.end } as Expr);
     fixed.forEach((x, i) => {
       const t = value(x);
       coerce(x, t, elements[i]!, `type '${show(t)}' is not assignable to type '${show(elements[i]!)}'`);
@@ -1909,14 +1909,14 @@ export function expressions(ctx: Context) {
     const many: Expr[] = [];
     if (tuple.rest !== undefined) {
       const rest = arrayType(tuple.rest);
-      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { id: freshId(), kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
+      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { id: nextId(ids), kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
       expect(extra, rest);
       const t = value(extra);
       coerce(extra, t, rest, `type '${show(t)}' is not assignable to type '${show(rest)}'`);
       many.push(extra);
     }
     if (e.kind === "array") {
-      Object.assign(e, { kind: "object", props: [...fixed, ...many].map((value, i) => ({ id: freshId(), kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })) });
+      Object.assign(e, { kind: "object", props: [...fixed, ...many].map((value, i) => ({ id: nextId(ids), kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })) });
       delete (e as { elements?: unknown }).elements;
       tupleLiterals.add(e);
     }
@@ -1961,9 +1961,9 @@ export function expressions(ctx: Context) {
     // Past a rest tuple's fixed elements, an index reads its array, panicking past the end.
     if (n >= BigInt(count) && (object as ObjectType).rest !== undefined) {
       const at = { start: e.index.start, end: e.index.end };
-      const array: Expr = { id: freshId(), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
+      const array: Expr = { id: nextId(ids), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
       restStarts.set(array, count);
-      Object.assign(e, { object: array, index: { id: freshId(), kind: "int", value: n - BigInt(count), ...at } });
+      Object.assign(e, { object: array, index: { id: nextId(ids), kind: "int", value: n - BigInt(count), ...at } });
       return false;
     }
     if (n >= BigInt(count)) throw new CompileError(`tuple type '${show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
@@ -1982,7 +1982,7 @@ export function expressions(ctx: Context) {
   // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
   function filled(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "filled") throw new CompileError(`'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
-    const written = e.typeArgs.length > 0 ? resolveType({ id: freshId(), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
+    const written = e.typeArgs.length > 0 ? resolveType({ id: nextId(ids), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
     if (!written || !isFixed(written)) throw new CompileError("say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'FixedArray.filled' takes the value to fill it with", e.start, e.end);
     clonable(written.element, e, "FixedArray.filled");
@@ -2059,8 +2059,8 @@ export function expressions(ctx: Context) {
   // A regex's pattern, parsed and compiled here so its errors come while compiling.
   function regexLiteral(source: string, flags: string, at: Span, shown: string = source): RegexType {
     try {
-      const pattern = parsePattern(source, flags, shared.regex);
-      compileRegex(pattern, shared.regex);
+      const pattern = parsePattern(source, flags, regex);
+      compileRegex(pattern, regex);
       return regexType(source, flags, pattern.captures, shown);
     } catch (err) {
       if (err instanceof RegexSyntaxError) throw new CompileError(err.message, at.start, at.end);
@@ -2169,7 +2169,7 @@ export function expressions(ctx: Context) {
   // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
   function jsonParse(e: Call): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
-    const [written = { id: freshId(), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
+    const [written = { id: nextId(ids), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
     if (others.length > 0) throw new CompileError("'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
     const text = e.args[0];
@@ -2263,10 +2263,10 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 0) throw new CompileError("'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
     const [source, f] = e.args as [Expr, Expr | undefined];
-    const prelude = (name: string, args: Expr[]): Expr => ({ id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
+    const prelude = (name: string, args: Expr[]): Expr => ({ id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
     const prop = source.kind === "object" && source.props.length === 1 ? source.props[0]! : undefined;
     const written = prop?.kind === "property" && prop.key === "length" ? prop.value
-      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { id: freshId(), kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
+      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { id: nextId(ids), kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
     const length = written && arrayLength(written, false);
     let made: Expr;
     if (length) {
@@ -2275,12 +2275,12 @@ export function expressions(ctx: Context) {
     } else {
       const t = value(source);
       const held = isRefType(t) ? t.to : t;
-      if (isArray(held)) made = f ? source : { id: freshId(), kind: "call", callee: { id: freshId(), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+      if (isArray(held)) made = f ? source : { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(held)) made = prelude("array chars", [source]);
       else if (yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
       else throw new CompileError(`'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${show(t)}'`, source.start, source.end);
     }
-    if (f) made = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
+    if (f) made = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
     Object.assign(e, made, { id: e.id, start: e.start, end: e.end });
     return call(e as Call);
   }
@@ -2288,7 +2288,7 @@ export function expressions(ctx: Context) {
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
   // `panics` a negative one ending the program at n.
   function arrayLength(n: Expr, panics: boolean): Expr {
-    const checked: Expr = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
+    const checked: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
     if (panics) lengthChecks.add(checked);
     return checked;
   }
@@ -2318,11 +2318,11 @@ export function expressions(ctx: Context) {
     const t = value(source);
     const held = lower(isRefType(t) ? t.to : t);
     const at = { start: source.start, end: source.end };
-    const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: freshId(), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
+    const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
-    if (stringLike(held)) from = made({ id: freshId(), kind: "ident", name: "array chars", ...at }, [source]);
-    else if (yieldsOf(held) !== undefined) from = made({ id: freshId(), kind: "ident", name: "array collect", ...at }, [source]);
-    else if (typeof held !== "string" && held.kind === "map") from = made({ id: freshId(), kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
+    if (stringLike(held)) from = made({ id: nextId(ids), kind: "ident", name: "array chars", ...at }, [source]);
+    else if (yieldsOf(held) !== undefined) from = made({ id: nextId(ids), kind: "ident", name: "array collect", ...at }, [source]);
+    else if (typeof held !== "string" && held.kind === "map") from = made({ id: nextId(ids), kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
     else if (!isArray(held)) throw new CompileError(`'...' spreads an array, a string, a generator, a Map or a Set, not '${show(t)}'`, source.start, source.end);
     if (from) {
       once.add(source);
@@ -2347,7 +2347,7 @@ export function expressions(ctx: Context) {
     if (list.length < fixed) return;
     const rest = list.splice(fixed);
     const at = rest.length > 0 ? { start: rest[0]!.start, end: rest.at(-1)!.end } : { start: e.end - 1, end: e.end - 1 };
-    list.push({ id: freshId(), kind: "array", elements: rest, ...at });
+    list.push({ id: nextId(ids), kind: "array", elements: rest, ...at });
     packed.add(e);
   }
 
@@ -2777,8 +2777,8 @@ export function expressions(ctx: Context) {
     const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
     const typeArgs = [...(gives === "void" ? [] : [presetNode(gives, e)]), ...(rejects ? [presetNode(error, e)] : [])];
     const at = { start: e.start, end: e.end };
-    const cell: Expr = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
-    Object.assign(e, { kind: "call", callee: { id: freshId(), kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
+    const cell: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: `promise cell${variant}`, ...at }, typeArgs, args: [executor], optional: false, ...at };
+    Object.assign(e, { kind: "call", callee: { id: nextId(ids), kind: "ident", name: `promise await${variant}`, ...at }, typeArgs, args: [cell], optional: false });
     if (gives !== "void") {
       const resolves = rejects ? "" : " resolve";
       promiseVariants.set(cell, { name: `promise cell${resolves}`, typeArgs });
@@ -2795,7 +2795,7 @@ export function expressions(ctx: Context) {
 
   // A type argument for a rewritten call, standing for a type already known.
   function presetNode(t: Type, at: Span): TypeNode {
-    const made: TypeNode = { id: freshId(), kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
+    const made: TypeNode = { id: nextId(ids), kind: "ref", name: show(t), args: [], start: at.start, end: at.end };
     presetTypes.set(made, t);
     return made;
   }
@@ -2803,12 +2803,12 @@ export function expressions(ctx: Context) {
   // `setTimeout(callback, ms)`, `setInterval` and their clears, rewritten as the std's timers.
   function timerCall(e: Call, name: string) {
     const at = { start: e.start, end: e.end };
-    const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { id: freshId(), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
+    const helper = (named: string, args: Expr[]) => Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     if (e.args.some((a) => a.kind === "spread")) throw new CompileError(`'${name}' takes its arguments written out, not spread`, e.start, e.end);
     if (name === "clearTimeout" || name === "clearInterval") {
       if (e.args.length > 1) throw new CompileError(`'${name}' takes the timer to clear`, e.start, e.end);
-      return helper("timeout clear", [e.args[0] ?? { id: freshId(), kind: "null", ...at }]);
+      return helper("timeout clear", [e.args[0] ?? { id: nextId(ids), kind: "null", ...at }]);
     }
     if (e.args.length === 0) throw new CompileError(`'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
     if (!ctx.runtime && !ctx.async) throw new CompileError(`'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
@@ -2830,18 +2830,18 @@ export function expressions(ctx: Context) {
     });
     const span = { start: callback.start, end: callback.end };
     // Each run passes its own copy of a value that doesn't copy, as each of node's runs passes it.
-    const given = passed.map((x): Expr => (x.kind === "ident" && !isCopy(value(x)) ? { id: freshId(), kind: "call", callee: { id: freshId(), kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
-    const run: Expr = { id: freshId(), kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
-    const body: Expr = givesPromise(callback) ? { id: freshId(), kind: "unary", op: "await", operand: run, ...span } : run;
+    const given = passed.map((x): Expr => (x.kind === "ident" && !isCopy(value(x)) ? { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
+    const run: Expr = { id: nextId(ids), kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
+    const body: Expr = givesPromise(callback) ? { id: nextId(ids), kind: "unary", op: "await", operand: run, ...span } : run;
     // An async arrow taking nothing is what the timer keeps, so its captures are made once.
     const own = callback.kind === "arrow" && callback.async && callback.params.length === 0 && Array.isArray(callback.body);
     const kept: Expr = own ? callback
-      : { id: freshId(), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ id: freshId(), kind: "expr", expr: body, ...span }], ...span };
-    const wrapper: Expr = givesPromise(callback) ? { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
+      : { id: nextId(ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ id: nextId(ids), kind: "expr", expr: body, ...span }], ...span };
+    const wrapper: Expr = givesPromise(callback) ? { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
     timerWrappers.add(kept);
-    const loop: Expr = { id: freshId(), kind: "call", callee: { id: freshId(), kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
-    const ms = e.args[1] ?? { id: freshId(), kind: "int", value: 0n, ...at };
-    helper("timerSet", [wrapper, ms, { id: freshId(), kind: "bool", value: name === "setInterval", ...at }, loop]);
+    const loop: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
+    const ms = e.args[1] ?? { id: nextId(ids), kind: "int", value: 0n, ...at };
+    helper("timerSet", [wrapper, ms, { id: nextId(ids), kind: "bool", value: name === "setInterval", ...at }, loop]);
     timerSets.add(e);
   }
 
@@ -2876,7 +2876,7 @@ export function expressions(ctx: Context) {
     const gives = resolveType(e.typeArgs[0]!);
     const error = ctx.throwsDeclared() ?? classes.get("Error")!.type;
     const at = { start: e.start, end: e.end };
-    Object.assign(e, { callee: { id: freshId(), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
+    Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
     if (gives !== "void") promiseVariants.set(e, { name: "promise with resolvers", typeArgs: e.typeArgs });
   }
 
@@ -2898,13 +2898,13 @@ export function expressions(ctx: Context) {
       if (typeof given !== "string" && (given?.kind === "future" || given?.kind === "handle" || (given?.kind === "dyn" && promiseElement(given.of) !== undefined))) {
         throw new CompileError("'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
       }
-      Object.assign(e, { callee: { id: freshId(), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
+      Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
       return;
     }
     if (e.args.length === 0) throw new CompileError("'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
     const gives = written ?? met ?? "void";
     const reason = value(e.args[0]!);
-    Object.assign(e, { callee: { id: freshId(), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
+    Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(widenLet(reason), e)] });
     if (gives !== "void") promiseVariants.set(e, { name: "promise reject", typeArgs: e.typeArgs });
   }
 
@@ -3069,7 +3069,7 @@ export function expressions(ctx: Context) {
     // A generic one is typed for the call's type arguments, written or inferred.
     if (method.generic) {
       // An optional parameter left out is undefined, as JS gives it.
-      while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ id: freshId(), kind: "null", start: e.end, end: e.end });
+      while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ id: nextId(ids), kind: "null", start: e.end, end: e.end });
       jsCrossings.add(e);
       jsOptionalOf.set(e, method.optional ?? []);
       const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
@@ -3170,7 +3170,7 @@ export function expressions(ctx: Context) {
     params.forEach((p) => crossing(p, `'${c.name}''s constructor takes a`, e));
     jsArgs(e, params, constructor.map((p) => p.optional));
     jsNews.set(e, c.js!);
-    return resolveType({ id: freshId(), kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
+    return resolveType({ id: nextId(ids), kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
 
   // A package's class and the classes it extends, nearest first: a class without its own
@@ -3961,7 +3961,7 @@ export function expressions(ctx: Context) {
         const written = ofElements.get(e);
         if (written) {
           // Resolved as an array's element is, so references and functions get the same rules.
-          const element = (resolveType({ id: freshId(), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
+          const element = (resolveType({ id: nextId(ids), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
           for (const x of e.elements as Expr[]) {
             expect(x, element);
             const t = value(x);

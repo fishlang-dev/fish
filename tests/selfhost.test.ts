@@ -1,7 +1,6 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { shared } from "../src/compilation.ts";
 import { parse, type Expr, type Param, type Stmt } from "../src/parser.ts";
 import { BASELINE, survey, type Baseline } from "../scripts/selfhost.ts";
 
@@ -34,18 +33,15 @@ test("every default parameter in the compiler's source has a type Fish can read"
       if (p.pattern && p.default && !p.type && !literal(p.default)) untyped.push(`${f}: ${(p.pattern as { name?: string }).name}`);
       Object.values(v).forEach(walk);
     };
-    walk(parse(readFileSync(join(SRC, f), "utf8"), shared.ids));
+    walk(parse(readFileSync(join(SRC, f), "utf8"), { last: 0 }));
   }
   expect(untyped).toEqual([]);
 });
 
-// Fish refuses a top-level `let`, and a `const` is deeply immutable, so the front end and the
-// checker keep no state of their own: no top-level `let`, and no table a top-level `const` holds
-// is changed after load, in its own file or in one importing it. Their callers hand them what
-// they need.
-const FRONT_END = ["diag.ts", "nodes.ts", "lexer.ts", "parser.ts", "expressions.ts", "types.ts", "patterns.ts", "declarations.ts", "regex.ts"];
-const CHECKER = ["check.ts", "values.ts", "typing.ts", "classes.ts", "generics.ts", "resolve.ts", "typefns.ts", "operators.ts", "interfaces.ts", "flow.ts", "narrow.ts", "match.ts", "moves.ts", "comptime.ts", "unions.ts", "enums.ts", "registry.ts", "unsupported.ts", "defaults.ts", "locals.ts", "macros.ts", "quote.ts"];
-const STATELESS = [...FRONT_END, ...CHECKER];
+// Fish refuses a top-level `let`, and a `const` is deeply immutable, so the compiler keeps no
+// state of its own: no file has a top-level `let`, and no table a top-level `const` holds is
+// changed after load, in its own file or in one importing it. A compilation, or the session or
+// run that outlives it, holds what changes, and is handed to what needs it.
 const MUTATORS = new Set(["set", "add", "delete", "clear", "push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"]);
 
 const topLevel = (program: Stmt[]) => program.map((s) => (s.kind === "export" ? s.body : s));
@@ -80,12 +76,12 @@ function tableChanges(program: Stmt[], tables: Set<string>): string[] {
   return found;
 }
 
-test("the front end and the checker keep no module state", () => {
-  const programs = new Map(readdirSync(SRC).filter((f) => f.endsWith(".ts")).map((f) => [f, parse(readFileSync(join(SRC, f), "utf8"), shared.ids)] as const));
-  const tables = new Map(STATELESS.map((f) => [f, new Set(tablesOf(programs.get(f)!))]));
+test("the compiler keeps no module state", () => {
+  const programs = new Map(readdirSync(SRC).filter((f) => f.endsWith(".ts")).map((f) => [f, parse(readFileSync(join(SRC, f), "utf8"), { last: 0 })] as const));
+  const tables = new Map([...programs].map(([f, program]) => [f, new Set(tablesOf(program))]));
   const found: string[] = [];
   for (const [f, program] of programs) {
-    if (STATELESS.includes(f)) found.push(...topLevelLets(program).map((at) => `${f}: a top-level 'let' at ${at}`));
+    found.push(...topLevelLets(program).map((at) => `${f}: a top-level 'let' at ${at}`));
     // The tables of those files this one can reach: its own, and those it imports.
     const reached = new Set(tables.get(f));
     for (const s of program) {

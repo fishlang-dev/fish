@@ -1,7 +1,6 @@
-import { freshId } from "./compilation.ts";
 import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { NodeMap, NodeSet } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, type Ids } from "./nodes.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -19,9 +18,10 @@ const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "se
 // The fields of a statement that hold statement lists, each a scope of its own.
 const LISTS = ["body", "then", "else", "block", "handler", "finalizer"];
 
-// Each name made is noted in `names`. `captured`, when given, is told of each local class or enum
-// using a variable around it, which is otherwise an error.
-export function hoistLocals(names: Names, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
+// Each name made is noted in `names`, and each node made numbered from `ids`. `captured`, when
+// given, is told of each local class or enum using a variable around it, which is otherwise an
+// error.
+export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
   const hoisted: Stmt[] = [];
   let count = 0;
 
@@ -83,16 +83,16 @@ export function hoistLocals(names: Names, program: Stmt[], captured?: (local: Lo
       if (params.length > 0 && local.kind === "enum" && !Array.isArray((local as { typeParams?: unknown }).typeParams)) {
         throw new CompileError(`the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
       }
-      const args: TypeNode[] = params.map((p): TypeNode => ({ id: freshId(), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
+      const args: TypeNode[] = params.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
       const own = local.typeParams?.length ?? 0;
-      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: freshId() })), ...(local.typeParams ?? [])] });
+      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId(ids) })), ...(local.typeParams ?? [])] });
       return { name, mangled, args, own, values: local.kind === "class" || local.kind === "enum" };
     });
     for (const r of renames) for (const s of stmts) rename(s, r);
     for (const s of stmts) visit(s, ctx);
     for (const local of locals) {
       hoisted.push(local);
-      stmts[stmts.indexOf(local)] = { id: freshId(), kind: "empty", start: local.start, end: local.end };
+      stmts[stmts.indexOf(local)] = { id: nextId(ids), kind: "empty", start: local.start, end: local.end };
     }
   };
 

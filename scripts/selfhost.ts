@@ -4,6 +4,7 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { newSession, type Session } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { checkProgram } from "../src/main.ts";
 
@@ -21,15 +22,16 @@ export function survey(src = join(import.meta.dir, "..", "src")): Record<string,
       writeFileSync(join(mirror, f.replace(/\.ts$/, ".fsh")), text);
     }
     // Messages name the mirror's paths, which differ each run, so they name them from it.
-    return Object.fromEntries(files.map((f) => [f, firstError(join(mirror, f.replace(/\.ts$/, ".fsh")))?.replaceAll(mirror + "/", "").replaceAll(mirror, "src") ?? null]));
+    const session = newSession();
+    return Object.fromEntries(files.map((f) => [f, firstError(session, join(mirror, f.replace(/\.ts$/, ".fsh")))?.replaceAll(mirror + "/", "").replaceAll(mirror, "src") ?? null]));
   } finally {
     rmSync(mirror, { recursive: true, force: true });
   }
 }
 
-function firstError(file: string): string | null {
+function firstError(session: Session, file: string): string | null {
   try {
-    checkProgram(file, true);
+    checkProgram(session, file, true);
     return null;
   } catch (e) {
     // An exception that isn't a CompileError is the checker failing on this file, which counts as

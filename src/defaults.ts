@@ -1,4 +1,5 @@
-import { freshId, type Tables } from "./compilation.ts";
+import type { Tables } from "./compilation.ts";
+import { nextId, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import type { Type } from "./typing.ts";
@@ -20,7 +21,7 @@ export function lowerDefaults(tables: Tables, node: unknown) {
 }
 
 function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
-  const { defaulted, fallbacks, renamed, prologues } = tables;
+  const { defaulted, fallbacks, renamed, prologues, ids } = tables;
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
     if (p.rest && i !== f.params.length - 1) throw new CompileError("a rest parameter has to be the last one, since it takes every argument after those before it", p.start, p.end);
@@ -29,11 +30,11 @@ function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr
     if ((p.pattern.kind === "object" || p.pattern.kind === "array") && !p.default && !p.rest) {
       const at = { start: p.pattern.start, end: p.pattern.end };
       const hidden = `argument ${i}`;
-      const binding: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: p.pattern, type: undefined, init: { id: freshId(), kind: "ident", name: hidden, ...at }, ...at }], ...at };
+      const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: p.pattern, type: undefined, init: { id: nextId(ids), kind: "ident", name: hidden, ...at }, ...at }], ...at };
       prologues.add(binding);
       firsts.push(binding);
       renamed.set(p, "_");
-      Object.assign(p, { pattern: { id: freshId(), kind: "ident", name: hidden, ...at } });
+      Object.assign(p, { pattern: { id: nextId(ids), kind: "ident", name: hidden, ...at } });
       return;
     }
     if (!p.default) return;
@@ -45,33 +46,33 @@ function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr
     if (p.modifiers.length > 0) throw new CompileError("defaults on parameter properties are not supported yet", p.start, p.end);
     if (p.rest) throw new CompileError("a rest parameter can't have a default; it is an empty array when nothing is passed", p.start, p.end);
     if (p.comptime) throw new CompileError("comptime parameters can't have defaults yet", p.start, p.end);
-    const type = p.type ?? literalType(p.default);
+    const type = p.type ?? literalType(ids, p.default);
     if (!type) throw new CompileError(`parameter '${p.pattern.name}' needs a type: its default isn't a literal that says one, so write it, as in '${p.pattern.name}: T = ...'`, p.start, p.end);
     const name = p.pattern.name;
     const empty = p.default.kind === "null" || (p.default.kind === "ident" && p.default.name === "undefined");
     const at = { start: p.start, end: p.end };
     const hidden = `${name} given`;
-    const given: Expr = { id: freshId(), kind: "ident", name: hidden, ...at };
-    const init: Expr = { id: freshId(), kind: "binary", op: "??", left: given, right: p.default, start: p.default.start, end: p.default.end };
+    const given: Expr = { id: nextId(ids), kind: "ident", name: hidden, ...at };
+    const init: Expr = { id: nextId(ids), kind: "binary", op: "??", left: given, right: p.default, start: p.default.start, end: p.default.end };
     fallbacks.set(init, type);
-    const binding: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: { id: freshId(), kind: "ident", name, ...at }, type, init, ...at }], ...at };
+    const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type, init, ...at }], ...at };
     prologues.add(binding);
     firsts.push(binding);
-    Object.assign(p, { pattern: { ...p.pattern, id: freshId(), name: hidden }, type, optional: true, default: undefined });
+    Object.assign(p, { pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });
     defaulted.set(p, { name, empty });
   });
   if (firsts.length === 0) return;
   if (Array.isArray(f.body)) f.body.unshift(...firsts);
   else {
     const value = f.body;
-    f.body = [...firsts, { id: freshId(), kind: "return", value, start: value.start, end: value.end }];
+    f.body = [...firsts, { id: nextId(ids), kind: "return", value, start: value.start, end: value.end }];
   }
 }
 
 // The type a literal default says: `1` an i64, `1.5` an f64, `"a"` a string, `true` a boolean.
-function literalType(e: Expr): TypeNode | undefined {
-  const ref = (name: string): TypeNode => ({ id: freshId(), kind: "ref", name, args: [], start: e.start, end: e.end });
-  if (e.kind === "unary" && e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) return literalType(e.operand);
+function literalType(ids: Ids, e: Expr): TypeNode | undefined {
+  const ref = (name: string): TypeNode => ({ id: nextId(ids), kind: "ref", name, args: [], start: e.start, end: e.end });
+  if (e.kind === "unary" && e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) return literalType(ids, e.operand);
   if (e.kind === "int") return ref("i64");
   if (e.kind === "float") return ref("f64");
   if (e.kind === "string" || (e.kind === "template" && e.exprs.length === 0)) return ref("string");

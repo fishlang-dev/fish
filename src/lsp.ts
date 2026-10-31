@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
+import { newSession, type Session } from "./compilation.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
@@ -53,11 +54,11 @@ function located(path: string, text: string, sources: Source[], start: number, e
 }
 
 // The diagnostics checking `text`, the document at `path`, gives, with its imports read by `read`,
-// and the checked program when there are none. An error in another file shows at the document's
-// start, saying where it is.
-function diagnose(path: string, text: string, read: (path: string) => string): { diagnostics: object[]; checked?: Checked } {
+// and the checked program when there are none, within the server's `session`. An error in another
+// file shows at the document's start, saying where it is.
+function diagnose(session: Session, path: string, text: string, read: (path: string) => string): { diagnostics: object[]; checked?: Checked } {
   try {
-    return { diagnostics: [], checked: analyze(text, path, read).checked };
+    return { diagnostics: [], checked: analyze(session, text, path, read).checked };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     const uri = pathToFileURL(path).href;
@@ -105,6 +106,8 @@ export function serveLsp() {
   let shutdown = false;
   const exit = () => process.exit(shutdown ? 0 : 1);
   const notify = (method: string, params: unknown) => send({ method, params });
+  // What every check this server runs shares, as std's parsed tree.
+  const session = newSession();
 
   // The open documents' text, by URI.
   const documents = new Map<string, string>();
@@ -120,7 +123,7 @@ export function serveLsp() {
     if (text === undefined || !uri.startsWith("file:")) return;
     results.set(uri, { text });
     try {
-      const { diagnostics, checked } = diagnose(fileURLToPath(uri), text, read);
+      const { diagnostics, checked } = diagnose(session, fileURLToPath(uri), text, read);
       results.set(uri, { text, checked });
       notify("textDocument/publishDiagnostics", { uri, diagnostics });
     } catch (e) {

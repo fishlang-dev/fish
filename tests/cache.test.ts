@@ -5,11 +5,15 @@ import { join } from "node:path";
 import { buildAsync, compile, ENGINE, runtimeUnits } from "../src/main.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
 import { STD_SOURCE, stdKey } from "../src/std.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // A fresh cache compiles the Math runtime too, which takes seconds.
 setDefaultTimeout(120_000);
 
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
+const COMPILATION = join(import.meta.dir, "..", "src", "compilation.ts");
 const root = mkdtempSync(join(tmpdir(), "fish-cache-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -49,10 +53,10 @@ test("a change to the runtime's source or flags is a new object", () => {
   process.env.FISH_CACHE_DIR = join(root, "unit");
   try {
     const [unit] = runtimeUnits("", false);
-    const built = cachedObject(unit!);
-    expect(cachedObject(unit!)).toBe(built);
-    const edited = cachedObject({ ...unit!, stdin: `${unit!.stdin}\nint fsh_rt_edited;\n` });
-    const flagged = cachedObject({ ...unit!, args: [...unit!.args, "-DFSH_FLAGGED"] });
+    const built = cachedObject(session, unit!);
+    expect(cachedObject(session, unit!)).toBe(built);
+    const edited = cachedObject(session, { ...unit!, stdin: `${unit!.stdin}\nint fsh_rt_edited;\n` });
+    const flagged = cachedObject(session, { ...unit!, args: [...unit!.args, "-DFSH_FLAGGED"] });
     expect(new Set([built, edited, flagged]).size).toBe(3);
     expect(readdirSync(join(root, "unit", "objects"))).toHaveLength(3);
   } finally {
@@ -65,7 +69,7 @@ test("a failed compile leaves nothing in the cache", () => {
   const was = process.env.FISH_CACHE_DIR;
   process.env.FISH_CACHE_DIR = join(root, "failed");
   try {
-    expect(() => cachedObject({ name: "broken", args: ["-x", "c", "-"], stdin: "this is not C", inputs: [] })).toThrow("clang failed building broken");
+    expect(() => cachedObject(session, { name: "broken", args: ["-x", "c", "-"], stdin: "this is not C", inputs: [] })).toThrow("clang failed building broken");
     expect(readdirSync(join(root, "failed", "objects"))).toEqual([]);
   } finally {
     if (was === undefined) delete process.env.FISH_CACHE_DIR;
@@ -99,9 +103,10 @@ writeFileSync(ENGINE_PROGRAM, `import { evaluate } from "fish:engine";\nfunction
 // Builds the program calling the engine into `out` with the cache at `cache`, from `cwd`.
 function buildEngine(cache: string, out: string, cwd = root) {
   const script = `import { build } from ${JSON.stringify(MAIN)};
-import { allowEngineHook } from ${JSON.stringify(join(import.meta.dir, "..", "src", "modules.ts"))};
-allowEngineHook(true);
-build(${JSON.stringify(ENGINE_PROGRAM)}, ${JSON.stringify(out)});`;
+import { newSession } from ${JSON.stringify(COMPILATION)};
+const session = newSession();
+session.engineHook = true;
+build(session, ${JSON.stringify(ENGINE_PROGRAM)}, ${JSON.stringify(out)});`;
   const run = Bun.spawnSync(["bun", "-e", script], { cwd, env: { ...process.env, FISH_CACHE_DIR: cache } });
   expect(run.stderr.toString()).toBe("");
   expect(run.exitCode).toBe(0);
@@ -137,7 +142,9 @@ test("builds running at once compile each object once", () => {
   chmodSync(join(bin, "clang"), 0o755);
   const outs = [1, 2, 3, 4].map((i) => join(root, `concurrent-${i}`));
   const script = `import { buildAsync } from ${JSON.stringify(MAIN)};
-await Promise.all(${JSON.stringify(outs)}.map((out) => buildAsync(${JSON.stringify(HELLO)}, out)));`;
+import { newSession } from ${JSON.stringify(COMPILATION)};
+const session = newSession();
+await Promise.all(${JSON.stringify(outs)}.map((out) => buildAsync(session, ${JSON.stringify(HELLO)}, out)));`;
   const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache, PATH: `${bin}:${process.env.PATH}` } });
   expect(run.stderr.toString()).toBe("");
   expect(run.exitCode).toBe(0);
@@ -158,9 +165,9 @@ test("an edit to a hashed engine header is a new object", () => {
     const copy = join(root, "engine-copy");
     cpSync(ENGINE, copy, { recursive: true });
     const unit = () => ({ name: "header", args: ["-x", "c", "-", "-I", copy], stdin: `#include "quickjs.h"\nint fsh_probe;\n`, inputs: files(copy) });
-    const before = cachedObject(unit());
+    const before = cachedObject(session, unit());
     appendFileSync(join(copy, "cutils.h"), "\n/* edited */\n");
-    expect(cachedObject(unit())).not.toBe(before);
+    expect(cachedObject(session, unit())).not.toBe(before);
   } finally {
     if (was === undefined) delete process.env.FISH_CACHE_DIR;
     else process.env.FISH_CACHE_DIR = was;
@@ -178,13 +185,15 @@ writeFileSync(HTTP_PROGRAM, `async function main(): Promise<void> {
 }
 `);
 
-// How many times one process parsed std over two checks with the cache at `cache`.
+// How many times one session parsed std over two checks with the cache at `cache`.
 function stdParsesIn(cache: string): string {
-  const script = `import { stdFor, stdParses } from ${JSON.stringify(STD)};
+  const script = `import { stdFor } from ${JSON.stringify(STD)};
+import { newCompilation, newSession } from ${JSON.stringify(COMPILATION)};
 // Each copy's nodes have ids of their own, so the copies are compared without them.
 const bare = (v) => Array.isArray(v) ? v.map(bare) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== "id").map(([k, x]) => [k, bare(x)])) : v;
-const [a, b] = [stdFor([]), stdFor([])];
-if (Bun.deepEquals(bare(a), bare(b))) console.log(stdParses.count);`;
+const session = newSession();
+const [a, b] = [stdFor(newCompilation(session), []), stdFor(newCompilation(session), [])];
+if (Bun.deepEquals(bare(a), bare(b))) console.log(session.std.parses);`;
   const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache } });
   expect(run.stderr.toString()).toBe("");
   return run.stdout.toString().trim();
@@ -303,9 +312,9 @@ function sampled(): { file: string; src: string }[] {
 // it ended.
 async function bothWays(file: string, src: string) {
   const [split, whole] = [`${file}.split`, `${file}.whole`];
-  await buildAsync(file, split);
-  const ir = compile(src, file);
-  const objects = (await Promise.all([...runtimeUnits(ir, false).map(cachedObjectAsync), mathObjectsAsync()])).flat();
+  await buildAsync(session, file, split);
+  const ir = compile(session, src, file);
+  const objects = (await Promise.all([...runtimeUnits(ir, false).map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
   const clang = Bun.spawn(["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm"], { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
   expect(await clang.exited).toBe(0);
   const run = async (out: string) => {

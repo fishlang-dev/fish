@@ -1,4 +1,5 @@
 import type { CompileError } from "./diag.ts";
+import type { RustClass } from "./rust.ts";
 
 // The checker's types. Object types are interned, so two types are structurally identical,
 // the same fields with the same types in any order, exactly when they are the same object.
@@ -25,7 +26,8 @@ export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
-export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] } };
+// `rust`: the Rust type a class a Rust module declares stands for.
+export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass };
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members

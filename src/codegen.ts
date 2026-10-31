@@ -1,5 +1,4 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import { shared } from "./compilation.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -130,7 +129,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
     dynMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
-    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing
+    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables
   } = noted;
   const {
     tiedBy, show, lower, unionType, arrayType, leafOf, blockType, callableOf, promiseElement, keyOf, described, sharesDyn, stored: storedType, lentPromise,
@@ -8999,7 +8998,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const held = untagged(tagged) as string;
       const slash = held.indexOf("/");
       const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
-      return regex(regexType(pattern, flags, parsePattern(pattern, flags, shared.regex).captures));
+      return regex(regexType(pattern, flags, parsePattern(pattern, flags, regexTables).captures));
     }
     if (typeof type !== "string" && type.kind === "union") {
       const member = memberOf(typing, tagged, type);
@@ -9284,7 +9283,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const key = `${t.flags}/${t.pattern}`;
     const made = regexes.get(key);
     if (made) return made;
-    const program = compileRegex(parsePattern(t.pattern, t.flags, shared.regex), shared.regex);
+    const program = compileRegex(parsePattern(t.pattern, t.flags, regexTables), regexTables);
     const name = `@.regex.${stableId("regex", key)}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);

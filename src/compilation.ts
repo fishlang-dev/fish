@@ -7,18 +7,24 @@ import { WeakNodeMap, WeakNodeSet, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
+import type { RustTables } from "./rust.ts";
+import type { Locking } from "./dependencies.ts";
+import type { Unit } from "./mathlib.ts";
 import { newTyping, type ClassType, type LiteralType, type Type, type Typing } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
 // counter node ids come from, the names its messages show as written, and the tables regexes are
 // compiled with; every check of the program shares its types, interned in `typing`, and `counts`.
-// Whatever starts a compilation makes one, so nothing one program makes reaches another.
+// Whatever starts a compilation makes one, so nothing one program makes reaches another; what
+// outlives it, the caches of a CLI run or a language server, is its `session`.
 // `upcasts` are the spans of the `equals` methods `@derive(Eq)` wrote over a base class. Their
 // `super.equals(other)` lends `other` to the base's `equals`, which reads the embedded base a
 // reference to the class points at, though Fish code can't upcast it itself. A span outlives the
 // copies macros make.
-export type Compilation = { ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string> };
+// `files` are the program's files once loaded, by the offset each starts at, for naming where a
+// declaration is. `rust` holds the Rust names its `rust:` modules declare.
+export type Compilation = { session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string }[]; rust: RustTables };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
 // whatever was compiled before it: its enums, which tells enums of one name apart, the generic
@@ -26,26 +32,46 @@ export type Compilation = { ids: Ids; names: Names; regex: RegexTables; typing: 
 // macros give values.
 export type Counts = { enums: number; lifts: number; destructures: number; expansions: number; constants: number };
 
-// What every compilation in the process shares. Node ids, because some tables keyed by node
-// outlive a program, the Rust bindings' and the formatter's, which need ids unique in the process,
-// and std's tree is numbered from the same counter when loaded. And the regex tables, which only
-// cache what Unicode's property escapes and case folds match, the same for every program.
-export const shared: { ids: Ids; regex: RegexTables } = { ids: { last: 0 }, regex: { properties: new Map(), folds: new Map() } };
+// What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
+// the caches that spare later compilations the work earlier ones did.
+// `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
+// `engineHook`: whether programs may import `fish:engine`, which only the compiler's own tests do.
+// `clang`: `clang --version`, which names the target as well as the compiler.
+// `digests`: each source a cached object depends on, hashed, by path, size and modification time.
+// `compiling`: the objects being compiled without blocking, so each is compiled once.
+// `mathUnits`: the Math runtime's objects to compile.
+// `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it; and how
+// many times std was parsed rather than loaded.
+export type Session = {
+  locking: Locking;
+  engineHook: boolean;
+  clang?: string;
+  digests: Map<string, string>;
+  compiling: Map<string, Promise<string>>;
+  mathUnits?: Unit[];
+  std: { key?: string; tree?: { path: string; bytes: Uint8Array }; parses: number };
+};
 
-export function newCompilation(): Compilation {
-  return { ids: shared.ids, names: { local: new Set(), madeUp: new Map() }, regex: shared.regex, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set() };
+export function newSession(): Session {
+  return { locking: { locked: false }, engineHook: false, digests: new Map(), compiling: new Map(), std: { parses: 0 } };
 }
 
-// A fresh node id, for code past the parser that makes nodes.
-export const freshId = (): number => ++shared.ids.last;
+export function newCompilation(session: Session): Compilation {
+  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() } };
+}
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.
 export type Tables = {
-  // The program's types, and the upcasts its macros wrote, which every check of it shares.
+  // What every check of the program shares: its types, the upcasts its macros wrote, the counter
+  // for the nodes checking makes, its regex tables, files and Rust names.
   typing: Typing;
   upcasts: Set<string>;
+  ids: Ids;
+  regex: RegexTables;
+  files: Compilation["files"];
+  rust: RustTables;
   // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
   // again for another instance meets them already made.
   loopParts: WeakNodeSet<Declarator>;
@@ -247,10 +273,14 @@ export type Tables = {
   computing: Set<Instance>;
 };
 
-export function newTables({ typing, upcasts }: Compilation): Tables {
+export function newTables({ typing, upcasts, ids, regex, files, rust }: Compilation): Tables {
   return {
     typing,
     upcasts,
+    ids,
+    regex,
+    files,
+    rust,
     loopParts: new WeakNodeSet<Declarator>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
     nestedBindings: new WeakSet<Local>(),

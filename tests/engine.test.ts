@@ -1,21 +1,21 @@
-import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
 import { buildAsync, callsEngine, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
-import { allowEngineHook } from "../src/modules.ts";
 import { sanitized as sanitize } from "./sanitized.ts";
+import { newSession } from "../src/compilation.ts";
+
+// Programs here may import the compiler's own test hook.
+const session = newSession();
+session.engineHook = true;
 
 // Each test builds a program with the JS engine, whose sources take several seconds to compile.
 setDefaultTimeout(30_000);
 
 const dir = mkdtempSync(join(tmpdir(), "fish-engine-"));
-beforeAll(() => allowEngineHook(true));
-afterAll(() => {
-  allowEngineHook(false);
-  rmSync(dir, { recursive: true, force: true });
-});
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 // The vendored engine on its own, as clang builds it into a program that calls it.
 test("the vendored engine evaluates JS", () => {
@@ -67,7 +67,7 @@ async function main() {
 `;
 
 function sanitized(name: string, src: string) {
-  return sanitize(join(dir, `${name}.fsh`), src);
+  return sanitize(session, join(dir, `${name}.fsh`), src);
 }
 
 // Handles copied, held by tasks on other threads and dropped, and every box freed.
@@ -157,7 +157,7 @@ test("JsValues are narrowed and read", () => {
 test("reading a property of undefined panics", async () => {
   const file = join(dir, "undefined.fsh");
   writeFileSync(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default undefined;");\n  const w = v.get("x");\n}\n`);
-  await buildAsync(file, `${file}.out`);
+  await buildAsync(session, file, `${file}.out`);
   const run = Bun.spawnSync([`${file}.out`]);
   expect(run.stderr.toString()).toBe(`panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\n`);
   expect(run.exitCode).toBe(101);
@@ -181,7 +181,7 @@ test.each([
 ])("refused: %s", (body, message) => {
   const [file, src] = [join(dir, `refused-${Bun.hash(body)}.fsh`), `import { evaluate } from "fish:engine";\nfunction main() { ${body} }\n`];
   writeFileSync(file, src);
-  expect(() => compile(src, file)).toThrow(message);
+  expect(() => compile(session, src, file)).toThrow(message);
 });
 
 // A throw while a module runs, or one that never parses, rejects or never settles, is a panic.
@@ -193,7 +193,7 @@ test.each([
 ])("a module that fails panics: %s", async (source, reason) => {
   const file = join(dir, `fails-${Bun.hash(source)}.fsh`);
   writeFileSync(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  console.log("before");\n  const v = evaluate(${JSON.stringify(source)});\n}\n`);
-  await buildAsync(file, `${file}.out`);
+  await buildAsync(session, file, `${file}.out`);
   const run = Bun.spawnSync([`${file}.out`], { env: { ...process.env, FISH_LEAKS: "1" } });
   expect(run.stdout.toString()).toBe("before\n");
   expect(run.stderr.toString()).toBe(`panicked at fish:engine:3:10:\nuncaught exception in JS: ${reason}\n`);
@@ -203,18 +203,13 @@ test.each([
 test("a program can't import the test hook", () => {
   const [file, src] = [join(dir, "hook.fsh"), `import { evaluate } from "fish:engine";\nfunction main() {}\n`];
   writeFileSync(file, src);
-  allowEngineHook(false);
-  try {
-    expect(() => compile(src, file)).toThrow(
-      new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", 0, 0),
-    );
-  } finally {
-    allowEngineHook(true);
-  }
+  expect(() => compile(newSession(), src, file)).toThrow(
+    new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", 0, 0),
+  );
 });
 
 test("a program with no JS doesn't build the engine in", () => {
   const [file, src] = [join(dir, "plain.fsh"), 'function main() { console.log("  call void @fsh_rt_js_release(ptr %v)"); }\n'];
   writeFileSync(file, src);
-  expect(callsEngine(compile(src, file))).toBe(false);
+  expect(callsEngine(compile(session, src, file))).toBe(false);
 });

@@ -3,6 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Each compilation has its own state, so a program compiles the same whatever the process
 // compiled before it. These programs use what a compilation numbers or interns as it goes:
@@ -54,7 +57,7 @@ const dir = mkdtempSync(join(tmpdir(), "fish-compilation-"));
 const ir = (name: string, src: string) => {
   const file = join(dir, name);
   writeFileSync(file, src);
-  return compile(src, file);
+  return compile(session, src, file);
 };
 
 test("a program compiles the same twice in one process", () => {

@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // What stops a program that type-checks with a package's declarations: a form that can't run
 // yet, or a package with no JS to bundle, as these fixtures have only declarations.
@@ -20,7 +23,7 @@ function stops(files: Record<string, string>): string {
     }
     const entry = join(dir, "main.fsh");
     try {
-      compile(files["main.fsh"]!, entry);
+      compile(session, files["main.fsh"]!, entry);
     } catch (e) {
       return formatError(e as never, "main.fsh", files["main.fsh"]!).replaceAll(dir + "/", "");
     }

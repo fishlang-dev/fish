@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { shared } from "../src/compilation.ts";
 import { CompileError, formatError } from "../src/diag.ts";
 import { buildAsync } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Each program in tests/programs states its expectations in comments:
 //   // expect: <line>   the next line of stdout, in order
@@ -56,12 +58,12 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
   const empty = { stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };
   try {
     if (src.includes("// mode: parse")) {
-      parse(src, shared.ids);
+      parse(src, { last: 0 });
       return empty;
     }
     const out = join(tmp, name.replace(/\.fsh$/, "").replace(/[^\w.-]+/g, "_"));
     const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
-    await buildAsync(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
+    await buildAsync(session, file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
     // Every program is checked for leaks: the runtime reports what is still allocated at exit.
     const run = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe" });
     let timedOut = false;

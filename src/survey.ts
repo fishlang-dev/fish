@@ -1,11 +1,10 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { freshId, shared } from "./compilation.ts";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
 import { isNode, named, surveyHits, type Node } from "./migrate.ts";
-import { renumber } from "./nodes.ts";
+import { nextId, renumber } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -143,10 +142,9 @@ function scanFile(path: string, file: string): FileScan {
   }
   const lines = src.split("\n").filter((l) => l.trim() !== "").length;
   const findings: [string, Example][] = [];
-  surveyed = path;
   try {
-    const program = parse(src, shared.ids);
-    scan(program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
+    const program = parse(src, { last: 0 });
+    scan(path, program, (id, offset, module) => findings.push([id, { file, ...position(src, offset), ...(module && { module }) }]));
     // The reject and guided rules, A1, A3 and A8 come from the migration lint's detector. Its A2, A4 and A9
     // find only what they can fix, so the survey counts those its own wider way.
     for (const hit of surveyHits(program)) findings.push([hit.rule, { file, ...position(src, hit.start) }]);
@@ -273,7 +271,8 @@ export function grade(score: number): string {
 function captures(program: Stmt[]): number[] {
   const found: number[] = [];
   try {
-    hoistLocals({ local: new Set(), madeUp: new Map() }, renumber(structuredClone(program), freshId), (local) => found.push(local.start));
+    const ids = { last: 0 };
+    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber(structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
   } catch {
     return [];
   }
@@ -281,8 +280,9 @@ function captures(program: Stmt[]): number[] {
 }
 
 // Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
-// counts the functions a node sits in, and `ambient` marks declarations under `declare`.
-function scan(program: unknown[], note: (id: string, offset: number, module?: string) => void) {
+// counts the functions a node sits in, and `ambient` marks declarations under `declare`. `path` is
+// the file's, whose packages its imports name.
+function scan(path: string, program: unknown[], note: (id: string, offset: number, module?: string) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
@@ -298,6 +298,7 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name) });
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
+  const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet() };
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter.
   const inCalls = new WeakSet<object>();
@@ -315,7 +316,7 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
-      for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
+      for (const [id, at, module] of classify(scanning, o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
       const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
       if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as number, whole.module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
@@ -346,20 +347,17 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: numb
   }
 }
 
+// What a scan of one file at `path` notes as it goes: the `process.env` nodes read by key, which
+// Fish takes (any other use of it, it doesn't), and the destructuring assignments written as
+// statements of their own.
+type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object> };
+
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
-// Generic arrows a const holds, which Fish declares as generic functions, and the members of
-// interfaces, whose generic methods Fish doesn't have.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
-// The `process.env` nodes read by key, which Fish takes; any other use of it, it doesn't.
-const envKeys = new WeakSet<object>();
 
-const heldArrows = new WeakSet<object>();
-const statementDestructures = new WeakSet<object>();
-const interfaceMembers = new WeakSet<object>();
-
-function classify(n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
+function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
   const found: [string, number, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -438,12 +436,11 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
     if (rest >= 0 && (rest < elements.length - 1 || elements.some((e) => e.optional))) push("tuples");
   }
   if ((n.kind === "array" && genericFunctionType(n.element)) || (n.kind === "union" && (n.types as unknown[]).some(genericFunctionType))) push("genericFunctionsHeld");
-  if (n.kind === "interface" && Array.isArray(n.members)) for (const m of n.members as object[]) interfaceMembers.add(m);
   // A dynamic `import("x")` names its module as its first argument.
   const [first] = Array.isArray(n.args) ? n.args : [];
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
   const specifier = n.module ?? n.require ?? dynamic;
-  const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
+  const rule = MODULE_FORMS.has(n.kind) ? moduleRule(path, n, specifier) : undefined;
   if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if (n.abstract === true && "members" in n) push("classForms");
@@ -456,7 +453,7 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
 // written. An npm package imported by name runs in the embedded JS engine, bundled while
 // compiling, whole or by name; one imported dynamically, through 'import x = require()' or
 // re-exported whole isn't.
-function moduleRule(n: Node, specifier: unknown): string | undefined {
+function moduleRule(path: string, n: Node, specifier: unknown): string | undefined {
   const form = n.kind === "importEquals" || n.kind === "exportAssign" || n.kind === "exportAsNamespace" || n.kind === "import" && (n.namespace !== undefined || !("module" in n)) || (n.kind === "exportAll" && n.alias !== undefined);
   if (typeof specifier !== "string") return form ? "moduleForms" : undefined;
   if (/^[#~]|^@\//.test(specifier)) return "pathAliases";
@@ -465,11 +462,8 @@ function moduleRule(n: Node, specifier: unknown): string | undefined {
   if (specifier.startsWith("node:") || NODE_MODULES.has(specifier.split("/")[0]!)) return "nodeBuiltins";
   if (specifier === "bun" || specifier.startsWith("bun:")) return "bunModules";
   if ((form && !(n.kind === "import" && n.namespace !== undefined)) || n.kind === "exportAll") return "moduleForms";
-  return surveyed !== undefined && untyped(surveyed, specifier) ? "untypedPackages" : undefined;
+  return untyped(path, specifier) ? "untypedPackages" : undefined;
 }
-
-// The file being scanned, from which its packages are looked up.
-let surveyed: string | undefined;
 
 // Whether a package is installed with no declarations, which Fish types it from; one not
 // installed is the dependency report's to note.
@@ -490,7 +484,7 @@ function stdHas(n: Node, specifier: string): boolean {
 
 // What a std module exports: its functions and its consts.
 function stdExports(name: string): Set<string> {
-  return new Set(parse(STD_MODULES[name]!, shared.ids).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
+  return new Set(parse(STD_MODULES[name]!, { last: 0 }).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
 }
 
 // The built-in an import names: its subpath when that has its own equivalent, else its module.
@@ -538,7 +532,6 @@ function fishPattern(p: Node): boolean {
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
   const declarations = n.declarations as { target: Node; type: unknown; init: unknown }[];
-  if (n.keyword === "const") for (const d of declarations) if (isNode(d.init) && d.init.kind === "arrow" && d.target.kind === "ident") heldArrows.add(d.init);
   // A declaration under `declare` describes a value defined elsewhere, so it has no initializer.
   if (!head && !ambient && declarations.some((d) => !d.init && !d.type)) push("declarators");
   // A loop head's plain pattern, of names, holes and renames, is one Fish takes apart.

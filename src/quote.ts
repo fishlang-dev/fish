@@ -1,9 +1,9 @@
-import { freshId, shared, type Tables } from "./compilation.ts";
+import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { renumber } from "./nodes.ts";
+import { nextId, renumber, type Ids } from "./nodes.ts";
 import { field, unfold, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -20,8 +20,8 @@ export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: E
 
 // The tree a quote's text parses to: a type for `quoteType`, else an expression when the whole
 // text is one and doesn't start as JavaScript's statements do, else one statement or
-// declaration. `parsed` holds each quote parsed so far.
-export function quoted(parsed: Tables["parsedQuotes"], e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
+// declaration. `parsedQuotes` holds each quote parsed so far.
+export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
   const made = parsed.get(e);
   if (made) return made;
   const template = e.template;
@@ -37,7 +37,7 @@ export function quoted(parsed: Tables["parsedQuotes"], e: Extract<Expr, { kind: 
   if (asType) {
     let tree: TypeNode;
     try {
-      tree = parseType(text, shared.ids);
+      tree = parseType(text, ids);
     } catch (error) {
       tree = fail(error);
     }
@@ -48,7 +48,7 @@ export function quoted(parsed: Tables["parsedQuotes"], e: Extract<Expr, { kind: 
     const statement = startsStatement(text);
     let tree: Expr | Stmt | undefined;
     try {
-      tree = statement ? undefined : parseExpression(text, shared.ids);
+      tree = statement ? undefined : parseExpression(text, ids);
     } catch {
       tree = undefined;
     }
@@ -56,7 +56,7 @@ export function quoted(parsed: Tables["parsedQuotes"], e: Extract<Expr, { kind: 
     else {
       let stmts: Stmt[] = [];
       try {
-        stmts = parse(text, shared.ids);
+        stmts = parse(text, ids);
       } catch (error) {
         fail(error);
       }
@@ -229,8 +229,8 @@ const VARIANTS = new Set(["None"]);
 // spliced into to bind.
 export type Free = Map<string, string>;
 
-function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, string>, free: Free): unknown {
-  const copy = renumber(structuredClone(tree), freshId);
+function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: number, bound: Map<string, string>, free: Free): unknown {
+  const copy = renumber(structuredClone(tree), () => nextId(ids));
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
     if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
@@ -282,7 +282,7 @@ function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, st
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
     if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
       const key = n.name;
-      const value = { id: freshId(), kind: "ident", name: renamed(key), start: n.start, end: n.end };
+      const value = { id: nextId(ids), kind: "ident", name: renamed(key), start: n.start, end: n.end };
       for (const k of Object.keys(n)) if (k !== "id") delete n[k];
       Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
     }
@@ -296,7 +296,7 @@ function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, st
 // Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`
 // gives the bindings of the quotes spliced in, and gets this quote's, with theirs; `free` gets
 // the names it leaves free.
-export function built<V>({ typing, hygiene }: Tables, q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
+export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
     const t = typing.unfolded(type);
@@ -323,7 +323,7 @@ export function built<V>({ typing, hygiene }: Tables, q: Quote, types: Record<Ca
     }
     return b.record(t, fields);
   };
-  return make(at && hygiene ? hygienic(q.tree, hygiene, Math.floor(at.start / FILE_SPAN), scope, free) : q.tree, types[q.category]);
+  return make(at && hygiene ? hygienic(ids, q.tree, hygiene, Math.floor(at.start / FILE_SPAN), scope, free) : q.tree, types[q.category]);
 }
 
 // An integer an Ast holds, as an `i64` until big integers.

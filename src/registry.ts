@@ -1,5 +1,6 @@
 import { checkOverrides, extend, type Body, type ClassInfo } from "./classes.ts";
-import { freshId, type Tables } from "./compilation.ts";
+import type { Tables } from "./compilation.ts";
+import { nextId } from "./nodes.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
@@ -27,7 +28,7 @@ type Checker = {
 };
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
-  const { typing } = tables;
+  const { typing, ids } = tables;
   const { optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
@@ -64,7 +65,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
     const at = c.node.extends!;
-    extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: freshId(), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     checkOverrides(c);
     linked.add(c);
   }
@@ -75,7 +76,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     const at = c.node.extends!;
     if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
-    const type = withScope(c.scope, () => resolveType({ id: freshId(), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
+    const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
     return infoOf.get(type)!;
   }
 
@@ -99,7 +100,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = {
-        id: freshId(), name, params: [], body: [{ id: freshId(), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
+        id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
       };
       const instance = instanceOf(initializer);

@@ -1,12 +1,11 @@
 import { expect, test } from "bun:test";
-import { shared } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { directive, fix, migrations, rejects, surveyHits } from "../src/migrate.ts";
 import { parse, parseWithComments } from "../src/parser.ts";
 
 // Each hit in `src` as its rule and the text it spans, in source order.
 function hits(src: string): [string, string][] {
-  return rejects(parse(src, shared.ids)).sort((a, b) => a.start - b.start || a.end - b.end).map((h) => [h.rule, src.slice(h.start, h.end)]);
+  return rejects(parse(src, { last: 0 })).sort((a, b) => a.start - b.start || a.end - b.end).map((h) => [h.rule, src.slice(h.start, h.end)]);
 }
 
 test("R1 finds eval, Function and new Function", () => {
@@ -83,7 +82,7 @@ test("a comment that only starts like the directive is an ordinary comment", () 
 
 // Each auto or guided hit in `src` as its action and rule and the text it spans, in source order.
 function found(src: string): string[] {
-  return migrations(parseWithComments(src, shared.ids), src).filter((h) => h.action !== "reject").sort((a, b) => a.start - b.start || a.end - b.end).map((h) => `${h.action} ${h.rule} ${src.slice(h.start, h.end)}`);
+  return migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.action !== "reject").sort((a, b) => a.start - b.start || a.end - b.end).map((h) => `${h.action} ${h.rule} ${src.slice(h.start, h.end)}`);
 }
 
 const fixed = (src: string) => fix(src).text;
@@ -184,7 +183,7 @@ test("positions come from tokens, so comments and strings holding ( : { == or | 
   ];
   for (const [src, out] of cases) {
     expect(fixed(src)).toBe(out);
-    expect(() => parse(fixed(src), shared.ids)).not.toThrow();
+    expect(() => parse(fixed(src), { last: 0 })).not.toThrow();
   }
 });
 
@@ -200,7 +199,7 @@ test("A9 leaves a function constructed or given a prototype under its name", () 
 });
 
 test("A1 rewrites a var only where function scoping can't matter, and says why otherwise", () => {
-  const guided = (src: string) => migrations(parseWithComments(src, shared.ids), src).filter((h) => h.rule === "A1").map((h) => `${h.action}: ${h.message!.split(": ")[1]}`);
+  const guided = (src: string) => migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.rule === "A1").map((h) => `${h.action}: ${h.message!.split(": ")[1]}`);
   expect(guided("for (var i = 0; i < 3; i++) {\n  fs.push(() => i);\n}\n")).toEqual(["guided: a closure in the loop captures it; rename or move it, then use 'let' or 'const'"]);
   expect(guided("var x = 1;\nif (c) {\n  var x = 2;\n}\n")).toEqual(Array(2).fill("guided: it is declared again in the same function; rename or move it, then use 'let' or 'const'"));
   expect(guided("if (c) {\n  var x = 1;\n}\nconsole.log(x);\n")).toEqual(["guided: it is used outside the block it is declared in; rename or move it, then use 'let' or 'const'"]);
@@ -251,13 +250,13 @@ test("A10 renames an import only when its .fsh is there or being made, and never
 });
 
 test("the survey's hits come without edits, A3 counted fixable or not", () => {
-  const hits = surveyHits(parse('var a = 1;\nconst b = a == 1 || x != y;\nconst u = JSON.parse(s) as U;\n', shared.ids));
+  const hits = surveyHits(parse('var a = 1;\nconst b = a == 1 || x != y;\nconst u = JSON.parse(s) as U;\n', { last: 0 }));
   expect(hits.map((h) => h.rule).sort()).toEqual(["A1", "A3", "A3", "A8"]);
   expect(hits.some((h) => h.edits)).toBe(false);
 });
 
 test("A1 leaves a var in a loop whose value carries from one turn to the next", () => {
-  const carried = (src: string) => migrations(parseWithComments(src, shared.ids), src).filter((h) => h.rule === "A1").map((h) => `${h.action}: ${h.message!.split(": ")[1]}`);
+  const carried = (src: string) => migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.rule === "A1").map((h) => `${h.action}: ${h.message!.split(": ")[1]}`);
   const reason = "guided: its value carries from one turn of the loop to the next; rename or move it, then use 'let' or 'const'";
   for (const src of ["for (let i = 0; i < 3; i++) {\n  var last;\n  if (i > 0) console.log(last);\n  last = i;\n}\n", "while (c) {\n  var seen;\n  if (seen) break;\n  seen = true;\n}\n", "while (c) {\n  var n = n + 1;\n  use(n);\n}\n", "for (const x of xs) {\n  if (c) {\n    var k;\n  }\n}\n"]) {
     expect(carried(src)).toEqual([reason]);
@@ -287,7 +286,7 @@ test("A9 leaves a property's function constructed through the object", () => {
 
 test("a fix a comment blocks is reported as one to make by hand", () => {
   const src = "let x: string /* | */ | null;\n";
-  const [hit] = migrations(parseWithComments(src, shared.ids), src).filter((h) => h.rule === "A2");
+  const [hit] = migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.rule === "A2");
   expect(hit!.edits).toBeUndefined();
   expect(hit!.message).toBe("a comment sits where this change would go, so it can't be made automatically; make it by hand: 'string /* | */ | null' becomes 'Option<string>'");
 });
@@ -295,16 +294,16 @@ test("a fix a comment blocks is reported as one to make by hand", () => {
 test("collecting each name's uses is linear in the file", () => {
   const src = Array.from({ length: 16000 }, (_, i) => `function f${i}() { let x = 1; for (let i = 0; i < 2; i++) x += i; return x; }`).join("\n");
   const started = performance.now();
-  const program = parseWithComments(src, shared.ids);
+  const program = parseWithComments(src, { last: 0 });
   migrations(program, src);
   expect(performance.now() - started).toBeLessThan(4000);
 });
 
 // Each guided hit in `src` as its rule and the text it spans, in source order, and the messages.
 function guidedIn(src: string): string[] {
-  return migrations(parseWithComments(src, shared.ids), src).filter((h) => h.action === "guided" && h.rule.startsWith("G")).sort((a, b) => a.start - b.start).map((h) => `${h.rule} ${src.slice(h.start, h.end)}`);
+  return migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.action === "guided" && h.rule.startsWith("G")).sort((a, b) => a.start - b.start).map((h) => `${h.rule} ${src.slice(h.start, h.end)}`);
 }
-const messageOf = (src: string, rule: string) => migrations(parseWithComments(src, shared.ids), src).find((h) => h.rule === rule)?.message;
+const messageOf = (src: string, rule: string) => migrations(parseWithComments(src, { last: 0 }), src).find((h) => h.rule === rule)?.message;
 
 test("G1 reports any, suggesting a concrete type, a union or Json", () => {
   expect(guidedIn("function f(x: any): any[] {\n  return [x];\n}\n")).toEqual(["G1 any", "G1 any"]);
@@ -357,7 +356,7 @@ test("G9 reports .call, .apply and .bind, and G10 an async forEach callback", ()
 test("guided hits are never fixed", () => {
   const src = "let x: any = 1;\nsetup();\n";
   expect(fix(src)).toEqual({ text: src, fixed: 0 });
-  expect(migrations(parseWithComments(src, shared.ids), src).filter((h) => h.action === "guided").every((h) => h.edits === undefined)).toBe(true);
+  expect(migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.action === "guided").every((h) => h.edits === undefined)).toBe(true);
 });
 
 test("G2 reports a dropped call to the file's async function or Promise method, and leaves one awaited, returned, assigned or voided", () => {
@@ -385,7 +384,7 @@ test("G11 reports an alias changed through one name while the other is still use
   ];
   for (const src of flagged) {
     expect(guidedIn(src).filter((h) => h.startsWith("G11"))).toHaveLength(1);
-    expect(migrations(parseWithComments(src, shared.ids), src).find((h) => h.rule === "G11")!.message).toMatch(/^'b' and 'a' /);
+    expect(migrations(parseWithComments(src, { last: 0 }), src).find((h) => h.rule === "G11")!.message).toMatch(/^'b' and 'a' /);
   }
   expect(messageOf(flagged[0]!, "G11")).toBe(`'b' and 'a' ${fixes}`);
   expect(guidedIn(flagged[0]!).filter((h) => h.startsWith("G11"))).toEqual(["G11 b = a"]);
@@ -401,7 +400,7 @@ test("G11 reports an alias changed through one name while the other is still use
 test("the guided rules are linear in the file", () => {
   const src = Array.from({ length: 8000 }, (_, i) => `function f${i}(xs: string, i: number) {\n  const a = { n: i };\n  const b = a;\n  b.n = 2;\n  for (let j = 0; j < xs.length; j++) g(xs[i] + a.n);\n  save();\n}\n`).join("");
   const started = performance.now();
-  expect(migrations(parseWithComments(src, shared.ids), src).filter((h) => h.rule === "G11")).toHaveLength(8000);
+  expect(migrations(parseWithComments(src, { last: 0 }), src).filter((h) => h.rule === "G11")).toHaveLength(8000);
   expect(performance.now() - started).toBeLessThan(5000);
 });
 
@@ -432,7 +431,7 @@ test("G3 and G11 are linear in the uses of one name", () => {
   const blocks = `function f(xs: number[]) {\n${"  { let k = 0; g(xs[k]); }\n".repeat(n)}}\n`;
   const aliases = `function h() {\n  const a = { n: 1 };\n${Array.from({ length: n }, (_, i) => `  const b${i} = a;\n  a.n = ${i};\n  use(b${i});\n`).join("")}}\n`;
   const started = performance.now();
-  expect(migrations(parseWithComments(blocks, shared.ids), blocks).filter((h) => h.rule === "G3")).toHaveLength(n);
-  expect(migrations(parseWithComments(aliases, shared.ids), aliases).filter((h) => h.rule === "G11")).toHaveLength(n);
+  expect(migrations(parseWithComments(blocks, { last: 0 }), blocks).filter((h) => h.rule === "G3")).toHaveLength(n);
+  expect(migrations(parseWithComments(aliases, { last: 0 }), aliases).filter((h) => h.rule === "G11")).toHaveLength(n);
   expect(performance.now() - started).toBeLessThan(5000);
 });

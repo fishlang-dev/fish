@@ -5,10 +5,10 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { newCompilation, shared, type Compilation } from "./compilation.ts";
+import { newCompilation, newSession, type Compilation, type Session } from "./compilation.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
-import { locking, resolvePackages } from "./dependencies.ts";
+import { resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
@@ -37,33 +37,33 @@ export type Library = "static" | "shared";
 
 // Checks the program whose entry is `file`, with text `src`, without building it, its package's
 // tests included. The file may be one another imports, so it needs no `main`. `read` reads the
-// files it imports.
-export function analyze(src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
-  const loaded = load(file, src, read);
-  const compilation = newCompilation();
+// files it imports. Each of these entry points compiles within a `session`, whose caches it uses.
+export function analyze(session: Session, src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
+  const compilation = newCompilation(session);
+  const loaded = load(compilation, file, src, read);
   return withSources(compilation, loaded.sources, () => {
-    liftTests(compilation.names, loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
+    liftTests(compilation, loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
     return { checked: check(compilation, expanded(compilation, loaded, false), false, false, true), sources: loaded.sources };
   });
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
-export function compile(src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
-  return compiled(src, file, release, panic, library).ir;
+export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false): string {
+  return compiled(session, src, file, release, panic, library).ir;
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing, or a library
 // with no main; throws its first CompileError.
-export function checkProgram(file: string, library = false) {
-  const loaded = load(file, readFileSync(file, "utf8"));
-  const compilation = newCompilation();
+export function checkProgram(session: Session, file: string, library = false) {
+  const compilation = newCompilation(session);
+  const loaded = load(compilation, file, readFileSync(file, "utf8"));
   withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, library), library));
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined } {
-  const loaded = load(file, src);
-  const compilation = newCompilation();
+function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined } {
+  const compilation = newCompilation(session);
+  const loaded = load(compilation, file, src);
   return withSources(compilation, loaded.sources, () => {
     const checked = check(compilation, expanded(compilation, loaded, library), library);
     return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances) };
@@ -85,7 +85,7 @@ function bundled(ir: string, loaded: Loaded): string {
 function expanded(compilation: Compilation, loaded: Loaded, library: boolean): Stmt[] {
   stripTests(loaded);
   expandMacros(compilation, loaded, library, (macros) => check(compilation, macros, false, true));
-  return flatten(loaded, library);
+  return flatten(compilation.ids, loaded, library);
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against, and
@@ -101,10 +101,10 @@ function withSources<T>({ names }: Compilation, sources: Source[], run: () => T)
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it.
-export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
+export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
   const src = readFileSync(file, "utf8");
-  const loaded = load(file, src);
-  const compilation = newCompilation();
+  const compilation = newCompilation(session);
+  const loaded = load(compilation, file, src);
   const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
   const ir = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
   const shim = rustShim(loaded.rust, checked.instances);
@@ -119,7 +119,7 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
     if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
   };
   try {
-    const objects = [...runtimeUnits(ir, release, true).map(cachedObject), ...mathObjects()];
+    const objects = [...runtimeUnits(ir, release, true).map((u) => cachedObject(session, u)), ...mathObjects(session)];
     if (kind === "shared") {
       const extension = process.platform === "darwin" ? "dylib" : "so";
       run(["clang", "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
@@ -173,9 +173,9 @@ function cType(t: Type): string {
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from.
-export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
-  linked(ir, instances, out, release, links, shim());
+export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
+  const { ir, instances, shim } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
+  linked(session, ir, instances, out, release, links, shim());
 }
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
@@ -190,18 +190,18 @@ function parts(ir: string, instances: Instance[], release: boolean): { std: Unit
 }
 
 // Builds the IR `ir`, of `instances`, into the executable `out`.
-function linked(ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim) {
+function linked(session: Session, ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim) {
   const { std, program } = parts(ir, instances, release);
-  const objects = [...[...runtimeUnits(ir, release), ...std].map(cachedObject), ...mathObjects()];
+  const objects = [...[...runtimeUnits(ir, release), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session)];
   const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim), { stdin: new TextEncoder().encode(program) });
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
-export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+export async function buildAsync(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
+  const { ir, instances, shim } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
   const { std, program } = parts(ir, instances, release);
-  const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map(cachedObjectAsync), mathObjectsAsync()])).flat();
+  const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
   const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
@@ -210,45 +210,46 @@ export async function buildAsync(file: string, out: string, release = false, pan
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
-export function buildTests(dir: string, out: string): Test[] {
+export function buildTests(session: Session, dir: string, out: string): Test[] {
   const files = fishFiles(dir, (message) => console.error(message.replace(/^fishc fmt/, "fishc test")));
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
   const src = harnessImports(dir, files);
-  const loaded = load(entry, src);
-  const compilation = newCompilation();
+  const compilation = newCompilation(session);
+  const loaded = load(compilation, entry, src);
   return withSources(compilation, loaded.sources, () => {
-    const tests = liftTests(compilation.names, files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
+    const tests = liftTests(compilation, files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
     if (tests.length === 0) return tests;
-    hideMains(compilation.names, loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
-    loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
+    hideMains(compilation, loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
+    loaded.modules[0]!.statements.push(...harnessMain(compilation.ids, tests, loaded.modules));
     const checked = check(compilation, expanded(compilation, loaded, false));
-    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
+    linked(session, bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
     return tests;
   });
 }
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
-async function testPackage(dir: string, filter: string | undefined): Promise<number> {
+async function testPackage(session: Session, dir: string, filter: string | undefined): Promise<number> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
+  const running = new Set<number>();
   // Interrupted, the tests running and what they started end, and the build is removed.
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
     process.on(signal, () => {
-      stopTests();
+      stopTests(running);
       rmSync(dirname(out), { recursive: true, force: true });
       process.exit(code);
     });
   }
   try {
-    const tests = buildTests(dir, out);
+    const tests = buildTests(session, dir, out);
     if (tests.length === 0) {
       console.log("no tests found");
       return 0;
     }
     const chosen = filter === undefined ? tests : tests.filter((t) => t.name.includes(filter));
-    if (chosen.length > 0) return await runTests(out, chosen, dir);
+    if (chosen.length > 0) return await runTests(running, out, chosen, dir);
     console.error(`fishc test: no test's name contains '${filter}'`);
     return 1;
   } catch (e) {
@@ -328,7 +329,7 @@ function lintPaths(paths: string[], fixing: boolean): number {
         if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
         continue;
       }
-      parse(src, shared.ids);
+      parse(src, { last: 0 });
       if (fixing) {
         const to = typescript ? `${path.slice(0, -3)}.fsh` : undefined;
         if (to && existsSync(to)) {
@@ -359,7 +360,7 @@ function lintPaths(paths: string[], fixing: boolean): number {
         }
         src = text;
       }
-      const found = migrations(parseWithComments(src, shared.ids), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
+      const found = migrations(parseWithComments(src, { last: 0 }), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
       if (at.endsWith(".ts")) found.unshift({ rule: "A10", action: "auto", start: 0, end: 0, message: `the file becomes '${basename(at, ".ts")}.fsh', its Fish name; 'fishc lint --fix' renames it` });
       for (const hit of found) console.log(formatError(new CompileError(hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
       hits += found.length;
@@ -439,6 +440,7 @@ function checkProject(dir: string) {
 
 if (import.meta.main && Bun.argv.length === 3 && Bun.argv[2] === "lsp") serveLsp();
 else if (import.meta.main) {
+  const session = newSession();
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {
@@ -542,7 +544,7 @@ else if (import.meta.main) {
     if (positionals.length > 2 || Object.keys(values).some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
     const found = findManifest(process.cwd());
     if (!found) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
-    process.exit(await testPackage(dirname(found), file));
+    process.exit(await testPackage(session, dirname(found), file));
   }
   if (command === "publish") {
     const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
@@ -603,8 +605,8 @@ else if (import.meta.main) {
         if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
         if (file && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
-        locking.update = file ? new Set([file]) : "all";
-        resolvePackages(join(manifest.dir, manifest.entry));
+        session.locking.update = file ? new Set([file]) : "all";
+        resolvePackages(join(manifest.dir, manifest.entry), session.locking);
         console.log(`updated ${relative(process.cwd(), join(manifest.dir, "fish.lock")) || "fish.lock"}`);
       }
     } catch (e) {
@@ -633,7 +635,7 @@ else if (import.meta.main) {
   }
   const panic = values.panic as Panic;
   const lib = values.lib as Library | undefined;
-  locking.locked = values.locked === true;
+  session.locking.locked = values.locked === true;
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
@@ -656,7 +658,7 @@ else if (import.meta.main) {
   }
   if (command === "check" && target && !values.out && !values.release && !values["emit-llvm"] && lib === undefined) {
     try {
-      checkProgram(target);
+      checkProgram(session, target);
     } catch (e) {
       if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);
@@ -670,7 +672,7 @@ else if (import.meta.main) {
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
     let code = 1;
     try {
-      build(target, binary, values.release, panic, values.link ?? []);
+      build(session, target, binary, values.release, panic, values.link ?? []);
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
       code = ran.exitCode ?? 128 + (ran.signalCode ? constants.signals[ran.signalCode as NodeJS.Signals] : 0);
@@ -687,9 +689,9 @@ else if (import.meta.main) {
     process.exit(2);
   }
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined));
-    else if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? []);
-    else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? []);
+    if (values["emit-llvm"]) process.stdout.write(compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined));
+    else if (lib) buildLibrary(session, target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? []);
+    else build(session, target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? []);
   } catch (e) {
     if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
