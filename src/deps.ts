@@ -24,7 +24,7 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   ...Object.fromEntries(["commander", "yargs", "minimist", "meow", "cac"].map((p) => [p, PLANNED("Typed CLI arguments")])),
   ...Object.fromEntries(["dotenv", "env-var"].map((p) => [p, PLANNED("Typed configuration from the environment")])),
   ws: PLANNED("WebSockets"),
-  ...Object.fromEntries(["uuid", "nanoid"].map((p) => [p, PLANNED("Randomness")])),
+  uuid: IN_STD("crypto.randomUUID, for v4 only"), nanoid: IN_STD("crypto.getRandomValues, to build IDs from"),
   ...Object.fromEntries(["dayjs", "date-fns", "moment", "luxon"].map((p) => [p, PLANNED("Date parsing and formatting")])),
   ...Object.fromEntries(["pino", "winston", "bunyan"].map((p) => [p, PLANNED("Structured logging")])),
   ...Object.fromEntries(["pg", "postgres"].map((p) => [p, PLANNED("Postgres driver")])),

@@ -14,6 +14,8 @@ import { parse } from "../src/parser.ts";
 //                       containing <text>
 //   // stderr: <line>   a line of stderr; a program's `stderr:` lines must appear in it together
 //                       and in order, with paths in the program's directory read from it
+//   // warning: <text>  the build must warn with a message containing <text>, and a program
+//                       stating any warning must give no other; one stating none may warn
 //   // mode: release    build with --release
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
@@ -33,7 +35,7 @@ const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
 const jobs = Number(process.env.FISH_TEST_JOBS) || availableParallelism();
 
 // What building and running a program gave: a compile error, or its output and how it ended.
-type Outcome = { error?: unknown; stdout: string; stderr: string; exitCode: number | null; signal: string | number | null; timedOut: boolean };
+type Outcome = { error?: unknown; warnings: CompileError[]; stdout: string; stderr: string; exitCode: number | null; signal: string | number | null; timedOut: boolean };
 
 let running = 0;
 const waiting: (() => void)[] = [];
@@ -54,7 +56,7 @@ async function pooled<T>(work: () => Promise<T>): Promise<T> {
 const limit = (name: string) => (name.startsWith("http_") ? 30_000 : 10_000);
 
 async function outcome(name: string, file: string, src: string): Promise<Outcome> {
-  const empty = { stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };
+  const empty = { warnings: [], stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };
   try {
     if (src.includes("// mode: parse")) {
       parse(src);
@@ -62,7 +64,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
     }
     const out = join(tmp, name.replace(/\.fsh$/, "").replace(/[^\w.-]+/g, "_"));
     const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
-    await buildAsync(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
+    const warnings = await buildAsync(file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
     // Every program is checked for leaks: the runtime reports what is still allocated at exit.
     const run = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe" });
     let timedOut = false;
@@ -73,7 +75,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
     const [stdout, stderr] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text()]);
     await run.exited;
     clearTimeout(timer);
-    return { stdout, stderr, exitCode: run.exitCode, signal: run.signalCode, timedOut };
+    return { warnings, stdout, stderr, exitCode: run.exitCode, signal: run.signalCode, timedOut };
   } catch (error) {
     return { ...empty, error };
   }
@@ -82,7 +84,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
 // A test's program: a file, a directory's `main.fsh`, or a case of a file, which is written out
 // as its own file; or what is wrong with a file's cases.
 type Program = { label: string; file: string; src: string; problem?: string };
-const DIRECTIVE = /^\/\/ (expect|error|panic|fails|stderr|mode|link):/;
+const DIRECTIVE = /^\/\/ (expect|error|warning|panic|fails|stderr|mode|link):/;
 
 function programsOf(entry: string): [string, Program][] {
   const file = entry.endsWith(".fsh") ? join(dir, entry) : join(dir, entry, "main.fsh");
@@ -134,6 +136,7 @@ for (const name of programs) {
     const panics = [...src.matchAll(/\/\/ panic: (.*)/g)].map((m) => m[1]!);
     const failures = [...src.matchAll(/\/\/ fails: (.*)/g)].map((m) => m[1]!);
     const lines = [...src.matchAll(/\/\/ stderr: (.*)/g)].map((m) => m[1]!);
+    const warned = [...src.matchAll(/\/\/ warning: (.*)/g)].map((m) => m[1]!);
     ahead(programs.indexOf(name));
     const run = await outcomes.get(name)!;
 
@@ -145,6 +148,9 @@ for (const name of programs) {
     }
     expect(errors).toEqual([]);
     if (src.includes("// mode: parse")) return;
+    const warnings = run.warnings.map((w) => formatError(w, label, src, "warning"));
+    for (const text of warned) expect(warnings.join("\n")).toContain(text);
+    if (warned.length > 0) for (const w of warnings) expect(warned.some((text) => w.includes(text)) ? w : "").toBe(w);
 
     expect(run.timedOut).toBe(false);
     expect(run.stdout).toBe(expected);

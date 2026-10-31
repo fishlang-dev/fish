@@ -1,15 +1,17 @@
-import { fileAt } from "./modules.ts";
+import { fileAt, textAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { abstractIn, copyFor, inherited, shownName, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
+import { abstractIn, copyFor, inherited, shownName, isLifetime, upcasts, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
+import type { Direct, Narrowing } from "./overloads.ts";
 import { CompileError, indexText } from "./diag.ts";
+import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, promiseInterface, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method, generatorElement, membersFor } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, promiseInterface, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, joinedType, type HandleType, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method, generatorElement, membersFor } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -93,6 +95,10 @@ export type Context = {
   // of a body around it, captured if need be.
   peek(name: string): Local | undefined;
   reach(l: Local, at?: Expr | ObjectProp): Local;
+  // The names a use at `at` reaches, its bindings in scope then top-level values, for suggesting one.
+  names(at: number): string[];
+  // The names of the classes, generic ones included, a use at `at` reaches.
+  classNames(at: number): string[];
   // Records the bindings a call of a nested function builds its environment from.
   envOf(e: Expr, of: Instance, env: Local[]): void;
   dynOf(e: Expr, table: DynTable): void;
@@ -215,6 +221,8 @@ export const fileCalls = new WeakSet<Expr>();
 export const syncFileCalls = new WeakMap<Expr, string>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
 export const printCalls = new WeakSet<Expr>();
+// `handle.join()` calls, which take the handle over and give it back awaitable as a TaskPanic.
+export const joinCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
 // The ways several Promises are awaited at once.
@@ -262,14 +270,15 @@ export function formatPlan(format: string, count: number): { specs: string[]; re
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
-// The `Date.now()` and `performance.now()` calls, by which each is.
-export const clocks = new WeakMap<Expr, "Date.now" | "performance.now">();
+// The `Date.now()`, `performance.now()` and `Math.random()` calls, by which each is: each reads
+// the world outside the program, so none has a value while compiling.
+export const clocks = new WeakMap<Expr, "Date.now" | "performance.now" | "Math.random">();
 // The `JSON.stringify` and `JSON.parse` calls, by which each is.
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
-// Calls of the global `assert`, which panics where it is called.
-export const asserts = new WeakSet<Expr>();
+// Calls of the global `assert`, which panics where it is called, each with its condition as written.
+export const asserts = new WeakMap<Expr, string>();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
 export const regexStringCalls = new WeakMap<Expr, string>();
@@ -293,6 +302,22 @@ export const REGEX_FLAGS: Record<string, string> = { hasIndices: "d", global: "g
 export const fixedPrints = new WeakSet<Expr>();
 // The `Math` calls and constants, which codegen lowers itself.
 export const maths = new WeakSet<Expr>();
+// The integer methods named for how they overflow, as Rust's are: `checkedAdd`, `wrappingShl`,
+// `saturatingPow`, `overflowingMul` and the rest, by family then operation.
+const INTEGER_METHODS: Record<string, string[]> = {
+  checked: ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "Shl", "Shr", "Pow"],
+  wrapping: ["Add", "Sub", "Mul", "Div", "Rem", "Neg", "Shl", "Shr", "Pow"],
+  saturating: ["Add", "Sub", "Mul", "Div", "Neg", "Pow"],
+  overflowing: ["Add", "Sub", "Mul"],
+};
+// A method name as its family and operation, when it is one of them.
+export function integerMethod(name: string): [string, string] | undefined {
+  const family = Object.keys(INTEGER_METHODS).find((f) => name.startsWith(f));
+  const operation = family && name.slice(family.length);
+  return family && INTEGER_METHODS[family]!.includes(operation!) ? [family, operation!] : undefined;
+}
+// The calls of those methods.
+export const integerCalls = new WeakSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
 export const MATH_FLOAT: Record<string, number> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
@@ -633,6 +658,7 @@ export function expressions(ctx: Context) {
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
     if (e.kind === "tagged" && !isQuote(e)) untag(e);
+    if (e.kind === "assign" || e.kind === "update") staticWrite(e);
     if (e.kind === "call") {
       const { type } = call(e);
       // A parse read only to check the text still makes its value, which is then dropped.
@@ -1032,13 +1058,24 @@ export function expressions(ctx: Context) {
       return call(e);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
-      return signalTimeout(e, callee);
+      return signalStatic(e, callee);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
       return tcpStatic(e, callee, callee.object.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
+    // `u8.fromBase64(s, options?)` and `u8.fromHex(s)`, TC39's Uint8Array statics on the byte type.
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "u8" && !lookup("u8") && !byName.has("u8") && !byName.has("const u8")) {
+      const helper = Object.hasOwn(BYTE_DECODERS, callee.name) ? BYTE_DECODERS[callee.name] : undefined;
+      if (!helper) throw new CompileError(`'u8' has no static '${callee.name}'; decode text into a 'u8[]' with 'u8.fromBase64' or 'u8.fromHex'`, callee.start, callee.end);
+      if (callee.optional || e.optional) throw new CompileError(`'u8.${callee.name}' is always there, so it is called without '?.'`, e.start, e.end);
+      if (e.typeArgs.length > 0) throw new CompileError(`'u8.${callee.name}' takes no type arguments`, e.start, e.end);
+      const most = callee.name === "fromBase64" ? 2 : 1;
+      if (e.args.length < 1 || e.args.length > most) throw new CompileError(most === 1 ? "'u8.fromHex' takes one string of hex digits" : "'u8.fromBase64' takes a string and an optional options object, as in '{ alphabet: \"base64url\" }'", e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: helper, start: callee.start, end: callee.end } });
+      return call(e);
+    }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !lookup("String") && !classes.has("String") && !byName.has("String") && !byName.has("const String") && !enums.has("String")) return stringStatic(e, callee);
     if (callee.kind === "member" && isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -1107,9 +1144,11 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "handle" && callee.name !== "clone") return handleCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
+    if (callee.kind === "member" && receiver !== undefined && isInteger(lower(receiver)) && integerMethod(callee.name)) return integerCall(e, callee, lower(receiver) as Integer);
     const rx = receiver === undefined ? undefined : asRegex(receiver);
     if (callee.kind === "member" && rx) return regexCall(e, callee, rx, lower(receiver!) !== rx);
     if (callee.kind === "member" && receiver !== undefined && isFixed(receiver)) {
@@ -1314,13 +1353,14 @@ export function expressions(ctx: Context) {
     const found = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
-    const target = found?.js?.overloads ? jsOverload(e, found) : found;
+    const target = found?.js?.overloads ? jsOverload(e, found) : found?.overloads && !(e as Direct).implementation ? overload(e, found) : found;
     // A package's const is a value; one holding a function would be a function crossing from JS.
     if (target?.js?.const) {
       const held = resolveType(target.returnType!);
       const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
       throw new CompileError(callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
+    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(target.start) === "node:assert") return assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
     const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
@@ -1359,7 +1399,7 @@ export function expressions(ctx: Context) {
     if (target && (target as { macro?: boolean }).macro) throw new CompileError(`'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     if (!target) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
-      throw new CompileError(`unknown function ${name}`, callee.start, callee.end);
+      throw new CompileError(`unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }
     if (target.foreign && !target.rust) needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
     if (target.js) jsCalls.set(e, target.js);
@@ -1443,7 +1483,7 @@ export function expressions(ctx: Context) {
   function untag(e: Extract<Expr, { kind: "tagged" }>) {
     const { tag, template } = e;
     const target = tag.kind === "ident" && !lookup(tag.name) ? byName.get(tag.name) : undefined;
-    if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'`, tag.start, tag.end);
+    if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'${didYouMean(tag.name, ctx.names(tag.start))}`, tag.start, tag.end);
     if (!target || tag.kind !== "ident") throw new CompileError("a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
     const shape = `'comptime strings: TemplateStringsArray, ...values: T[]'`;
     if (!tagStrings(target.params[0])) {
@@ -1766,7 +1806,7 @@ export function expressions(ctx: Context) {
       return { type: "string", what: "'concat'" };
     }
     const method = STRING_METHODS[callee.name];
-    if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
+    if (!method) throw new CompileError(`strings have no method '${callee.name}' yet${didYouMean(callee.name, Object.keys(STRING_METHODS))}`, callee.start, callee.end);
     const [params, returns, required] = method;
     if (e.args.length < required || e.args.length > params.length) {
       const count = required === params.length ? `${required}` : `${required} or ${params.length}`;
@@ -1839,7 +1879,7 @@ export function expressions(ctx: Context) {
   // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or
   // gives an empty Option. Both change the array.
   function arrayCall(e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
-    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet`, callee.start, callee.end);
+    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError(`arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -1850,6 +1890,14 @@ export function expressions(ctx: Context) {
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
       Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
+      return call(e);
+    }
+    // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
+    if (Object.hasOwn(BYTE_METHODS, callee.name)) {
+      if (lower(array.element) !== "u8") throw new CompileError(`'${callee.name}' encodes bytes, a 'u8[]', not '${show(array)}'`, callee.start, callee.end);
+      const most = callee.name === "toBase64" ? 1 : 0;
+      if (e.args.length > most) throw new CompileError(most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: BYTE_METHODS[callee.name], start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] });
       return call(e);
     }
     if (readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
@@ -2128,6 +2176,27 @@ export function expressions(ctx: Context) {
     return { type: "string", what: "'toFixed'" };
   }
 
+  // `x.checkedAdd(y)` and its kin: the other operand is x's type, or a `u32` for a shift or a
+  // power; checked gives an Option, overflowing a tuple with whether it overflowed.
+  function integerCall(e: Call, callee: Extract<Expr, { kind: "member" }>, type: Integer): { type: Type; what: string } {
+    const [family, operation] = integerMethod(callee.name)!;
+    const what = `'${callee.name}'`;
+    if (callee.optional || linked(callee)) throw new CompileError(`${what} can't be called through an optional chain yet; check for null first`, callee.start, callee.end);
+    if (operation === "Neg" && family === "saturating" && !INTEGERS[type].signed) throw new CompileError(`'${show(type)}' has no method ${what}: an unsigned number is never negated past its range; use 'checkedNeg' or 'wrappingNeg'`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    loaded(callee.object, types.get(callee.object)!);
+    const other: Integer = ["Shl", "Shr", "Pow"].includes(operation) ? "u32" : type;
+    const arity = operation === "Neg" ? 0 : 1;
+    if (e.args.length !== arity) throw new CompileError(arity === 0 ? `${what} takes no argument` : `${what} takes one '${show(other)}'`, e.start, e.end);
+    for (const a of e.args) {
+      const t = read(a);
+      if (t !== other && !adapt(a, other)) throw new CompileError(`${what} on '${show(type)}' takes a '${show(other)}', not '${show(t)}'; convert it with 'as', as in 'n as ${show(other)}'`, a.start, a.end);
+    }
+    integerCalls.add(e);
+    const result = family === "checked" ? unionType([type, "null"]) : family === "overflowing" ? tupleType([type, "boolean"]) : type;
+    return { type: result, what };
+  }
+
   // The global `parseInt`, `parseFloat`, `Number` and `Number.parse...` a call makes, unless a
   // name of the program's hides it.
   function parserOf(callee: Expr): "parseInt" | "parseFloat" | "Number" | undefined {
@@ -2168,7 +2237,7 @@ export function expressions(ctx: Context) {
       if (!stringLike(t)) throw new CompileError(`an assertion's message is a string, not '${show(t)}'`, message.start, message.end);
       if (t !== "string") coerce(message, t, "string", "");
     }
-    asserts.add(e);
+    asserts.set(e, textAt(e.args[0]!));
     return { type: "void", what: "'assert'" };
   }
 
@@ -2331,8 +2400,12 @@ export function expressions(ctx: Context) {
   // the type of the numbers beside it as with an operator; the rest take and give `f64`.
   function mathCall(e: Call, name: string): { type: Type; what: string } {
     const what = `'Math.${name}'`;
-    if (name === "random") throw new CompileError("'Math.random' is not supported yet; it will come from the OS's secure random source", e.start, e.end);
     if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    if (name === "random") {
+      if (e.args.length > 0) throw new CompileError("'Math.random' takes no arguments", e.start, e.end);
+      clocks.set(e, "Math.random");
+      return { type: "f64", what };
+    }
     const arity = MATH_FLOAT[name];
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError(`${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
@@ -2665,7 +2738,7 @@ export function expressions(ctx: Context) {
   function mapCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
     const name = callee.name;
     const kind = t.set ? "Set" : "Map";
-    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet`, callee.start, callee.end);
+    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet${didYouMean(name, t.set ? SET_METHODS : MAP_METHODS)}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported(`optional chains calling '${kind}' methods`, callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     const count = MAP_ARGUMENTS[name]!;
@@ -2763,6 +2836,17 @@ export function expressions(ctx: Context) {
     throw new CompileError(set ? "'new Set()' needs the type of its members, as in 'new Set<string>()'" : "'new Map()' needs its key and value types, as in 'new Map<string, i64>()'", e.start, e.end);
   }
 
+  // `handle.join()`: the task's handle, awaited as giving its value or throwing a TaskPanic.
+  function handleCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: HandleType): { type: Type; what: string } {
+    if (callee.name !== "join") throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${t.joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
+    if (t.joined) throw new CompileError("this is already the task's 'join()'; await it", callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling 'join'", callee);
+    if (e.args.length !== 0) throw new CompileError("'join' takes no arguments", e.start, e.end);
+    if (isRefType(types.get(callee.object)!)) throw new CompileError("'join' takes the handle over, so it needs the handle itself, not a borrow of it", callee.object.start, callee.object.end);
+    joinCalls.add(e);
+    return { type: joinedType(t, classes.get("TaskPanic")!.type), what: "'join'" };
+  }
+
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
@@ -2808,9 +2892,11 @@ export function expressions(ctx: Context) {
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
-  // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds.
-  function signalTimeout(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
-    if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout'`, callee.start, callee.end);
+  // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
+  // `AbortSignal.any(signals)`: one that aborts with the first of them, each lent to it.
+  function signalStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name === "any") return signalAny(e);
+    if (callee.name !== "timeout") throw new CompileError(`'AbortSignal' has no static method '${callee.name}'; it has 'timeout' and 'any'`, callee.start, callee.end);
     // The std library's own code is compiled whatever main is; a sync main never reaches it.
     if (!ctx.runtime && e.start < STD_BASE) throw new CompileError("'AbortSignal.timeout' needs the async runtime's timer, which runs when 'main' is an async function", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'AbortSignal.timeout' takes how many milliseconds until it aborts, like 'AbortSignal.timeout(5000)'", e.start, e.end);
@@ -2818,6 +2904,24 @@ export function expressions(ctx: Context) {
     const t = value(e.args[0]!);
     coerce(e.args[0]!, t, "i64", `'AbortSignal.timeout' takes milliseconds as an 'i64', not '${show(t)}'`);
     return { type: blockType("AbortSignal"), what: "'AbortSignal.timeout'" };
+  }
+
+  // A literal list lends each signal, as a wait's is, so 'req.signal' stays the request's.
+  function signalAny(e: Call): { type: Type; what: string } {
+    const example = "like 'AbortSignal.any([a, b])'";
+    if (e.args.length !== 1) throw new CompileError(`'AbortSignal.any' takes one list of signals, ${example}`, e.start, e.end);
+    const list = e.args[0]!;
+    const signal = blockType("AbortSignal");
+    if (list.kind === "array") {
+      for (const x of list.elements) {
+        if (!x || x.kind === "spread") throw new CompileError(`'AbortSignal.any' takes its signals listed one by one, ${example}`, (x ?? list).start, (x ?? list).end);
+        signalArgument(x, "'AbortSignal.any'");
+      }
+    } else {
+      const given = value(list);
+      coerce(list, given, refType(arrayType(signal), false), `'AbortSignal.any' takes a list of 'AbortSignal's, not '${show(given)}'`);
+    }
+    return { type: signal, what: "'AbortSignal.any'" };
   }
 
   // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`: futures the async
@@ -3220,6 +3324,119 @@ export function expressions(ctx: Context) {
     throw new CompileError(`no signature of '${first.js!.name}' takes (${given.map(show).join(", ")}); it takes ${shown}`, e.start, e.end);
   }
 
+  // The overload a call takes: the first, in the order declared, whose parameters its arguments
+  // pass for, as TypeScript picks one. A generic one is taken on the count of its arguments.
+  function overload(e: Call, impl: Body): Body {
+    const spread = e.args.find((a) => a.kind === "spread");
+    if (spread) throw new CompileError(`spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
+    const given = e.args.map((a) => (a.kind === "arrow" ? undefined : tried(a)));
+    const fitting = impl.overloads!.find((f) => {
+      const required = f.params.filter((p) => !p.optional && !p.rest).length;
+      if (e.args.length < required || (e.args.length > f.params.length && !f.params.at(-1)?.rest)) return false;
+      const types = signatureTypes(f);
+      return types === undefined || e.args.every((a, i) => passes(a, given[i], types[Math.min(i, types.length - 1)]!, f.params[Math.min(i, f.params.length - 1)]!));
+    });
+    if (fitting) return fitting;
+    const shown = impl.overloads!.map((f) => {
+      const types = signatureTypes(f);
+      // A destructured parameter, named only to be passed on, shows as its type alone.
+      const params = f.params.map((p, i) => {
+        const name = (p.pattern as { name?: string }).name ?? "_";
+        const type = types ? show(types[i]!) : "_";
+        return name.startsWith("argument ") ? type : `${p.rest ? "..." : ""}${name}${p.optional ? "?" : ""}: ${type}`;
+      });
+      return `(${params.join(", ")}): ${f.returnType ? show(resolveType(f.returnType)) : "_"}`;
+    });
+    const args = given.map((t) => (t === undefined ? "a function" : show(t)));
+    throw new CompileError(`no overload of '${impl.name}' takes (${args.join(", ")}); its overloads are ${shown.join(", ")}`, e.start, e.end);
+  }
+
+  // What an overload's body gives back: the implementation's value, as the members of its type the
+  // signature's return type takes; codegen panics on any other.
+  function narrowedReturn(call: Expr, node: TypeNode): Type {
+    const from = value(call);
+    const to = resolveType(node);
+    if (fits(from, to)) return from;
+    const kept = typeof from !== "string" && from.kind === "union" ? from.members.filter((m) => fits(m, to)) : [];
+    if (kept.length === 0 && fits(to, from)) throw new CompileError(`it returns '${show(to)}', narrower than the implementation's '${show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${show(to)} | ...'`, node.start, node.end);
+    if (kept.length === 0) throw new CompileError(`this overload signature is not compatible with its implementation, which returns '${show(from)}', never a '${show(to)}'`, node.start, node.end);
+    return kept.length === 1 ? kept[0]! : unionType(kept);
+  }
+
+  // An argument's type before it meets a parameter, or nothing when it needs one to be typed.
+  function tried(a: Expr): Type | undefined {
+    try {
+      return value(a);
+    } catch (err) {
+      if (err instanceof CompileError) return undefined;
+      throw err;
+    }
+  }
+
+  // A signature's parameter types, unless it is generic, when each call's instance decides them.
+  function signatureTypes(f: Body): Type[] | undefined {
+    if ((f.typeParams ?? []).some((p) => !isLifetime(p)) || f.params.some((p) => p.comptime)) return undefined;
+    const bounds = implicitOf(f);
+    const known = bounds.size > 0 ? undefined : paramTypes(instanceOf(f));
+    return f.params.map((p, i) => {
+      const t = bounds.get(i) ?? known![i]!;
+      return p.optional ? unionType([t, "null"]) : p.rest && isArray(lower(t)) ? (lower(t) as ArrayType).element : t;
+    });
+  }
+
+  // Whether an argument passes for a parameter, as choosing an overload asks before the call
+  // checks it against the one chosen.
+  function passes(a: Expr, given: Type | undefined, to: Type, p: Param): boolean {
+    if (a.kind === "arrow") return arrowPasses(a, to);
+    if (given === undefined) return true;
+    if (fits(given, to)) return true;
+    if (isRefType(to)) return passes(a, isRefType(given) ? given.to : given, to.to, p);
+    if (isRefType(given)) return passes(a, given.to, to, p);
+    const n = numberLiteral(a);
+    if (typeof to === "string") {
+      if (n === undefined || !isNumeric(to)) return false;
+      if (isFloat(to)) return true;
+      return typeof n === "bigint" && isInteger(to) && n >= range(to)[0] && n <= range(to)[1];
+    }
+    if (to.kind === "union") return to.members.some((m) => passes(a, given, m, p));
+    if (to.kind === "interface") return unsatisfied(given, to, members, a) === undefined;
+    if (to.kind === "literal") return (a.kind === "string" || a.kind === "bool") ? a.value === to.value : n !== undefined && n === to.value;
+    return false;
+  }
+
+  // Whether an arrow passes for a function type: no more parameters than it takes, each one
+  // written with a type taking what it is given. Without a function type, the call decides.
+  function arrowPasses(a: Extract<Expr, { kind: "arrow" }>, to: Type): boolean {
+    if (typeof to !== "string" && to.kind === "union") return to.members.some((m) => arrowPasses(a, m));
+    if (typeof to === "string" || to.kind !== "function" || to.generic) return true;
+    if (a.params.length > to.params.length) return false;
+    return a.params.every((q, i) => {
+      if (!q.type) return true;
+      const written = tryType(q.type);
+      return written === undefined || fits(to.params[i]!, written);
+    });
+  }
+
+  function tryType(t: TypeNode): Type | undefined {
+    try {
+      return resolveType(t);
+    } catch (err) {
+      if (err instanceof CompileError) return undefined;
+      throw err;
+    }
+  }
+
+  // A numeric literal's value, negated or not: a bigint for an integer, a number for a float.
+  function numberLiteral(a: Expr): bigint | number | undefined {
+    if (a.kind === "int") return a.value;
+    if (a.kind === "float") return a.value;
+    if (a.kind === "unary" && a.op === "-") {
+      const n = numberLiteral(a.operand);
+      return n === undefined ? undefined : -n;
+    }
+    return undefined;
+  }
+
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
   function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[], optional: boolean[]) {
@@ -3349,7 +3566,7 @@ export function expressions(ctx: Context) {
     const inner = lower(t.of);
     if (typeof inner !== "string" && inner.kind === "class") classOf(inner);
     const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
-    if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
+    if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'${didYouMean(e.name, memberNames(inner))}`, e.start, e.end);
     if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
     // A Rust value is reached only under the lock, and a read here would copy its handle out.
     let rust: RustClass | undefined;
@@ -3465,7 +3682,8 @@ export function expressions(ctx: Context) {
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place. An async
   // generator's gives a future borrowing it, awaited where it is made so the borrow ends there.
   function generatorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, generator: Type, yields: Type, async = false): { type: Type; what: string } {
-    if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet; 'next' is the one they have`, callee.start, callee.end);
+    if (!async && Object.hasOwn(GENERATOR_HELPERS, callee.name)) return helperCall(e, callee, yields);
+    if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet${didYouMean(callee.name, async ? ["next"] : ["next", ...Object.keys(GENERATOR_HELPERS)])}`, callee.start, callee.end);
     if (async && !awaitedNow.has(e)) throw new CompileError("an async generator's 'next()' is awaited where it is called, as in 'await g.next()'", e.start, e.end);
     if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
     if (e.args.length > 0) throw unsupported("values sent into 'next'", e.args[0]!);
@@ -3476,6 +3694,86 @@ export function expressions(ctx: Context) {
     if (!async) return { type: nextResult(yields), what: "'next'" };
     const made = typeof generator !== "string" && generator.kind === "param" && generator.concrete ? generator.concrete : generator;
     return { type: typeof made !== "string" && made.kind === "generator" ? leafFuture("next", made) : promiseInterface(nextResult(yields)), what: "'next'" };
+  }
+
+  // The iterator helpers call std's generators and functions over the generator, which they take
+  // over. `map`, `filter`, `take`, `drop` and `flatMap` give a generator that pulls from it only
+  // when pulled; the rest run it at once. Callbacks get each value and its index, the predicates
+  // a borrow of the value.
+  function helperCall(e: Call, callee: Extract<Expr, { kind: "member" }>, yields: Type): { type: Type; what: string } {
+    const name = callee.name;
+    const source = callee.object;
+    if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
+    if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
+    if (isRefType(types.get(source)!)) throw new CompileError(`'${name}' takes its generator over, and this one is borrowed; call it on a generator this code owns`, source.start, source.end);
+    once.add(source);
+    const at = { start: e.start, end: e.end };
+    const helper = (helperName: string, args: Expr[]): Call => ({ kind: "call", callee: { kind: "ident", name: helperName, ...at }, args, typeArgs: [], optional: false, shown: name, ...at }) as Call;
+    // A count or a fold that can't give a value panics at the call, with JavaScript's reason.
+    const unwrap = (expr: Expr, reason: string): Expr => ({ kind: "nonNull", expr, reason, ...at }) as Expr;
+    const counted = name === "take" || name === "drop";
+    if (name === "toArray" ? e.args.length !== 0 : name === "reduce" ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
+      const takes = name === "toArray" ? "no arguments" : counted ? "1 argument, a count" : name === "reduce" ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'";
+      throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
+    }
+    if (name === "toArray") {
+      Object.assign(e, helper("array collect", [source]));
+      return call(e);
+    }
+    if (counted) {
+      Object.assign(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)]));
+      return call(e);
+    }
+    const [callback, init] = e.args as [Expr, Expr | undefined];
+    // A declared function given by name becomes an arrow calling it, as for array methods.
+    namedFunction(callback);
+    const reducing = name === "reduce";
+    const lent = PREDICATES.has(name);
+    const each = lent ? refType(yields, false) : yields;
+    const acc = !reducing ? undefined : init ? widenLet(value(init)) : yields;
+    if (init) once.add(init);
+    const params = acc ? [acc, each, "i64" as const] : [each, "i64" as const];
+    if (callback.kind === "arrow" && callback.params.length > params.length) {
+      throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the value and its index`, callback.params[params.length]!.start, callback.params[params.length]!.end);
+    }
+    const names = acc ? ["accumulator", "value", "index"] : ["value", "index"];
+    // std calls the callback with every argument, so an arrow leaving some out takes them under
+    // names no program can write.
+    if (callback.kind === "arrow") {
+      for (let i = callback.params.length; i < params.length; i++) {
+        const pattern = { kind: "ident" as const, name: `_ ${names[i]}`, start: callback.start, end: callback.start };
+        callback.params.push({ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: callback.start, end: callback.start });
+      }
+    }
+    // std lends a predicate even a value that copies; a function taking the copy reads it there.
+    if (callback.kind === "arrow" && lent && isCopy(yields) && presetParams.get(callback.params[0]!) === yields) presetParams.delete(callback.params[0]!);
+    expect(callback, functionType(names, params, "void"));
+    const c = value(callback);
+    once.add(callback);
+    if (typeof c === "string" || c.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
+    c.params.forEach((p, i) => passedExactly(name, params[i]!, p, callback.kind === "arrow" ? callback.params[i] : undefined, callback, i !== params.length - 1));
+    runsOften(c, name, "its callback once per value", callback);
+    const gives = c.returns;
+    if (lent && gives !== "boolean") {
+      throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
+    }
+    if (acc && !fits(gives, acc)) throw new CompileError(`'reduce''s callback gives the next accumulator, a '${show(acc)}', but this one gives '${show(gives)}'`, callback.start, callback.end);
+    if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
+    let target = GENERATOR_HELPERS[name]!;
+    if (name === "flatMap") {
+      if (yieldsOf(lower(gives)) !== undefined) target = "iter flat map generator";
+      else if (!isArray(lower(gives))) throw new CompileError(`'flatMap''s callback gives a generator or an array for each value, whose values make up the result; this one gives '${show(gives)}'`, callback.start, callback.end);
+      else clonable((lower(gives) as ArrayType).element, callback, "flatMap");
+    }
+    if (reducing && !init) {
+      // std gives the fold in a one-element tuple, or nothing when the generator was empty.
+      const folded = unwrap(helper("iter reduce first", [source, callback]), "reduce of empty generator with no initial value");
+      for (const stale of ["callee", "args", "typeArgs"] as const) delete (e as Partial<Call>)[stale];
+      Object.assign(e, { kind: "index", object: folded, index: { kind: "int", value: 0n, ...at }, optional: false });
+      return { type: typeOf(e as Expr), what: "'reduce'" };
+    }
+    Object.assign(e, helper(target, init ? [source, callback, init] : [source, callback]));
+    return call(e);
   }
 
   // Whether an expression is an index into an array, a place inside it.
@@ -3501,7 +3799,7 @@ export function expressions(ctx: Context) {
   function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
-    if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'`, e.start, e.end);
+    if (!member) throw new CompileError(`property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
     if (typeArgs.length > 0 && typeArgs.length !== data.params.length) {
       const n = data.params.length;
       throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, e.start, e.end);
@@ -3645,7 +3943,7 @@ export function expressions(ctx: Context) {
   function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Extract<Type, { kind: "param" | "interface" }>): { type: Type; what: string } {
     const trait = receiver.kind === "param" ? receiver.bound : receiver;
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
-    if (!found) throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${receiver.name}'${didYouMean(callee.name, memberNames(receiver))}`, callee.start, callee.end);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
@@ -3731,6 +4029,72 @@ export function expressions(ctx: Context) {
     }
   }
 
+  // A class's static property, `C.x`: a `static readonly` field, the const `C.x`, or a static
+  // accessor, the static methods `get x` and `set x`. Reads and writes of one are rewritten in
+  // place into a read of that const or a call of those methods, forms the rest of the compiler knows.
+  type Static = { field?: FieldDecl; declaring: ClassInfo; getter?: Body; setter?: Body };
+  // The nearest class declaring `x` decides what it is, as in TypeScript: a class declaring only
+  // a setter hides its base's getter.
+  function staticProperty(e: Expr): Static | undefined {
+    if (e.kind !== "member" || e.optional || e.object.kind !== "ident" || lookup(e.object.name)) return undefined;
+    const c = classes.get(e.object.name);
+    return c && staticOf(c, e.name);
+  }
+
+  function staticOf(c: ClassInfo, name: string): Static | undefined {
+    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+      const field = b.staticFields.get(name);
+      if (field) return { field, declaring: b };
+      const getter = b.statics.get(`get ${name}`);
+      const setter = b.statics.get(`set ${name}`);
+      if (getter || setter) return { getter, setter, declaring: b };
+    }
+    return undefined;
+  }
+
+  function become(e: Expr, to: Expr) {
+    const at = { start: e.start, end: e.end };
+    for (const k of Object.keys(e)) delete (e as Record<string, unknown>)[k];
+    Object.assign(e, to, at);
+  }
+
+  function staticRead(e: Extract<Expr, { kind: "member" }>, found: Static): Expr {
+    const at = { start: e.start, end: e.end };
+    if (found.field) {
+      visible(found.field.access, found.declaring!.type, e.name, e);
+      return { kind: "ident", name: `${found.declaring!.type.name}.${e.name}`, ...at };
+    }
+    if (!found.getter) {
+      const hidden = found.declaring.base && staticOf(found.declaring.base, e.name)?.getter;
+      throw new CompileError(hidden ? `'${found.declaring.type.name}' declares only a setter for '${e.name}', which hides the getter of its base; declare a getter in '${found.declaring.type.name}' too` : `property '${e.name}' has a setter but no getter`, e.start, e.end);
+    }
+    visible(found.getter.access, found.declaring.type, e.name, e);
+    return staticCall(e, "get", []);
+  }
+
+  function staticCall(e: Extract<Expr, { kind: "member" }>, kind: "get" | "set", args: Expr[]): Expr {
+    const at = { start: e.start, end: e.end };
+    return { kind: "call", callee: { kind: "member", object: e.object, name: `${kind} ${e.name}`, optional: false, ...at }, typeArgs: [], args, optional: false, ...at };
+  }
+
+  // `C.x = v`, `C.x += v` and `C.x++` on a static setter call it with the value to store. Whether
+  // the write was rewritten.
+  function staticWrite(e: Extract<Expr, { kind: "assign" | "update" }>): boolean {
+    const target = e.kind === "assign" ? e.target : e.operand;
+    const found = staticProperty(target);
+    if (!found) return false;
+    const member = target as Extract<Expr, { kind: "member" }>;
+    if (!found.setter) throw new CompileError(`cannot assign to '${member.name}' because it is a read-only property`, member.start, member.end);
+    visible(found.setter.access, found.declaring.type, member.name, member);
+    const op = e.kind === "update" ? (e.op === "++" ? "+" : "-") : ASSIGNMENTS[e.op];
+    if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
+    const at = { start: e.start, end: e.end };
+    const right: Expr = e.kind === "update" ? { kind: "int", value: 1n, ...at } : e.value;
+    const given: Expr = op === "=" ? right : { kind: "binary", op, left: staticRead(member, found), right, ...at };
+    become(e, staticCall(member, "set", [given]));
+    return true;
+  }
+
   // The method a member call names: a static one on a class name, or an instance one, whose
   // receiver must be able to change when the method changes it.
   function method(callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
@@ -3738,14 +4102,16 @@ export function expressions(ctx: Context) {
     const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
     if (named) {
       const found = inherited(named, "statics", name);
-      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
+      const property = found ? undefined : staticOf(named, name);
+      if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${property.declaring.type.name}', not a method; read it as '${named.type.name}.${name}'`, callee.start, callee.end);
+      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'${didYouMean(name, staticNames(named))}`, callee.start, callee.end);
       visible(found.access, found.declared ?? found.owner!, name, callee);
       return found;
     }
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
-    if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'${didYouMean(name, memberNames(type))}`, callee.start, callee.end);
     visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);
     else if (found.self!.mutable) mutates(object, name);
@@ -3759,7 +4125,7 @@ export function expressions(ctx: Context) {
     if (!base) throw new CompileError("'super' can only be used in a class that extends another", callee.start, callee.end);
     if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
     let found = inherited(classOf(base), "methods", callee.name);
-    if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'${didYouMean(callee.name, memberNames(base))}`, callee.start, callee.end);
     if (found.abstract) throw new CompileError(`'${callee.name}' is abstract in '${found.owner!.name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = found.copyOf ?? found;
@@ -3785,14 +4151,48 @@ export function expressions(ctx: Context) {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (!access || access === "public" || owner === declaring) return;
-    if (access === "protected" && owner && derives(owner, declaring)) return;
-    // A base reaches a subclass's implementation of its abstract member.
-    if (access === "protected" && owner && derives(declaring, owner) && abstractIn(classOf(owner), name)) return;
+    if (accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${declaring.name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
+  }
+
+  function accessible(access: Access | undefined, declaring: ClassType, name: string): boolean {
+    if (!access || access === "public" || owner === declaring) return true;
+    if (access === "protected" && owner !== undefined && derives(owner, declaring)) return true;
+    // A base reaches a subclass's implementation of its abstract member.
+    return access === "protected" && owner !== undefined && derives(declaring, owner) && abstractIn(classOf(owner), name);
+  }
+
+  // The members of a type this body can reach, for suggesting one: an object's fields; a
+  // class's fields, methods and accessors with its bases', those private or protected only where
+  // accessible; an interface's or a Dyn's fields and methods.
+  function memberNames(t: Type | undefined): string[] {
+    if (t === undefined || typeof t === "string") return [];
+    if (t.kind === "ref") return memberNames(t.to);
+    if (t.kind === "param") return memberNames(t.bound);
+    if (t.kind === "dyn") return memberNames(t.of);
+    if (t.kind === "interface") return [...t.fields, ...t.methods].map((m) => m.name);
+    if (t.kind === "object") return t.fields.map((f) => f.name);
+    if (t.kind !== "class") return [];
+    const names: string[] = [];
+    for (let c: ClassInfo | undefined = classOf(t); c; c = c.base) {
+      const declaring = c.type;
+      names.push(...declaring.fields.filter((f) => accessible(f.access, declaring, f.name)).map((f) => shownName(f.name)));
+      for (const table of [c.methods, c.getters, c.setters]) for (const [name, body] of table) if (accessible(body.access, declaring, name)) names.push(shownName(name));
+    }
+    return names;
+  }
+
+  // A class's static members, with its bases', for suggesting one.
+  function staticNames(c: ClassInfo): string[] {
+    const names: string[] = [];
+    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+      for (const [name, body] of b.statics) if (accessible(body.access, b.type, name)) names.push(shownName(name.replace(/^[gs]et /, "")));
+      for (const [name, f] of b.staticFields) if (accessible(f.access, b.type, name)) names.push(shownName(name));
+    }
+    return names;
   }
 
   // The class whose own fields include `name`: `t` itself or a base it embeds.
@@ -3855,6 +4255,8 @@ export function expressions(ctx: Context) {
         return "never";
       // `x!` is what an Option holds; it panics when there is nothing.
       case "nonNull": {
+        const narrows = (e as Narrowing).narrows;
+        if (narrows) return narrowedReturn(e.expr, narrows);
         const option = read(e.expr);
         if (!isOption(option)) throw new CompileError(`'!' takes the value out of an Option, and this is a '${show(option)}', which is never empty`, e.start, e.end);
         return held(option);
@@ -3895,6 +4297,7 @@ export function expressions(ctx: Context) {
         }
         // A declared function named as a value is a closure calling it.
         const declared = local ? undefined : byName.get(e.name);
+        if (declared?.overloads) throw new CompileError(`'${e.name}' is overloaded, so it can't be used as a value yet; pass an arrow that calls it, as in '(x) => ${e.name}(x)'`, e.start, e.end);
         if (declared && !declared.comptime && declared.typeParams?.some((p) => !isLifetime(p))) return genericValue(declared, e);
         if (declared && !declared.comptime) {
           functionValue(e, declared);
@@ -3904,7 +4307,7 @@ export function expressions(ctx: Context) {
           const message = byName.has(e.name) ? "functions can't be used as values yet"
             : classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
             : enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
-            : `cannot find name '${e.name}'`;
+            : `cannot find name '${e.name}'${didYouMean(e.name, ctx.names(e.start))}`;
           throw new CompileError(message, e.start, e.end);
         }
         if (!reachable(local)) {
@@ -3970,12 +4373,17 @@ export function expressions(ctx: Context) {
           maths.add(e);
           return "f64";
         }
+        const property = staticProperty(e);
+        if (property) {
+          become(e, staticRead(e, property));
+          return typeOf(e);
+        }
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
         if (named?.data) return variant(e, named, true);
         if (named) {
           const found = named.members.get(e.name);
-          if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'`, e.start, e.end);
+          if (!found) throw new CompileError(`property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'${didYouMean(e.name, named.members.keys())}`, e.start, e.end);
           return found;
         }
         if (e.object.kind === "ident") objects.add(e.object);
@@ -4000,7 +4408,7 @@ export function expressions(ctx: Context) {
         // A Map's or a Set's one property is its size, the number of entries it holds.
         if (typeof object !== "string" && object.kind === "map") {
           if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "size") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "size") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, ["size", ...(object.set ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -4012,7 +4420,7 @@ export function expressions(ctx: Context) {
         }
         // A fixed array's one property is its length, known while compiling.
         if (isFixed(object)) {
-          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, ["length"])}`, e.start, e.end);
           load();
           return "usize";
         }
@@ -4022,14 +4430,14 @@ export function expressions(ctx: Context) {
           if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
           // A shared value's array is read as a copy, which has only the room it needs.
           if (e.name === "capacity" && ctx.copiesOut.has(e.object)) throw new CompileError(`a shared value's array is read as a copy, so read its capacity inside '${placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
-          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, ["length", "capacity", ...ARRAY_METHODS])}`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
         // A string's one property is its length in UTF-16 code units.
         if (stringLike(object)) {
           if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type 'string'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(STRING_METHODS)])}`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -4046,7 +4454,7 @@ export function expressions(ctx: Context) {
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
-        if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
+        if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, memberNames(object))}`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
         // Through a type parameter the field has its bound's type, and in an instance the
         // concrete class may give it with a getter.
@@ -4216,7 +4624,7 @@ export function expressions(ctx: Context) {
         }
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
-        if (!c) throw new CompileError("only a class can be constructed with 'new'", e.callee.start, e.callee.end);
+        if (!c) throw new CompileError(`only a class can be constructed with 'new'${e.callee.kind === "ident" && !lookup(e.callee.name) ? didYouMean(e.callee.name, ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
         const rust = rustClassOf(c.type);
         if (rust && !c.constructor.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
         constructs(c.constructor, list, argTypes);
@@ -4269,6 +4677,7 @@ export function expressions(ctx: Context) {
         return type;
       }
       case "assign": {
+        if (staticWrite(e)) throw new CompileError("a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
@@ -4294,6 +4703,7 @@ export function expressions(ctx: Context) {
         return target;
       }
       case "update": {
+        if (staticWrite(e)) throw new CompileError("a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const target = assignable(e.operand, true);
         if (!isNumeric(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return target;
@@ -4353,7 +4763,7 @@ export function expressions(ctx: Context) {
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [operand(e.left), operand(e.right)];
-          if (stringLike(left) || stringLike(right)) return join(e.left, left, e.right, right);
+          if (stringLike(left) || stringLike(right) || enumText(left) || enumText(right)) return join(e.left, left, e.right, right);
         }
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
@@ -4605,7 +5015,7 @@ export function expressions(ctx: Context) {
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
   function joined(e: Expr, type: Type, into: string) {
-    if (stringLike(type)) {
+    if (stringLike(type) || enumText(type)) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
@@ -5043,7 +5453,7 @@ export function expressions(ctx: Context) {
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
     const local = lookup(p.name, p);
-    if (!local) throw new CompileError(`cannot find name '${p.name}'`, p.start, p.end);
+    if (!local) throw new CompileError(`cannot find name '${p.name}'${didYouMean(p.name, ctx.names(p.start))}`, p.start, p.end);
     if (!reachable(local)) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
@@ -5366,7 +5776,7 @@ export function expressions(ctx: Context) {
     const index = t.of.methods.findIndex((m) => m.name === callee.name);
     const m = t.of.methods[index];
     if (!m) {
-      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : "";
+      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : didYouMean(callee.name, memberNames(t));
       throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
@@ -5426,7 +5836,7 @@ export function expressions(ctx: Context) {
     if (linked(e)) throw unsupported("optional chains through a Dyn", e);
     const f = t.of.fields.find((x) => x.name === e.name);
     if (!f) {
-      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : "";
+      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : didYouMean(e.name, memberNames(t));
       throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
     }
     // A copy of an Atomic, a Lock or a Dyn would change apart from the original.
@@ -5566,6 +5976,9 @@ export function expressions(ctx: Context) {
 // A string, or a string literal that isn't an enum's member.
 const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind === "pattern" || (t.kind === "literal" && typeof t.value === "string" && !t.owner)));
 
+// A string enum's member, or a union of them, which joins into a string as its value.
+const enumText = (t: Type): boolean => typeof t !== "string" && (t.kind === "union" ? t.members.every(enumText) : t.kind === "literal" && typeof t.value === "string" && t.owner !== undefined);
+
 // What a string's length, index and methods work on: text, or a union of string literals.
 export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
 
@@ -5621,6 +6034,11 @@ const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "
 
 // The methods that run a callback on each element.
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+// Generators' iterator helpers, and the std function each calls.
+const GENERATOR_HELPERS: Record<string, string> = {
+  map: "iter map", filter: "iter filter", take: "iter take", drop: "iter drop", flatMap: "iter flat map",
+  reduce: "iter reduce", toArray: "array collect", forEach: "iter for each", some: "iter some", every: "iter every", find: "iter find",
+};
 // The callback methods whose callback decides yes or no.
 const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
@@ -5629,10 +6047,14 @@ const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
+// `u8`'s statics decoding text into bytes, and the prelude function each calls.
+const BYTE_DECODERS: Record<string, string> = { fromBase64: "array from base64", fromHex: "array from hex" };
+// The methods encoding a `u8[]` as text, and the prelude function each calls.
+const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHex: "array to hex" };
 // A Map's and a Set's methods, how many arguments each takes, and those changing it.
 const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
 const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
 const MAP_ARGUMENTS: Record<string, number> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 

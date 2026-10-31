@@ -548,7 +548,9 @@ export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
-export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[] };
+// `joined` marks what `handle.join()` gives: the same task, awaited so that its panic is thrown as
+// the TaskPanic `panic` rather than panicking its awaiter.
+export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
 
 const handles = new Map<string, HandleType>();
 
@@ -557,6 +559,18 @@ export function handleType(gives: Type, throws: Type | undefined): HandleType {
   let t = handles.get(key);
   if (!t) {
     t = { kind: "handle", gives, throws, fields: [] };
+    handles.set(key, t);
+    keys.set(t, key);
+  }
+  return t;
+}
+
+// What `handle.join()` gives: the task's handle, awaited as throwing a TaskPanic too.
+export function joinedType(base: HandleType, panic: Type): HandleType {
+  const key = `joined ${keyOf(base)} ${keyOf(panic)}`;
+  let t = handles.get(key);
+  if (!t) {
+    t = { kind: "handle", gives: base.gives, throws: base.throws ? unionType([base.throws, panic]) : panic, fields: [], joined: { base, panic } };
     handles.set(key, t);
     keys.set(t, key);
   }
@@ -1345,7 +1359,7 @@ export function lower(t: Type): Type {
   if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
   if (t.kind === "pattern") return "string";
   if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
-  if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
+  if (t.kind === "handle") return t.joined ? joinedType(lower(t.joined.base) as HandleType, t.joined.panic) : handleType(lower(t.gives), t.throws && lower(t.throws));
   if (t.kind === "interior") return interiorType(t.which, lower(t.of));
   if (t.kind === "shared") return sharedType(lower(t.of));
   if (t.kind === "block") return blockType(t.which, lower(t.of));
@@ -1734,7 +1748,7 @@ export function show(t: Type): string {
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
   if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
-  if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+  if (t.kind === "handle") return `${t.joined ? "Promise" : "JoinHandle"}<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
   if (t.match && !describing) return "RegExpExecArray";
   if (t.tuple && !t.match) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;

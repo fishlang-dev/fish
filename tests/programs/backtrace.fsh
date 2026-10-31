@@ -116,6 +116,40 @@ async function main() {
 // stderr:    1: work at task_panic.fsh:7:13
 // stderr: spawned at task_panic.fsh:12:19
 
+// case: task_panic_awaited
+// An awaiter re-raising a task's panic prints its own task's stack, not the one that panicked.
+async function pick(xs: i64[], at: usize): Promise<i64> {
+  await sleep(10);
+  return xs[at];
+}
+
+async function collect(h: JoinHandle<i64>): Promise<i64> {
+  const v = await h;
+  return v;
+}
+
+async function relay(): Promise<i64> {
+  const v = await collect(spawn(pick([1, 2], 7)));
+  return v;
+}
+
+async function main() {
+  const v = await spawn(relay());
+  console.log(v);
+}
+// panic: a task this awaited panicked: a task this awaited panicked: index out of bounds: the len is 2 but the index is 7
+// stderr: stack backtrace:
+// stderr:    0: pick at task_panic_awaited.fsh:4:10
+// stderr: spawned at task_panic_awaited.fsh:13:27
+// stderr: panicked at task_panic_awaited.fsh:8:13:
+// stderr: a task this awaited panicked: index out of bounds: the len is 2 but the index is 7
+// stderr: await 'handle.join()' to catch it as a TaskPanic instead
+// stderr: stack backtrace:
+// stderr:    0: collect at task_panic_awaited.fsh:8:13
+// stderr:    1: relay at task_panic_awaited.fsh:13:13
+// stderr: spawned at task_panic_awaited.fsh:18:19
+// stderr: panicked at task_panic_awaited.fsh:18:13:
+
 // case: task_after_task
 function half(n: i64): i64 {
   return 10 / n;
@@ -268,7 +302,10 @@ async function main(): Promise<void> throws IoError {
   const got = await conn.read(4096);
   console.log(got.length);
 }
-// panic: attempt to divide by zero
+// The handler's panic ends only its task: the client gets a bare 500, and the program goes on.
+// expect: 153
+// stderr: panicked at route_handler.fsh:3:10:
+// stderr: attempt to divide by zero
 // stderr: stack backtrace:
 // stderr:    0: parsePage at route_handler.fsh:3:10
 // stderr:    1: <arrow 8:27> at route_handler.fsh:8:65

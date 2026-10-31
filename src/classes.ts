@@ -39,6 +39,10 @@ export type Body = Span & {
   scope?: Map<string, Type>;
   // `owned`: a method declared `this: Own<this>` takes its object over.
   self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean };
+  // An overloaded function's signatures, in the order a call tries them.
+  overloads?: Body[];
+  // A signature of an overloaded function, whose body calls the implementation.
+  signature?: true;
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
   access?: Access;
@@ -87,7 +91,10 @@ export type ClassInfo = {
   // The prelude's field initializers, which can't see the constructor's parameters.
   initializers: Set<Stmt>;
   methods: Map<string, Body>;
+  // Static methods by name, and static accessors as `get x` and `set x`, none with a `this`.
   statics: Map<string, Body>;
+  // Each `static readonly` field, a top-level const named `C.x` computed while compiling.
+  staticFields: Map<string, FieldDecl>;
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
   getters: Map<string, Body>;
   setters: Map<string, Body>;
@@ -116,8 +123,9 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   }
   const fields: FieldDecl[] = [];
   const constructors = node.members.filter((m) => m.kind === "constructor");
-  if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   const ctor = constructors[0];
+  if (ctor && !ctor.body && constructors.length > 1) throw unsupported("constructor overloads", ctor);
+  if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
@@ -125,6 +133,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   const abstracts: AbstractMember[] = [];
   const methods = new Map<string, Body>();
   const statics = new Map<string, Body>();
+  const staticFields = new Map<string, FieldDecl>();
   const getters = new Map<string, Body>();
   const setters = new Map<string, Body>();
   for (const m of node.members) {
@@ -142,8 +151,11 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       continue;
     }
     if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], m);
-    if (m.modifiers.includes("static")) throw unsupported("static fields", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (m.modifiers.includes("static")) {
+      staticField(m, m.name);
+      continue;
+    }
     const access = modifiers(m.modifiers, m, m.name);
     if (m.definite) throw unsupported("definite assignment assertions", m);
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
@@ -162,6 +174,16 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }), ...(!p.optional && p.type && withoutUndefined(p.type) && { undefinedSpelled: true as const }) });
   });
 
+  for (const [name, f] of staticFields) {
+    if (statics.has(name) || statics.has(`get ${name}`) || statics.has(`set ${name}`)) throw new CompileError(`duplicate property '${name}'`, f.start, f.end);
+  }
+  for (const name of statics.keys()) {
+    const accessor = /^[gs]et (.*)$/.exec(name)?.[1];
+    if (accessor !== undefined && statics.has(accessor)) {
+      const m = statics.get(accessor)!;
+      throw new CompileError(`duplicate property '${accessor}'`, m.start, m.end);
+    }
+  }
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
     const clash = fields.find((f) => f.name === name);
     if (clash) throw new CompileError(`duplicate property '${name}'`, clash.start, clash.end);
@@ -196,7 +218,19 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   };
   const required = new Set(fields.map((f) => f.name));
   const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
-  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node, wraps: [] };
+  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
+
+  // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
+  function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
+    if (node.typeParams.length > 0) throw unsupported("static fields in generic classes", m);
+    if (!m.modifiers.includes("readonly")) throw new CompileError(`a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
+    if (m.optional) throw unsupported("optional static fields", m);
+    if (m.definite) throw unsupported("definite assignment assertions", m);
+    if (!m.init) throw new CompileError(`a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
+    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, field);
+    if (staticFields.has(field)) throw new CompileError(`duplicate property '${field}'`, m.start, m.end);
+    staticFields.set(field, { name: field, type: m.type, init: m.init, access, readonly: true, start: m.start, end: m.end });
+  }
 
   // TypeScript's rules: only an abstract class has abstract members, which are methods or
   // accessors without a body, never private or static.
@@ -221,22 +255,25 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   }
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
-    if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
+    const isStatic = m.modifiers.includes("static");
+    if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    const access = modifiers(m.modifiers, m, m.name);
+    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
-    const table = m.kind === "get" ? getters : setters;
-    if (table.has(m.name)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
+    const table = isStatic ? statics : m.kind === "get" ? getters : setters;
+    const key = isStatic ? `${m.kind} ${m.name}` : m.name;
+    if (table.has(key)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
     if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
-    table.set(m.name, {
-      name: `${name}.${m.kind} ${m.name}`,
+    if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("a static accessor has no 'this'", m.params[0].start, m.params[0].end);
+    table.set(key, {
+      name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
       scope,
       params: m.params,
       body: m.body,
       returnType: m.returnType,
-      self: { type, constructor: false, mutable: m.kind === "set" },
+      ...(!isStatic && { self: { type, constructor: false, mutable: m.kind === "set" } }),
       accessor: true,
       owner: type,
       access,
@@ -252,7 +289,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator && !m.modifiers.includes("async")) throw unsupported("generator methods", m);
-    if (!m.body) throw unsupported("method overloads", m);
+    if (!m.body) throw new CompileError(`'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
     if (table.has(m.name)) throw new CompileError(`duplicate method '${m.name}'`, m.start, m.end);
@@ -277,7 +314,11 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       start: m.start,
       end: m.end,
       ...rustOf(m),
+      ...((m as { signature?: true }).signature && { signature: true as const }),
     });
+    // The implementation comes right after its signatures.
+    const overloads = (m as { overloads?: ClassMember[] }).overloads;
+    if (overloads) table.get(m.name)!.overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
@@ -523,7 +564,10 @@ function thisEscapes(node: unknown): boolean {
 function usesOnThis(node: unknown, name: string, viaSuper = false): boolean {
   if (typeof node !== "object" || node === null) return false;
   if (Array.isArray(node)) return node.some((n) => usesOnThis(n, name, viaSuper));
-  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown };
+  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown; implementation?: true; args?: unknown };
+  // An overload signature's call of its own class's implementation is the signature's, which an
+  // override replaces along with it.
+  if (n.implementation) return usesOnThis(n.args, name, viaSuper);
   if (n.kind === "member" && (n.object?.kind === "this" || (viaSuper && n.object?.kind === "super")) && n.name === name) return true;
   return Object.values(node).some((v) => usesOnThis(v, name, viaSuper));
 }

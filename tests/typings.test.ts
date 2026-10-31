@@ -284,7 +284,7 @@ test("export = an imported module, an object's members, and a namespace's own ex
 
 test("a Node built-in Fish lacks is named as one, and a re-export that can't be read is said", () => {
   project({
-    "a.fsh": "import { createHash } from \"node:crypto\";\nfunction main() {}\n",
+    "a.fsh": "import { gzipSync } from \"node:zlib\";\nfunction main() {}\n",
     "b.fsh": "import { x } from \"p\";\nfunction main() {}\n",
     "node_modules/p/index.d.ts": "export * from 'gone';\nexport * from './missing';\n",
   }, (dir) => {
@@ -296,7 +296,7 @@ test("a Node built-in Fish lacks is named as one, and a re-export that can't be 
       }
       return "loaded";
     };
-    expect(error("a.fsh")).toBe("'node:crypto' is a Node module Fish's std doesn't have yet");
+    expect(error("a.fsh")).toBe("'node:zlib' is a Node module Fish's std doesn't have yet");
     expect(error("b.fsh")).toStartWith("'p' has no export 'x'; its declarations in 'node_modules/p/index.d.ts' export nothing; re-exporting from 'gone' failed: can't find the package 'gone'");
   });
 });

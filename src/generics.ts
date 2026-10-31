@@ -402,6 +402,12 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     } else {
       const names = new Set(params.map((p) => p.name));
       f.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+      // `G extends Generator<U>` decides `U` from what `G`'s generator yields.
+      for (const p of params) {
+        const c = p.constraint;
+        const yields = bindings.has(p.name) ? yieldsOf(bindings.get(p.name)!) : undefined;
+        if (c?.kind === "ref" && c.name === "Generator" && c.args.length === 1 && yields !== undefined) infer(c.args[0]!, yields, names, bindings, at);
+      }
     }
     for (const p of params) {
       const type = bindings.get(p.name);

@@ -199,7 +199,7 @@ test("stopped by SIGTERM, fishc test ends its tests and removes its build", asyn
 
 test("a test calling its file's main reaches it", () => {
   const dir = pkg("callsmain", { "src/main.fsh": 'function main() {\n  console.log("hello");\n}\ntest("main runs", () => {\n  main();\n  assert(false);\n});\n' });
-  expect(fishc(dir).out).toBe("FAIL src/main.fsh > main runs\nhello\npanicked at src/main.fsh:6:3:\nassertion failed\nstack backtrace:\n   0: test \"main runs\" at src/main.fsh:6:3\n0 passed, 1 failed\n");
+  expect(fishc(dir).out).toBe("FAIL src/main.fsh > main runs\nhello\npanicked at src/main.fsh:6:3:\nassertion failed: false\nstack backtrace:\n   0: test \"main runs\" at src/main.fsh:6:3\n0 passed, 1 failed\n");
 });
 
 test("a failing test with no output is told by its exit code or signal", () => {

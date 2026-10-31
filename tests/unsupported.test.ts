@@ -64,12 +64,12 @@ const CLASSES: [string, string, string][] = [
   ["abstract class A { abstract n: i64 }", "abstract fields", "abstract n: i64"],
   ["abstract class A<T> {}", "generic abstract classes", "abstract class A<T> {}"],
   ["class A extends f() {}", "base class expressions", "f()"],
-  ["class A { static n = 1 }", "static fields", "static n = 1"],
+  ["class A<T> { static readonly n = 1 }\nconst a = new A<i64>()", "static fields in generic classes", "static readonly n = 1"],
   ["class A { override n = 1 }", "'override' modifiers", "override n = 1"],
   ["class A { n!: i64 }", "definite assignment assertions", "n!: i64"],
   ["class A { [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["class A { static {} }", "static blocks", "static {}"],
-  ["class A { static get n(): i64 { return 1 } }", "static accessors", "static get n(): i64 { return 1 }"],
+  ["class A<T> { static get n(): i64 { return 1 } }\nconst a = new A<i64>()", "static accessors in generic classes", "static get n(): i64 { return 1 }"],
   ["class A { *g() {} }", "generator methods", "*g() {}"],
 ];
 
@@ -185,13 +185,6 @@ for (const [stmt, what] of STATEMENTS) {
     }));
   });
 }
-
-test("a function without a body", () => {
-  const src = "function f(): void\nfunction main() {}";
-  expect(() => check(parse(src))).toThrow(expect.objectContaining({
-    message: "functions without a body are not supported yet", start: 0, end: "function f(): void".length,
-  }));
-});
 
 for (const decl of ["import x from 'm'", "import fs = require('fs')"]) {
   test(decl, () => {

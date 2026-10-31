@@ -1,10 +1,11 @@
 import type { Instance } from "./check.ts";
+import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
+import { asserts, clocks, equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, lower, range, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -38,6 +39,9 @@ const LONGEST = 1 << 28;
 // What an optional link meeting an empty Option makes of the rest of its chain.
 const SHORT = { kind: "short" } as const;
 
+// std's crypto functions, which comptime refuses as it refuses Math.random.
+const RANDOM = new Set(["getRandomValues", "randomBytes", "randomUUID"]);
+
 // A panic, or a refusal, while compiling: where it happened, and what it says.
 class Stop {
   message: string;
@@ -49,6 +53,9 @@ class Stop {
     this.panic = panic;
   }
 }
+
+// A false `assert`, which fails the build at the assert itself.
+class Assertion extends Stop {}
 
 // A `return`, unwinding to its function's call or to its match arm.
 class Return {
@@ -215,8 +222,9 @@ function guarded(site: Span, go: (run: Interpreter) => Value): Value {
     // A string or array past what the compiler can hold.
     if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
     if (!(stop instanceof Stop)) throw e;
-    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
     const inside = stop.at.start !== site.start || stop.at.end !== site.end;
+    if (stop instanceof Assertion) throw new CompileError(stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
+    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
     throw new CompileError(what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
   }
 }
@@ -265,6 +273,11 @@ function interpreter() {
     throw new Stop(`${what} can't run while compiling: comptime code only computes values`, at, false);
   }
 
+  // A source of randomness, whose one value comptime would bake into every run.
+  function random(what: string, at: Span): never {
+    throw new Stop(`${what} can't run while compiling; its value would be fixed into the program`, at, false);
+  }
+
   // Pure code the interpreter doesn't run yet.
   function unsupported(what: string, at: Span): never {
     throw new Stop(`${what} isn't supported in comptime code yet`, at, false);
@@ -290,6 +303,7 @@ function interpreter() {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
+      if (RANDOM.has(callee.body.name) && fileAt(callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
@@ -553,6 +567,15 @@ function interpreter() {
       case "as":
         return convert(unwrap(expr(f, e.expr)), type, e);
       case "nonNull": {
+        // An overload's body narrows the implementation's value to the signature's return type.
+        if ((e as Narrowing).narrows) {
+          const [from, to] = [f.instance.types.get(e.expr), type];
+          const held = expr(f, e.expr);
+          if (from === to) return held;
+          const kept = typeof to !== "string" && to.kind === "union" ? to.members : [to];
+          if (!kept.includes(memberType(held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
+          return retag(held, from, to);
+        }
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
         return v;
@@ -635,9 +658,14 @@ function interpreter() {
   function callExpr(f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
     const callee = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") refuse("printing", e);
+    if (clocks.get(e) === "Math.random") random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
     if (type !== undefined && typeof type !== "string" && type.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
       return { kind: "variant", type, args: e.args.map((a) => expr(f, a)) };
+    }
+    if (asserts.has(e)) {
+      if (expr(f, e.args[0]!) === true) return undefined;
+      throw new Assertion(e.args[1] ? String(unwrap(expr(f, e.args[1]))) : `assertion failed: ${asserts.get(e)}`, e, true);
     }
     const target = f.instance.calls.get(e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return call(target, args(f, target, e.args), f.self, e);
@@ -666,6 +694,7 @@ function interpreter() {
       if (isShort(linked)) return SHORT;
       const held = unwrap(linked);
       if (held === null && (callee.optional || e.optional)) return SHORT;
+      if (integerCalls.has(e)) return integerValue(callee.name, held as bigint, e.args[0] ? (unwrap(expr(f, e.args[0])) as bigint) : 0n, lower(typeOf(f, callee.object)) as Integer, type, e);
       if (typeof held === "string") return stringMethod(callee.name, held, e.args.map((a) => unwrap(expr(f, a))), e);
       if (callee.name === "clone") return cloned(held);
       if (held && typeof held === "object" && held.kind === "array") {
@@ -970,6 +999,70 @@ function interpreter() {
       }
     }
     return unsupported(`'${op}'`, at);
+  }
+
+  // `x.checkedAdd(y)` and its kin, as the program computes them: the exact result, then null,
+  // the wrapped value, the nearest bound, or the wrapped value and whether it overflowed.
+  function integerValue(name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Span): Value {
+    const [family, operation] = integerMethod(name)!;
+    const { bits, signed } = INTEGERS[type];
+    const [min, max] = range(type);
+    let exact: bigint;
+    let over: boolean | undefined;
+    switch (operation) {
+      case "Add":
+        exact = a + b;
+        break;
+      case "Sub":
+        exact = a - b;
+        break;
+      case "Mul":
+        exact = a * b;
+        break;
+      case "Neg":
+        exact = -a;
+        break;
+      case "Div":
+      case "Rem": {
+        if (b === 0n && family === "checked") return null;
+        if (b === 0n) panic(operation === "Div" ? "attempt to divide by zero" : "attempt to calculate the remainder with a divisor of zero", at);
+        // MIN % -1 is 0, which fits, but Rust counts it as overflowing with MIN / -1.
+        over = signed && a === min && b === -1n;
+        exact = operation === "Div" ? a / b : a % b;
+        break;
+      }
+      case "Shl":
+      case "Shr": {
+        const amount = b & BigInt(bits - 1);
+        exact = operation === "Shl" ? wrap(a << amount, type) : a >> amount;
+        over = b >= BigInt(bits);
+        break;
+      }
+      default: {
+        // By squaring, as the program does, so a power that fits never overflows on the way.
+        let [power, base, exponent] = [1n, a, b];
+        over = false;
+        const times = (x: bigint, y: bigint) => {
+          if (wrap(x * y, type) !== x * y) over = true;
+          return wrap(x * y, type);
+        };
+        while (exponent > 0n) {
+          step(at);
+          if (exponent & 1n) power = times(power, base);
+          exponent >>= 1n;
+          if (exponent > 0n) base = times(base, base);
+        }
+        // A negative base to an odd power is past MIN.
+        if (family === "saturating" && over) return a < 0n && (b & 1n) === 1n ? min : max;
+        exact = power;
+      }
+    }
+    over ??= wrap(exact, type) !== exact;
+    const wrapped = wrap(exact, type);
+    if (family === "checked") return over ? null : wrapped;
+    if (family === "wrapping") return wrapped;
+    if (family === "saturating") return !over ? wrapped : exact < min ? min : max;
+    return { kind: "record", type: result as ObjectType, fields: new Map<string, Value>([["0", wrapped], ["1", over]]) };
   }
 
   // Comptime checks overflow in every build: a value that would wrap in a release build is a

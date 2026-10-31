@@ -41,11 +41,17 @@ export function allowEngineHook(allowed: boolean) {
 }
 
 // The files of the program last loaded, for naming where a declaration is.
-let loadedFiles: { base: number; file: string }[] = [];
+let loadedFiles: { base: number; file: string; src: string }[] = [];
 
 // The file a source offset is in, as written relative to the entry's directory.
 export function fileAt(offset: number): string {
   return loadedFiles.findLast((f) => offset >= f.base)?.file ?? "";
+}
+
+// The source text a span covers in the program last loaded; std's prelude is in none of its files.
+export function textAt(at: Span): string {
+  const f = loadedFiles.findLast((f) => at.start >= f.base);
+  return f && at.end - f.base <= f.src.length ? f.src.slice(at.start - f.base, at.end - f.base) : "";
 }
 
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
@@ -252,7 +258,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     if (e instanceof CompileError) e.sources = sources;
     throw e;
   }
-  loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
+  loadedFiles = modules.map(({ base, file, src }) => ({ base, file: base === 0 ? basename(entry) : file, src }));
   return { modules, sources, packages, rust };
 }
 
@@ -488,7 +494,15 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
     }
   }
   const foreign = new Map<string, { signature: string; file: string }>();
-  return all.flatMap((l) => {
+  const names = new Map(all.map((l) => {
+    const written = new Map([...l.own.values()].map((d) => [d.unique, d.name]));
+    for (const alias of l.imports.keys()) {
+      const d = local(l, alias);
+      if (d) written.set(d.unique, alias);
+    }
+    return [l.module.base, written];
+  }));
+  const program = all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
       // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
@@ -518,7 +532,13 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
       return !known;
     });
   });
+  fileNames.set(program, names);
+  return program;
 }
+
+// For a linked program, each file's top-level names by its base offset: the name each
+// declaration it reaches takes in the program, to the name the file writes for it.
+export const fileNames = new WeakMap<Stmt[], Map<number, Map<string, string>>>();
 
 // A name told apart from another file's: `-` can't be written in a name, and messages leave the
 // suffix out.

@@ -36,7 +36,7 @@ function run(name: string, src: string, { release = false, leaks = true, env = {
   mkdirSync(dir);
   const file = join(dir, "main.fsh");
   writeFileSync(file, src);
-  build(file, join(dir, "main"), release, "unwind", [], leaks);
+  build(file, join(dir, "main"), release, "unwind", [], undefined, leaks);
   const done = Bun.spawnSync([join(dir, "main")], { cwd: dir, env: { ...process.env, FISH_LEAKS: "0", ...env } });
   return { code: done.exitCode, out: done.stdout.toString(), err: done.stderr.toString().replaceAll(`${dir}/`, "") };
 }
@@ -105,7 +105,7 @@ test("--leaks leaves an ordinary build's IR and runtime alone", () => {
   expect(compile(LEAKY, file, true, "unwind", false, true)).toContain("@fsh_rt_frames");
   for (const release of [false, true]) {
     const [plain] = runtimeUnits("", release);
-    const [leaks] = runtimeUnits("", release, false, true);
+    const [leaks] = runtimeUnits("", release, false, undefined, true);
     expect(plain!.name).toBe("runtime");
     expect(plain!.args).not.toContain("-DFSH_LEAK_SITES");
     expect(leaks!.name).toBe("runtime-leaks");
@@ -200,5 +200,5 @@ test("FISH_LEAKS=1 still counts in an ordinary build", () => {
 test("the usage text lists --leaks", () => {
   const bad = Bun.spawnSync(["bun", MAIN, "build", "x.fsh", "--panic=no"], { cwd: root });
   expect(bad.exitCode).toBe(2);
-  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--leaks] [--emit-llvm]");
+  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]");
 });
