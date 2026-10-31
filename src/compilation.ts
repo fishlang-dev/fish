@@ -3,8 +3,8 @@ import type { Value } from "./comptime.ts";
 import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
-import { WeakNodeMap, WeakNodeSet, type Ids } from "./nodes.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
@@ -24,7 +24,15 @@ import type { DynTable } from "./values.ts";
 // copies macros make.
 // `files` are the program's files once loaded, by the offset each starts at, for naming where a
 // declaration is. `rust` holds the Rust names its `rust:` modules declare.
-export type Compilation = { session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string }[]; rust: RustTables };
+// `enumInits` are the computed enum initializers being evaluated, innermost last, as the span and
+// member name an error about one points at.
+// `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
+// declaration it reaches takes in the program, to the name the file writes for it.
+// `generated`: the nodes a macro made, which no warning points into: their author can't change them.
+export type Compilation = {
+  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string }[]; rust: RustTables;
+  enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>;
+};
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
 // whatever was compiled before it: its enums, which tells enums of one name apart, the generic
@@ -40,8 +48,8 @@ export type Counts = { enums: number; lifts: number; destructures: number; expan
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `compiling`: the objects being compiled without blocking, so each is compiled once.
 // `mathUnits`: the Math runtime's objects to compile.
-// `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it; and how
-// many times std was parsed rather than loaded.
+// `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it, null when
+// no compiler source can be read; and how many times std was parsed rather than loaded.
 export type Session = {
   locking: Locking;
   engineHook: boolean;
@@ -49,7 +57,7 @@ export type Session = {
   digests: Map<string, string>;
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
-  std: { key?: string; tree?: { path: string; bytes: Uint8Array }; parses: number };
+  std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: number };
 };
 
 export function newSession(): Session {
@@ -57,7 +65,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() } };
+  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
@@ -72,6 +80,10 @@ export type Tables = {
   regex: RegexTables;
   files: Compilation["files"];
   rust: RustTables;
+  generated: Compilation["generated"];
+  // The `let` statements and parameters that declare a name, as the checker meets them; every
+  // other node an instance's `locals` holds is a use of one.
+  declarations: WeakNodeSet<Expr | Stmt | Param | ObjectProp>;
   // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
   // again for another instance meets them already made.
   loopParts: WeakNodeSet<Declarator>;
@@ -125,6 +137,8 @@ export type Tables = {
   syncFileCalls: WeakNodeMap<Expr, string>;
   // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
   printCalls: WeakNodeSet<Expr>;
+  // `handle.join()` calls, which take the handle over and give it back awaitable as a TaskPanic.
+  joinCalls: WeakNodeSet<Expr>;
   // node:util's `format` calls.
   formatCalls: WeakNodeSet<Expr>;
   // The timer calls written in a program, rewritten into the std's own, and the async arrows
@@ -146,14 +160,15 @@ export type Tables = {
   // The values printed as Node's util.inspect prints them, whose types as written say how their
   // fields were spelled.
   printed: WeakNodeSet<Expr>;
-  // The `Date.now()` and `performance.now()` calls, by which each is.
-  clocks: WeakNodeMap<Expr, "Date.now" | "performance.now">;
+  // The `Date.now()`, `performance.now()` and `Math.random()` calls, by which each is: each reads
+  // the world outside the program, so none has a value while compiling.
+  clocks: WeakNodeMap<Expr, "Date.now" | "performance.now" | "Math.random">;
   // The `JSON.stringify` and `JSON.parse` calls, by which each is.
   jsonCalls: WeakNodeMap<Expr, "stringify" | "parse">;
   // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
   parses: WeakNodeMap<Expr, "parseInt" | "parseFloat" | "Number">;
-  // Calls of the global `assert`, which panics where it is called.
-  asserts: WeakNodeSet<Expr>;
+  // Calls of the global `assert`, which panics where it is called, each with its condition as written.
+  asserts: WeakNodeMap<Expr, string>;
   regexStringCalls: WeakNodeMap<Expr, string>;
   // The regex method calls, by method.
   regexCalls: WeakNodeMap<Expr, "test" | "exec">;
@@ -163,6 +178,8 @@ export type Tables = {
   fixedPrints: WeakNodeSet<Expr>;
   // The `Math` calls and constants, which codegen lowers itself.
   maths: WeakNodeSet<Expr>;
+  // The calls of the integer methods named for how they overflow, as `checkedAdd`.
+  integerCalls: WeakNodeSet<Expr>;
   // The calls a tagged template became, the only calls yet that fill a rest parameter.
   tagCalls: WeakNodeSet<Expr>;
   // The `equals` each class's `===` calls.
@@ -273,7 +290,7 @@ export type Tables = {
   computing: Set<Instance>;
 };
 
-export function newTables({ typing, upcasts, ids, regex, files, rust }: Compilation): Tables {
+export function newTables({ typing, upcasts, ids, regex, files, rust, generated }: Compilation): Tables {
   return {
     typing,
     upcasts,
@@ -281,6 +298,8 @@ export function newTables({ typing, upcasts, ids, regex, files, rust }: Compilat
     regex,
     files,
     rust,
+    generated,
+    declarations: new WeakNodeSet<Expr | Stmt | Param | ObjectProp>(),
     loopParts: new WeakNodeSet<Declarator>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
     nestedBindings: new WeakSet<Local>(),
@@ -304,6 +323,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust }: Compilat
     fileCalls: new WeakNodeSet<Expr>(),
     syncFileCalls: new WeakNodeMap<Expr, string>(),
     printCalls: new WeakNodeSet<Expr>(),
+    joinCalls: new WeakNodeSet<Expr>(),
     formatCalls: new WeakNodeSet<Expr>(),
     timerSets: new WeakNodeSet<Expr>(),
     timerWrappers: new WeakNodeSet<Expr>(),
@@ -314,15 +334,16 @@ export function newTables({ typing, upcasts, ids, regex, files, rust }: Compilat
     deepEqualities: new WeakNodeSet<Expr>(),
     parsedArgs: new WeakNodeSet<Expr>(),
     printed: new WeakNodeSet<Expr>(),
-    clocks: new WeakNodeMap<Expr, "Date.now" | "performance.now">(),
+    clocks: new WeakNodeMap<Expr, "Date.now" | "performance.now" | "Math.random">(),
     jsonCalls: new WeakNodeMap<Expr, "stringify" | "parse">(),
     parses: new WeakNodeMap<Expr, "parseInt" | "parseFloat" | "Number">(),
-    asserts: new WeakNodeSet<Expr>(),
+    asserts: new WeakNodeMap<Expr, string>(),
     regexStringCalls: new WeakNodeMap<Expr, string>(),
     regexCalls: new WeakNodeMap<Expr, "test" | "exec">(),
     regexNews: new WeakNodeSet<Expr>(),
     fixedPrints: new WeakNodeSet<Expr>(),
     maths: new WeakNodeSet<Expr>(),
+    integerCalls: new WeakNodeSet<Expr>(),
     tagCalls: new WeakNodeSet<Expr>(),
     equalities: new WeakMap<ClassType, Instance>(),
     quotes: new WeakNodeMap<Expr, Record<Category, Type>>(),

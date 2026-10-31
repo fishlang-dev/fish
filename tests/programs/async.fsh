@@ -988,6 +988,253 @@ async function main() {
   console.log(x);
 }
 // error: 'p' would keep borrowing this temporary
+// case: async_task_panic_abort
+// mode: abort
+// panic: index out of bounds
+async function boom(xs: i64[]): Promise<i64> {
+  await yieldNow();
+  return xs[3];
+}
+async function main() {
+  spawn(boom([1]));
+  await sleep(5000);
+}
+// case: async_task_panic_all_joins
+// expect: caught index out of bounds: the len is 1 but the index is 4
+// expect: both 3
+async function pick(n: i64, at: usize): Promise<i64> {
+  const xs = [n];
+  await sleep(10);
+  return xs[at];
+}
+async function main() {
+  try {
+    const got = await Promise.all([spawn(pick(1, 0)).join(), spawn(pick(2, 4)).join()]);
+    console.log(got.length);
+  } catch (e) {
+    console.log("caught", e.message);
+  }
+  try {
+    const got = await Promise.all([spawn(pick(1, 0)).join(), spawn(pick(2, 0)).join()]);
+    console.log("both", got[0] + got[1]);
+  } catch (e) {
+    console.log("unexpected", e.message);
+  }
+}
+// case: async_task_panic_awaited
+// panic: a task this awaited panicked: index out of bounds: the len is 1 but the index is 3
+// panic: await 'handle.join()' to catch it as a TaskPanic instead
+async function boom(xs: string[]): Promise<string> {
+  const held = "held" + 1;
+  await yieldNow();
+  return held + xs[3];
+}
+async function main() {
+  const kept = "kept" + 1;
+  const v = await spawn(boom(["a" + 1]));
+  console.log(v, kept);
+}
+// case: async_task_panic_before_await
+// expect: caught index out of bounds: the len is 1 but the index is 2
+// expect: then 7
+async function boom(): Promise<string> {
+  const xs = ["a" + 1];
+  return xs[2];
+}
+async function main() {
+  const h = spawn(boom());
+  const later = spawn(boom());
+  await sleep(100);
+  try {
+    const v = await h.join();
+    console.log(v);
+  } catch (e) {
+    console.log("caught", e.message);
+  }
+  console.log("then", 7);
+}
+// case: async_task_panic_chained
+// expect: caught a task this awaited panicked: index out of bounds: the len is 1 but the index is 7
+async function boom(): Promise<string> {
+  const xs = ["x" + 1];
+  await yieldNow();
+  return xs[7];
+}
+async function middle(): Promise<string> {
+  const keep = "mid" + 1;
+  const got = await spawn(boom());
+  return got + keep;
+}
+async function main() {
+  try {
+    const v = await spawn(middle()).join();
+    console.log(v);
+  } catch (e) {
+    console.log("caught", e.message);
+  }
+}
+// case: async_task_panic_concurrent
+// expect: caught 16 of 16
+async function boom(n: i64): Promise<i64> {
+  const held = "held" + n;
+  let total = 0;
+  for (let i = 0; i < 200000; i++) total += i % 3;
+  const xs = [held];
+  return total + (xs[(n + 1) as usize].length as i64);
+}
+async function main() {
+  let handles: JoinHandle<i64>[] = [];
+  for (let i = 0; i < 16; i++) handles.push(spawn(boom(i)));
+  let caught = 0;
+  while (handles.length > 0) {
+    const h = handles.pop()!;
+    try {
+      await h.join();
+    } catch (e) {
+      if (e.message.startsWith("index out of bounds")) caught += 1;
+    }
+  }
+  console.log("caught", caught, "of", 16);
+}
+// case: async_task_panic_detached
+// expect: others 3
+// expect: main goes on
+async function boom(xs: string[]): Promise<void> {
+  const held = "held" + xs.length;
+  await yieldNow();
+  console.log(held + xs[5]);
+}
+async function add(a: i64, b: i64): Promise<i64> {
+  await sleep(20);
+  return a + b;
+}
+async function main() {
+  spawn(boom(["a" + 1]));
+  const other = spawn(add(1, 2));
+  await sleep(50);
+  const v = await other;
+  console.log("others", v);
+  console.log("main goes on");
+}
+// case: async_task_panic_join
+// expect: ok held0
+// expect: oops thrown 1
+// expect: panic index out of bounds: the len is 1 but the index is 2
+// expect: after
+class Oops { why: string; constructor(why: string) { this.why = why; } }
+async function risky(n: i64): Promise<string> throws Oops {
+  const held = "held" + n;
+  await yieldNow();
+  if (n === 1) throw new Oops("thrown " + n);
+  const xs = [held];
+  return xs[n as usize];
+}
+async function main() {
+  for (const n of [0, 1, 2]) {
+    try {
+      const v = await spawn(risky(n)).join();
+      console.log("ok", v);
+    } catch (e) {
+      if (e instanceof Oops) console.log("oops", e.why);
+      else console.log("panic", e.message);
+    }
+  }
+  const later = spawn(risky(0));
+  const joined = later.join();
+  try {
+    await joined;
+    console.log("after");
+  } catch (e) {
+    console.log("unexpected");
+  }
+}
+// case: async_task_panic_join_moved
+// error: 'h' moved here: 'join' takes the handle over, as awaiting it would
+async function two(): Promise<i64> { await yieldNow(); return 2; }
+async function main() throws TaskPanic {
+  const h = spawn(two());
+  const j = h.join();
+  const a = await h;
+  const b = await j;
+  console.log(a + b);
+}
+// case: async_task_panic_join_twice
+// error: this is already the task's 'join()'; await it
+async function two(): Promise<i64> { await yieldNow(); return 2; }
+async function main() throws TaskPanic {
+  const v = await spawn(two()).join().join();
+  console.log(v);
+}
+// case: async_task_panic_join_unhandled
+// error: 'main' must declare 'throws TaskPanic' after its return type since this Promise can throw 'TaskPanic', or catch it with try/catch
+async function two(): Promise<i64> { await yieldNow(); return 2; }
+async function main() {
+  const v = await spawn(two()).join();
+  console.log(v);
+}
+// case: async_task_panic_lock_waiting
+// expect: holder index out of bounds: the len is 1 but the index is 9
+// expect: waiter a task panicked while holding this lock, so the value it guards may be half changed
+async function holder(s: shared<{ n: Lock<i64>; waiting: Atomic<i64> }>): Promise<void> {
+  await yieldNow();
+  s.n.update((v) => {
+    for (let i = 0; i < 2000000000 && s.waiting.load() === 0; i++) v += 1;
+    for (let i = 0; i < 2000000; i++) v += 1;
+    const xs = [1];
+    v = xs[9];
+  });
+}
+async function waiter(s: shared<{ n: Lock<i64>; waiting: Atomic<i64> }>): Promise<void> {
+  await sleep(20);
+  s.waiting.store(1);
+  s.n.update((v) => { v += 1; });
+}
+async function main() {
+  const s = shared({ n: new Lock(0), waiting: new Atomic(0) });
+  const a = spawn(holder(s.clone()));
+  const b = spawn(waiter(s.clone()));
+  try {
+    await a.join();
+  } catch (e) {
+    console.log("holder", e.message);
+  }
+  try {
+    await b.join();
+  } catch (e) {
+    console.log("waiter", e.message);
+  }
+}
+// case: async_task_panic_long_reason
+// expect: 511 é 233 1022
+async function boom(): Promise<void> {
+  await yieldNow();
+  assert(false, "é".repeat(600));
+}
+async function main() {
+  try {
+    await spawn(boom()).join();
+  } catch (e) {
+    const m = e.message;
+    console.log(m.length, m.at(-1), m.charCodeAt(m.length - 1), new TextEncoder().encode(m).length);
+  }
+}
+// case: async_task_panic_poisoned
+// expect: poisoner index out of bounds: the len is 1 but the index is 3
+// panic: a task panicked while holding this lock, so the value it guards may be half changed
+async function poison(s: shared<{ n: i64 }>): Promise<void> {
+  await yieldNow();
+  s.update((v) => { const xs = [1]; v.n = xs[3]; });
+}
+async function main() {
+  const s = shared({ n: 0 });
+  try {
+    await spawn(poison(s.clone())).join();
+  } catch (e) {
+    console.log("poisoner", e.message);
+  }
+  s.update((v) => { v.n = v.n + 1; });
+  console.log("unreachable");
+}
 // case: async_unused_promise
 async function save(n: i64) {
   console.log(n);

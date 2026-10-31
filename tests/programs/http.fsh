@@ -1,3 +1,101 @@
+// case: http_bad_options
+// expect: serve's maxBodySize is -1, but it can't be negative; give it in bytes
+// expect: serve's headerTimeout is -5, but it can't be negative; give it in milliseconds, or 0 for no timeout
+// expect: serve's idleTimeout is -1, but it can't be negative; give it in milliseconds, or 0 for no timeout
+// A negative limit is refused when serve is called, before it listens.
+async function attempt(options: ServeOptions): Promise<void> {
+  try {
+    await serve(options, async (req: Request) => new Response("hi"));
+    console.log("served");
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+
+async function main(): Promise<void> {
+  await attempt({ maxBodySize: -1 });
+  await attempt({ headerTimeout: -5 });
+  await attempt({ port: 0, idleTimeout: -1 });
+}
+// case: http_binary
+// expect: got 0 255 195|text 3 true|again 3
+// expect: HTTP/1.1 200 OK|content-length: 3|content-type: false
+// expect: body 3|0 255 195
+// Bytes that aren't UTF-8 pass through serve untouched: req.bytes() gives them as sent, text()
+// decodes them with U+FFFD and can follow, and a u8[] response sends them with their length and
+// no content type.
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const bytes = await req.bytes();
+    const text = await req.text();
+    const again = await req.bytes();
+    console.log("got " + String(bytes[0]) + " " + String(bytes[1]) + " " + String(bytes[2]) + "|text " + String(text.length) + " " + String(text.endsWith("��")) + "|again " + String(again.length));
+    return new Response(bytes);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+  let raw = new TextEncoder().encode("POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 3\r\n\r\n");
+  raw.push(0);
+  raw.push(255);
+  raw.push(195);
+  await conn.write(raw);
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  const head = new TextDecoder().decode(all).split("\r\n\r\n")[0];
+  const lines = head.split("\r\n");
+  let length = "";
+  for (const line of lines) if (line.startsWith("content-length")) length = line;
+  console.log(lines[0] + "|" + length + "|content-type: " + String(head.includes("content-type")));
+  const n = all.length - head.length - 4;
+  console.log("body " + String(n) + "|" + String(all[all.length - 3]) + " " + String(all[all.length - 2]) + " " + String(all[all.length - 1]));
+}
+// case: http_body_limit
+// expect: at the limit|HTTP/1.1 200 OK|0123456789
+// expect: over the limit|HTTP/1.1 413 Content Too Large|true
+// expect: none allowed|HTTP/1.1 413 Content Too Large|true
+// expect: empty body|HTTP/1.1 200 OK|
+// maxBodySize refuses a Content-Length over it before reading the body, and serves one at it.
+async function ask(port: i64, raw: string): Promise<string> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode(raw));
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096, AbortSignal.timeout(5000));
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+
+async function listen(limit: i64): Promise<i64> {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", maxBodySize: limit, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const body = await req.text();
+    return new Response(body);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  return found.port.load();
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const port = await listen(10);
+  const at = await ask(port, "POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 10\r\n\r\n0123456789");
+  console.log("at the limit|" + at.split("\r\n")[0] + "|" + at.split("\r\n\r\n")[1]);
+  const over = await ask(port, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 11\r\n\r\n");
+  console.log("over the limit|" + over.split("\r\n")[0] + "|" + String(over.includes("connection: close")));
+  const zero = await listen(0);
+  const none = await ask(zero, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\n");
+  console.log("none allowed|" + none.split("\r\n")[0] + "|" + String(none.includes("connection: close")));
+  const empty = await ask(zero, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+  console.log("empty body|" + empty.split("\r\n")[0] + "|" + empty.split("\r\n\r\n")[1]);
+}
 // case: http_classes
 // expect: text/html a=1, b=2 false none
 // expect: false
@@ -71,20 +169,54 @@ async function main(): Promise<void> throws IoError {
   console.log("plain host|" + plain.split("\r\n\r\n")[1]);
 }
 // case: http_idle
-// expect: closed after idling
-// A connection that sends nothing is closed after 5 seconds.
-async function main(): Promise<void> throws IoError {
+// expect: fresh|closed with nothing sent
+// expect: kept alive|HTTP/1.1 200 OK|closed with nothing sent
+// expect: headers only|closed with nothing sent
+// expect: no timeouts|still open
+// A connection with no request in flight is closed after idleTimeout, or headerTimeout when
+// that is sooner, with nothing sent; 0 turns both off.
+async function listen(header: i64, idle: i64): Promise<i64> {
   const found = shared({ port: new Atomic(0) });
   const seen = found.clone();
-  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => new Response("hi")));
+  spawn(serve({ port: 0, hostname: "127.0.0.1", headerTimeout: header, idleTimeout: idle, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => new Response("hi")));
   while (found.port.load() === 0) await sleep(1);
-  const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+  return found.port.load();
+}
+
+// What the server sends before it closes, or "still open" when it hasn't closed within ms.
+async function rest(conn: Ref<TcpStream>, ms: i64): Promise<string> throws IoError {
+  let all: u8[] = [];
   try {
-    const got = await conn.read(16, AbortSignal.timeout(8000));
-    if (got.length === 0) console.log("closed after idling");
+    while (true) {
+      const got = await conn.read(4096, AbortSignal.timeout(ms));
+      if (got.length === 0) break;
+      for (const b of got) all.push(b);
+    }
   } catch (e) {
-    console.log("still open after 8 seconds");
+    if (e instanceof IoError) throw e;
+    return "still open";
   }
+  return all.length === 0 ? "closed with nothing sent" : new TextDecoder().decode(all);
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const port = await listen(60000, 200);
+  const fresh = await TcpStream.connect("127.0.0.1", port);
+  const closed = await rest(fresh, 5000);
+  console.log("fresh|" + closed);
+  const kept = await TcpStream.connect("127.0.0.1", port);
+  await kept.write(new TextEncoder().encode("GET / HTTP/1.1\r\nHost: h\r\n\r\n"));
+  const got = await kept.read(4096);
+  const after = await rest(kept, 5000);
+  console.log("kept alive|" + new TextDecoder().decode(got).split("\r\n")[0] + "|" + after);
+  const short = await listen(200, 0);
+  const waiting = await TcpStream.connect("127.0.0.1", short);
+  const unasked = await rest(waiting, 5000);
+  console.log("headers only|" + unasked);
+  const off = await listen(0, 0);
+  const silent = await TcpStream.connect("127.0.0.1", off);
+  const open = await rest(silent, 500);
+  console.log("no timeouts|" + open);
 }
 // case: http_limits
 // expect: big head|HTTP/1.1 431 Request Header Fields Too Large|true
@@ -121,7 +253,7 @@ async function main(): Promise<void> throws IoError {
   while (found.port.load() === 0) await sleep(1);
   const port = found.port.load();
   await check(port, "big head", "GET / HTTP/1.1\r\nHost: h\r\nX-Big: " + "a".repeat(16500) + "\r\n\r\n");
-  await check(port, "big body", "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 2000000\r\n\r\n");
+  await check(port, "big body", "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 134217729\r\n\r\n");
   await check(port, "garbage", "GARBAGE\r\n\r\n");
   await check(port, "http/2", "GET / HTTP/2.0\r\n\r\n");
   await check(port, "no colon", "GET / HTTP/1.1\r\nHost\r\n\r\n");
@@ -148,6 +280,33 @@ function main() {
   console.log(new Server().serve(), o.serve, t.Response);
   const Headers = 0;
   console.log(Headers);
+}
+// case: http_own_fetch
+// expect: mine /a
+// expect: listening
+// A program's own fetch beside serve is the one it calls, and the HTTP library stays.
+function fetch(path: string): string { return "mine " + path; }
+async function main(): Promise<void> {
+  console.log(fetch("/a"));
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req) => new Response("hi")));
+  while (found.port.load() === 0) await sleep(1);
+  console.log("listening");
+}
+// case: http_own_fetch_const
+// expect: mine 200
+// A program's own fetch constant beside the HTTP library is the one it reads.
+const fetch = "mine";
+async function main(): Promise<void> {
+  console.log(fetch, new Response("hi").status);
+}
+// case: http_own_fetch_const_alone
+// expect: mine
+// A program's own fetch constant, with no HTTP library, is the one it reads.
+const fetch = "mine";
+function main() {
+  console.log(fetch);
 }
 // case: http_own_names
 // expect: mine /a
@@ -492,6 +651,50 @@ function main() {
   h.set("x", "x");
   const res = new Response("hi", { headers: h });
   console.log(res.headers.get("content-type") ?? "", res.headers.get("x") ?? "");
+}
+// case: http_timeouts
+// expect: slow head|HTTP/1.1 408 Request Timeout|true
+// expect: slow body|HTTP/1.1 408 Request Timeout|true
+// expect: steady body|HTTP/1.1 200 OK|abcdefgh
+// A request that stalls once begun gets a 408 and a closed connection: its head past
+// headerTimeout, or its body past idleTimeout between reads, while a body that keeps
+// arriving is served however long it takes in all.
+async function listen(header: i64, idle: i64): Promise<i64> {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", headerTimeout: header, idleTimeout: idle, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const body = await req.text();
+    return new Response(body);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  return found.port.load();
+}
+
+// Writes each part with a pause after it, then reads until the server closes.
+async function trickle(port: i64, parts: string[], pause: i64): Promise<string> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  for (const part of parts) {
+    await conn.write(new TextEncoder().encode(part));
+    await sleep(pause);
+  }
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096, AbortSignal.timeout(5000));
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const head = await listen(300, 0);
+  const slowHead = await trickle(head, ["GET / HTTP/1.1\r\nHost: h\r\n"], 0);
+  console.log("slow head|" + slowHead.split("\r\n")[0] + "|" + String(slowHead.includes("connection: close")));
+  const body = await listen(0, 400);
+  const slowBody = await trickle(body, ["POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\nabc"], 0);
+  console.log("slow body|" + slowBody.split("\r\n")[0] + "|" + String(slowBody.includes("connection: close")));
+  const steady = await trickle(body, ["POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 8\r\n\r\n", "ab", "cd", "ef", "gh"], 150);
+  console.log("steady body|" + steady.split("\r\n")[0] + "|" + steady.split("\r\n\r\n")[1]);
 }
 // case: http_user_builtins
 // expect: 3 4

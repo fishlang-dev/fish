@@ -141,9 +141,10 @@ function units(session: Session): Unit[] {
   return session.mathUnits;
 }
 
-// The objects to link, built first if this clang and target have none yet.
-export function mathObjects(session: Session): string[] {
-  return units(session).map((u) => cachedObject(session, u));
+// The objects to link, built first if this clang and target have none yet. `target` is the
+// clang flags of a target other than the host's.
+export function mathObjects(session: Session, target: string[] = []): string[] {
+  return units(session).map((u) => cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
 }
 
 // `mathObjects`, without blocking.

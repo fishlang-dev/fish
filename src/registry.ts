@@ -5,6 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
+import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
@@ -25,9 +26,11 @@ type Checker = {
   instanceOf(f: Body): Instance;
   definition(f: Body): Instance;
   checkBody(i: Instance): void;
+  // The names of the classes a use at `at` reaches, for suggesting one.
+  classNames(at: number): string[];
 };
 
-export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
+export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
   const { typing, ids } = tables;
   const { optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
@@ -74,7 +77,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // as this class's own type parameters stand for them.
   function baseOf(c: ClassInfo, name: string): ClassInfo {
     const at = c.node.extends!;
-    if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'`, at.start, at.end);
+    if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
     const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
     return infoOf.get(type)!;

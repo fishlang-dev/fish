@@ -82,7 +82,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       const loaded = load(compilation, p.file, p.src);
       stripTests(loaded);
       expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
-      written = flatten(compilation.ids, loaded, false);
+      written = flatten(compilation, loaded, false);
       problems.push(...audit([written, stdFor(compilation, written)], ids, p.name));
       check(compilation, written);
     } catch (e) {

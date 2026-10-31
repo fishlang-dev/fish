@@ -8,6 +8,7 @@ import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } f
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 import { nextId, NodeMap, NodeSet, renumber, type Ids } from "./nodes.ts";
+import { markGenerated } from "./warnings.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
 // it while compiling, and what the macro gives replaces it in its file, before the files are
@@ -44,7 +45,7 @@ export function expandMacros(compilation: Compilation, loaded: Loaded, library: 
     // The program as linked, from copies, for checking and running the macros; an import of what
     // an expansion will make isn't there yet, and nothing the macros use may need one.
     const { loaded: copy, of } = copied(compilation.ids, loaded);
-    const program = flatten(compilation.ids, copy, library, true);
+    const program = flatten(compilation, copy, library, true);
     const macros = macroFunctions(program);
     const linked = (site: Site) => {
       const s = of.get(site.module.statements[site.index]!)!;
@@ -114,7 +115,7 @@ function builtin(d: Expr, macros: Map<string, Func>): boolean {
 
 // `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
 // with Eq, the `equals` comparing every field that `===` calls, unless the class has one.
-function derived({ upcasts, ids }: Compilation, d: Decl, exported: boolean, pending: Pending): Stmt[] {
+function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: boolean, pending: Pending): Stmt[] {
   const at = pending.decorator;
   if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
   const traits = at.kind === "call" ? at.args : [];
@@ -137,6 +138,7 @@ function derived({ upcasts, ids }: Compilation, d: Decl, exported: boolean, pend
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`, ids)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
+    markGenerated(generated, method);
     upcasts.add(`${at.start}:${at.end}`);
     decl.members = [...decl.members, method];
   }
@@ -443,6 +445,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
   const node = nodeOf(ids, result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
+  markGenerated(compilation.generated, given);
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);

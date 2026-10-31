@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -105,3 +106,78 @@ test("a long URL and query are read in linear time", () => {
   expect(run.stdout.toString()).toBe("2400011 1200001 200000 200006\n");
   expect(took).toBeLessThan(5000);
 });
+
+// The server reads a request's path and checks its Host with the parser's path and host rules
+// alone. Fed the WPT slice's paths and hosts, plus the cases of a Host the parser refuses and of
+// dot segments and backslashes, it answers as the whole parser does: each target's pathname, and
+// 400 for each Host the parser can't read.
+test("the server reads paths and hosts as the URL parser does", async () => {
+  const cases = (JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "url", "urltestdata.json"), "utf8")) as unknown[]).filter((c): c is Case => typeof c === "object");
+  const authority = /^[a-zA-Z][a-zA-Z0-9+.-]*:[/\\]*([^/\\?#]*)/;
+  // A target goes on the request line, so it holds no space or line break, and starts with '/'.
+  const targets = cases.flatMap((c) => [c.input.replace(authority, ""), c.pathname ?? ""]).map((t) => (t.startsWith("/") ? t : "/" + t));
+  targets.push("/a/../b", "/a/%2e%2e/b", "/a/.%2E/b", "/a/./b", "/%2e/x", "/a\\b", "/a\\..\\b", "/admin/x");
+  // The server refuses outright a Host with a space, control, '/', '?', '#', '@', ',' or '\', so
+  // only the rest reach the parser's rules.
+  const hosts = cases.flatMap((c) => [(authority.exec(c.input)?.[1] ?? "").split("@").pop() ?? "", c.host ?? ""]);
+  hosts.push("h", "h:8080", "h:abc", "a^b", "[::1", "a%zz", "h:", ":80", "[::1]:99999", "1.2.3.256", "0x7f.1");
+  const paths = [...new Set(targets.filter((t) => t.isWellFormed() && !/[\0\n\r ]/.test(t)))];
+  const named = [...new Set(hosts.filter((h) => h.length > 0 && h.isWellFormed() && !/[\0-\x20\x7f/?#@,\\]/.test(h)))];
+  expect([paths.length, named.length]).toEqual([384, 323]);
+
+  const oracle = join(tmp, "oracle.fsh");
+  writeFileSync(oracle, `import { readFileSync } from "node:fs";
+type Corpus = { paths: string[]; hosts: string[] };
+function main(): void throws IoError | JsonError {
+  const c = JSON.parse<Corpus>(new TextDecoder().decode(readFileSync(process.argv[2])));
+  for (const t of c.paths) {
+    try {
+      console.log("200", new URL("http://h" + t).pathname);
+    } catch (e) {
+      console.log("400");
+    }
+  }
+  for (const h of c.hosts) console.log(URL.canParse("http://" + h + "/") ? "200 /" : "400");
+}
+`);
+  const corpus = join(tmp, "corpus.json");
+  writeFileSync(corpus, JSON.stringify({ paths, hosts: named }));
+  const main = join(import.meta.dir, "..", "src", "main.ts");
+  expect(Bun.spawnSync(["bun", main, "build", oracle, "-o", join(tmp, "oracle")]).stderr.toString()).toBe("");
+  const want = Bun.spawnSync([join(tmp, "oracle"), corpus]).stdout.toString().split("\n").slice(0, paths.length + named.length);
+
+  const server = join(tmp, "server.fsh");
+  writeFileSync(server, `async function main(): Promise<void> throws IoError {
+  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { console.error(info.port); } }, async (req) => new Response(req.path));
+}
+`);
+  // The server's program names nothing that brings the parser.
+  expect(Bun.spawnSync(["bun", main, "build", server, "--emit-llvm"]).stdout.toString()).not.toContain('@"fsh.url parse"');
+  expect(Bun.spawnSync(["bun", main, "build", server, "-o", join(tmp, "server")]).stderr.toString()).toBe("");
+  const proc = Bun.spawn([join(tmp, "server")], { stderr: "pipe" });
+  try {
+    const reader = proc.stderr.getReader();
+    let seen = "";
+    while (!seen.includes("\n")) seen += new TextDecoder().decode((await reader.read()).value);
+    const port = Number(seen.trim());
+    const ask = (target: string, host: string) =>
+      new Promise<string>((resolve, reject) => {
+        let got = Buffer.alloc(0);
+        const socket = connect(port, "127.0.0.1", () => socket.write(`GET ${target} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
+        socket.on("data", (d: Buffer) => (got = Buffer.concat([got, d])));
+        socket.on("error", reject);
+        socket.on("close", () => {
+          const text = got.toString();
+          const status = text.slice(9, 12);
+          resolve(status === "200" ? `200 ${text.slice(text.indexOf("\r\n\r\n") + 4)}` : status);
+        });
+      });
+    const got: string[] = [];
+    for (const t of paths) got.push(await ask(t, "h"));
+    for (const h of named) got.push(await ask("/", h));
+    const label = [...paths.map((t) => `path ${t}`), ...named.map((h) => `host ${h}`)];
+    expect(got.map((g, i) => `${label[i]} => ${g}`)).toEqual(want.map((w, i) => `${label[i]} => ${w}`));
+  } finally {
+    proc.kill();
+  }
+}, 120_000);

@@ -431,6 +431,39 @@ import { make } from "esm";
   expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "6\n[ 'A', 'B' ] [ 'c4' ]\ngot one got two\nnone\n", stderr: "", exitCode: 0 });
 });
 
+test("a task panicking in a callback JS runs ends the program, since the panic would cross JS's frames", () => {
+  const main = `import { each } from "esm";
+async function boom(): Promise<void> {
+  await yieldNow();
+  const xs = [1];
+  each([1], (x) => { console.log(xs[3]); });
+}
+async function use(): Promise<void> {
+  await sleep(10);
+  each([1], (x) => {});
+}
+async function main() {
+  try {
+    await spawn(boom()).join();
+  } catch (e) {
+    console.log("caught");
+  }
+  await spawn(use());
+  console.log("done");
+}
+`;
+  const dir = project(main);
+  const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
+  build(session, entry, out);
+  // Bounded, so a lock the panic left held fails the test rather than hanging it.
+  const ran = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" }, timeout: 20_000 });
+  expect({ stdout: ran.stdout.toString(), stderr: ran.stderr.toString().replaceAll(`${dir}/`, ""), exitCode: ran.exitCode }).toEqual({
+    stdout: "",
+    stderr: "panicked at main.fsh:5:34:\nindex out of bounds: the len is 1 but the index is 3\n",
+    exitCode: 101,
+  });
+});
+
 test("a callback holding what isn't Send is refused, and one JS gives the wrong value panics", () => {
   expect(run(`import { keep } from "esm";\nfunction main() {\n  const c = new Cell<i64>(0);\n  keep((s) => { c.set(1); return s; });\n}\n`)).toBe("main.fsh:4:8: error: a '(s: string) => string' may cross to another thread, so it can't hold a 'Cell<i64>', which changes without a lock");
   const misused = run(`import { misuse } from "esm";\nfunction main() {\n  console.log(misuse((n) => n + 1));\n}\n`);

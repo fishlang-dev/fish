@@ -41,6 +41,12 @@ export function fileAt(files: Compilation["files"], offset: number): string {
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
+// The source text a span covers in the program last loaded; std's prelude is in none of its files.
+export function textAt(files: Compilation["files"], at: Span): string {
+  const f = files.findLast((f) => at.start >= f.base);
+  return f && at.end - f.base <= f.src.length ? f.src.slice(at.start - f.base, at.end - f.base) : "";
+}
+
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
@@ -247,7 +253,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     if (e instanceof CompileError) e.sources = [...sources, STD];
     throw e;
   }
-  compilation.files.push(...modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file })));
+  compilation.files.push(...modules.map(({ base, file, src }) => ({ base, file: base === 0 ? basename(entry) : file, src })));
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   return { modules, sources: [...sources, STD], packages, rust };
 }
@@ -435,7 +441,8 @@ type Linked = {
 // out. Only the entry file keeps `export function`, which a library makes a C function.
 // With `lenient`, an import of a name no file exports is left unlinked, as one an expansion of a
 // macro has yet to make.
-export function flatten(ids: Ids, { modules }: Loaded, library = false, lenient = false): Stmt[] {
+export function flatten(compilation: Compilation, { modules }: Loaded, library = false, lenient = false): Stmt[] {
+  const { ids, fileNames } = compilation;
   const linked = new Map(modules.map((m, i) => [m, linkOf(ids, m, i, library)]));
   const exported = (m: Module, name: string, seen: Set<string> = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
@@ -484,7 +491,15 @@ export function flatten(ids: Ids, { modules }: Loaded, library = false, lenient 
     }
   }
   const foreign = new Map<string, { signature: string; file: string }>();
-  return all.flatMap((l) => {
+  const names = new Map(all.map((l) => {
+    const written = new Map([...l.own.values()].map((d) => [d.unique, d.name]));
+    for (const alias of l.imports.keys()) {
+      const d = local(l, alias);
+      if (d) written.set(d.unique, alias);
+    }
+    return [l.module.base, written];
+  }));
+  const program = all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
       // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
@@ -514,6 +529,8 @@ export function flatten(ids: Ids, { modules }: Loaded, library = false, lenient 
       return !known;
     });
   });
+  fileNames.set(program, names);
+  return program;
 }
 
 // A name told apart from another file's: `-` can't be written in a name, and messages leave the

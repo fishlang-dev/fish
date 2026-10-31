@@ -237,7 +237,9 @@ export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect"
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
-export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[] };
+// `joined` marks what `handle.join()` gives: the same task, awaited so that its panic is thrown as
+// the TaskPanic `panic` rather than panicking its awaiter.
+export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
 
 // An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
 // its parameters, which say what it borrows, and the frame its state lives in, as a
@@ -875,6 +877,18 @@ export function newTyping() {
     return t;
   }
 
+  // What `handle.join()` gives: the task's handle, awaited as throwing a TaskPanic too.
+  function joinedType(base: HandleType, panic: Type): HandleType {
+    const key = `joined ${keyOf(base)} ${keyOf(panic)}`;
+    let t = handles.get(key);
+    if (!t) {
+      t = { kind: "handle", gives: base.gives, throws: base.throws ? unionType([base.throws, panic]) : panic, fields: [], joined: { base, panic } };
+      handles.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
   function futureType(name: string, concrete: boolean): FutureType {
     const t: FutureType = { kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete };
     keys.set(t, `future ${declared++}`);
@@ -1397,7 +1411,7 @@ export function newTyping() {
     if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
     if (t.kind === "pattern") return "string";
     if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
-    if (t.kind === "handle") return handleType(lower(t.gives), t.throws && lower(t.throws));
+    if (t.kind === "handle") return t.joined ? joinedType(lower(t.joined.base) as HandleType, t.joined.panic) : handleType(lower(t.gives), t.throws && lower(t.throws));
     if (t.kind === "interior") return interiorType(t.which, lower(t.of));
     if (t.kind === "shared") return sharedType(lower(t.of));
     if (t.kind === "block") return blockType(t.which, lower(t.of));
@@ -1755,7 +1769,7 @@ export function newTyping() {
     if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
     if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.shown ?? t.of.name : `Dyn<${t.of.name}>`;
     if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
-    if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+    if (t.kind === "handle") return `${t.joined ? "Promise" : "JoinHandle"}<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
     if (t.kind !== "object") return t.name;
     if (t.match && !describing) return "RegExpExecArray";
     if (t.tuple && !t.match) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
@@ -1767,7 +1781,7 @@ export function newTyping() {
   return {
     openThrows, patternType, holdsPattern, sameLowered, interiorType, sharedType, dynType, callableOf, uncrossable, jsUntyped, jsOptional, jsUncalled,
     setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
-    leafFuture, handleType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
+    leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
     promiseElement, regexType, recursiveType, blockFor, holdsBlock, lowersRecursive, partOfItself, unjson, unfolded, pointerType, classType,
     interfaceType, generatorType, nextResult, generatorInterface, yieldsOf, generatorElement, functionType, closureType, genericFunctionType,
     literalType, standInLiteral, unionType, membersFor, typeParameter, refType, fixedType, arrayType, standsFor, tiedBy, mapType, variantType,

@@ -602,7 +602,7 @@ test("a future holding a Rust value is boxed by moving it: stored as a Promise, 
   return c.get();
 }
 
-async function counted(req: Request): Promise<Response> {
+async function counted(_req: Request): Promise<Response> {
   const c = new Counter(7);
   await yieldNow();
   return new Response(\`count \${c.get()}\`);
@@ -616,7 +616,7 @@ async function main() {
   console.log(a, b, drops());
   let app = new Router();
   app.get("/n", counted);
-  app.get("/m", async (req) => {
+  app.get("/m", async (_req) => {
     const c = new Counter(3);
     await yieldNow();
     return new Response(\`m \${c.get()}\`);
@@ -631,6 +631,32 @@ async function main() {
   expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
   const run = built(dir);
   expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([0, "5 5 2\ncount 7 m 3 4\n", ""]);
+});
+
+test("copying a boxed future holding a Rust value panics naming its type; one holding none copies", () => {
+  const dir = handles(`async function hold(): Promise<i64> {
+  const c = new Counter(5);
+  await yieldNow();
+  return c.get();
+}
+
+async function plain(): Promise<i64> {
+  await yieldNow();
+  return 2;
+}
+
+async function main() {
+  const fine: Promise<i64>[] = [plain(), plain()];
+  const kept = fine.slice(0, 1);
+  console.log(kept.length);
+  const ps: Promise<i64>[] = [hold(), hold()];
+  const qs = ps.slice(0, 1);
+  console.log(qs.length);
+}
+`);
+  expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
+  const run = built(dir);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "1\n", "panicked while copying a Dyn:\nits value holds a Rust 'Counter', which is moved, never copied; await the futures holding one, or move them rather than copy them\n"]);
 });
 
 const TEXT = `declare module "rust:demo" {

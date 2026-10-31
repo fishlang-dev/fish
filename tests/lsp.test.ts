@@ -152,7 +152,7 @@ const published = (uri: string) => (m: Reply) => m.method === "textDocument/publ
 const diagnostics = (m: Reply) => (m.params as { diagnostics: Diagnostic[] }).diagnostics;
 
 test("a document's error is published at its place, and cleared when fixed or closed", async () => {
-  const line = '  const s: string = "😀"; const n: i64 = true;';
+  const line = '  const _s: string = "😀"; const _n: i64 = true;';
   const src = `function main() {\n${line}\n}\n`;
   const uri = Bun.pathToFileURL(file("typo.fsh", src)).href;
   const s = await started();
@@ -166,6 +166,36 @@ test("a document's error is published at its place, and cleared when fixed or cl
   expect(diagnostics(await s.next(published(uri)))).toEqual([]);
   s.notify("textDocument/didClose", { textDocument: { uri } });
   expect(diagnostics(await s.next(published(uri)))).toEqual([]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
+test("a document's warnings are published with warning severity, and an error replaces them", async () => {
+  const src = "function main() {\n  const unused = 1;\n  return;\n  print(2);\n}\n";
+  const uri = Bun.pathToFileURL(file("warned.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  const found = diagnostics(await s.next(published(uri)));
+  expect(found.map((d) => [d.severity, d.message, d.range.start])).toEqual([
+    [2, "unused variable 'unused'; if it's intentional, name it '_unused'", { line: 1, character: 8 }],
+    [2, "unreachable code after 'return'", { line: 3, character: 2 }],
+  ]);
+  s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: src.replace("= 1", "= true + 1") }] });
+  expect(diagnostics(await s.next(published(uri))).map((d) => d.severity)).toEqual([1]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
+test("a misspelled name's diagnostic suggests the near name", async () => {
+  const src = "function main() {\n  const count = 1;\n  print(cont);\n}\n";
+  const uri = Bun.pathToFileURL(file("suggest.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  const [d] = diagnostics(await s.next(published(uri)));
+  expect(d!.message).toBe("cannot find name 'cont'; did you mean 'count'?");
+  expect(d!.range.start).toEqual({ line: 2, character: 8 });
   s.request("shutdown");
   s.notify("exit");
   expect(await s.proc.exited).toBe(0);

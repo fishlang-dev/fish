@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
 import { nextId, renumber } from "./nodes.ts";
-import { parse, shiftSpans, type Stmt } from "./parser.ts";
+import { parse, shiftSpans, type Pattern, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -37,6 +37,112 @@ function __arrayCollect<T>(g: Generator<T>): T[] {
   for (const x of g) out.push(x);
   return out;
 }
+function* __iterMap<T, U>(g: Generator<T>, f: (value: T, index: i64) => U): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    yield f(x, i);
+    i++;
+  }
+}
+function* __iterFilter<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): Generator<T> {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) yield x;
+    i++;
+  }
+}
+function* __iterTake<T>(g: Generator<T>, n: i64): Generator<T> {
+  if (n === 0) return;
+  let i = 0;
+  for (const x of g) {
+    yield x;
+    i++;
+    if (i === n) return;
+  }
+}
+function* __iterDrop<T>(g: Generator<T>, n: i64): Generator<T> {
+  let i = 0;
+  for (const x of g) {
+    if (i < n) i++;
+    else yield x;
+  }
+}
+function* __iterFlatMap<T, U>(g: Generator<T>, f: (value: T, index: i64) => U[]): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    // ponytail: each element is cloned, since a loop over an array lends them; moving them out
+    // needs an owning loop over arrays.
+    const ys = f(x, i);
+    for (const y of ys) yield y.clone();
+    i++;
+  }
+}
+function* __iterFlatMapGenerator<T, U, G extends Generator<U>>(g: Generator<T>, f: (value: T, index: i64) => G): Generator<U> {
+  let i = 0;
+  for (const x of g) {
+    const ys = f(x, i);
+    yield* ys;
+    i++;
+  }
+}
+function __iterReduce<T, A>(g: Generator<T>, f: (accumulator: A, value: T, index: i64) => A, init: A): A {
+  let acc = init;
+  let i = 0;
+  for (const x of g) {
+    acc = f(acc, x, i);
+    i++;
+  }
+  return acc;
+}
+// The fold in a one-element tuple, so a 'T' that may itself be null isn't taken for empty.
+function __iterReduceFirst<T>(g: Generator<T>, f: (accumulator: T, value: T, index: i64) => T): [T] | null {
+  let it = g;
+  const first = it.next();
+  if (first.done === true) return null;
+  let acc = first.value;
+  let i = 1;
+  for (const x of it) {
+    acc = f(acc, x, i);
+    i++;
+  }
+  return [acc];
+}
+function __iterForEach<T>(g: Generator<T>, f: (value: T, index: i64) => void) {
+  let i = 0;
+  for (const x of g) {
+    f(x, i);
+    i++;
+  }
+}
+function __iterSome<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): boolean {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) return true;
+    i++;
+  }
+  return false;
+}
+function __iterEvery<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): boolean {
+  let i = 0;
+  for (const x of g) {
+    if (!f(x, i)) return false;
+    i++;
+  }
+  return true;
+}
+function __iterFind<T>(g: Generator<T>, f: (value: Ref<T>, index: i64) => boolean): T | null {
+  let i = 0;
+  for (const x of g) {
+    if (f(x, i)) return x;
+    i++;
+  }
+  return null;
+}
+// The count 'take' or 'drop' was given, or nothing when it is negative, which panics at the call.
+function __iterCount(n: i64): i64 | null {
+  if (n < 0) return null;
+  return n;
+}
 function __arrayRange(n: i64): i64[] {
   let out: i64[] = [];
   for (let i = 0; i < n; i++) out.push(i);
@@ -51,6 +157,8 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
   return out;
 }
 class AbortError { message: string = "This operation was aborted"; }
+// What awaiting 'handle.join()' throws when the task panicked: its panic's reason.
+class TaskPanic { message: string; constructor(message: string) { this.message = message; } }
 class IoError {
   message: string;
   code: string = "";
@@ -276,14 +384,19 @@ class Headers {
   }
 }
 
-type RequestInit = { method?: string; headers?: Headers; body?: string; signal?: AbortSignal };
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
+
+// A body given as text or bytes, as the bytes sent.
+function __httpBody(body: string | u8[]): u8[] {
+  return typeof body === "string" ? new TextEncoder().encode(body) : body;
+}
 
 class Request {
   method: string;
   url: string;
   path: string;
   headers: Headers;
-  body: string;
+  body: u8[];
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -293,7 +406,7 @@ class Request {
     this.path = __urlRequestPath(url);
     let method = "GET";
     let headers = new Headers();
-    let body = "";
+    let body: u8[] = [];
     let signal = new AbortController().signal;
     if (init !== null) {
       const m = init.method;
@@ -301,7 +414,7 @@ class Request {
       const h = init.headers;
       if (h !== null) headers = h;
       const b = init.body;
-      if (b !== null) body = b;
+      if (b !== null) body = __httpBody(b);
       const s = init.signal;
       if (s !== null) signal = s;
     }
@@ -311,13 +424,19 @@ class Request {
     this.signal = signal;
   }
 
+  // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return this.body;
+    return new TextDecoder().decode(this.body);
+  }
+
+  // The body's bytes as they were sent.
+  async bytes(): Promise<u8[]> {
+    return this.body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(this.body);
+    return JSON.parse<T>(new TextDecoder().decode(this.body));
   }
 
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
@@ -337,11 +456,13 @@ class Response {
   status: i64;
   statusText: string;
   headers: Headers;
-  body: string;
+  body: u8[];
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
 
-  constructor(body?: string | null, init?: ResponseInit) {
+  // A text body is typed 'text/plain;charset=UTF-8' unless the headers say otherwise; bytes are
+  // given no type, as Bun does.
+  constructor(body?: string | u8[] | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
     let headers = new Headers();
@@ -353,15 +474,15 @@ class Response {
       const h = init.headers;
       if (h !== null) headers = h;
     }
-    let text = "";
-    if (body !== null) {
-      text = body;
+    let bytes: u8[] = [];
+    if (typeof body === "string") {
+      bytes = new TextEncoder().encode(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
-    }
+    } else if (body !== null) bytes = body;
     this.status = status;
     this.statusText = statusText;
     this.headers = headers;
-    this.body = text;
+    this.body = bytes;
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -369,7 +490,7 @@ class Response {
   static json<T>(data: Ref<T>, init?: ResponseInit): Response {
     let res = new Response(null, init);
     if (!res.headers.has("content-type")) res.headers.set("content-type", "application/json");
-    res.body = JSON.stringify(data);
+    res.body = new TextEncoder().encode(JSON.stringify(data));
     return res;
   }
 
@@ -377,33 +498,28 @@ class Response {
     return this.status >= 200 && this.status < 300;
   }
 
+  // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return this.body;
+    return new TextDecoder().decode(this.body);
+  }
+
+  // The body's bytes as they were sent.
+  async bytes(): Promise<u8[]> {
+    return this.body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(this.body);
+    return JSON.parse<T>(new TextDecoder().decode(this.body));
   }
 }
 
-// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
-// is a response, not an error, and a redirect is returned rather than followed.
-async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
-  const req = Http1.fetched(input, init);
-  const signal = req.signal.clone();
-  const to = Http1.target(req.url);
-  const sent = new TextEncoder().encode(Http1.requestText(req, to.authority, to.path));
-  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
-  await conn.write(sent, signal.clone());
-  let res = await Http1.receive(conn, req.method === "HEAD", signal);
-  res.url = to.url;
-  return res;
-}
-
 type ServeInfo = { hostname: string; port: i64 };
-type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void };
+// Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
+type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
 type ServeHandler = (req: Request) => Promise<Response>;
+// What serve's options settle for each connection, under a name no program can write.
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -421,6 +537,12 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
+  // Bun's 128 MiB body limit and 10 second idle timeout, and Node's minute for a request's head.
+  const limits: __serveLimits = {
+    maxBodySize: Http1.option(options.maxBodySize, 134217728, "maxBodySize", "bytes"),
+    headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
+    idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
+  };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
   const stop = given ?? shutdownSignal();
@@ -432,12 +554,13 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: hostname, port: bound });
     const boxed: ServeHandler = handler;
-    const host = hostname + ":" + String(bound);
+    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL.
+    const host = (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
     while (true) {
       try {
         const conn = await listener.accept(stop);
         live.count.add(1);
-        spawn(Http1.tracked(conn, boxed.clone(), host, stop.clone(), live.clone()));
+        spawn(Http1.tracked(conn, boxed.clone(), host, stop.clone(), live.clone(), limits.clone()));
       } catch (e) {
         if (e instanceof AbortError) break;
         // Out of file descriptors, say: those in use free up as connections end.
@@ -463,25 +586,28 @@ class HttpHead {
   }
 }
 
-// One connection's requests, one after another while both sides keep it open. Waiting for a
-// request ends after 5 seconds; once one starts, it has 30 seconds to arrive whole.
-async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal): Promise<void> {
+// One connection's requests, one after another while both sides keep it open. A request's head
+// must arrive within headerTimeout of the connection opening or the last response, and with no
+// byte of it yet the connection also closes after idleTimeout; a body must keep arriving, with
+// no gap between reads longer than idleTimeout. A request that stalls once begun gets a 408.
+async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> {
   let buffer: u8[] = [];
   try {
     while (true) {
       buffer = Http1.skipBlank(buffer);
-      let started = buffer.length > 0;
-      let deadline = nowMs() + (started ? 30000 : 5000);
+      const headBy = Http1.after(limits.headerTimeout);
+      const idleBy = Http1.after(limits.idleTimeout);
       let end = Http1.headEnd(buffer, 0);
       while (end < 0) {
-        // A head may take 16 KiB, and a body 1 MiB.
+        // A head may take 16 KiB.
         if ((buffer.length as i64) > 16384) { await Http1.refuse(conn, 431); return; }
-        const got = await Http1.readBy(conn, stop, deadline);
-        if (got.length === 0) return;
-        if (!started) {
-          started = true;
-          deadline = nowMs() + 30000;
+        const started = buffer.length > 0;
+        const got = await Http1.readBy(conn, stop, started ? headBy : Http1.sooner(headBy, idleBy));
+        if (got === null) {
+          if (started) await Http1.refuse(conn, 408);
+          return;
         }
+        if (got.length === 0) return;
         const from = buffer.length as i64 - 3;
         for (const b of got) buffer.push(b);
         buffer = Http1.skipBlank(buffer);
@@ -494,7 +620,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       if (head.headers.has("transfer-encoding")) { await Http1.refuse(conn, 501); return; }
       const length = Http1.contentLength(head.headers);
       if (length < 0) { await Http1.refuse(conn, 400); return; }
-      if (length > 1048576) { await Http1.refuse(conn, 413); return; }
+      if (length > limits.maxBodySize) { await Http1.refuse(conn, 413); return; }
       // The Host header names the server and nothing else, and HTTP/1.1 requires one.
       let authority = host;
       const named = head.headers.get("host");
@@ -505,12 +631,14 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
         await conn.write(new TextEncoder().encode("HTTP/1.1 100 Continue\\r\\n\\r\\n"), AbortSignal.timeout(30000));
       }
       while ((buffer.length as i64) < length) {
-        const got = await Http1.readBy(conn, stop, deadline);
+        const got = await Http1.readBy(conn, stop, Http1.after(limits.idleTimeout));
+        if (got === null) { await Http1.refuse(conn, 408); return; }
         if (got.length === 0) return;
         for (const b of got) buffer.push(b);
       }
-      const body = new TextDecoder().decode(Http1.take(buffer, 0, length));
-      buffer = Http1.take(buffer, length, buffer.length as i64);
+      // The buffer becomes the body, so a large one isn't copied; what came after it is kept.
+      let body = buffer;
+      buffer = body.splice(length);
       const keep = Http1.keepAlive(head);
       const method = head.method;
       const version = head.version;
@@ -519,8 +647,20 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const signal = client.signal;
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
-      const req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, body: body, signal: signal });
-      const res = await handler(req);
+      // The body is set after, not passed in init, which would copy it.
+      let req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, signal: signal });
+      req.body = body;
+      // The handler runs as a task of its own, so a panic in it ends only that task: its client
+      // gets a bare 500 and the connection closes, and the server goes on serving.
+      let res: Response;
+      try {
+        res = await spawn(Http1.handle(handler.clone(), req)).join();
+      } catch (e) {
+        done.abort();
+        await watching;
+        await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
+        return;
+      }
       done.abort();
       const early = await watching;
       for (const b of early) buffer.push(b);
@@ -528,8 +668,8 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A response that can't be sent as it stands, like a header value holding a line break,
       // goes out as a 500 instead.
-      const text = Http1.sendable(res) ? Http1.responseText(res, method === "HEAD", close, version) : Http1.responseText(new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
-      await conn.write(new TextEncoder().encode(text), AbortSignal.timeout(30000));
+      if (Http1.sendable(res)) await Http1.send(conn, res, method === "HEAD", close, version);
+      else await Http1.send(conn, new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
       if (close) return;
     }
   } catch (e) {
@@ -689,25 +829,48 @@ class Router {
 // The wire format of HTTP/1.x.
 class Http1 {
   // A connection's requests, counted while it is open so the server can wait for it at shutdown.
-  static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>): Promise<void> {
-    await serveConnection(conn, handler, host, stop);
+  static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>, limits: __serveLimits): Promise<void> {
+    await serveConnection(conn, handler, host, stop, limits);
     live.count.sub(1);
   }
 
-  // The client's next bytes, or nothing once the deadline passes or the server stops.
-  // ponytail: wakes every 250 ms to look at the server's signal; AbortSignal.any would combine them.
-  static async readBy(conn: Ref<TcpStream>, stop: Ref<AbortSignal>, deadline: i64): Promise<u8[]> throws IoError {
-    while (!stop.aborted) {
+  // A serve option's value, or its default when it isn't given; serve refuses a negative one.
+  static option(given: i64 | null, fallback: i64, name: string, unit: string): i64 throws IoError {
+    if (given === null) return fallback;
+    if (given < 0) throw new IoError("serve's " + name + " is " + String(given) + ", but it can't be negative; give it in " + unit);
+    return given;
+  }
+
+  // The deadline ms from now, or 0, no deadline, for a timeout of 0.
+  static after(ms: i64): i64 {
+    return ms === 0 ? 0 : nowMs() + ms;
+  }
+
+  // The earlier of two deadlines, where 0 is none.
+  static sooner(a: i64, b: i64): i64 {
+    if (a === 0) return b;
+    if (b === 0 || a < b) return a;
+    return b;
+  }
+
+  static async handle(handler: ServeHandler, req: Request): Promise<Response> {
+    return await handler(req);
+  }
+
+  // The client's next bytes, nothing once the stream ends or the server stops, or null once the
+  // deadline passes. A deadline of 0 is none.
+  static async readBy(conn: Ref<TcpStream>, stop: Ref<AbortSignal>, deadline: i64): Promise<u8[] | null> throws IoError {
+    if (stop.aborted) return [];
+    try {
+      if (deadline === 0) return await conn.read(16384, stop.clone());
       const left = deadline - nowMs();
-      if (left <= 0) return [];
-      try {
-        const got = await conn.read(16384, AbortSignal.timeout(left < 250 ? left : 250));
-        return got;
-      } catch (e) {
-        if (e instanceof IoError) throw e;
-      }
+      if (left <= 0) return null;
+      return await conn.read(16384, AbortSignal.any([stop.clone(), AbortSignal.timeout(left)]));
+    } catch (e) {
+      if (e instanceof IoError) throw e;
+      if (stop.aborted) return [];
+      return null;
     }
-    return [];
   }
 
   // Reads from the client while its request is handled: the end of the stream, or a broken
@@ -726,7 +889,21 @@ class Http1 {
   // Answers a request the server won't serve, and ends the connection.
   static async refuse(conn: Ref<TcpStream>, status: i64): Promise<void> throws IoError | AbortError {
     const res = new Response(Http1.reasonPhrase(status) + "\\n", { status: status });
-    await conn.write(new TextEncoder().encode(Http1.responseText(res, false, true, "HTTP/1.1")), AbortSignal.timeout(30000));
+    await Http1.send(conn, res, false, true, "HTTP/1.1");
+  }
+
+  // Writes a response. A small body goes out in one write with its head, since a second small
+  // write can wait on the client's delayed ACK; a large one is written as it is, not copied.
+  static async send(conn: Ref<TcpStream>, res: Response, head: boolean, close: boolean, version: string): Promise<void> throws IoError | AbortError {
+    let out = new TextEncoder().encode(Http1.responseText(res, head, close, version));
+    const sends = !head && res.status !== 204 && res.status !== 304;
+    if (!sends || res.body.length <= 16384) {
+      if (sends) for (const b of res.body) out.push(b);
+      await conn.write(out, AbortSignal.timeout(30000));
+      return;
+    }
+    await conn.write(out, AbortSignal.timeout(30000));
+    await conn.write(res.body, AbortSignal.timeout(30000));
   }
 
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
@@ -746,8 +923,8 @@ class Http1 {
     return Http1.take(buffer, at, buffer.length as i64);
   }
 
-  // The bytes from start to end, as a new array.
-  // ponytail: copies byte by byte; array slicing would save a 1 MiB body two or three copies.
+  // The bytes from start to end, as a new array, for heads and other small pieces; a body is
+  // split off its buffer with splice instead of copied.
   static take(buffer: Ref<u8[]>, start: i64, end: i64): u8[] {
     let out: u8[] = [];
     for (let i = start as usize; i < (end as usize); i++) out.push(buffer[i]);
@@ -782,37 +959,9 @@ class Http1 {
     return headers;
   }
 
-  // fetch's request: a Request given, with what init sets in place of its own.
-  static fetched(input: string | Request | URL, init?: RequestInit): Request {
-    if (typeof input === "string") return new Request(input, init);
-    if (input instanceof URL) return new Request(input.href, init);
-    let req = input;
-    if (init !== null) {
-      const m = init.method;
-      if (m !== null) req.method = m.toUpperCase();
-      const h = init.headers;
-      if (h !== null) req.headers = h;
-      const b = init.body;
-      if (b !== null) req.body = b;
-      const s = init.signal;
-      if (s !== null) req.signal = s;
-    }
-    return req;
-  }
-
-  // Where an http: URL points: host and port to connect to, the Host header, the path and query
-  // sent, and the URL without its fragment.
-  static target(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
-    const parsed = __urlFetchTarget(url);
-    if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
-    const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
-    const query = parsed.hasQuery ? "?" + parsed.query : "";
-    return { host: parsed.host.clone(), port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
-  }
-
   // A request's line, headers and body, as fetch sends it: the caller's headers in their order,
   // the framing and Host its own.
-  static requestText(req: Ref<Request>, authority: string, path: string): string throws IoError {
+  static requestBytes(req: Ref<Request>, authority: string, path: string): u8[] throws IoError {
     if (!Http1.isToken(req.method)) throw new IoError("can't fetch '" + req.url + "': '" + req.method + "' isn't a method name");
     let text = req.method + " " + path + " HTTP/1.1\\r\\nhost: " + authority + "\\r\\n";
     let bad = "";
@@ -823,9 +972,11 @@ class Http1 {
     if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
     if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
     if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
-    const size = new TextEncoder().encode(req.body).length as i64;
+    const size = req.body.length as i64;
     if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
-    return text + "connection: close\\r\\n\\r\\n" + req.body;
+    let out = new TextEncoder().encode(text + "connection: close\\r\\n\\r\\n");
+    for (const b of req.body) out.push(b);
+    return out;
   }
 
   // The next bytes of a response, which must come before the connection ends.
@@ -872,7 +1023,8 @@ class Http1 {
           const got = await Http1.more(conn, signal, "the response's body ended");
           for (const b of got) buffer.push(b);
         }
-        body = Http1.take(buffer, 0, length);
+        body = buffer;
+        body.splice(length);
       } else {
         body = buffer;
         while (true) {
@@ -882,7 +1034,7 @@ class Http1 {
         }
       }
       let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
-      res.body = new TextDecoder().decode(body);
+      res.body = body;
       return res;
     }
   }
@@ -1005,7 +1157,8 @@ class Http1 {
       const c = text.charCodeAt(i) as i64;
       if (c <= 32 || c === 47 || c === 63 || c === 35 || c === 64 || c === 44 || c === 92 || c === 127) return false;
     }
-    return typeof __urlParse("http://" + text + "/", null) !== "string";
+    let url = __urlEmpty();
+    return __urlHostPort(__urlPoints(text), url, true).length === 0;
   }
 
   // Whether a response can go out as it stands: a status the Fetch API allows, and a status
@@ -1019,7 +1172,7 @@ class Http1 {
     return fine;
   }
 
-  // A response's status line, headers and body, as sent.
+  // A response's status line and headers, as sent.
   // The server frames the body itself, so a handler's own framing headers are left out; 204
   // and 304 have no body at all.
   static responseText(res: Ref<Response>, head: boolean, close: boolean, version: string): string {
@@ -1031,15 +1184,12 @@ class Http1 {
     });
     const bodiless = res.status === 204 || res.status === 304;
     if (!bodiless) {
-      const size = new TextEncoder().encode(res.body).length;
-      text = text + "content-length: " + String(size as i64) + "\\r\\n";
+      text = text + "content-length: " + String(res.body.length as i64) + "\\r\\n";
     }
     text = text + "date: " + httpDate() + "\\r\\n";
     if (close) text = text + "connection: close\\r\\n";
     else if (version === "HTTP/1.0") text = text + "connection: keep-alive\\r\\n";
-    text = text + "\\r\\n";
-    if (!head && !bodiless) text = text + res.body;
-    return text;
+    return text + "\\r\\n";
   }
 
   static reasonPhrase(status: i64): string {
@@ -1056,6 +1206,7 @@ class Http1 {
       case 403 => "Forbidden",
       case 404 => "Not Found",
       case 405 => "Method Not Allowed",
+      case 408 => "Request Timeout",
       case 413 => "Content Too Large",
       case 431 => "Request Header Fields Too Large",
       case 500 => "Internal Server Error",
@@ -1067,8 +1218,71 @@ class Http1 {
 }
 `;
 
-// The URL Standard's URL and URLSearchParams.
-const URL_LIB = String.raw`
+// fetch, whose URLs the URL library's parser reads.
+const FETCH = `
+// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
+// is a response, not an error, and a redirect is returned rather than followed.
+async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const req = __urlFetchRequest(input, init);
+  const signal = req.signal.clone();
+  const to = __urlFetchAddress(req.url);
+  const sent = Http1.requestBytes(req, to.authority, to.path);
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  let res = await Http1.receive(conn, req.method === "HEAD", signal);
+  res.url = to.url;
+  return res;
+}
+
+// fetch's request: a Request given, with what init sets in place of its own.
+function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): Request {
+  if (typeof input === "string") return new Request(input, init);
+  if (input instanceof URL) return new Request(input.href, init);
+  let req = input;
+  if (init !== null) {
+    const m = init.method;
+    if (m !== null) req.method = m.toUpperCase();
+    const h = init.headers;
+    if (h !== null) req.headers = h;
+    const b = init.body;
+    if (b !== null) req.body = __httpBody(b);
+    const s = init.signal;
+    if (s !== null) req.signal = s;
+  }
+  return req;
+}
+
+// Where an http: URL points: host and port to connect to, the Host header, the path and query
+// sent, and the URL without its fragment.
+function __urlFetchAddress(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+  const parsed = __urlFetchTarget(url);
+  if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
+  const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
+  const query = parsed.hasQuery ? "?" + parsed.query : "";
+  // An IPv6 host connects without the brackets it has in the URL and the Host header.
+  const host = parsed.host.startsWith("[") ? parsed.host.slice(1, (parsed.host.length as i64) - 1) : parsed.host.clone();
+  return { host: host, port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+}
+`;
+
+// A request's path in a program without the URL library, whose requests all come from the server.
+const SERVED = String.raw`
+// A request's path, read with the parser's path rules from its URL as the server writes it:
+// "http://", a Host header the server checked, and a target starting with '/'.
+function __urlRequestPath(url: string): string {
+  const input = __urlInput(url);
+  let p: i64 = 7;
+  while (p < (input.length as i64) && input[p as usize] !== 47) p++;
+  let record = __urlEmpty();
+  record.scheme = "http";
+  const begun: u8[] = [];
+  __urlReadPath(input, p + 1, record, begun, true);
+  return __urlPathText(record);
+}
+`;
+
+// The URL Standard's pieces the HTTP server reads requests with: hosts, paths and decoding.
+const URL_CORE = String.raw`
 // The URL Standard's URL record, as the parser builds it. A part that may be missing has a flag
 // saying whether it is there; a port of -1 is none.
 type __urlRecord = { scheme: string; username: string; password: string; host: string; hasHost: boolean; port: i64; path: string[]; opaque: boolean; query: string; hasQuery: boolean; fragment: string; hasFragment: boolean };
@@ -1108,10 +1322,6 @@ function __urlPoints(s: string): i64[] {
 
 function __urlAt(points: Ref<i64[]>, i: i64): i64 {
   return i >= 0 && i < (points.length as i64) ? points[i as usize] : -1;
-}
-
-function __urlSpecial(scheme: string): boolean {
-  return scheme === "http" || scheme === "https" || scheme === "ws" || scheme === "wss" || scheme === "ftp" || scheme === "file";
 }
 
 function __urlDefaultPort(scheme: string): i64 {
@@ -1184,13 +1394,6 @@ function __urlPutByte(out: Mut<u8[]>, b: i64, escape: boolean) {
   out.push((low < 10 ? 48 + low : 55 + low) as u8);
 }
 
-// Code points as a string.
-function __urlString(points: Ref<i64[]>): string {
-  let out: u8[] = [];
-  for (const c of points) __urlPut(out, c, "none");
-  return __urlText(out);
-}
-
 // Bytes with each '%' and two hex digits read as the byte they name.
 function __urlPercentDecode(bytes: Ref<u8[]>): u8[] {
   let out: u8[] = [];
@@ -1220,15 +1423,6 @@ function __urlDrive(s: string, normalized: boolean): boolean {
   if (s.length !== 2 || !__urlAlpha(s.charCodeAt(0) as i64)) return false;
   const c = s.charCodeAt(1) as i64;
   return c === 58 || (!normalized && c === 124);
-}
-
-// Whether the code points from i start with a Windows drive letter ending there or before a
-// '/', '\', '?' or '#'.
-function __urlStartsWithDrive(input: Ref<i64[]>, i: i64): boolean {
-  const second = __urlAt(input, i + 1);
-  if (!__urlAlpha(__urlAt(input, i)) || (second !== 58 && second !== 124)) return false;
-  const third = __urlAt(input, i + 2);
-  return third === -1 || third === 47 || third === 92 || third === 63 || third === 35;
 }
 
 // Drops a path's last segment, except a file URL's drive letter.
@@ -1474,12 +1668,65 @@ function __urlIpv6Text(address: Ref<i64[]>): string {
   return out;
 }
 
-// The URL Standard's basic URL parser, without a state override: a URL record, or the message
-// of the TypeError for an input that isn't a URL.
-function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string {
-  const failure = "Invalid URL";
+// Percent-encoded UTF-8 decoded, as decodeURIComponent does, or null for a '%' without two hex
+// digits after it or bytes that aren't UTF-8.
+function __urlDecodeStrict(text: string): string | null {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] !== 37) {
+      out.push(bytes[i]);
+      i += 1;
+      continue;
+    }
+    if (i + 2 >= bytes.length + 0 || __urlHexValue(bytes[i + 1] as i64) < 0 || __urlHexValue(bytes[i + 2] as i64) < 0) return null;
+    out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
+    i += 3;
+  }
+  if (!__urlUtf8Valid(out)) return null;
+  return new TextDecoder().decode(out);
+}
+
+// Whether bytes are well-formed UTF-8: no overlong forms, surrogates or code points past U+10FFFF.
+function __urlUtf8Valid(bytes: Ref<u8[]>): boolean {
+  const n = bytes.length as i64;
+  let i: i64 = 0;
+  while (i < n) {
+    const b = bytes[i as usize] as i64;
+    let need: i64 = 0;
+    let low: i64 = 0x80;
+    let high: i64 = 0xBF;
+    if (b < 0x80) need = 0;
+    else if (b >= 0xC2 && b <= 0xDF) need = 1;
+    else if (b === 0xE0) { need = 2; low = 0xA0; }
+    else if (b === 0xED) { need = 2; high = 0x9F; }
+    else if (b >= 0xE1 && b <= 0xEF) need = 2;
+    else if (b === 0xF0) { need = 3; low = 0x90; }
+    else if (b === 0xF4) { need = 3; high = 0x8F; }
+    else if (b >= 0xF1 && b <= 0xF3) need = 3;
+    else return false;
+    if (i + need >= n) return false;
+    for (let k: i64 = 1; k <= need; k++) {
+      const c = bytes[(i + k) as usize] as i64;
+      if (c < (k === 1 ? low : 0x80) || c > (k === 1 ? high : 0xBF)) return false;
+    }
+    i += need + 1;
+  }
+  return true;
+}
+
+// A URL's path as its pathname gives it.
+function __urlPathText(url: Ref<__urlRecord>): string {
+  if (url.opaque) return url.path[0];
+  if (url.path.length === 0) return "";
+  return "/" + url.path.join("/");
+}
+
+// The code points a URL is parsed from: its leading and trailing C0 controls and spaces gone,
+// then every tab and newline.
+function __urlInput(raw: string): i64[] {
   const all = __urlPoints(raw);
-  // Leading and trailing C0 controls and spaces go, then every tab and newline.
   let first: i64 = 0;
   let end = all.length as i64;
   while (first < end && all[first as usize] <= 32) first++;
@@ -1490,6 +1737,94 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
     const c = all[i as usize];
     if (c !== 9 && c !== 10 && c !== 13) input.push(c);
   }
+  return input;
+}
+
+// The parser's path state: reads segments into url from p, the first begun in segment, up to the
+// '?', '#' or end that ends the path, and gives where that is.
+function __urlReadPath(input: Ref<i64[]>, start: i64, url: Mut<__urlRecord>, begun: u8[], special: boolean): i64 {
+  let segment = begun;
+  let p = start;
+  while (true) {
+    const c = __urlAt(input, p);
+    // '/', or '\' in a special URL, which the parser takes for one.
+    const slash = c === 47 || (special && c === 92);
+    if (c === -1 || slash || c === 63 || c === 35) {
+      let text = __urlText(segment);
+      segment = [];
+      if (__urlDoubleDot(text)) {
+        __urlShorten(url);
+        if (!slash) url.path.push("");
+      } else if (__urlSingleDot(text) && !slash) url.path.push("");
+      else if (!__urlSingleDot(text)) {
+        if (url.scheme === "file" && url.path.length === 0 && __urlDrive(text, false)) text = text.slice(0, 1) + ":";
+        url.path.push(text);
+      }
+      if (!slash) return p;
+    } else __urlPut(segment, c, "path");
+    p++;
+  }
+}
+
+// The parser's host and port states over the code points between an authority's user info and
+// its end: the URL's host and port set, or the message of the failure.
+function __urlHostPort(points: Ref<i64[]>, url: Mut<__urlRecord>, special: boolean): string {
+  const failure = "Invalid URL";
+  const n = points.length as i64;
+  // The host ends at the first ':' outside brackets.
+  let end = n;
+  let brackets = false;
+  for (let i: i64 = 0; i < n && end === n; i++) {
+    const c = points[i as usize];
+    if (c === 58 && !brackets) end = i;
+    else if (c === 91) brackets = true;
+    else if (c === 93) brackets = false;
+  }
+  if (end === 0 && (end < n || special)) return failure;
+  const host = __urlHostOf(points.slice(0, end), special);
+  if (host.error.length > 0) return host.error;
+  url.host = host.host;
+  url.hasHost = true;
+  if (end + 1 >= n) return "";
+  let port: i64 = 0;
+  for (let i = end + 1; i < n; i++) {
+    const d = points[i as usize];
+    if (!__urlDigit(d)) return failure;
+    port = port * 10 + (d - 48);
+    if (port > 65535) return failure;
+  }
+  url.port = port === __urlDefaultPort(url.scheme) ? -1 : port;
+  return "";
+}
+`;
+
+// The URL Standard's parser, URL and URLSearchParams.
+const URL_LIB = String.raw`
+function __urlSpecial(scheme: string): boolean {
+  return scheme === "http" || scheme === "https" || scheme === "ws" || scheme === "wss" || scheme === "ftp" || scheme === "file";
+}
+
+// Code points as a string.
+function __urlString(points: Ref<i64[]>): string {
+  let out: u8[] = [];
+  for (const c of points) __urlPut(out, c, "none");
+  return __urlText(out);
+}
+
+// Whether the code points from i start with a Windows drive letter ending there or before a
+// '/', '\', '?' or '#'.
+function __urlStartsWithDrive(input: Ref<i64[]>, i: i64): boolean {
+  const second = __urlAt(input, i + 1);
+  if (!__urlAlpha(__urlAt(input, i)) || (second !== 58 && second !== 124)) return false;
+  const third = __urlAt(input, i + 2);
+  return third === -1 || third === 47 || third === 92 || third === 63 || third === 35;
+}
+
+// The URL Standard's basic URL parser, without a state override: a URL record, or the message
+// of the TypeError for an input that isn't a URL.
+function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string {
+  const failure = "Invalid URL";
+  const input = __urlInput(raw);
   const hasBase = base !== null;
   const b = base ?? __urlEmpty();
   let url = __urlEmpty();
@@ -1509,8 +1844,6 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
   const PATH = 12;
   const RELATIVE_SLASH = 13;
   const QUERY = 14;
-  const HOST = 15;
-  const PORT = 16;
   const PATH_START = 17;
   const FILE_SLASH = 18;
   const FILE_HOST = 19;
@@ -1528,7 +1861,6 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
   let opaqueRead = false;
   let queryRead = false;
   let atSign = false;
-  let brackets = false;
   let passwordToken = false;
   let special = false;
   let p: i64 = 0;
@@ -1664,48 +1996,12 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
         buffer = [];
       } else if (c === -1 || slash || c === 63 || c === 35) {
         if (atSign && buffer.length === 0) return failure;
-        p -= (buffer.length as i64) + 1;
+        const error = __urlHostPort(buffer, url, special);
+        if (error.length > 0) return error;
         buffer = [];
-        state = HOST;
+        state = PATH_START;
+        p--;
       } else buffer.push(c);
-    } else if (state === HOST) {
-      if (c === 58 && !brackets) {
-        if (buffer.length === 0) return failure;
-        const host = __urlHostOf(buffer, special);
-        if (host.error.length > 0) return host.error;
-        url.host = host.host;
-        url.hasHost = true;
-        buffer = [];
-        state = PORT;
-      } else if (c === -1 || slash || c === 63 || c === 35) {
-        p--;
-        if (special && buffer.length === 0) return failure;
-        const host = __urlHostOf(buffer, special);
-        if (host.error.length > 0) return host.error;
-        url.host = host.host;
-        url.hasHost = true;
-        buffer = [];
-        state = PATH_START;
-      } else {
-        if (c === 91) brackets = true;
-        if (c === 93) brackets = false;
-        buffer.push(c);
-      }
-    } else if (state === PORT) {
-      if (__urlDigit(c)) buffer.push(c);
-      else if (c === -1 || slash || c === 63 || c === 35) {
-        if (buffer.length > 0) {
-          let port: i64 = 0;
-          for (const d of buffer) {
-            port = port * 10 + (d - 48);
-            if (port > 65535) return failure;
-          }
-          url.port = port === __urlDefaultPort(url.scheme) ? -1 : port;
-          buffer = [];
-        }
-        state = PATH_START;
-        p--;
-      } else return failure;
     } else if (state === FILE) {
       url.scheme = "file";
       special = __urlSpecial(url.scheme);
@@ -1783,25 +2079,16 @@ function __urlParse(raw: string, base: __urlRecord | null): __urlRecord | string
         if (c !== 47) p--;
       }
     } else if (state === PATH) {
-      if (c === -1 || slash || c === 63 || c === 35) {
-        let text = __urlText(segment);
-        segment = [];
-        if (__urlDoubleDot(text)) {
-          __urlShorten(url);
-          if (!slash) url.path.push("");
-        } else if (__urlSingleDot(text) && !slash) url.path.push("");
-        else if (!__urlSingleDot(text)) {
-          if (url.scheme === "file" && url.path.length === 0 && __urlDrive(text, false)) text = text.slice(0, 1) + ":";
-          url.path.push(text);
-        }
-        if (c === 63) {
-          queryRead = true;
-          state = QUERY;
-        } else if (c === 35) {
-          url.hasFragment = true;
-          state = FRAGMENT;
-        }
-      } else __urlPut(segment, c, "path");
+      p = __urlReadPath(input, p, url, segment, special);
+      segment = [];
+      const end = __urlAt(input, p);
+      if (end === 63) {
+        queryRead = true;
+        state = QUERY;
+      } else if (end === 35) {
+        url.hasFragment = true;
+        state = FRAGMENT;
+      }
     } else if (state === OPAQUE_PATH) {
       if (c === 63) {
         queryRead = true;
@@ -1854,64 +2141,8 @@ function __urlFetchTarget(url: string): __urlRecord | string {
   if (parsed.scheme === "https") return "https: needs TLS, which isn't supported yet";
   if (parsed.scheme !== "http") return "only http: URLs are supported";
   if (parsed.username.length > 0 || parsed.password.length > 0) return "a URL can't hold a user name or password";
-  if (parsed.host.startsWith("[")) return "IPv6 hosts aren't supported yet";
   if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
   return parsed;
-}
-
-// Percent-encoded UTF-8 decoded, as decodeURIComponent does, or null for a '%' without two hex
-// digits after it or bytes that aren't UTF-8.
-function __urlDecodeStrict(text: string): string | null {
-  const bytes = new TextEncoder().encode(text);
-  let out: u8[] = [];
-  let i: usize = 0;
-  while (i < bytes.length) {
-    if (bytes[i] !== 37) {
-      out.push(bytes[i]);
-      i += 1;
-      continue;
-    }
-    if (i + 2 >= bytes.length + 0 || __urlHexValue(bytes[i + 1] as i64) < 0 || __urlHexValue(bytes[i + 2] as i64) < 0) return null;
-    out.push((__urlHexValue(bytes[i + 1] as i64) * 16 + __urlHexValue(bytes[i + 2] as i64)) as u8);
-    i += 3;
-  }
-  if (!__urlUtf8Valid(out)) return null;
-  return new TextDecoder().decode(out);
-}
-
-// Whether bytes are well-formed UTF-8: no overlong forms, surrogates or code points past U+10FFFF.
-function __urlUtf8Valid(bytes: Ref<u8[]>): boolean {
-  const n = bytes.length as i64;
-  let i: i64 = 0;
-  while (i < n) {
-    const b = bytes[i as usize] as i64;
-    let need: i64 = 0;
-    let low: i64 = 0x80;
-    let high: i64 = 0xBF;
-    if (b < 0x80) need = 0;
-    else if (b >= 0xC2 && b <= 0xDF) need = 1;
-    else if (b === 0xE0) { need = 2; low = 0xA0; }
-    else if (b === 0xED) { need = 2; high = 0x9F; }
-    else if (b >= 0xE1 && b <= 0xEF) need = 2;
-    else if (b === 0xF0) { need = 3; low = 0x90; }
-    else if (b === 0xF4) { need = 3; high = 0x8F; }
-    else if (b >= 0xF1 && b <= 0xF3) need = 3;
-    else return false;
-    if (i + need >= n) return false;
-    for (let k: i64 = 1; k <= need; k++) {
-      const c = bytes[(i + k) as usize] as i64;
-      if (c < (k === 1 ? low : 0x80) || c > (k === 1 ? high : 0xBF)) return false;
-    }
-    i += need + 1;
-  }
-  return true;
-}
-
-// A URL's path as its pathname gives it.
-function __urlPathText(url: Ref<__urlRecord>): string {
-  if (url.opaque) return url.path[0];
-  if (url.path.length === 0) return "";
-  return "/" + url.path.join("/");
 }
 
 // A URL written out, with the query its params hold now.
@@ -2229,7 +2460,14 @@ class URLSearchParams {
 }
 `;
 
+const BYTE_METHODS = ["toBase64", "toHex"];
+const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
+// std's names a program may declare its own of, which std's own code then reaches under another.
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
+// std's top-level names for its own code: a program can't use them as std means them, so no
+// suggestion offers them.
+export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
 const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
@@ -2253,9 +2491,222 @@ type Json = JsonValue;
 // The name untyped `JSON.parse` reads into.
 export const JSON_VALUE_NAME = "json value";
 
+// The encoders and decoders on bytes, in a program that calls one of them or btoa or atob.
+const BYTES = `
+// bytes.toBase64(options) and bytes.toHex(), as TC39's Uint8Array methods. Text is built as bytes
+// and decoded once, since appending to a string copies it.
+function __arrayToBase64(bytes: Ref<u8[]>, options?: { alphabet?: "base64" | "base64url"; omitPadding?: boolean }): string {
+  return __arrayBase64Text(bytes, options?.alphabet === "base64url", options?.omitPadding !== true);
+}
+function __arrayBase64Text(bytes: Ref<u8[]>, url: boolean, pad: boolean): string {
+  const table = new TextEncoder().encode(url ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/");
+  const n = bytes.length;
+  let out: u8[] = [];
+  out.reserve(((n + 2) / 3 * 4) as i64);
+  let i: usize = 0;
+  while (i + 3 <= n) {
+    const v = ((bytes[i] as i64) << 16) | ((bytes[i + 1] as i64) << 8) | (bytes[i + 2] as i64);
+    out.push(table[(v >> 18) as usize]);
+    out.push(table[((v >> 12) & 63) as usize]);
+    out.push(table[((v >> 6) & 63) as usize]);
+    out.push(table[(v & 63) as usize]);
+    i += 3;
+  }
+  const left = n - i;
+  if (left > 0) {
+    const v = ((bytes[i] as i64) << 16) | (left === 2 ? (bytes[i + 1] as i64) << 8 : 0);
+    out.push(table[(v >> 18) as usize]);
+    out.push(table[((v >> 12) & 63) as usize]);
+    if (left === 2) out.push(table[((v >> 6) & 63) as usize]);
+    if (pad) {
+      if (left === 1) out.push(61);
+      out.push(61);
+    }
+  }
+  return new TextDecoder().decode(out);
+}
+function __arrayToHex(bytes: Ref<u8[]>): string {
+  const digits = new TextEncoder().encode("0123456789abcdef");
+  let out: u8[] = [];
+  out.reserve((bytes.length * 2) as i64);
+  for (const b of bytes) {
+    out.push(digits[(b >> 4) as usize]);
+    out.push(digits[(b & 15) as usize]);
+  }
+  return new TextDecoder().decode(out);
+}
+// A base64 character's value, or -1 for one outside the alphabet.
+function __arrayBase64Value(c: i64, url: boolean): i64 {
+  if (c >= 65 && c <= 90) return c - 65;
+  if (c >= 97 && c <= 122) return c - 71;
+  if (c >= 48 && c <= 57) return c + 4;
+  if (c === (url ? 45 : 43)) return 62;
+  if (c === (url ? 95 : 47)) return 63;
+  return -1;
+}
+// ASCII whitespace, as the HTML spec and TC39 skip it.
+function __arrayBase64Space(c: i64): boolean {
+  return c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
+}
+// A chunk of 2, 3 or 4 characters' values as its bytes. A short chunk's bits past its last byte are
+// dropped, or refused when they must be zero.
+function __arrayBase64Chunk(out: Mut<u8[]>, v: i64, count: i64, strict: boolean): void throws TypeError {
+  const bits = v << ((4 - count) * 6);
+  if (strict && (bits & (count === 2 ? 0xFFFF : count === 3 ? 0xFF : 0)) !== 0) throw new TypeError("base64 input has bits set past its last byte; fix its last character, or decode with lastChunkHandling: \\"loose\\"");
+  out.push((bits >> 16) as u8);
+  if (count > 2) out.push(((bits >> 8) & 255) as u8);
+  if (count > 3) out.push((bits & 255) as u8);
+}
+// u8.fromBase64(s, options), TC39's FromBase64 with no length limit.
+function __arrayFromBase64(s: string, options?: { alphabet?: "base64" | "base64url"; lastChunkHandling?: "loose" | "strict" | "stop-before-partial" }): u8[] throws TypeError {
+  const url = options?.alphabet === "base64url";
+  const handling = options?.lastChunkHandling ?? "loose";
+  const text = new TextEncoder().encode(s);
+  const n = text.length as i64;
+  let out: u8[] = [];
+  out.reserve(n / 4 * 3);
+  let v: i64 = 0;
+  let count: i64 = 0;
+  let i: i64 = 0;
+  while (true) {
+    while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+    if (i === n) {
+      if (count === 0 || handling === "stop-before-partial") return out;
+      if (handling === "strict") throw new TypeError("base64 input ends in a chunk without its padding; pad it with '=', or decode with lastChunkHandling: \\"loose\\"");
+      if (count === 1) throw new TypeError("base64 input ends in a lone character, which holds no whole byte; check it isn't cut short");
+      __arrayBase64Chunk(out, v, count, false);
+      return out;
+    }
+    const c = text[i as usize] as i64;
+    i++;
+    if (c === 61) {
+      if (count < 2) throw new TypeError("base64 padding '=' goes after the second or third character of a chunk of four");
+      while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+      if (count === 2) {
+        if (i === n) {
+          if (handling === "stop-before-partial") return out;
+          throw new TypeError("base64 padding after two characters is '=='; add the second '='");
+        }
+        if (text[i as usize] === 61) {
+          i++;
+          while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+        }
+      }
+      if (i < n) throw new TypeError("base64 input goes on after its padding; '=' only ends it");
+      __arrayBase64Chunk(out, v, count, handling === "strict");
+      return out;
+    }
+    const d = __arrayBase64Value(c, url);
+    if (d < 0) throw new TypeError(url ? "base64url input holds a character outside A-Z, a-z, 0-9, '-' and '_'; decode standard base64 without alphabet: \\"base64url\\"" : "base64 input holds a character outside A-Z, a-z, 0-9, '+' and '/'; decode base64url with alphabet: \\"base64url\\"");
+    v = (v << 6) | d;
+    count++;
+    if (count === 4) {
+      __arrayBase64Chunk(out, v, 4, false);
+      v = 0;
+      count = 0;
+    }
+  }
+}
+function __arrayHexValue(c: i64): i64 {
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 102) return c - 87;
+  if (c >= 65 && c <= 70) return c - 55;
+  return -1;
+}
+// u8.fromHex(s): two digits a byte, in either case.
+function __arrayFromHex(s: string): u8[] throws TypeError {
+  const text = new TextEncoder().encode(s);
+  if (text.length % 2 !== 0) throw new TypeError("hex input has an odd number of digits; each byte is two");
+  let out: u8[] = [];
+  out.reserve((text.length / 2) as i64);
+  let i: usize = 0;
+  while (i < text.length) {
+    const high = __arrayHexValue(text[i] as i64);
+    const low = __arrayHexValue(text[i + 1] as i64);
+    if (high < 0 || low < 0) throw new TypeError("hex input holds a character outside 0-9, a-f and A-F");
+    out.push((high * 16 + low) as u8);
+    i += 2;
+  }
+  return out;
+}
+`;
+// btoa and atob, each in a program that names it and doesn't declare it, so a program's own
+// polyfill of one keeps its name and std's other stays.
+const BTOA = `
+// btoa and atob, as the HTML spec has them: base64 of a string's characters as Latin-1 bytes. The
+// UTF-8 the string holds is read back as code points up to U+00FF.
+function btoa(data: string): string throws TypeError {
+  const text = new TextEncoder().encode(data);
+  let bytes: u8[] = [];
+  bytes.reserve(text.length as i64);
+  let i: usize = 0;
+  while (i < text.length) {
+    const b = text[i];
+    if (b < 0x80) {
+      bytes.push(b);
+      i += 1;
+    } else if (b === 0xC2 || b === 0xC3) {
+      bytes.push(((b & 3) << 6) | (text[i + 1] & 63));
+      i += 2;
+    } else {
+      throw new TypeError("btoa takes characters up to U+00FF; for other text, encode it as UTF-8 first, as in 'new TextEncoder().encode(s).toBase64()'");
+    }
+  }
+  return __arrayBase64Text(bytes, false, true);
+}
+`;
+const ATOB = `
+// The HTML spec's forgiving-base64 decode: whitespace is dropped, then up to two '=' that end a
+// whole chunk, and what is left must be a whole number of bytes in the standard alphabet.
+function atob(data: string): string throws TypeError {
+  const text = new TextEncoder().encode(data);
+  let chars: u8[] = [];
+  chars.reserve(text.length as i64);
+  for (const c of text) {
+    if (!__arrayBase64Space(c as i64)) chars.push(c);
+  }
+  let n = chars.length;
+  if (n % 4 === 0 && n > 0 && chars[n - 1] === 61) n -= chars[n - 2] === 61 ? 2 : 1;
+  const bad = "atob takes base64 in A-Z, a-z, 0-9, '+' and '/', with '=' only as padding; decode base64url with u8.fromBase64(s, { alphabet: \\"base64url\\" })";
+  if (n % 4 === 1) throw new TypeError(bad);
+  let bytes: u8[] = [];
+  bytes.reserve((n / 4 * 3) as i64);
+  let v: i64 = 0;
+  let count: i64 = 0;
+  for (let i: usize = 0; i < n; i++) {
+    const d = __arrayBase64Value(chars[i] as i64, false);
+    if (d < 0) throw new TypeError(bad);
+    v = (v << 6) | d;
+    count++;
+    if (count === 4) {
+      __arrayBase64Chunk(bytes, v, 4, false);
+      v = 0;
+      count = 0;
+    }
+  }
+  if (count > 0) __arrayBase64Chunk(bytes, v, count, false);
+  // Each byte as the code point of the same number, in UTF-8.
+  let out: u8[] = [];
+  out.reserve((bytes.length * 2) as i64);
+  for (const b of bytes) {
+    if (b < 0x80) out.push(b);
+    else {
+      out.push(0xC0 | (b >> 6));
+      out.push(0x80 | (b & 63));
+    }
+  }
+  return new TextDecoder().decode(out);
+}
+`;
+
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
 export const STD_MODULES: Record<string, string> = {
+  // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
+  // they panic where they are made.
+  assert: String.raw`
+export function ok(_value: boolean, _message?: string): void {}
+`,
   os: String.raw`
 declare function fsh_rt_os_hostname(): Ptr<u8>;
 declare function fsh_rt_os_tmpdir(): Ptr<u8>;
@@ -2281,6 +2732,42 @@ export function platform(): string {
 
 export function availableParallelism(): i64 {
   return unsafe { fsh_rt_os_parallelism() };
+}
+`,
+  // Web Crypto's random functions, and Node's randomBytes, from the OS's secure random source. A
+  // u8[] stands in for Uint8Array and Buffer.
+  crypto: String.raw`
+declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
+
+// Fills the array in place and gives it back. Web Crypto fills at most 65536 bytes a call.
+export function getRandomValues(array: Mut<u8[]>): Mut<u8[]> {
+  const n = array.length;
+  assert(n <= 65536, "QuotaExceededError: getRandomValues fills at most 65536 bytes a call, not " + String(n) + "; fill a larger array in pieces");
+  if (n > 0) unsafe { fsh_rt_random_fill(mutPtrOf(array[0]), n) };
+  return array;
+}
+
+export function randomBytes(size: i64): u8[] {
+  assert(size >= 0, "randomBytes takes a size of 0 or more, not " + String(size));
+  let out: u8[] = new Array(size).fill(0 as u8);
+  if (size > 0) unsafe { fsh_rt_random_fill(mutPtrOf(out[0]), size as usize) };
+  return out;
+}
+
+// A version 4 UUID, RFC 9562's: 122 random bits, then the version and variant in lowercase hex.
+export function randomUUID(): string {
+  let b = randomBytes(16);
+  b[6] = (b[6] & 0x0F) | 0x40;
+  b[8] = (b[8] & 0x3F) | 0x80;
+  const digits = new TextEncoder().encode("0123456789abcdef");
+  let out: u8[] = [];
+  out.reserve(36);
+  for (let i: usize = 0; i < 16; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) out.push(45);
+    out.push(digits[(b[i] >> 4) as usize]);
+    out.push(digits[(b[i] & 15) as usize]);
+  }
+  return new TextDecoder().decode(out);
 }
 `,
   // The checker gives these their meaning, as each takes values of any type; a rest parameter
@@ -2989,44 +3476,57 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 
 // A hash of the std source, the compiler's own sources and Bun's version, which decides the
-// serialization format, so no other parser's tree is ever loaded.
-export function stdKey(source: string, dir: string): string {
+// serialization format, so no other parser's tree is ever loaded. Null when no compiler source
+// can be read, as inside a single-file executable, since the hash couldn't tell parsers apart.
+export function stdKey(source: string, dir: string): string | null {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".ts")).sort();
+  } catch {
+    return null;
+  }
+  if (files.length === 0) return null;
   const hash = createHash("sha256").update(Bun.version).update("\0").update(source);
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".ts")).sort()) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
+  for (const f of files) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
   return hash.digest("hex").slice(0, 16);
 }
 
 // std's parsed tree, serialized: kept in the session's memory, else read from the cache, else
 // parsed and written there, the session counting the parse. A cache that can't be read or written
-// only costs the parse.
+// only costs the parse, and without a key the cache isn't touched at all.
 function stdBytes({ std }: Session): Uint8Array {
-  const path = join(cacheDir(), "std", `ast-${(std.key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
-  if (std.tree?.path === path) return std.tree.bytes;
+  if (std.key === undefined) std.key = stdKey(STD_SOURCE, import.meta.dir);
+  const path = std.key === null ? null : join(cacheDir(), "std", `ast-${std.key}.bin`);
+  if (std.tree !== undefined && std.tree.path === path) return std.tree.bytes;
   let bytes: Uint8Array | undefined;
-  try {
-    bytes = readFileSync(path);
-    // A tree from before nodes had ids, or anything else, is made again.
-    const cached = deserialize(bytes);
-    if (!Array.isArray(cached) || typeof cached[0]?.id !== "number") bytes = undefined;
-  } catch {
-    bytes = undefined;
+  if (path !== null) {
+    try {
+      bytes = readFileSync(path);
+      // A tree from before nodes had ids, or anything else, is made again.
+      const cached = deserialize(bytes);
+      if (!Array.isArray(cached) || typeof cached[0]?.id !== "number") bytes = undefined;
+    } catch {
+      bytes = undefined;
+    }
   }
   if (bytes === undefined) {
     std.parses++;
     // Ids are each compilation's own, so the cached tree holds zeros, and each copy is numbered
     // as it is loaded.
     bytes = new Uint8Array(serialize(renumber(parse(STD_SOURCE, { last: 0 }), () => 0)));
-    try {
-      const temp = partial(path);
-      writeFileSync(temp, bytes);
-      renameSync(temp, path);
-    } catch {}
+    if (path !== null) {
+      try {
+        const temp = partial(path);
+        writeFileSync(temp, bytes);
+        renameSync(temp, path);
+      } catch {}
+    }
   }
   std.tree = { path, bytes };
   return bytes;
@@ -3041,27 +3541,53 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // none hides them.
   hideHelpers(all);
   const at = (s: Stmt) => s.start - STD_BASE;
-  const prelude = all.filter((s) => at(s) < PRELUDE.length);
-  const http = all.filter((s) => at(s) >= PRELUDE.length && at(s) < PRELUDE.length + HTTP.length);
-  const urlAt = PRELUDE.length + HTTP.length;
-  const url = all.filter((s) => at(s) >= urlAt && at(s) < urlAt + URL_LIB.length);
-  const jsonAt = urlAt + URL_LIB.length;
-  const json = all.filter((s) => at(s) >= jsonAt && at(s) < jsonAt + JSON_VALUE.length);
-  const jsonName = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length && at(s) < jsonAt + JSON_VALUE.length + JSON_NAME.length);
+  let from = 0;
+  // The statements of std's next section, in the order STD_SOURCE joins them.
+  const next = (text: string) => {
+    const start = from;
+    from += text.length;
+    return all.filter((s) => at(s) >= start && at(s) < from);
+  };
+  const prelude = next(PRELUDE);
+  const http = next(HTTP);
+  const fetching = next(FETCH);
+  const served = next(SERVED);
+  const core = next(URL_CORE);
+  const url = next(URL_LIB);
+  const json = next(JSON_VALUE);
+  const jsonName = next(JSON_NAME);
+  const ast = next(AST + AST_HELPERS);
+  const js = next(JS_ERROR);
+  const bytes = next(BYTES);
+  const btoa = next(BTOA);
+  const atob = next(ATOB);
   renameValue([...json, ...jsonName]);
-  const jsAt = STD_SOURCE.length - JS_ERROR.length;
-  const ast = all.filter((s) => at(s) >= jsonAt + JSON_VALUE.length + JSON_NAME.length && at(s) < jsAt);
-  const js = all.filter((s) => at(s) >= jsAt);
-  const astNames = ast.flatMap((s) => ("name" in s && typeof s.name === "string" ? [s.name] : []));
-  const parts = [[http, HTTP_NAMES], [url, URL_NAMES], [json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
+  const astNames = ast.flatMap(declaredNames);
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]]] as const;
   const packages = written.some(fromPackage);
-  // The HTTP library parses its URLs with the URL library's parser, which comes with it. A
-  // program's own URL or URLSearchParams keeps its name, and std's takes one no program can write.
+  // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
+  // program can write.
+  const declared = new Set(written.flatMap(declaredNames));
+  const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
+  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob], own);
+  // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
+  // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
-  const urlWanted = httpUsed || uses(written, [], URL_NAMES);
-  const own = new Set(URL_NAMES.filter((n) => written.some((s) => "name" in s && s.name === n)));
-  if (urlWanted && own.size > 0) hideNames([...http, ...url], own);
-  return [...prelude, ...parts.flatMap(([part, names]) => (part === url ? urlWanted : uses(written, part, [...names]) || (part === js && packages)) ? part : [])];
+  const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
+  const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentions(written, (n) => n.kind === "ident" && n.name === "Request"));
+  const urls = [...(httpUsed && !urlWanted ? served : []), ...(httpUsed || urlWanted ? core : []), ...(urlWanted ? url : [])];
+  const linked = parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []));
+  // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
+  // btoa and atob call them too.
+  const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
+  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
+}
+
+// A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
+function encodes(n: Record<string, unknown>): boolean {
+  if (n.kind !== "member" || typeof n.name !== "string") return false;
+  const object = n.object as { kind?: string; name?: string };
+  return BYTE_METHODS.includes(n.name) || (BYTE_STATICS.includes(n.name) && object.kind === "ident" && object.name === "u8");
 }
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
@@ -3071,7 +3597,7 @@ function hideHelpers(nodes: unknown) {
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
   const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-  if (hidden && typeof node.name === "string" && /^__(array|promise|timer|timeout|router|url)/.test(node.name)) {
+  if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);
@@ -3106,14 +3632,51 @@ function fromPackage(s: Stmt): boolean {
 }
 
 function uses(written: Stmt[], library: Stmt[], wanted: string[]): boolean {
-  const declared = new Set(written.map((s) => ("name" in s ? s.name : undefined)));
-  if (library.some((s) => "name" in s && declared.has(s.name))) return false;
-  const names = (v: unknown): boolean => {
-    if (Array.isArray(v)) return v.some(names);
-    if (typeof v !== "object" || v === null) return false;
-    const node = v as Record<string, unknown>;
-    const named = (node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && wanted.includes(node.name);
-    return named || Object.values(node).some(names);
-  };
-  return names(written);
+  const declared = new Set(written.flatMap(declaredNames));
+  if (library.some((s) => declaredNames(s).some((n) => declared.has(n)))) return false;
+  // A name the program declares is its own, not the library's.
+  return mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && wanted.includes(n.name) && !declared.has(n.name));
+}
+
+// The top-level names a statement binds: a declaration's, each name its `let` or `const`
+// patterns bind, and an import's, through `export` and `declare`.
+function declaredNames(s: Stmt): string[] {
+  switch (s.kind) {
+    case "export":
+    case "declare":
+      return declaredNames(s.body);
+    case "exportDefault":
+      return s.declaration === undefined ? [] : declaredNames(s.declaration);
+    case "let":
+      return s.declarations.flatMap((d) => boundNames(d.target));
+    case "import":
+      return [...(s.default === undefined ? [] : [s.default]), ...(s.namespace === undefined ? [] : [s.namespace]), ...(s.named ?? []).map((n) => n.alias ?? n.name)];
+    default:
+      return "name" in s && typeof s.name === "string" ? [s.name] : [];
+  }
+}
+
+// The names a binding pattern binds; a default's value binds none.
+function boundNames(p: Pattern | undefined): string[] {
+  if (p === undefined) return [];
+  switch (p.kind) {
+    case "ident":
+      return [p.name];
+    case "object":
+      return [...p.props.flatMap((prop) => boundNames(prop.value)), ...boundNames(p.rest)];
+    case "array":
+      return [...p.elements.flatMap(boundNames), ...boundNames(p.rest)];
+    case "default":
+      return boundNames(p.target);
+    default:
+      return [];
+  }
+}
+
+// Whether a node in a tree is one the test picks.
+function mentions(v: unknown, test: (node: Record<string, unknown>) => boolean): boolean {
+  if (Array.isArray(v)) return v.some((n) => mentions(n, test));
+  if (typeof v !== "object" || v === null) return false;
+  const node = v as Record<string, unknown>;
+  return test(node) || Object.values(node).some((n) => mentions(n, test));
 }

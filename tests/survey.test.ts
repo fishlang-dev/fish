@@ -105,7 +105,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
   expect(counts("function f(a?: string) { return () => class {}; }\n")).toEqual({ A2: 1 });
   expect(counts("const a = Number.parseInt(s);\nconst f = Function(\"x\");\n")).toEqual({ R1: 1 });
-  expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({ math: 1 });
+  expect(counts("const r = Math.random();\nconst n = Math.floor(Math.sqrt(x) * Math.PI);\n")).toEqual({});
   expect(counts("const a = /x+/.test(s) && /(y)/.exec(s);\nconst b = new RegExp(\"z\", \"i\");\nconst c = new RegExp(`w`);\n")).toEqual({});
   expect(counts("const a = /x+/g.test(s);\nconst i = re.lastIndex;\n")).toEqual({ regexState: 2 });
   expect(counts("function f() { [a, b] = [b, a]; g([c] = [1]); }\n")).toEqual({ destructuringAssignment: 1 });
@@ -203,7 +203,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(56);
+  expect(r.rules.length + r.waiting.length).toBe(55);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -241,14 +241,14 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
   next(0);
 }
 
-const big = "const xs = Math.random(f, 1);\n".repeat(10);
+const big = "const xs = console.debug(f, 1);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
   projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "abstract class A {}\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
-      ["Randomness", 1, 10, 78.5],
+      ["The rest of console", 1, 10, 78.5],
       ["for...in", 1, 1, 85.7],
       ["Abstract classes and #private fields", 1, 2, 100],
     ]);
@@ -257,11 +257,22 @@ test("the curve picks the feature freeing the most lines first, and frees a file
   });
 });
 
+test("a project using Buffer waits on typed arrays, though std has base64 and hex", () => {
+  projects([{
+    "a.ts": "import { Buffer } from \"node:buffer\";\nexport function pack(a: Uint8Array): Buffer {\n  const head = Buffer.alloc(4);\n  head.writeUInt32BE(a.length, 0);\n  return Buffer.concat([head, Buffer.from(a)]);\n}\n",
+    "b.ts": "export const one = 1;\n",
+  }], (dirs) => {
+    const r = rank(dirs);
+    expect(r.curve.start.share).toBeLessThan(100);
+    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Typed arrays and DataView"]);
+  });
+});
+
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
   projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
     expect(r.repos[0]!.unread).toEqual({ files: 2, lines: 3 });
-    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["Randomness", 76.9]]);
+    expect(r.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["The rest of console", 76.9]]);
     expect(r.curve.unread).toEqual([{ feature: "JSX for server-side HTML", files: 1, lines: 2 }, { feature: "parser gaps", files: 1, lines: 1 }]);
     expect(formatRanking(r)).toContain("also waiting, in files Fish couldn't read");
     expect(r.self!.curve.steps.map((s) => [s.feature, s.portable.share])).toEqual([["for...in", 100]]);
@@ -296,10 +307,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **Randomness** - Math.random\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "Randomness": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
+      "The rest of console": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
@@ -315,7 +326,7 @@ test("a plan names each feature's item and whether it is done", () => {
 test("fishc survey --rank prints and gives JSON, and refuses what it can't read", () => {
   projects([{ "a.ts": big }, { "s.ts": "const o = { ...p };\n" }], ([a, s]) => {
     const text = fishc("survey", "--rank", a!, "--self", s!).stdout.toString();
-    expect(text).toContain("1. Randomness");
+    expect(text).toContain("1. The rest of console");
     expect(text).toContain(`self-hosting (${s})`);
     expect(JSON.parse(fishc("survey", "--rank", a!, "--json").stdout.toString())).toEqual(JSON.parse(JSON.stringify(rank([a!]))));
     expect(fishc("survey", "--rank", a!, "--plan", join(a!, "missing.md")).exitCode).toBe(2);
@@ -332,16 +343,16 @@ test("fishc survey --rank prints and gives JSON, and refuses what it can't read"
 });
 
 test("a comparison lists the rules that moved, the furthest first, a new rule from nothing", () => {
-  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = Math.random(f, 1);\n" }, (dir) => {
+  project({ "a.ts": "var a = 1;\nvar b = 2;\nconst xs = console.debug(f, 1);\n" }, (dir) => {
     const then = readReport(JSON.stringify(survey(dir)));
-    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = Math.random(f, 1) && Math.random(g, 2) && Math.random(h, 3);\ndelete o.k;\n");
+    writeFileSync(join(dir, "a.ts"), "const a = 1;\nconst xs = console.debug(f, 1) && console.debug(g, 2) && console.debug(h, 3);\ndelete o.k;\n");
     const c = compare(then, survey(dir));
-    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["math", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
+    expect(c.rules.map((m) => [m.id, m.then, m.now, m.change])).toEqual([["A1", 2, 0, -2], ["console", 1, 3, 2], ["G7", 0, 1, 1], ["R3", 0, 1, 1]]);
     expect(c.then.counts.reject).toBe(0);
     expect(c.now.counts.reject).toBe(1);
     const text = formatComparison(c);
     expect(text).toContain("rejected  0 -> 1 (+1)");
-    expect(text).toContain("      +2  Math.random (1 -> 3)");
+    expect(text).toContain("      +2  console methods besides log, error and warn (1 -> 3)");
     expect(text.indexOf("rewrites that changed")).toBeLessThan(text.indexOf("waiting on Fish, changed"));
     expect(formatComparison(compare(then, then))).toContain("no rule's count changed");
   });
@@ -465,7 +476,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
 
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
-    "a.ts": "import { createSocket } from \"node:dgram\";\nimport crypto from \"crypto\";\n",
+    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
     "c.ts": "import vm from \"vm\";\nimport d = require(\"dgram\");\n",
     "plan.md": "- [ ] 1. **UDP sockets**\n- [ ] 2. **Hashing**\n",
@@ -482,11 +493,11 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["dgram", "crypto", "timers/promises"]);
   });
   project({
-    "a.ts": "export * from \"crypto\";\nexport { createSocket } from \"node:dgram\";\n",
+    "a.ts": "export * from \"zlib\";\nexport { createSocket } from \"node:dgram\";\n",
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Hashing", "UDP sockets"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "UDP sockets"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
   // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
@@ -515,7 +526,7 @@ test("child_process's sync calls are std's, and spawn still waits", () => {
 
 test("the report lists each Node built-in with its files and what replaces it", () => {
   project({
-    "a.ts": "import { createSocket } from \"node:dgram\";\nimport crypto from \"crypto\";\n",
+    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
     "b.ts": "import dgram from \"node:dgram\";\nimport http from \"node:http\";\n",
     "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\n",
   }, (dir) => {
@@ -565,5 +576,56 @@ test("generic arrows not held by a const are portable", () => {
 test("node:fs members the std module answers are portable; others are Node built-ins", () => {
   project({ "a.ts": "import { readFileSync, statSync, rmSync } from \"node:fs\";\n", "b.ts": "import { mkdirSync } from \"fs\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
+  });
+});
+
+test("std's random functions make Math.random, crypto imports of them, and uuid and nanoid portable", () => {
+  project({
+    "a.ts": "import { randomUUID, getRandomValues } from \"node:crypto\";\nexport const id = randomUUID() + Math.random();\n",
+    "b.ts": "import { randomUUID, createHash } from \"crypto\";\n",
+    "package.json": JSON.stringify({ dependencies: { uuid: "1", nanoid: "1" } }),
+  }, (dir) => {
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([[], ["Hashing"]]);
+    expect(Object.fromEntries(dependencies(dir)!.list.map((x) => [x.name, [x.group, x.equivalent?.name]]))).toEqual({
+      nanoid: ["std", "crypto.getRandomValues, to build IDs from"], uuid: ["std", "crypto.randomUUID, for v4 only"],
+    });
+  });
+});
+
+test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a u8[]", () => {
+  project({
+    "a.ts": "import { randomBytes } from \"node:crypto\";\nexport const t = randomBytes(16).toString(\"hex\");\n",
+    "b.ts": "import crypto from \"crypto\";\nexport const b = crypto.randomBytes(8).readUInt32BE(0) + crypto.randomUUID().length;\n",
+    "c.ts": "import { randomBytes, createHash } from \"crypto\";\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Typed arrays and DataView"], ["Typed arrays and DataView"], ["Hashing", "Typed arrays and DataView"]]);
+    expect(survey(dir).builtins!.map((b) => b.module)).toEqual(["buffer", "crypto"]);
+  });
+});
+
+test("node:assert ports for its default export and ok, and its other names wait on nothing planned", () => {
+  project({
+    "a.ts": "import assert from \"node:assert\";\nassert(1 < 2);\nassert.ok(true, \"fine\");\n",
+    "b.ts": "import { ok } from \"assert\";\nok(1 < 2);\n",
+    "c.ts": "import { ok, strictEqual } from \"node:assert\";\nok(true);\nstrictEqual(1, 1);\n",
+    "d.ts": "import assert from \"assert\";\nassert.deepStrictEqual([1], [1]);\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Node built-ins"], ["Node built-ins"]]);
+    expect(survey(dir).builtins!.map((b) => [b.module, b.equivalent?.name])).toEqual([["assert", "assert, for the default export and ok"]]);
+  });
+});
+
+test("an import whose missing names wait on different features waits on each, and isn't freed by one", () => {
+  projects([
+    { "a.ts": "import { randomBytes, createHash } from \"node:crypto\";\nconsole.log(randomBytes(4), createHash(\"sha1\"));\n" },
+    { "b.ts": "import { randomBytes, randomInt } from \"crypto\";\nconsole.log(randomBytes(4), randomInt(3));\n" },
+    { "c.ts": "import crypto from \"crypto\";\nconsole.log(crypto.randomBytes(4), crypto.createHash(\"md5\"), crypto.randomUUID());\n" },
+  ], ([a, b, c]) => {
+    for (const [dir, other] of [[a!, "Hashing"], [b!, "Node built-ins"], [c!, "Hashing"]] as const) {
+      expect(scanFiles(dir).map(featuresOf)).toEqual([[other, "Typed arrays and DataView"].sort()]);
+      const steps = rank([dir]).curve.steps;
+      expect(steps.map((s) => [s.gained.files, s.portable.share])).toEqual([[0, 0], [1, 100]]);
+    }
+    expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["buffer", "Typed arrays and DataView"], ["crypto.randomInt", undefined]]);
   });
 });
