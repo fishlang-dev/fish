@@ -1448,6 +1448,7 @@ class Http1 {
     res.headers.forEach((value: string, name: string) => {
       if (!Http1.isToken(name) || Http1.hasBreak(value)) fine = false;
     });
+    for (const line of res.cookies.toSetCookieHeaders()) if (Http1.hasBreak(line)) fine = false;
     return fine;
   }
 

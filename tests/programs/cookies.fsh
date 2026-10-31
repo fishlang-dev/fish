@@ -143,3 +143,69 @@ async function main(): Promise<void> throws IoError | AbortError {
   const three = await ask(port, "GET /clone HTTP/1.1\r\nHost: h\r\nCookie: visits=7\r\nConnection: close\r\n\r\n");
   console.log(cookieLines(three));
 }
+// case: cookies_refused
+// expect: /semicolon HTTP/1.1 500 Internal Server Error false
+// expect: /equals HTTP/1.1 500 Internal Server Error false
+// expect: /space HTTP/1.1 500 Internal Server Error false
+// expect: /crlf HTTP/1.1 500 Internal Server Error false
+// expect: /empty HTTP/1.1 500 Internal Server Error false
+// expect: /path HTTP/1.1 500 Internal Server Error false
+// expect: /path-crlf HTTP/1.1 500 Internal Server Error false
+// expect: /domain HTTP/1.1 500 Internal Server Error false
+// expect: /domain-ascii HTTP/1.1 500 Internal Server Error false
+// expect: /delete HTTP/1.1 500 Internal Server Error false
+// expect: /fine HTTP/1.1 200 OK true
+// A cookie that would break out of its header or its attribute panics in the handler that sets
+// it: the client gets a bare 500 with no Set-Cookie, and the server goes on serving.
+async function ask(port: i64, path: string): Promise<string> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode("GET " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"));
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096, AbortSignal.timeout(5000));
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  const text = new TextDecoder().decode(all);
+  return path + " " + text.split("\r\n")[0] + " " + String(text.includes("set-cookie"));
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    let res = new Response("ok");
+    const p = req.path;
+    if (p === "/semicolon") res.cookies.set("a;b", "x");
+    else if (p === "/equals") res.cookies.set("a=b", "x");
+    else if (p === "/space") res.cookies.set("a b", "x");
+    else if (p === "/crlf") res.cookies.set("a\r\nx-evil: 1", "x");
+    else if (p === "/empty") res.cookies.set("", "x");
+    else if (p === "/path") res.cookies.set("a", "x", { path: "/; Domain=evil.example" });
+    else if (p === "/path-crlf") res.cookies.set("a", "x", { path: "/\r\nx-evil: 1" });
+    else if (p === "/domain") res.cookies.set("a", "x", { domain: "example.com; Secure" });
+    else if (p === "/domain-ascii") res.cookies.set("a", "x", { domain: "\u{E9}vil.example" });
+    else if (p === "/delete") res.cookies.delete("a", { path: "/\u{0}" });
+    else res.cookies.set("fine", "x");
+    return res;
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+  for (const path of ["/semicolon", "/equals", "/space", "/crlf", "/empty", "/path", "/path-crlf", "/domain", "/domain-ascii", "/delete", "/fine"]) {
+    const line = await ask(port, path);
+    console.log(line);
+  }
+}
+// case: cookies_bad_name
+// panic: a cookie's name must be an HTTP token, of letters, digits and !#$%&'*+-.^_|~, so 'sid; Domain=evil.example' can't be one
+// A name that isn't a token would let the program write attributes of its own.
+function main() {
+  let jar = new CookieMap();
+  jar.set("sid; Domain=evil.example", "x");
+}
+// case: cookies_bad_path
+// panic: cookie 'sid' can't have a path holding ';', a control character or a character outside ASCII
+function main() {
+  let jar = new CookieMap();
+  jar.set("sid", "x", { path: "/; SameSite=None" });
+}
