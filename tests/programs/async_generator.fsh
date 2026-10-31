@@ -620,3 +620,8 @@ async function one(): Promise<i64> { return 1; }
 async function main() {
   const d: Dyn<Promise<i64>> = one();
 }
+// case: async_generator_send
+// error: values sent into an async generator's 'next' are not supported yet
+async function* one(): AsyncGenerator<i64, void, i64> { yield 1; }
+
+async function main() {}
