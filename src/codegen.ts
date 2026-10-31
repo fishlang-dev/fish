@@ -236,7 +236,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const declaredRust = new Set<string>();
   const rustDrops = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder, kindTests);
+  const { convert, test, equals, unionField, holds, holdsWhere, eachMember } = conversions(builder, kindTests);
 
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
@@ -6708,6 +6708,46 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     return cString(`panicked at ${where(at)}:\n`);
   }
 
+  // A type predicate's answer narrows its argument, and a wrong one would have the narrowed code
+  // read the union's payload as a member it doesn't hold, so its tag is checked against the
+  // answer in every build, as an index is against the length.
+  function predicateCheck(e: Extract<Expr, { kind: "call" }>, answer: string) {
+    const { index, type, yes, no } = current.predicates!.get(e)!;
+    const arg = e.args[index] as Extract<Expr, { kind: "ident" }>;
+    const local = resolved(arg);
+    let [v, whole] = [temp(), local.type];
+    emit(`${v} = load ${llvm(whole)}, ptr ${slot(local)}`);
+    while (isRef(whole) || (typeof whole !== "string" && whole.kind === "recursive")) {
+      const [inner, next] = [temp(), isRef(whole) ? whole.to : (whole as RecursiveType).of];
+      emit(`${inner} = load ${llvm(next)}, ptr ${v}`);
+      [v, whole] = [inner, next];
+    }
+    if (typeof whole === "string" || whole.kind !== "union") return;
+    const union = whole;
+    const [held, wrong, bad] = [holdsWhere(v, union, (m) => typing.fits(m, type)), temp(), temp()];
+    emit(`${wrong} = xor i1 ${answer}, ${held}`);
+    emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
+    const [fail, ok] = [label(), label()];
+    emit(`br i1 ${bad}, label %${fail}, label %${ok}`);
+    startBlock(fail);
+    const [said, saidNot] = [label(), label()];
+    emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
+    const name = calls.get(e)!.body.name;
+    for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
+      startBlock(at);
+      const tag = temp();
+      emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
+      const cases = union.members.map(() => label());
+      emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      union.members.forEach((m, i) => {
+        startBlock(cases[i]!);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${arg.name}' ${is} '${show(type)}', but it holds a '${show(m)}'\n`)})`);
+        emit("unreachable");
+      });
+    }
+    startBlock(ok);
+  }
+
   // `file:line:col` of an expression, in the program or the std library.
   function where(at: Span): string {
     const place = sourceOf(src, file, at.start, sources);
@@ -8544,6 +8584,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       case "call": {
         const result = call(e);
         if (!result) throw new Error("internal error: void call used as a value");
+        if (current.predicates?.has(e)) predicateCheck(e, result);
         return result;
       }
       case "unary": {

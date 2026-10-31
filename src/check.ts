@@ -105,6 +105,9 @@ export type Instance = {
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
+  // Each call of a type predicate that narrows its argument: the predicate's type, and whether
+  // its true and its false answers narrow, which codegen checks against the argument's tag.
+  predicates?: NodeMap<Expr, { index: number; type: Type; yes: boolean; no: boolean }>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -860,6 +863,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(tables.typing, info)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
+    instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
@@ -1096,6 +1100,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     delete instance.throws;
     delete instance.envs;
     delete instance.made;
+    delete instance.predicates;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
@@ -1187,7 +1192,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const p = target?.body.returnType;
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
       const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
-      return { index, type: withScope(target.bindings, () => resolveType(p.type!)) };
+      const type = withScope(target.bindings, () => resolveType(p.type!));
+      return { index, type, narrows: (yes: boolean, no: boolean) => void (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no }) };
     };
     const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
 

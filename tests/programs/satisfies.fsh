@@ -54,3 +54,25 @@ function main(): void {
   const it = r as Item;
 }
 // error: 'as' can't take the value out of 'Ref<Item>', which only borrows it; use '.clone()' for a copy
+// case: as_function_type
+class Box<T> {
+  value: T;
+  constructor(v: T) { this.value = v; }
+}
+function dbl(x: i64): i64 {
+  return x * 2;
+}
+function main(): void {
+  const f = (() => 5) as () => i64;
+  const named = (x: i64) => x + 1;
+  const g = named as (x: i64) => i64;
+  const h = dbl as (x: i64) => i64;
+  const b = new Box((() => 6) as () => i64);
+  console.log(f(), g(4), h(4), b.value());
+}
+// expect: 5 5 8 6
+// case: as_function_type_refuses
+function main(): void {
+  const f = (() => "s") as () => i64;
+}
+// error: type '"s"' is not assignable to return type 'i64'
