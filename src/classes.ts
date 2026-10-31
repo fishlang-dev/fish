@@ -181,6 +181,8 @@ export function declareClass(node: ClassNode & { name: string }, name: string = 
     const access = modifiers(m.modifiers, m, m.name);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
+    // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
+    if (m.throws) throw unsupported("accessors that throw", m.throws);
     const table = m.kind === "get" ? getters : setters;
     if (table.has(m.name)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);

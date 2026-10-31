@@ -791,3 +791,86 @@ test("decorators on functions, type aliases, interfaces and enums", () => {
   ]);
   expect(() => parseStatements("@a const x = 1;")).toThrow("expected a class, function, type, interface or enum after decorators");
 });
+
+// The `throws` type a declaration's JSDoc `@throws` tags give, shown with the text its span covers.
+function documented(src: string): string {
+  const find = (n: unknown): TypeNode | undefined => {
+    if (!n || typeof n !== "object") return undefined;
+    if ("throws" in n && n.throws) return n.throws as TypeNode;
+    return Object.values(n).map(find).find((t) => t);
+  };
+  const t = find(parse(src));
+  return t ? `${show(t)} at '${src.slice(t.start, t.end)}'` : "none";
+}
+
+const JSDOC_THROWS: [string, string][] = [
+  ["/** @throws {E} */ function f() {}", "E at 'E'"],
+  ["/** @throws {E} why */\nexport async function f() {}", "E at 'E'"],
+  ["/** @throws {E} */ export default function () {}", "E at 'E'"],
+  ["/** @throws {A | B} */ declare function f(): void", "(A | B) at 'A | B'"],
+  ["/**\n * @throws {A} first\n * @throws B\n */\nfunction f() {}", "(A | B) at 'A} first\n * @throws B'"],
+  ["/** @throws {{ code: i64 }} */ function f() {}", "{ property code: i64 } at '{ code: i64 }'"],
+  ["/** @throws E */ function f() {}", "E at 'E'"],
+  ["/** @throws if the file is missing */ function f() {}", "none"],
+  ["/** @throws E when it fails */ function f() {}", "none"],
+  ["/** Fails. @throws{E} */ function f() {}", "E at 'E'"],
+  ["/** see x@throws {E} */ function f() {}", "none"],
+  ["/* @throws {E} */ function f() {}", "none"],
+  ["/** @throws {E} */ g();\nfunction f() {}", "none"],
+  ["/** @throws {E} */\n// note\nfunction f() {}", "E at 'E'"],
+  ["/** @throws {E} */ function f() throws E {}", "E at 'E'"],
+  ["class A { /** @throws {E} */ m() {} }", "E at 'E'"],
+  ["class A { /** @throws {E} */ static async m() {} }", "E at 'E'"],
+  ["class A { /** @throws {E} */ constructor() {} }", "E at 'E'"],
+  ["class A { /** @throws {E} */ get x() { return 1 } }", "E at 'E'"],
+  ["class A { /** @throws {E} */ f = () => 1 }", "E at 'E'"],
+  ["/** @throws {E} */ const f = async (x: i64) => x", "E at 'E'"],
+  ["/** @throws {E} */ export const f = (x: i64) => x", "E at 'E'"],
+  ["/** @throws {E} */ const a = () => 1, b = () => 2", "none"],
+  ["/** @throws {E} */ const n = 1", "none"],
+  ["function g() {\n  /** @throws {E} */\n  function f() {}\n}", "E at 'E'"],
+  ["/** @throws {@link E} */ function f() {}", "none"],
+  ["/** @throws {*} */ function f() {}", "none"],
+  ["/** @throws {?E} */ function f() {}", "none"],
+  ["/** @throws {Error=} */ function f() {}", "none"],
+  ["/** @throws {A |} */ function f() {}", "none"],
+  ["/** @throws {A */ function f() {}", "none"],
+  ["/**\n * @throws {A |\n *   B} when\n */\nfunction f() {}", "none"],
+  ["/**\n * @throws {@link E}\n * @throws {F}\n */\nfunction f() {}", "F at 'F'"],
+];
+
+for (const [src, shape] of JSDOC_THROWS) {
+  test(`jsdoc ${src}`, () => expect(documented(src)).toBe(shape));
+}
+
+test("a JSDoc @throws tag parses as the written clause does", () => {
+  const bare = (src: string) => JSON.stringify(parse(src), (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : v));
+  expect(bare("/** @throws {A | B<i64>} */ function f(): void {}")).toBe(bare("function f(): void throws A | B<i64> {}"));
+  expect(bare("class C { /** @throws {E} */ m(): void {} }")).toBe(bare("class C { m(): void throws E {} }"));
+});
+
+test("JSDoc @throws errors point into the comment", () => {
+  expect(() => parse("/** @throws {string} */ function f() throws i64 {}")).toThrow(expect.objectContaining({
+    message: "the JSDoc says '@throws {string}' but the function says 'throws i64'; make them the same type, or keep one", start: 13, end: 19,
+  }));
+  expect(() => parse("/** @throws {1} */ function f() throws 1 {}")).not.toThrow();
+  expect(() => parse("/** @throws {1} */ function f() throws 2 {}")).toThrow("the JSDoc says '@throws {1}' but the function says 'throws 2'");
+});
+
+test("TypeScript with JSDoc types Fish can't read still parses", () => {
+  const src = [
+    "/**",
+    " * Reads the config.",
+    " * @throws {@link ConfigError} when it is missing",
+    " * @throws {*} anything else",
+    " * @throws {?Error}",
+    " * @throws {module:fs~Error=}",
+    " * @throws {{",
+    " *   code: number",
+    " * }}",
+    " */",
+    "export async function read(path: string): Promise<string> { return path }",
+    "class A { /** @throws {!Error} */ m(): void {} }",
+  ].join("\n");
+  expect(documented(src)).toBe("none");
+});

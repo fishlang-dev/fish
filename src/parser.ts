@@ -187,7 +187,7 @@ export type ClassMember = Span & Id & { modifiers: Modifier[]; decorators: Expr[
   | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
       params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "constructor"; params: Param[]; throws?: TypeNode; body: Stmt[] | undefined }
-  | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; body: Stmt[] | undefined }
+  | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "index"; params: Param[]; type: TypeNode }
   | { kind: "staticBlock"; body: Stmt[] }
 );
@@ -322,10 +322,14 @@ export type Cursor = {
   attempt<T>(parse: () => T): T | undefined;
   // The comments scanned so far.
   comments: Comment[];
+  src: string;
+  // Whether JSDoc `@throws` tags declare what a function throws: when compiling, not when
+  // formatting or linting, which keep the comment as written.
+  docs: boolean;
 };
 
-function cursor(src: string): Cursor {
-  const lex = lexer(src);
+function cursor(src: string, from = 0, docs = false): Cursor {
+  const lex = lexer(src, from);
   // Every token lexed so far; lookahead and backtracking move `pos` within it.
   const tokens: Token[] = [];
   const describe = (t: Token) => {
@@ -336,6 +340,8 @@ function cursor(src: string): Cursor {
   const c: Cursor = {
     tokens,
     comments: lex.comments,
+    src,
+    docs,
     pos: 0,
     conditionalAllowed: true,
     inAllowed: true,
@@ -408,12 +414,12 @@ export function allowingIn<T>(c: Cursor, allowed: boolean, parse: () => T): T {
 // A program is a list of statements; which of them may appear at the top level is the
 // checker's call.
 export function parse(src: string): Stmt[] {
-  return parseWithComments(src).program;
+  return parseWithComments(src, true).program;
 }
 
 // The program, and the comments the lexer kept, for the formatter, and its tokens.
-export function parseWithComments(src: string): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
-  const c = cursor(src);
+export function parseWithComments(src: string, docs = false): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
+  const c = cursor(src, 0, docs);
   const program: Stmt[] = [];
   while (c.peek().kind !== "eof") program.push(statement(c));
   return { program, comments: c.comments, tokens: c.tokens };
@@ -433,6 +439,73 @@ export function parseType(src: string): TypeNode {
   const t = type(c);
   if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
   return t;
+}
+
+// Words a declaration may start with before its keyword, all of which its JSDoc comes before.
+const LEADING = new Set(["export", "default", "declare", "macro"]);
+
+// A declaration's `throws` type: its written clause, or else the types its JSDoc names in
+// `@throws {E}` tags, as a union when there are several. `at` is where the declaration starts,
+// and its JSDoc is the `/** ... */` comments between it and the token before.
+export function documentedThrows(c: Cursor, at: number, written: TypeNode | undefined): TypeNode | undefined {
+  if (!c.docs) return written;
+  let i = c.pos - 1;
+  while (i > 0 && c.tokens[i]!.start > at) i--;
+  while (i > 0 && c.tokens[i - 1]!.kind === "ident" && LEADING.has(c.tokens[i - 1]!.text)) i--;
+  const from = i > 0 ? c.tokens[i - 1]!.end : 0;
+  const to = c.tokens[i]!.start;
+  const jsdoc: Comment[] = [];
+  for (let k = c.comments.length - 1; k >= 0 && c.comments[k]!.end > from; k--) {
+    const m = c.comments[k]!;
+    if (m.end <= to && /^\/\*\*[^/]/.test(m.text)) jsdoc.unshift(m);
+  }
+  const types = jsdoc.flatMap((m) => thrownTypes(c.src, m));
+  if (types.length === 0) return written;
+  const doc: TypeNode = types.length === 1 ? types[0]! : { id: nextId(), kind: "union", types, start: types[0]!.start, end: types.at(-1)!.end };
+  if (!written) return doc;
+  const shape = (t: TypeNode) => JSON.stringify(t, (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : typeof v === "bigint" ? `${v}n` : v));
+  if (shape(doc) !== shape(written)) {
+    const text = (t: TypeNode) => c.src.slice(t.start, t.end);
+    throw new CompileError(`the JSDoc says '@throws {${types.map(text).join(" | ")}}' but the function says 'throws ${text(written)}'; make them the same type, or keep one`, doc.start, doc.end);
+  }
+  return written;
+}
+
+// The types of a JSDoc comment's `@throws` tags. `@throws {E} why` names `E`, and so does
+// `@throws E` alone on its line; any other `@throws` only describes, and names nothing. As in
+// TypeScript, a tag whose type doesn't parse, such as `{@link E}` or `{?E}`, names nothing
+// either, so any TypeScript file still parses.
+function thrownTypes(src: string, m: Comment): TypeNode[] {
+  const types: TypeNode[] = [];
+  const close = m.end - 2;
+  for (const tag of m.text.matchAll(/(?<![^\s*])@throws(?![\p{ID_Continue}$])[ \t]*/gu)) {
+    const start = m.start + tag.index + tag[0].length;
+    if (src[start] === "{") {
+      let end = start;
+      for (let depth = 0; end < close; end++) {
+        if (src[end] === "{") depth++;
+        else if (src[end] === "}" && --depth === 0) break;
+      }
+      const t = end < close ? typeAt(src, start + 1, end) : undefined;
+      if (t) types.push(t);
+    } else {
+      const word = /^[\p{ID_Start}_$][\p{ID_Continue}$.]*(?=[ \t]*(\r?\n|$))/u.exec(src.slice(start, close));
+      const t = word ? typeAt(src, start, start + word[0].length) : undefined;
+      if (t) types.push(t);
+    }
+  }
+  return types;
+}
+
+// The type written from `start` to `end` of `src`, its spans offsets into the whole text, or
+// undefined when that text isn't one type.
+function typeAt(src: string, start: number, end: number): TypeNode | undefined {
+  const c = cursor(src.slice(0, end), start);
+  return c.attempt(() => {
+    const t = type(c);
+    if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
+    return t;
+  });
 }
 
 // A function, type alias, interface or enum after decorators, which Fish applies as macros
@@ -456,7 +529,7 @@ export function func(c: Cursor, anonymous = false): Func {
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);
-  const throws = throwsClause(c);
+  const throws = documentedThrows(c, start, throwsClause(c));
   // An overload signature or a `declare function` ends where its body would start.
   let body: Stmt[] | undefined;
   if (c.at("{")) body = block(c);
@@ -633,6 +706,12 @@ function declaration(c: Cursor): Stmt {
   const declarations: Declarator[] = [];
   do declarations.push(declarator(c));
   while (c.eat(","));
+  // As in TypeScript, a statement's JSDoc belongs to its only declarator, here an arrow's.
+  const init = declarations.length === 1 ? declarations[0]!.init : undefined;
+  if (init?.kind === "arrow") {
+    const throws = documentedThrows(c, start, init.throws);
+    if (throws) init.throws = throws;
+  }
   return { id: nextId(), kind: "let", keyword, declarations, start, end: c.end() };
 }
 

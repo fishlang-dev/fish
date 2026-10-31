@@ -42,6 +42,7 @@ const refused = new Map([
   ["tests/programs/type.fsh > type_newline_extends", "'extends' on a new line after a type"],
   ["tests/programs/throw.fsh > throw_newline", "a line break after 'throw'"],
   ["tests/programs/modules_parse_error_elsewhere/b.fsh", "a parse error in an imported file"],
+  ["tests/programs/jsdoc_throws.fsh > jsdoc_throws_conflict", "a JSDoc @throws disagreeing with the written clause"],
 ]);
 
 const root = new URL("..", import.meta.url).pathname;
