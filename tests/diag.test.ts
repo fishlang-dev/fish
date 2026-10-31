@@ -11,6 +11,13 @@ test("an error renders its line with a caret underline", () => {
   );
 });
 
+test("an error's code renders after its kind, and a note's line shows none", () => {
+  const e = new CompileError("E0201", "bad", 14, 15, { message: "moved here", start: 4, end: 5 });
+  expect(formatError(e, "f.fsh", src).split("\n").filter((l) => l.startsWith("f.fsh"))).toEqual(["f.fsh:2:5: error[E0201]: bad", "f.fsh:1:5: note: moved here"]);
+  expect(formatError(e, "f.fsh", src, "warning").split("\n")[0]).toBe("f.fsh:2:5: warning[E0201]: bad");
+  expect(formatError(e, "f.fsh", src, "reject var").split("\n")[0]).toBe("f.fsh:2:5: reject var: bad");
+});
+
 test("a note renders after the error at its own location", () => {
   const e = new CompileError("bad", 14, 15, { message: "moved here", start: 4, end: 5 });
   expect(formatError(e, "f.fsh", src)).toBe(

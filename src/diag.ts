@@ -25,21 +25,26 @@ export type Note = { message: string; start: number; end: number };
 // A file of a program other than the one an error is rendered against, from `base` on.
 export type Source = { base: number; src: string; file: string };
 
-// A user-facing compile error pointing at a [start, end) source range. `sources` holds the
-// program's other files, when it spans several, and `names` the names its compilation made up,
-// both given by `named` where the error leaves the compilation.
+// A user-facing compile error pointing at a [start, end) source range, with its code from
+// src/codes.ts. `sources` holds the program's other files, when it spans several, and `names` the
+// names its compilation made up, both given by `named` where the error leaves the compilation.
 export class CompileError extends Error {
+  code: string;
   start: number;
   end: number;
   note: Note | undefined;
   sources: Source[] = [];
   names: Names = { local: new Set(), madeUp: new Map() };
 
-  constructor(message: string, start: number, end: number = start + 1, note?: Note) {
-    super(message);
-    this.start = start;
-    this.end = end;
-    this.note = note;
+  constructor(code: string, message: string, start: number, end?: number, note?: Note);
+  constructor(message: string, start: number, end?: number, note?: Note);
+  constructor(a: string, b: string | number, c?: number, d?: number | Note, e?: Note) {
+    const coded = typeof b === "string";
+    super(coded ? b : a);
+    this.code = coded ? a : "";
+    this.start = coded ? c! : b;
+    this.end = (coded ? (d as number | undefined) : c) ?? this.start + 1;
+    this.note = coded ? e : (d as Note | undefined);
   }
 }
 
@@ -67,8 +72,9 @@ export function locate(src: string, offset: number) {
   return { line, col: offset - lineStart + 1, lineStart, lineEnd };
 }
 
-// Renders `file:line:col: error: msg`, or another `kind` than `error`, followed by the source line
-// with a caret underline, then the same for its note.
+// Renders `file:line:col: error[E0201]: msg`, or another `kind` than `error`, followed by the
+// source line with a caret underline, then the same for its note. Only errors and warnings show
+// the code: lint findings render through here under their rule's name.
 export function formatError(e: CompileError, path: string, program: string, kind = "error"): string {
   const lines = (kind: string, note: Note) => {
     const { src, file, offset } = sourceOf(program, path, note.start, e.sources);
@@ -85,7 +91,8 @@ export function formatError(e: CompileError, path: string, program: string, kind
       ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
     ];
   };
-  return [...lines(kind, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
+  const head = e.code && (kind === "error" || kind === "warning") ? `${kind}[${e.code}]` : kind;
+  return [...lines(head, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
 }
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
