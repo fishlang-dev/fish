@@ -450,7 +450,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function frameName(i: Instance): string {
     const closure = i.body.closure;
     if (closure) return closure.self ?? `<arrow ${where(i.body).split(":").slice(-2).join(":")}>`;
-    return i.symbol.replace(/#\w+/g, "");
+    // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
+    // dot or space, renamed `#name@Class` when a base declares one too.
+    return i.symbol.replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
   }
 
   // The part of a generated symbol telling `owner` apart in its family: a hash of its description

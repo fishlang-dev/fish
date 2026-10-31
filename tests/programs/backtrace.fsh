@@ -359,3 +359,36 @@ function main() {
 // stderr:    0: double at function_as_value.fsh:2:10
 // stderr:    1: apply at function_as_value.fsh:6:10
 // stderr:    2: main at function_as_value.fsh:10:15
+
+// case: private_methods
+class A {
+  #f(n: i64): i64 { return 1 / n; }
+  a(n: i64): i64 { return this.#f(n); }
+}
+
+class B extends A {
+  #f(n: i64): i64 { return this.a(n) + 2; }
+  b(n: i64): i64 { return this.#f(n); }
+  static #check(n: i64): i64 { return new B().b(n); }
+  static run(n: i64): i64 { return B.#check(n); }
+}
+
+class Box<T> {
+  #get(n: i64): i64 { return B.run(n); }
+  open(n: i64): i64 { return this.#get(n); }
+}
+
+function main() {
+  console.log(new Box<i64>().open(0));
+}
+// panic: attempt to divide by zero
+// stderr: stack backtrace:
+// stderr:    0: A.#f at private_methods.fsh:2:28
+// stderr:    1: A.a at private_methods.fsh:3:27
+// stderr:    2: B.#f at private_methods.fsh:7:28
+// stderr:    3: B.b at private_methods.fsh:8:27
+// stderr:    4: B.static #check at private_methods.fsh:9:39
+// stderr:    5: B.static run at private_methods.fsh:10:36
+// stderr:    6: Box<i64>.#get at private_methods.fsh:14:30
+// stderr:    7: Box<i64>.open at private_methods.fsh:15:30
+// stderr:    8: main at private_methods.fsh:19:15
