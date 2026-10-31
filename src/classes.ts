@@ -250,7 +250,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
-    if (m.generator) throw unsupported("generator methods", m);
+    if (m.generator && !m.modifiers.includes("async")) throw unsupported("generator methods", m);
     if (!m.body) throw unsupported("method overloads", m);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
@@ -268,6 +268,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       returnType: m.returnType,
       ...(m.throws && { throws: m.throws }),
       ...(m.modifiers.includes("async") && { async: true }),
+      ...(m.generator && { generator: true }),
       typeParams: m.typeParams,
       self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false, owned: receiver ? owns(receiver) : false },
       owner: type,

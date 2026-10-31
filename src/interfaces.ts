@@ -112,8 +112,8 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   }
   // A generator is a `Generator<T>` for exactly what it yields, its `next` being its only member.
   if (typeof type !== "string" && type.kind === "generator") {
-    const element = generatorElement(trait);
-    if (element === undefined) return `a generator has only 'next', which type '${trait.name}' doesn't describe`;
+    const element = generatorElement(trait, type.async);
+    if (element === undefined) return `${type.async ? "an async" : "a"} generator has only 'next', which type '${trait.name}' doesn't describe`;
     return type.yields === element ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
   }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;

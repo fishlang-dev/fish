@@ -609,7 +609,7 @@ async function* g(): Generator<i64> {
 }
 
 function main() {}
-// error: async generators are not supported yet
+// error: an async generator function's return type is 'AsyncGenerator<T>'
 // case: async_handle_out_of_array
 // error: can't be moved out of its array; use 'pop()'
 async function one(n: i64): Promise<string> { await yieldNow(); return "v" + n; }

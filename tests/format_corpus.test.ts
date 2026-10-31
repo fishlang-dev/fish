@@ -13,27 +13,7 @@ import { format, programShape } from "../src/printer.ts";
 
 // Where a source file deliberately formats otherwise than Prettier: in Prettier's output, each
 // `prettier` text is replaced by `ours`, once.
-const knownDifferences = new Map<string, { reason: string; prettier: string; ours: string }[]>([
-  ["src/codegen.ts", [{
-    reason: "Prettier isn't idempotent here: its own output, formatted again, joins the chain once the object has a line break after its `{`; Fish formats until the text is stable, so it gives Prettier's second-run output",
-    prettier: [
-      "    awaitsOf",
-      "      .get(current)!",
-      "      .push({",
-      "        state: resumed,",
-      "        field: current.frame!.awaits.get(e)!,",
-      "        type: inner,",
-      "      });",
-    ].join("\n"),
-    ours: [
-      "    awaitsOf.get(current)!.push({",
-      "      state: resumed,",
-      "      field: current.frame!.awaits.get(e)!,",
-      "      type: inner,",
-      "    });",
-    ].join("\n"),
-  }]],
-]);
+const knownDifferences = new Map<string, { reason: string; prettier: string; ours: string }[]>();
 
 // Programs the parser refuses on purpose, each an error test.
 const refused = new Map([

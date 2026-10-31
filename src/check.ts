@@ -17,7 +17,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, leafFuture, nextResult, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -259,7 +259,16 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     const s = node as Stmt;
     if (s.kind === "forOf") {
       loops.set(s, fields.length);
-      fields.push({ name: "loop", type: iterated(instance, s.right) }, { name: "at", type: "i64" });
+      const kept = iterated(instance, s.right);
+      const held = isRef(kept) ? kept.to : kept;
+      // A `for await` loop holds its generator, or a count on its channel, and the future it awaits.
+      if (s.await && typeof held !== "string" && held.kind === "block") fields.push({ name: "loop", type: held }, { name: "at", type: "i64" }, { name: "await", type: leafFuture("receive", lower(held.of)) });
+      else if (s.await) {
+        // In a generic body, a parameter standing for the generator awaits what its bound's `next()` gives.
+        const generator = typeof held !== "string" && held.kind === "param" && held.concrete ? held.concrete : held;
+        const next = typeof generator !== "string" && generator.kind === "generator" ? leafFuture("next", generator) : promiseInterface(nextResult(yieldsOf(held, true)!));
+        fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" }, { name: "await", type: next });
+      } else fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" });
     }
     const e = node as Expr;
     if (isAwait(e)) {
@@ -513,7 +522,6 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const rest = f.params.at(-1)!;
       throw new CompileError("a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
     }
-    if (f.async && f.generator) throw unsupported("async generators", f);
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
@@ -1181,16 +1189,18 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // take that type.
     const given = f.closure?.expected?.returns;
     let declared = f.closure ? (f.returnType ? stored(resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
-    // A generator's declared `Generator<T>` says what it yields; calling it gives its own type.
-    const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete), instance)) : undefined;
-    let yielded = generator && declared ? generatorElement(declared) : undefined;
-    if (generator && declared && !yielded) throw new CompileError("a generator function's return type is 'Generator<T>', the type of what it yields", f.returnType!.start, f.returnType!.end);
+    // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
+    // yields; calling it gives its own type.
+    const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete, f.async === true), instance)) : undefined;
+    const generatorName = f.async ? "AsyncGenerator" : "Generator";
+    let yielded = generator && declared ? generatorElement(declared, f.async === true) : undefined;
+    if (generator && declared && !yielded) throw new CompileError(`${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
     if (generator && f.throws) throw unsupported("generators that throw", f.throws);
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
     // give that, and calling it gives its own future, which runs nothing until awaited.
-    const future = f.async ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
+    const future = f.async && !f.generator ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
     if (future && declared) {
       const gives = promiseElement(declared);
       if (gives === undefined) throw new CompileError("an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
@@ -1379,10 +1389,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     if (generator) {
-      if (!yielded) throw new CompileError("this generator never yields, so what it gives can't be told; declare it as 'Generator<T>'", (f.returnType ?? f).start, (f.returnType ?? f).end);
+      if (!yielded) throw new CompileError(`this generator never yields, so what it gives can't be told; declare it as '${generatorName}<T>'`, (f.returnType ?? f).start, (f.returnType ?? f).end);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);
       generator.yields = laid(yielded);
       generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+      // An async generator method's frame holds its object, as an async method's future does.
+      if (f.self && !f.self.constructor) generator.params.unshift(receiverField(f.self, laid));
     }
     const gives = declared ?? inferred ?? "void";
     // A closure's signature and an async result are kept as written, so a pattern in one would
@@ -2129,7 +2141,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
           throw unsupported("'for...in' loops", s);
         // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
         case "forOf": {
-          if (s.await) throw unsupported("'for await...of' loops", s);
+          if (s.await) {
+            if (!f.async || timerMains.has(f as Func)) throw new CompileError("'for await' can only be used inside an 'async' function", s.start, s.end);
+            if (targets.some((t) => t.kind === "arm")) throw unsupported("'for await' loops inside match arms", s);
+            if (finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
+          }
           const left = s.left;
           if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
           const d = left.declarations[0]!;
@@ -2138,6 +2154,10 @@ export function check(written: Stmt[], library = false, macros = false, module =
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
+          if (s.await) {
+            awaitLoop(s, d.target.name, left.keyword === "let", through, object);
+            return;
+          }
           // A loop borrows what it reads from as long as it runs, so it can't read a part of a
           // value made for the statement, which is gone before the first pass.
           // A reference reaches a value living elsewhere, wherever it came from.
@@ -2187,6 +2207,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
             scopes.pop();
             return;
           }
+          if (yieldsOf(object, true) !== undefined) throw new CompileError("an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
           if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a Map, a Set, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
@@ -2337,6 +2358,21 @@ export function check(written: Stmt[], library = false, macros = false, module =
       }
     }
 
+    // `for await`: an async generator gives each value it yields, as a generator's loop does, and
+    // a Channel each value it receives until it is closed and drained.
+    function awaitLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
+      const yields = yieldsOf(object, true);
+      const channel = typeof object !== "string" && object.kind === "block" && object.which === "Channel" ? lower(object.of) : undefined;
+      if (yields === undefined && channel === undefined) {
+        throw new CompileError(`'for await' loops over an async generator or a Channel, not '${show(through)}'`, s.right.start, s.right.end);
+      }
+      if (yields !== undefined && isRef(through) && !through.mutable) throw new CompileError("a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+      scopes.push(new Map());
+      declare(name, yields ?? channel!, mutable, false, s.left as Stmt);
+      within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+      scopes.pop();
+    }
+
     // The `this.x` a statement assigns, when it is a plain assignment to one of the class's
     // own fields. A setter is a method, which can't run until every field is set.
     // `yield v;`: the generator gives `v` and stops until `next()` is called again. It runs as
@@ -2351,14 +2387,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const t = value(e.value);
       if (!yielded) yielded = widenLet(t);
       if (holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
-      coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's 'Generator<${show(yielded)}>'`);
+      coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's '${generatorName}<${show(yielded)}>'`);
     }
 
     // An `await` written as a statement of its own, or as all of a declaration's initializer,
     // an assignment's value or a return's: one the state machine can stop at with nothing else
     // of the statement pending.
     function awaiting(e: Expr) {
-      if (!future) return;
+      if (!f.async) return;
       if (targets.some((t) => t.kind === "arm")) throw unsupported("'await' inside match arms", e);
       if (finalizing > 0) throw unsupported("'await' statements in a 'try' with a 'finally'", e);
       awaitable.add(e);
