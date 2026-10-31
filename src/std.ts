@@ -384,6 +384,47 @@ class Headers {
   }
 }
 
+// Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
+// first of a repeated name kept.
+class CookieMap {
+  #names: string[] = [];
+  #values: string[] = [];
+
+  constructor(header?: string) {
+    if (header === null) return;
+    for (const part of header.split(";")) {
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      const name = part.slice(0, eq).trim();
+      if (name.length === 0 || this.has(name)) continue;
+      let value = part.slice(eq + 1).trim();
+      if (value.length >= 2 && value.startsWith("\\"") && value.endsWith("\\"")) value = value.slice(1, -1);
+      const decoded = value.includes("%") ? __urlDecodeStrict(value) : value;
+      this.#names.push(name);
+      this.#values.push(decoded ?? value);
+    }
+  }
+
+  get(name: string): string | null {
+    for (let i = 0; i < this.#names.length; i++) {
+      if (this.#names[i] === name) return this.#values[i];
+    }
+    return null;
+  }
+
+  has(name: string): boolean {
+    return this.get(name) !== null;
+  }
+
+  get size(): i64 {
+    return this.#names.length as i64;
+  }
+
+  forEach(callback: (value: string, name: string) => void) {
+    for (let i = 0; i < this.#names.length; i++) callback(this.#values[i], this.#names[i]);
+  }
+}
+
 type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
 
 // A body given as text or bytes, as the bytes sent.
@@ -437,6 +478,15 @@ class Request {
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
     return JSON.parse<T>(new TextDecoder().decode(this.body));
+  }
+
+  // The cookies of every Cookie header the request has.
+  get cookies(): CookieMap {
+    let all: string[] = [];
+    for (let i = 0; i < this.headers.names.length; i++) {
+      if (this.headers.names[i] === "cookie") all.push(this.headers.values[i]);
+    }
+    return new CookieMap(all.join("; "));
   }
 
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
@@ -2655,7 +2705,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
