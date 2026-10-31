@@ -4,7 +4,8 @@ import { CASEMAP } from "./casemap.ts";
 // points are named `fsh_rt_*`.
 
 // Every allocation goes through fsh_rt_alloc and fsh_rt_free, which count what is live. With
-// FISH_LEAKS=1 in the environment, a program reports at exit what it never freed.
+// FISH_LEAKS=1 in the environment, a program reports at exit how many blocks it never freed; a
+// --leaks build always reports them, grouped by where each was allocated.
 //
 // A string is a block: a reference count, its length in bytes, a pointer to its bytes, the
 // block it shares them with when it is a slice, its UTF-16 length once known (-1 before), its
@@ -61,19 +62,52 @@ static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
 
+#ifdef FSH_LEAK_SITES
+// A --leaks build's blocks each start with a header naming the allocation's site, on one list
+// the report walks at exit. Its size keeps the block after it 16-byte aligned, as malloc's is.
+typedef struct fsh_block { const char *site; const char *name; int64_t size; struct fsh_block *prev, *next; int64_t pad; } fsh_block;
+static fsh_block fsh_blocks = { NULL, NULL, 0, &fsh_blocks, &fsh_blocks, 0 };
+static pthread_mutex_t fsh_blocks_lock = PTHREAD_MUTEX_INITIALIZER;
+static void fsh_site(fsh_block *b);
+#endif
+
 void *fsh_rt_alloc(int64_t size) {
+#ifdef FSH_LEAK_SITES
+  // A size the header would overflow fails as one malloc can't give.
+  fsh_block *b = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_block) ? NULL : malloc(sizeof(fsh_block) + size);
+  void *p = b ? b + 1 : NULL;
+#else
   void *p = malloc(size);
+#endif
   if (!p) {
     fputs("out of memory\n", stderr);
     exit(101);
   }
   __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
+#ifdef FSH_LEAK_SITES
+  fsh_site(b);
+  b->size = size;
+  pthread_mutex_lock(&fsh_blocks_lock);
+  b->prev = &fsh_blocks;
+  b->next = fsh_blocks.next;
+  b->next->prev = b;
+  fsh_blocks.next = b;
+  pthread_mutex_unlock(&fsh_blocks_lock);
+#endif
   return p;
 }
 
 void fsh_rt_free(void *p) {
   if (!p) return;
   __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
+#ifdef FSH_LEAK_SITES
+  fsh_block *b = (fsh_block *)p - 1;
+  pthread_mutex_lock(&fsh_blocks_lock);
+  b->prev->next = b->next;
+  b->next->prev = b->prev;
+  pthread_mutex_unlock(&fsh_blocks_lock);
+  p = b;
+#endif
   free(p);
 }
 
@@ -95,16 +129,27 @@ static int32_t fsh_panic_began = 0;
 // the signal itself lives to the end, so nothing else frees it.
 static void (*fsh_shutdown_end)(void) = NULL;
 
+#ifdef FSH_LEAK_SITES
+static void fsh_leak_report(void);
+#endif
+
 __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
   const char *check = getenv("FISH_LEAKS");
+#ifdef FSH_LEAK_SITES
+  check = "1";
+#endif
   if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   // After a panic, what JS frames it unwound held is still live in the engine, not leaked.
   int32_t held = fsh_engine_end && fsh_panic_began;
+#ifdef FSH_LEAK_SITES
+  if (live != 0 && !fsh_abandoned && !held) fsh_leak_report();
+#else
   if (check && check[0] == '1' && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
+#endif
 }
 
 typedef struct fsh_str {
@@ -529,6 +574,124 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
 static int32_t fsh_tokens = 0;
 static _Thread_local int32_t fsh_token = 0;
 
+// A debug build's shadow stack: a frame for each of the program's own functions that is running,
+// pushed on entry and popped on return by the program's IR, naming the function and the call it
+// is making. A release build never touches it.
+typedef struct fsh_frame { const char *site; const char *name; struct fsh_frame *prev; } fsh_frame;
+_Thread_local fsh_frame *fsh_rt_frames = NULL;
+// Where the task this thread is polling was spawned, and the panic's "panicked at" line.
+static _Thread_local const char *fsh_spawned_at = NULL;
+static _Thread_local const char *fsh_panic_line = NULL;
+
+#ifdef FSH_LEAK_SITES
+// A block's site: the innermost of the program's own frames, so a block std makes is charged to
+// the program's call into std, and <runtime> when there is none.
+static void fsh_site(fsh_block *b) {
+  b->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  b->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
+}
+
+typedef struct { const char *site; const char *name; int64_t count, bytes; } fsh_leak;
+
+static int fsh_text_order(const char *a, const char *b) {
+  return a == b ? 0 : !a ? -1 : !b ? 1 : strcmp(a, b);
+}
+
+// Sites are "file:line:col", ordered by file, then line, then column, as numbers.
+static int fsh_site_order(const char *a, const char *b) {
+  if (!a || !b) return fsh_text_order(a, b);
+  const char *ca = strrchr(a, ':'), *cb = strrchr(b, ':');
+  const char *la = ca, *lb = cb;
+  while (la > a && la[-1] != ':') la--;
+  while (lb > b && lb[-1] != ':') lb--;
+  if (la == a || lb == b) return strcmp(a, b);
+  size_t fa = la - 1 - a, fb = lb - 1 - b;
+  int c = strncmp(a, b, fa < fb ? fa : fb);
+  if (c || fa != fb) return c ? c : fa < fb ? -1 : 1;
+  long long na = atoll(la), nb = atoll(lb);
+  if (na != nb) return na < nb ? -1 : 1;
+  na = atoll(ca + 1), nb = atoll(cb + 1);
+  return na < nb ? -1 : na > nb;
+}
+
+static int fsh_by_site(const void *x, const void *y) {
+  const fsh_leak *a = x, *b = y;
+  int c = fsh_text_order(a->name, b->name);
+  return c ? c : fsh_text_order(a->site, b->site);
+}
+
+// Largest group first: by count, then bytes, then where.
+static int fsh_by_size(const void *x, const void *y) {
+  const fsh_leak *a = x, *b = y;
+  if (a->count != b->count) return a->count > b->count ? -1 : 1;
+  if (a->bytes != b->bytes) return a->bytes > b->bytes ? -1 : 1;
+  int c = fsh_site_order(a->site, b->site);
+  return c ? c : fsh_text_order(a->name, b->name);
+}
+
+// Every block still live, grouped by site, after anything the program printed.
+static void fsh_leak_report(void) {
+  pthread_mutex_lock(&fsh_blocks_lock);
+  int64_t n = 0, total = 0;
+  for (fsh_block *b = fsh_blocks.next; b != &fsh_blocks; b = b->next) n++;
+  fsh_leak *all = malloc((n ? n : 1) * sizeof(fsh_leak));
+  if (!all) abort();
+  n = 0;
+  for (fsh_block *b = fsh_blocks.next; b != &fsh_blocks; b = b->next) {
+    all[n++] = (fsh_leak){ b->site, b->name, 1, b->size };
+    total += b->size;
+  }
+  pthread_mutex_unlock(&fsh_blocks_lock);
+  qsort(all, n, sizeof(fsh_leak), fsh_by_site);
+  int64_t groups = 0;
+  for (int64_t i = 0; i < n; i++) {
+    if (groups > 0 && fsh_by_site(&all[groups - 1], &all[i]) == 0) {
+      all[groups - 1].count++;
+      all[groups - 1].bytes += all[i].bytes;
+    } else all[groups++] = all[i];
+  }
+  qsort(all, groups, sizeof(fsh_leak), fsh_by_size);
+  fflush(NULL);
+  fprintf(stderr, "fish: leaked %lld allocation%s (%lld byte%s)\n", (long long)n, n == 1 ? "" : "s", (long long)total, total == 1 ? "" : "s");
+  for (int64_t i = 0; i < groups; i++) {
+    fsh_leak *g = &all[i];
+    fprintf(stderr, "  %lld allocation%s, %lld byte%s, ", (long long)g->count, g->count == 1 ? "" : "s", (long long)g->bytes, g->bytes == 1 ? "" : "s");
+    if (!g->name) fputs("at <runtime>\n", stderr);
+    else if (g->site) fprintf(stderr, "at %s in %s\n", g->site, g->name);
+    else fprintf(stderr, "in %s\n", g->name);
+  }
+  free(all);
+}
+#endif
+
+static void fsh_panic_at(const char *at) {
+  fflush(NULL);
+  fputs(at, stderr);
+  fsh_panic_line = at;
+}
+
+// The stack, innermost first, numbered as Rust's is. The innermost frame is where the panic
+// happened, unless that is inside std or one of its built-in modules, whose frames are hidden:
+// then it is the frame's call into std.
+static void fsh_backtrace(void) {
+  if (!fsh_rt_frames) return;
+  fputs("stack backtrace:\n", stderr);
+  const char *at = fsh_panic_line && strncmp(fsh_panic_line, "panicked at ", 12) == 0 ? fsh_panic_line + 12 : NULL;
+  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "node:", 5) == 0 || strncmp(at, "fish:", 5) == 0)) at = NULL;
+  int64_t n = 0;
+  for (fsh_frame *f = fsh_rt_frames; f; f = f->prev, n++) {
+    if (n == 64) {
+      int64_t rest = 0;
+      for (; f; f = f->prev) rest++;
+      fprintf(stderr, "... %lld more frames\n", (long long)rest);
+      break;
+    }
+    if (n == 0 && at) fprintf(stderr, "%4lld: %s at %.*s\n", (long long)n, f->name, (int)strcspn(at, "\n") - 1, at);
+    else if (f->site) fprintf(stderr, "%4lld: %s at %s\n", (long long)n, f->name, f->site);
+    else fprintf(stderr, "%4lld: %s\n", (long long)n, f->name);
+  }
+  if (fsh_spawned_at) fprintf(stderr, "spawned at %s\n", fsh_spawned_at);
+}
 // A panic's reason, without its "panicked at" line, kept for the task it ends: a TaskPanic's
 // message, or what its awaiter's own panic names. A long one is cut short.
 static _Thread_local char fsh_reason[1024];
@@ -576,6 +739,12 @@ void fsh_rt_panic(const char *message) {
   fsh_token = 0;
   fflush(NULL);
   fputs(message, stderr);
+  if (strncmp(message, "panicked at ", 12) == 0) fsh_panic_line = message;
+  fsh_backtrace();
+  fsh_panic_line = NULL;
+  // An unwind pops no frame, and a drop it runs may panic again: that panic starts from nothing,
+  // rather than walking frames the unwind already left. A task's poller gets its own stack back.
+  fsh_rt_frames = NULL;
   if (fsh_panic_abort) abort();
   if (fsh_in_js > 0) {
     fsh_panic_began = 1;
@@ -616,8 +785,7 @@ static void fsh_array_room(fsh_array *a, int64_t need, int64_t size) {
 // negative count is no count at all.
 void fsh_rt_array_grow(fsh_array *a, int64_t more, int64_t size, const char *at) {
   if (more < 0 || more > INT64_MAX / (size ? size : 1) - a->length) {
-    fflush(NULL);
-    fputs(at, stderr);
+    fsh_panic_at(at);
     fsh_rt_panic("capacity overflow\n");
   }
   if (a->length + more <= a->capacity) return;
@@ -1086,8 +1254,7 @@ fsh_str *fsh_rt_str_from_units(const uint16_t *units, int64_t n) {
 fsh_str *fsh_rt_str_from_points(const uint32_t *points, int64_t n, const char *where) {
   for (int64_t i = 0; i < n; i++) {
     if (points[i] <= 0x10FFFF) continue;
-    fflush(NULL);
-    fputs(where, stderr);
+    fsh_panic_at(where);
     char reason[64];
     snprintf(reason, sizeof reason, "invalid code point %u\n", points[i]);
     fsh_rt_panic(reason);
@@ -1100,8 +1267,7 @@ fsh_str *fsh_rt_str_from_points(const uint32_t *points, int64_t n, const char *w
 #define FSH_MAX_BYTES ((int64_t)1 << 40)
 
 static void fsh_too_long(const char *at) {
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fsh_rt_panic("invalid string length\n");
 }
 
@@ -1169,8 +1335,7 @@ fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start
 void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   char reason[96];
   snprintf(reason, sizeof reason, "index out of bounds: the len is %lld but the index is %llu\n", (long long)length, (unsigned long long)index);
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fsh_rt_panic(reason);
 }
 
@@ -1178,8 +1343,7 @@ void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
 // released here, as the panic unwinds past the statement that would release it.
 void fsh_rt_panic_assert(const char *at, fsh_str *message) {
   size_t length = message ? message->length : 0;
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   if (length > 0) fwrite(message->bytes, 1, length, stderr);
   fsh_panic_reason(length > 0 ? message->bytes : "", length);
   fsh_rt_str_release(message);
@@ -1203,8 +1367,7 @@ void fsh_rt_rust_panicked(fsh_rust_message **out, const char *message, size_t le
 
 // The Fish panic a Rust panic becomes at its call; at is the "panicked at" line.
 void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
-  fflush(NULL);
-  fputs(at, stderr);
+  fsh_panic_at(at);
   fwrite(reason->bytes, 1, reason->length, stderr);
   fsh_panic_reason(reason->bytes, reason->length);
   fsh_rt_panic("\n");
@@ -3598,8 +3761,7 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n, const char *where) {
       if (next == 'j') {
         fsh_rt_free(b.p);
         fsh_fargs_free(args, n);
-        fflush(NULL);
-        fputs(where, stderr);
+        fsh_panic_at(where);
         fsh_rt_panic("'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead\n");
       }
       fsh_farg *x = &args[++a];
@@ -3755,6 +3917,9 @@ struct fsh_task {
   struct fsh_str *panic;
   int64_t frame_size;
   int64_t output_size;
+  // In a debug build, the call that spawned it, which its backtraces end with: for a task std
+  // spawned with none of the program's frames below, the call that spawned the task doing so.
+  const char *spawned;
   char memory[];
 };
 
@@ -3858,7 +4023,15 @@ static void fsh_unlink(fsh_task *t) {
 // where it stopped and its reason kept for whoever awaits it, as tokio's tasks do.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
+  // its frames behind for this reset to drop.
+  fsh_frame *frames = fsh_rt_frames;
+  const char *spawned = fsh_spawned_at;
+  fsh_rt_frames = NULL;
+  fsh_spawned_at = t->spawned;
   int32_t result = t->poll(t, t->memory);
+  fsh_rt_frames = frames;
+  fsh_spawned_at = spawned;
   if (result == 3 && (t == fsh_main_task || t == fsh_timeouts_task)) {
     pthread_mutex_lock(&fsh_alive_lock);
     fsh_panic_began = 1;
@@ -3935,6 +4108,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   t->joiner = NULL;
   t->panic = NULL;
   t->state = FSH_QUEUED;
+  t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
@@ -3960,6 +4134,7 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   t->joiner = NULL;
   t->panic = NULL;
   t->state = FSH_QUEUED;
+  t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
@@ -3987,8 +4162,7 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     if (outcome == 3) {
       char reason[1100];
       int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)t->panic->length, t->panic->bytes);
-      fflush(NULL);
-      fputs(at, stderr);
+      fsh_panic_at(at);
       fputs(reason, stderr);
       fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
       fsh_rt_panic("\nawait 'handle.join()' to catch it as a TaskPanic instead\n");
@@ -4078,17 +4252,26 @@ static void fsh_timer_remove(int64_t at) {
   }
 }
 
-// An aborted or cancelled sleep takes its timer off the heap, so it neither waits out its deadline
-// holding the task nor wakes it later; one never polled has none.
-// ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
-void fsh_rt_sleep_cancel(fsh_task *task, void *frame) {
+// Takes the timer task set with tag off the heap, if it is there, giving up its count on the task;
+// a sleep's state, when given, is marked cancelled under the timers' lock. A tag that isn't a
+// sleep's frame, as a connect attempt's socket, has no state to mark.
+static void fsh_timer_cancel(fsh_task *task, void *tag, int32_t *state) {
   pthread_mutex_lock(&fsh_timer_lock);
   int64_t at = 0;
-  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].tag != frame)) at++;
+  while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].tag != tag)) at++;
   if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
   fsh_timer_remove(at);
+  if (state) *state = 2;
   pthread_mutex_unlock(&fsh_timer_lock);
   fsh_task_release(task);
+}
+
+// An aborted or cancelled sleep takes its timer off the heap, so it neither waits out its deadline
+// holding the task nor wakes it later; one never polled has none. Its state marks it cancelled, so
+// an async generator paused on it, polled again, re-arms its timer for the same deadline.
+// ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
+void fsh_rt_sleep_cancel(fsh_task *task, void *frame) {
+  fsh_timer_cancel(task, frame, frame);
 }
 
 // What a timer does when it fires, or is dropped at shutdown: its count on the task or signal
@@ -4264,9 +4447,17 @@ static void fsh_timeouts_main_returned(void) {
 // Polls a sleep, whose frame holds its state and first the delay in milliseconds, then its
 // deadline: done once the deadline has passed, and until then its one timer, added at its first
 // poll and never firing early, wakes the task; a poll before then from another wake waits on.
+// One whose timer was cancelled (state 2) adds it again, for what is left of its delay.
 int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   int32_t *state = (int32_t *)frame;
   int64_t *deadline = frame + 1;
+  if (*state == 2) {
+    if (fsh_now() >= *deadline) return 1;
+    *state = 1;
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    fsh_timer_add(*deadline, task, NULL, frame);
+    return 0;
+  }
   if (*state != 0) return fsh_now() >= *deadline;
   *state = 1;
   int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
@@ -5067,7 +5258,7 @@ void fsh_rt_socket_release(fsh_socket *s) {
 // Takes off a connect attempt's deadline timer, fired or not, so it neither holds nor wakes the task.
 static void fsh_connect_untimed(fsh_socket *s, fsh_task *task) {
   if (!s->deadline) return;
-  fsh_rt_sleep_cancel(task, s);
+  fsh_timer_cancel(task, s, NULL);
   s->deadline = 0;
 }
 
@@ -5157,6 +5348,11 @@ typedef struct fsh_file_job {
   fsh_array data;
   fsh_task *task;
   struct fsh_file_job *next;
+#ifdef FSH_LEAK_SITES
+  // The frame that submitted it, whose site what the job allocates is charged to.
+  const char *site;
+  const char *name;
+#endif
 } fsh_file_job;
 
 static pthread_mutex_t fsh_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -5673,11 +5869,21 @@ static void *fsh_pool_work(void *arg) {
     fsh_pool_head = job->next;
     if (!fsh_pool_head) fsh_pool_tail = NULL;
     pthread_mutex_unlock(&fsh_pool_lock);
+#ifdef FSH_LEAK_SITES
+    fsh_frame submitter = { job->site, job->name, NULL };
+    fsh_rt_frames = job->name ? &submitter : NULL;
+#endif
     if (job->op == 0) fsh_file_read(job);
     else if (job->op == 1) fsh_file_write(job);
     else fsh_host_lookup(job);
+#ifdef FSH_LEAK_SITES
+    fsh_rt_frames = NULL;
+#endif
+    // Under the pool's lock, so a poll from another task can't hand the job over meanwhile.
+    pthread_mutex_lock(&fsh_pool_lock);
     fsh_task *task = job->task;
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&fsh_pool_lock);
     fsh_rt_wake(task);
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
@@ -5697,6 +5903,10 @@ static void fsh_pool_submit(fsh_file_job *job) {
     }
   }
   job->next = NULL;
+#ifdef FSH_LEAK_SITES
+  job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  job->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
+#endif
   __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
   if (fsh_pool_tail) fsh_pool_tail->next = job;
   else fsh_pool_head = job;
@@ -5707,6 +5917,23 @@ static void fsh_pool_submit(fsh_file_job *job) {
 
 // Polls a readFile (op 0) or writeFile (op 1): its first poll hands the job to the pool and waits;
 // once the thread is done, 1 with what a read gave in out, or 5 with the IoError's parts.
+// A job still running is polled by this task: an async generator paused on it may be polled again
+// from another task after its wait was cancelled, and the job wakes whoever polled it last.
+static int32_t fsh_job_done(fsh_file_job *job, fsh_task *task) {
+  if (__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 1;
+  fsh_task *old = NULL;
+  pthread_mutex_lock(&fsh_pool_lock);
+  int32_t done = job->done;
+  if (!done && job->task != task) {
+    old = job->task;
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    job->task = task;
+  }
+  pthread_mutex_unlock(&fsh_pool_lock);
+  if (old) fsh_task_release(old);
+  return done;
+}
+
 int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at, int32_t op, fsh_task *task, fsh_array *out, fsh_str **error) {
   fsh_file_job *job = *job_at;
   if (!job) {
@@ -5729,7 +5956,7 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
     fsh_pool_submit(job);
     return 0;
   }
-  if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+  if (!fsh_job_done(job, task)) return 0;
   if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
   if (op == 0) {
     *out = job->data;
@@ -5953,7 +6180,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     }
   } else if (s->fd < 0) {
     fsh_file_job *job = s->lookup;
-    if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+    if (!fsh_job_done(job, task)) return 0;
     if (job->error) {
       // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";

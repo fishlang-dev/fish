@@ -218,9 +218,9 @@ test("a Rust panic's message keeps its NULs, and a payload that panics when drop
   });
   expect(fishc(dir, ["build"]).code).toBe(0);
   const nul = built(dir);
-  expect([nul.exitCode, nul.stderr.toString()]).toEqual([101, "panicked at src/main.fsh:5:15:\nbefore\0after\n"]);
+  expect([nul.exitCode, nul.stderr.toString()]).toEqual([101, "panicked at src/main.fsh:5:15:\nbefore\0after\nstack backtrace:\n   0: main at src/main.fsh:5:15\n"]);
   const bomb = Bun.spawnSync([join(dir, "target", "debug", "app"), "x"]);
-  expect([bomb.exitCode, bomb.stderr.toString()]).toEqual([101, "panicked at src/main.fsh:4:44:\na Rust panic with no message\n"]);
+  expect([bomb.exitCode, bomb.stderr.toString()]).toEqual([101, "panicked at src/main.fsh:4:44:\na Rust panic with no message\nstack backtrace:\n   0: main at src/main.fsh:4:44\n"]);
 });
 
 test("a macro can't make a function Rust, and the shim trusts no name the declarations didn't give", () => {
@@ -283,7 +283,7 @@ test("a Rust panic is a Fish panic at the call", () => {
   const run = built(dir);
   expect(run.exitCode).toBe(101);
   expect(run.stdout.toString()).toBe("1\n");
-  expect(run.stderr.toString()).toBe("panicked at src/main.fsh:5:15:\nnegative: -2\n");
+  expect(run.stderr.toString()).toBe("panicked at src/main.fsh:5:15:\nnegative: -2\nstack backtrace:\n   0: main at src/main.fsh:5:15\n");
 });
 
 test("a build calling Rust without cargo on PATH says how to get it", () => {
@@ -450,7 +450,7 @@ test("a panic in a Rust method is a Fish panic at the call", () => {
   const dir = handles(`function main() {\n  const c = new Counter(4);\n  console.log(c.get());\n  console.log(c.fail());\n}\n`);
   expect(fishc(dir, ["build"]).code).toBe(0);
   const run = built(dir);
-  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "4\n", "panicked at src/main.fsh:5:15:\ncounter at 4\n"]);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "4\n", "panicked at src/main.fsh:5:15:\ncounter at 4\nstack backtrace:\n   0: main at src/main.fsh:5:15\n"]);
 });
 
 test("a panic in a Rust value's drop is a Fish panic", () => {
@@ -460,7 +460,18 @@ test("a panic in a Rust value's drop is a Fish panic", () => {
   });
   expect(fishc(dir, ["build"]).code).toBe(0);
   const run = built(dir);
-  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "made\n", "panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\n"]);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "made\n", "panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\nstack backtrace:\n   0: main at src/main.fsh:6:1\n"]);
+});
+
+test("a drop panicking while a panic unwinds walks no frame the unwind left", () => {
+  const dir = pkg({
+    "src/rust.fsh": `declare module "rust:demo" {\n  export class Grumpy {\n    constructor();\n  }\n}\n`,
+    "src/main.fsh": `import { Grumpy } from "rust:demo";\nfunction inner(n: i64): i64 {\n  const a = [1, 2, 3, 4, 5, 6, 7, 8];\n  const b = [a[0], a[1], a[2]];\n  return b[n as usize];\n}\nfunction deeper(n: i64): i64 {\n  const xs = [n, n + 1];\n  return inner(xs[0]) + inner(xs[1]);\n}\nfunction holds(n: i64): i64 {\n  const g = new Grumpy();\n  const v = deeper(n);\n  return v;\n}\nfunction main() {\n  console.log(holds(9));\n}\n`,
+  });
+  expect(fishc(dir, ["build"]).code).toBe(0);
+  const run = built(dir);
+  const first = "panicked at src/main.fsh:5:10:\nindex out of bounds: the len is 3 but the index is 9\nstack backtrace:\n   0: inner at src/main.fsh:5:10\n   1: deeper at src/main.fsh:9:10\n   2: holds at src/main.fsh:13:13\n   3: main at src/main.fsh:17:15\n";
+  expect([run.exitCode, run.stderr.toString()]).toEqual([101, `${first}panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\n`]);
 });
 
 test("a Rust handle is owned by a spawned task, and shared between tasks, and dropped once", () => {
@@ -656,7 +667,7 @@ async function main() {
 `);
   expect(fishc(dir, ["build"])).toEqual({ code: 0, out: "", err: "" });
   const run = built(dir);
-  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "1\n", "panicked while copying a Dyn:\nits value holds a Rust 'Counter', which is moved, never copied; await the futures holding one, or move them rather than copy them\n"]);
+  expect([run.exitCode, run.stdout.toString(), run.stderr.toString()]).toEqual([101, "1\n", "panicked while copying a Dyn:\nits value holds a Rust 'Counter', which is moved, never copied; await the futures holding one, or move them rather than copy them\nstack backtrace:\n   0: main at src/main.fsh:18:14\n"]);
 });
 
 const TEXT = `declare module "rust:demo" {
@@ -901,7 +912,7 @@ function main() {
   const out = "7 1\ncaught: failed with xname 3 6 2\n4 -1 5 -1 4\n[ 255, 2, 1 ] [ 2.25, 3 ]\n6 9\n61 62 FFFD 1F600\n";
   expect(checked(dir)).toEqual([0, out, ""]);
   const panicked = Bun.spawnSync([join(dir, "target", "debug", "app"), "x"], { env: { ...process.env, FISH_LEAKS: "1" } });
-  expect([panicked.exitCode, panicked.stdout.toString(), panicked.stderr.toString()]).toEqual([101, out, "panicked at src/main.fsh:21:32:\nboom sname 2 2 9\n"]);
+  expect([panicked.exitCode, panicked.stdout.toString(), panicked.stderr.toString()]).toEqual([101, out, "panicked at src/main.fsh:21:32:\nboom sname 2 2 9\nstack backtrace:\n   0: main at src/main.fsh:21:32\n"]);
 });
 
 test("a returned array whose Rust elements aren't the declared ones is cargo's type error", () => {

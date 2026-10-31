@@ -280,7 +280,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "forOf": {
         // Like JavaScript closing a generator when its loop ends, the loop takes one it owns.
         const taken = types.get(s.right);
-        if (taken !== undefined && !isRef(taken) && yieldsOf(taken) !== undefined) {
+        if (taken !== undefined && !isRef(taken) && (yieldsOf(taken) ?? yieldsOf(taken, true)) !== undefined) {
           expr(s.right, (p) => `'${p}' moved here: the 'for...of' loop takes the generator over, as JavaScript closes it when the loop ends; call 'next()' instead to keep it`);
           // What the generator borrows stays lent until the loop ends.
           const holder = loopHolders.get(s) ?? { name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 };
@@ -1438,7 +1438,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function generator(e: Expr): boolean {
     const t = types.get(e);
     const held = t !== undefined && isRef(t) ? t.to : t;
-    return held !== undefined && yieldsOf(held) !== undefined;
+    return held !== undefined && (yieldsOf(held) !== undefined || yieldsOf(held, true) !== undefined);
   }
 
   function mapped(e: Expr): boolean {

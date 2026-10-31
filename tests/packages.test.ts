@@ -214,7 +214,7 @@ test("a const that isn't what its declaration says panics where it is read", () 
 function main() {
   const w = WRONG;
 }
-`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:13:\n'WRONG' from 'esm' is a number, where its declaration says 'string'\n", exitCode: 101 });
+`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:13:\n'WRONG' from 'esm' is a number, where its declaration says 'string'\nstack backtrace:\n   0: main at main.fsh:3:13\n", exitCode: 101 });
 });
 
 test("a package needing a Node built-in, or with no JS, is refused", () => {
@@ -247,8 +247,8 @@ function main() {
 });
 
 test("a JS throw, or a result that isn't what its declaration says, panics at the call", () => {
-  expect(run(`import { boom } from "esm";\nfunction main() {\n  boom();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:3:\nuncaught exception in JS: RangeError: too far\n", exitCode: 101 });
-  expect(run(`import { liar } from "esm";\nfunction main() {\n  console.log(liar());\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:15:\n'liar' from 'esm' gave a number, where its declaration says 'string'\n", exitCode: 101 });
+  expect(run(`import { boom } from "esm";\nfunction main() {\n  boom();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:3:\nuncaught exception in JS: RangeError: too far\nstack backtrace:\n   0: main at main.fsh:3:3\n", exitCode: 101 });
+  expect(run(`import { liar } from "esm";\nfunction main() {\n  console.log(liar());\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:15:\n'liar' from 'esm' gave a number, where its declaration says 'string'\nstack backtrace:\n   0: main at main.fsh:3:15\n", exitCode: 101 });
 });
 
 test("an overload's signature is the one called", () => {
@@ -326,7 +326,7 @@ function main() {
 });
 
 test("a result no member of its declared union takes panics", () => {
-  expect(run(`import { rb } from "esm";\nfunction main() {\n  const r = rb();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:13:\n'rb' from 'esm' gave a number, where its declaration says 'boolean | Result'\n", exitCode: 101 });
+  expect(run(`import { rb } from "esm";\nfunction main() {\n  const r = rb();\n}\n`)).toEqual({ stdout: "", stderr: "panicked at main.fsh:3:13:\n'rb' from 'esm' gave a number, where its declaration says 'boolean | Result'\nstack backtrace:\n   0: main at main.fsh:3:13\n", exitCode: 101 });
 });
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
@@ -459,7 +459,7 @@ async function main() {
   const ran = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" }, timeout: 20_000 });
   expect({ stdout: ran.stdout.toString(), stderr: ran.stderr.toString().replaceAll(`${dir}/`, ""), exitCode: ran.exitCode }).toEqual({
     stdout: "",
-    stderr: "panicked at main.fsh:5:34:\nindex out of bounds: the len is 1 but the index is 3\n",
+    stderr: "panicked at main.fsh:5:34:\nindex out of bounds: the len is 1 but the index is 3\nstack backtrace:\n   0: <arrow 5:13> at main.fsh:5:34\n   1: boom at main.fsh:5:3\nspawned at main.fsh:13:11\n",
     exitCode: 101,
   });
 });
@@ -558,7 +558,7 @@ function main() {
   const dir = project(main);
   expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "made3\n", stderr: "", exitCode: 0 });
   const locked = run(`import { shout } from "esm";\nfunction main() {\n  const l = new Lock("a");\n  l.update((v) => { v = shout(v); });\n}\n`);
-  expect(locked).toEqual({ stdout: "", stderr: "panicked at main.fsh:4:25:\ncalled into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\n", exitCode: 101 });
+  expect(locked).toEqual({ stdout: "", stderr: "panicked at main.fsh:4:25:\ncalled into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\nstack backtrace:\n   0: <arrow 4:12> at main.fsh:4:25\n   1: main at main.fsh:4:3\n", exitCode: 101 });
 });
 
 test("a callback inside an object given to JS waits", () => {

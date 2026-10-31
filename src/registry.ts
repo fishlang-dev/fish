@@ -1,4 +1,4 @@
-import { checkOverrides, extend, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
 import { nextId } from "./nodes.ts";
 import { unsupported } from "./unsupported.ts";
@@ -55,12 +55,18 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
-    return [c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values()];
+    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
   }
 
-  // Bases are linked first, since a derived constructor may take its base's parameters.
+  // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
+  // class's templates are marked, and a concrete class's copies made, before overrides are checked.
   function link(c: ClassInfo, path: Set<ClassInfo>) {
-    if (linked.has(c) || c.baseName === undefined) return;
+    if (linked.has(c)) return;
+    if (c.baseName === undefined) {
+      implementAbstracts(ids, c);
+      linked.add(c);
+      return;
+    }
     if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
@@ -69,6 +75,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     link(base, path.add(c));
     const at = c.node.extends!;
     extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    implementAbstracts(ids, c);
     checkOverrides(c);
     linked.add(c);
   }
@@ -79,6 +86,9 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     const at = c.node.extends!;
     if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
+    // A declared class is found by name: an abstract one is no type a value can have to resolve.
+    const declared = at.kind === "instantiation" ? undefined : classes.get(name);
+    if (declared) return declared;
     const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
     return infoOf.get(type)!;
   }

@@ -69,7 +69,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   const {
     lowersRecursive, keyOf, recursiveType, show, standsFor, heldArgument, holdsRef, holdsPattern, variantType, unionType, holdsBlock, lower, stored,
     promiseElement, arrayType, fixedType, replaced, refType, functionType, objectType, tupleType, pointerType, generatorElement, dynType, blockType,
-    handleType, promiseInterface, generatorInterface, literalType, interfaceType, shapeKey, jsUntyped, jsOptional, optionalField, withoutNull, typeParameter, fits,
+    handleType, promiseInterface, generatorInterface, asyncGeneratorInterface, literalType, interfaceType, shapeKey, jsUntyped, jsOptional, optionalField, withoutNull, typeParameter, fits,
   } = typing;
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
@@ -423,6 +423,10 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (t.args.length !== 1) throw new CompileError("'Generator' takes the type it yields, like 'Generator<i64>'", t.start, t.end);
       return generatorInterface(resolveType(t.args[0]!));
     }
+    if (t.name === "AsyncGenerator") {
+      if (t.args.length !== 1) throw new CompileError("'AsyncGenerator' takes the type it yields, like 'AsyncGenerator<i64>'", t.start, t.end);
+      return asyncGeneratorInterface(resolveType(t.args[0]!));
+    }
     if (t.name === "Option") {
       if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
       return unionType([unionMember(t.args[0]!, true), "null"]);
@@ -438,6 +442,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     }
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);
+    if (named?.abstract) throw new CompileError(`'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
     if (named) return named;
     const [owner, name] = t.name.split(".");
     const e = enums.get(owner!);
@@ -1057,7 +1062,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
   return mapType(key, stored(heldArgument(value)), set);
 }
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

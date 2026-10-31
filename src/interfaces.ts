@@ -101,7 +101,7 @@ function same(typing: Typing, a: Type, b: Type): boolean {
 
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const { typing } = members;
-  const { fits, show, promiseElement, generatorElement, replaced } = typing;
+  const { fits, show, promiseElement, generatorElement, replaced, lower } = typing;
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
     typeof expected !== "string" && expected.kind === "interface" ? unsatisfied(actual, expected, members, at) === undefined : fits(actual, expected);
@@ -119,9 +119,9 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   }
   // A generator is a `Generator<T>` for exactly what it yields, its `next` being its only member.
   if (typeof type !== "string" && type.kind === "generator") {
-    const element = generatorElement(trait);
-    if (element === undefined) return `a generator has only 'next', which type '${trait.name}' doesn't describe`;
-    return type.yields === element ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
+    const element = generatorElement(trait, type.async);
+    if (element === undefined) return `${type.async ? "an async" : "a"} generator has only 'next', which type '${trait.name}' doesn't describe`;
+    return lower(type.yields) === lower(element) ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
   }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;
   for (const f of trait.fields) {

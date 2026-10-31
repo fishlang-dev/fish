@@ -11,6 +11,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
+import { STD_BASE } from "./std.ts";
 import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -56,6 +57,14 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
   view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
   return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
 }
+
+// The callee of a call or invoke line, and the callees a frame's site needn't be stored before:
+// intrinsics, printing and reference counts, none of which panics or calls back into Fish.
+const CALLEE = /^(?:%\S+ = )?(?:call|invoke) [^@%]*([@%][^(]*)\(/;
+const FRAME = "{ ptr, ptr, ptr }";
+// The files of std's built-in modules, such as `node:path` and `fish:engine`.
+const BUILT_IN = /^(node|fish):/;
+const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
@@ -119,26 +128,35 @@ const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.construct
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[] };
+// `harness`: the entry file is `fishc test`'s generated harness, whose functions keep no frame.
+// `leaks`: a `--leaks` build, whose frames name each allocation's site, so it keeps them in release.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
   const {
     asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
     jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
-    dynMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
+    dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
     fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables,
     joinCalls, integerCalls,
   } = noted;
   const {
     tiedBy, show, lower, unionType, arrayType, leafOf, blockType, callableOf, promiseElement, keyOf, described, sharesDyn, stored: storedType, lentPromise,
-    interiorType, nextResult, tupleType, handleType, combinedOf, settledParts, regexType, matchType,
+    interiorType, nextResult, leafFuture, tupleType, handleType, combinedOf, settledParts, regexType, matchType,
   } = typing;
   const llvm = layoutOf(typing);
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
+  // In a debug or `--leaks` build each of the program's own functions keeps a frame on the
+  // runtime's shadow stack, `{ site, name, prev }`, for a panic's backtrace and a leak's site:
+  // `framing` is the body of the one being emitted, and `site` the expression or statement whose
+  // calls it is making.
+  let framing: string[] | undefined;
+  let site: Span | undefined;
+  let frames = false;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
   const out: string[] = [];
@@ -293,6 +311,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     scopes = [[]];
     const type = instance.returns;
     framed = new Set();
+    // std's functions, its built-in modules' included, keep no frame, as Rust's short backtrace
+    // hides std's internals; nor do the arrows the checker wraps around a callback.
+    const from = sourceOf(src, file, f.start, sources).file;
+    const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
+    framing = (!release || leaks) && !library && ours ? body : undefined;
+    site = undefined;
     const machine = instance.generator ?? instance.future;
     resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
@@ -315,7 +339,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
       }
       for (const [local, i] of instance.frame!.locals) field(slot(local), i);
-      for (const i of instance.frame!.loops.values()) [i, i + 1].forEach((j) => field(`%loop${j}`, j));
+      // A `for await` loop's third field is the future it awaits.
+      for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
       startBlock(resuming.start);
     }
@@ -353,6 +378,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     });
     if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
+    // Falling off the end drops what the body holds there, at its closing brace.
+    site = { start: f.end - 1, end: f.end };
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     if (type === "void" || resuming) leave(undefined);
     else emit("unreachable");
@@ -360,17 +387,19 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
       // `await`, or the end. A finished future is never polled again.
       startBlock(resuming.done);
-      if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${answer(undefined, resuming.type.yields)}`);
+      if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resuming.type.yields))}`);
       else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push("  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
-      const takes = resuming.type.kind === "future" ? "ptr %frame, ptr %cx" : "ptr %frame";
-      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
+      const takes = resuming.type.kind === "future" || resuming.type.async ? "ptr %frame, ptr %cx" : "ptr %frame";
+      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
       continue;
     }
     // Fish's own functions stay inside this module, so two libraries never clash over them.
-    out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
   }
+  framing = undefined;
+  if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
   for (const done = new Set<Instance>(); done.size < cancelled.size;) {
     for (const i of [...cancelled]) {
@@ -401,6 +430,46 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     ...filled,
     "",
   ].join("\n");
+
+  // A framed function's entry pushes its frame: a generator or future's on each resume, since it
+  // pops at every suspend, so an `await` chain or a generator's resumer is the stack below it.
+  // The record is `{ site, name, prev }`, the site first so each call's store is to the slot
+  // itself; nothing else outlives the entry block, so unoptimized code spills nothing more.
+  function pushFrame(i: Instance): string[] {
+    if (body !== framing) return [];
+    frames = true;
+    return [
+      `  %fsh.site = alloca ${FRAME}`,
+      `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
+      `  %fsh.link = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`,
+      "  %fsh.prev = load ptr, ptr @fsh_rt_frames",
+      "  store ptr null, ptr %fsh.site",
+      `  store ptr ${cString(frameName(i))}, ptr %fsh.name`,
+      "  store ptr %fsh.prev, ptr %fsh.link",
+      "  store ptr %fsh.site, ptr @fsh_rt_frames",
+    ];
+  }
+
+  // Every return pops it; an unwinding panic leaves it, for the runtime to reset.
+  function popFrame(lines: string[]): string[] {
+    if (lines !== framing) return lines;
+    let n = 0;
+    return lines.flatMap((line) => {
+      if (!line.startsWith("  ret ")) return [line];
+      const [link, prev] = [`%fsh.link${n}`, `%fsh.prev${n++}`];
+      return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load ptr, ptr ${link}`, `  store ptr ${prev}, ptr @fsh_rt_frames`, line];
+    });
+  }
+
+  // A frame's name: the function as written, a generic one's instance without its number, a
+  // nested function by its name and an arrow by where it starts.
+  function frameName(i: Instance): string {
+    const closure = i.body.closure;
+    if (closure) return closure.self ?? `<arrow ${where(i.body).split(":").slice(-2).join(":")}>`;
+    // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
+    // dot or space, renamed `#name@Class` when a base declares one too.
+    return i.symbol.replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
+  }
 
   // The part of a generated symbol telling `owner` apart in its family: a hash of its description
   // rather than a count, so it is the same in every program making it. Owners described alike
@@ -710,6 +779,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function emit(line: string) {
+    const callee = body === framing && site ? CALLEE.exec(line)?.[1] : undefined;
+    if (callee && !QUIET.test(callee)) body.push(`  store ptr ${cString(where(site!))}, ptr %fsh.site`);
     body.push(`  ${line}`);
   }
 
@@ -2034,7 +2105,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const cloned = table.clone === "copy" ? copied : dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
-      const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
+      const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "generator"));
       const copy = !pinned || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
       slots = [dynDrop(type, n), copy, cloned];
     }
@@ -2149,14 +2220,52 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function dynSlots(type: Type, n: string, to: DynType, { methods, fields }: DynTable): string[] {
     // A boxed future's slots are its poll, which takes its frame as the block, and its cancel.
     if (promiseElement(to.of) !== undefined) {
+      if (leafOf.get(type as FutureType)?.method === "next") return nextSlots(type as FutureType, n);
       const instance = futureOf.get(type as FutureType)!;
       cancelled.add(instance);
       return [symbol(instance), cancelSymbol(instance)];
     }
     if (isDyn(type)) return [relayThunk(`@"fsh.dyn.${n}.call"`, type, to.of.methods[0]!)];
+    if (typeof type !== "string" && type.kind === "generator") return [generatorNext(type, n)];
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
+  }
+
+  // A boxed async generator's `next()`: its future, borrowing the generator in the block, boxed.
+  function generatorNext(type: GeneratorType, n: string): string {
+    const name = `@"fsh.dyn.${n}.next"`;
+    thunk(name, DYN, () => {
+      const future = leafFuture("next", type);
+      const made = temp();
+      emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr %p, 1`);
+      emit(`ret ${DYN} ${box(made, future, lentPromise(nextResult(type.yields)))}`);
+    });
+    return name;
+  }
+
+  // A boxed `next()` future's poll and cancel: the generator's own, through the pointer to it.
+  function nextSlots(future: FutureType, n: string): string[] {
+    const target = generatorOf.get(leafOf.get(future)!.of as GeneratorType)!;
+    cancelled.add(target);
+    const generator = () => {
+      const [slot, p] = [temp(), temp()];
+      emit(`${slot} = getelementptr ${llvm(future)}, ptr %p, i32 0, i32 1`);
+      emit(`${p} = load ptr, ptr ${slot}`);
+      return p;
+    };
+    const poll = `@"fsh.dyn.${n}.poll"`;
+    thunk(poll, pollType(future), () => {
+      const result = temp();
+      emit(`${result} = call ${pollType(future)} ${symbol(target)}(ptr ${generator()}, ptr %cx)`);
+      emit(`ret ${pollType(future)} ${result}`);
+    }, ["ptr %cx"]);
+    const cancel = `@"fsh.dyn.${n}.cancel"`;
+    thunk(cancel, "void", () => {
+      emit(`call void ${cancelSymbol(target)}(ptr ${generator()}, ptr %cx)`);
+      emit("ret void");
+    }, ["ptr %cx"]);
+    return [poll, cancel];
   }
 
   // A method's slot: the type's method run on the block, its result as the interface gives it.
@@ -2605,6 +2714,85 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     scopes.pop();
   }
 
+  // `for await`: each pass awaits the next value in the loop's await slot, an async generator's
+  // `next()` or a Channel's `receive()`, until the generator finishes or the channel is closed
+  // and drained. The loop owns a generator it was given, as a generator's loop does, and a count
+  // on its channel.
+  function awaitLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type) {
+    const local = resolved(s.left as Stmt);
+    const base = current.frame!.loops.get(s)!;
+    const [held, at] = [`%loop${base}`, `%loop${base + 2}`];
+    const kept = resuming!.type.frame[base]!.type;
+    const awaited = resuming!.type.frame[base + 2]!.type as FutureType | DynType;
+    const boxed = awaited.kind === "dyn" ? awaited : undefined;
+    const future = awaited as FutureType;
+    const channel = typeof kept !== "string" && kept.kind === "block" ? kept : undefined;
+    scopes.push([]);
+    if (channel) {
+      let handle = value(s.right);
+      if (isRef(iterated)) {
+        handle = temp();
+        emit(`${handle} = load ptr, ptr ${value(s.right)}`);
+      }
+      own(held, channel);
+      emit(`store ptr ${copied(handle, channel)}, ptr ${held}`);
+    } else if (isRef(kept)) emit(`store ptr ${value(s.right)}, ptr ${held}`);
+    else {
+      own(held, kept);
+      emit(`store ${llvm(kept)} ${owned(s.right)}, ptr ${held}`);
+    }
+    settle();
+    scopes.at(-1)!.push({ slot: at, type: awaited });
+    const [test, loop, end] = [label(), label(), label()];
+    emit(`br label %${test}`);
+    startBlock(test);
+    let source = held;
+    if (channel || isRef(kept)) {
+      source = temp();
+      emit(`${source} = load ptr, ptr ${held}`);
+    }
+    if (boxed) {
+      // A boxed generator's `next()` is its vtable's first slot after drop, copy and clone.
+      const [dyn, data, table] = [temp(), temp(), temp()];
+      emit(`${dyn} = load ${DYN}, ptr ${source}`);
+      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      const made = temp();
+      unwinding(`call ${DYN} ${vslot(table, 0)}(ptr ${data})`, made);
+      emit(`store ${DYN} ${made}, ptr ${at}`);
+    } else {
+      const frame = temp();
+      emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${channel ? copied(source, channel) : source}, 1`);
+      emit(`store ${llvm(future)} ${frame}, ptr ${at}`);
+    }
+    const result = suspend(awaited, at, base + 2, s.right)!;
+    const gives = (boxed ? promiseElement(boxed.of)! : future.gives) as UnionType;
+    let v: string;
+    if (channel) {
+      emit(`br i1 ${holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
+      startBlock(loop);
+      v = convert(result, gives, local.type);
+    } else {
+      const [finished, more] = nextShapes(local.type);
+      emit(`br i1 ${holds(result, gives, [finished])}, label %${end}, label %${loop}`);
+      startBlock(loop);
+      v = temp();
+      emit(`${v} = extractvalue ${llvm(more)} ${convert(result, gives, more)}, 1`);
+    }
+    exits.set(s, { exit: end, next: test, depth: scopes.length });
+    scopes.push([]);
+    reserve(local);
+    own(slot(local), local.type);
+    emit(`store ${llvm(local.type)} ${v}, ptr ${slot(local)}`);
+    s.body.forEach(statement);
+    drop(scopes.length - 1);
+    scopes.pop();
+    emit(`br label %${test}`);
+    startBlock(end);
+    drop(scopes.length - 1);
+    scopes.pop();
+  }
+
   // The two shapes `next()` gives: finished, and holding a value.
   function nextShapes(yields: Type): [ObjectType, ObjectType] {
     const members = (nextResult(yields) as UnionType).members as ObjectType[];
@@ -2639,7 +2827,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const at = label();
     g.resumes.push(at);
     emit(`store i32 ${g.resumes.length}, ptr %state`);
-    emit(`ret ${resultType(current)} ${result}`);
+    emit(`ret ${resultType(current)} ${yieldedAs(result)}`);
     startBlock(at);
   }
 
@@ -2666,6 +2854,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function statement(s: Stmt) {
+    const outer = site;
+    site = s;
+    lowerStatement(s);
+    site = outer;
+  }
+
+  function lowerStatement(s: Stmt) {
     switch (s.kind) {
       case "expr":
         if (s.expr.kind === "yield") return yielded(s.expr);
@@ -2744,6 +2939,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       // Each pass gives the variable a pointer to its element, or a copy of a Copy one.
       case "forOf": {
         const iterated = types.get(s.right)!;
+        if (s.await) return awaitLoop(s, iterated);
         if (typeof iterated !== "string" && (iterated.kind === "generator" || (iterated.kind === "ref" && typeof iterated.to !== "string" && iterated.to.kind === "generator"))) {
           return generatorLoop(s, iterated);
         }
@@ -5964,14 +6160,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if ((e.kind === "satisfies" || (e.kind === "as" && widens(e))) && !coercions.has(e)) return owned(e.expr);
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
-    // else a copy of it.
+    // else a copy of it. One boxed into a union's Dyn then goes into the union.
     // So is a stored callable held in one that throws more.
-    if (to && isDyn(to) && (!isDyn(types.get(e)!) || relays(typing, types.get(e)!, to))) {
+    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
+    if (to && dyn && (!isDyn(types.get(e)!) || relays(typing, types.get(e)!, dyn))) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
       if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
       else if (!fresh(e)) v = copied(v, type);
-      return box(v, type, to);
+      return to === dyn ? box(v, type, dyn) : convert(box(v, type, dyn), dyn, to);
     }
     // A value read out of a recursive type's block, when it is given up, leaves the block to be
     // freed.
@@ -6581,6 +6778,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && (valueType(e.callee.object) as { kind?: string }).kind === "map") return mapCall(e, e.callee);
+      if (e.callee.kind === "member" && (valueType(e.callee.object) as GeneratorType).async) {
+        const made = temp();
+        emit(`${made} = insertvalue ${llvm(types.get(e)!)} zeroinitializer, ptr ${receiver(e.callee.object)}, 1`);
+        return made;
+      }
       if (e.callee.kind === "member" && typeof valueType(e.callee.object) !== "string" && (valueType(e.callee.object) as Exclude<Type, string>).kind === "generator") {
         const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
         const type = nextResult((valueType(e.callee.object) as GeneratorType).yields);
@@ -7277,9 +7479,21 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     startBlock(ok);
   }
 
+  // The future an async function's poll, or an async generator's resume, answers as.
+  function pollOf(i: Instance): FutureType {
+    return i.future ?? leafFuture("next", i.generator!);
+  }
+
+  // What a generator gives back from a `yield` or its end: what `next()` gives, which an async
+  // one's resume gives as ready.
+  function yieldedAs(answer: string): string {
+    return current.generator?.async ? polled(pollOf(current), 1, answer) : answer;
+  }
+
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
+    if (i.generator?.async) return pollType(pollOf(i));
     if (i.generator) return llvm(nextResult(i.generator.yields));
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
@@ -7431,18 +7645,26 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // value comes out, or its error is raised; either way it is finished, and dropped.
   function awaitFuture(e: Extract<Expr, { kind: "unary" }>): string | undefined {
     const inner = valueType(e.operand) as FutureType | HandleType | DynType;
-    // A boxed future polls as a future giving what its Promise does, and throws nothing.
-    const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
-    const g = resuming!;
-    const at = `%await${current.frame!.awaits.get(e)!}`;
+    const field = current.frame!.awaits.get(e)!;
+    const at = `%await${field}`;
     emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
     settle();
     scopes.at(-1)!.push({ slot: at, type: inner });
+    return suspend(inner, at, field, e);
+  }
+
+  // Polls the future in frame field `field`, at `at`, until it is done, this future or async
+  // generator pending meanwhile; then it is finished and dropped, and gives its value, or its
+  // error is raised at `e`.
+  function suspend(inner: FutureType | HandleType | DynType, at: string, field: number, e: Expr): string | undefined {
+    // A boxed future polls as a future giving what its Promise does, and throws nothing.
+    const shape = inner.kind === "dyn" ? handleType(promiseElement(inner.of)!, undefined) : inner;
+    const g = resuming!;
     const poll = label();
     g.resumes.push(poll);
     const resumed = g.resumes.length;
     if (!awaitsOf.has(current)) awaitsOf.set(current, []);
-    awaitsOf.get(current)!.push({ state: resumed, field: current.frame!.awaits.get(e)!, type: inner });
+    awaitsOf.get(current)!.push({ state: resumed, field, type: inner });
     emit(`br label %${poll}`);
     startBlock(poll);
     const step = pollStep(inner, at, e);
@@ -7450,7 +7672,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
     if (inner === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
     emit(`store i32 ${resumed}, ptr %state`);
-    emit(`ret ${resultType(current)} ${polled(current.future!, 0)}`);
+    emit(`ret ${resultType(current)} ${polled(pollOf(current), 0)}`);
     const finish = () => {
       const old = temp();
       emit(`${old} = load ${llvm(inner)}, ptr ${at}`);
@@ -7834,6 +8056,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
     else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
     else if (leaf && ["connect", "accept", "read", "write"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    else if (leaf?.method === "next") {
+      const instance = generatorOf.get(leaf.of as GeneratorType)!;
+      cancelled.add(instance);
+      emit(`call void ${cancelSymbol(instance)}(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    }
     if (leaf?.signal) {
       const [flag] = load(frame.length - 1, "i32");
       emit(`call void @fsh_rt_signal_leave(ptr ${load(frame.length - 2, "ptr")[1]}, ptr ${flag}, ptr %cx)`);
@@ -7913,7 +8140,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     awaits.forEach((a, n) => {
       startBlock(cases[n]!);
       const p = temp();
-      emit(`${p} = getelementptr ${llvm(i.future!)}, ptr %frame, i32 0, i32 ${a.field}`);
+      emit(`${p} = getelementptr ${llvm(i.future ?? i.generator!)}, ptr %frame, i32 0, i32 ${a.field}`);
       cancelAt(p, a.type);
       emit(`br label %${done}`);
     });
@@ -7937,7 +8164,16 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     let why: string | undefined;
     // The poll result as the runtime gives it: a joined task's is its own, throwing no TaskPanic.
     const polledAs = inner.kind === "handle" && inner.joined ? inner.joined.base : shape;
-    if (leaf) {
+    if (leaf?.method === "next") {
+      // An async generator's `next()`: its resume, run where the generator lives.
+      const [slot, generator] = [temp(), temp()];
+      emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
+      emit(`${generator} = load ptr, ptr ${slot}`);
+      const target = generatorOf.get(leaf.of as GeneratorType)!;
+      unwinding(`call ${pollType(shape)} ${symbol(target)}(ptr ${generator}, ptr %cx)`, result);
+      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+    } else if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
       // slot empty.
@@ -8158,7 +8394,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     };
     const value = () => {
       let v: string | undefined = readied ? readied() : given;
-      if (shape.gives !== "void" && !leaf) {
+      if (shape.gives !== "void" && (!leaf || leaf.method === "next")) {
         v = temp();
         emit(`${v} = extractvalue ${pollType(polledAs)} ${result}, 1`);
       }
@@ -8451,8 +8687,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
       return boxed;
     }
-    if (to && isDyn(to) && !isDyn(type)) {
-      const boxed = box(result, type, to);
+    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
+    if (to && dyn && !isDyn(type)) {
+      const boxed = to === dyn ? box(result, type, dyn) : convert(box(result, type, dyn), dyn, to);
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
       return boxed;
     }
@@ -8482,7 +8719,16 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     return slot;
   }
 
+  // The calls an expression makes are made from its site, once its operands' own calls are done.
   function evaluate(e: Expr): string {
+    const outer = site;
+    site = e;
+    const v = evaluated(e);
+    site = outer;
+    return v;
+  }
+
+  function evaluated(e: Expr): string {
     switch (e.kind) {
       case "int": {
         const type = types.get(e)!;

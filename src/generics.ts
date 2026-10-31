@@ -142,6 +142,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(tables, node.args[0]!, yieldsOf(arg)!, names, bindings, at);
+  if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && yieldsOf(arg, true) !== undefined) return infer(tables, node.args[0]!, yieldsOf(arg, true)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(tables, node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
@@ -266,7 +267,7 @@ export function comptimeName(p: Param): string {
 
 export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const { typing } = tables;
-  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
+  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
   const concrete = concreteness(typing);
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
@@ -493,7 +494,8 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     ]);
     for (const [i, bound] of implicitOf(f)) {
       const element = generatorElement(bound);
-      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
+      const asyncElement = generatorElement(bound, true);
+      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : asyncElement !== undefined && decided.size > 0 ? asyncGeneratorInterface(replaced(asyncElement, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;

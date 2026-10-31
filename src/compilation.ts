@@ -10,7 +10,7 @@ import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
 import type { Locking } from "./dependencies.ts";
 import type { Unit } from "./mathlib.ts";
-import { newTyping, type ClassType, type LiteralType, type Type, type Typing } from "./typing.ts";
+import { newTyping, type ClassType, type DynType, type LiteralType, type Type, type Typing } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
@@ -129,6 +129,9 @@ export type Tables = {
   namedParams: WeakNodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>;
   // Their types, resolved where the function is declared.
   presetParams: WeakNodeMap<Param, Type>;
+  // The arrows the checker writes around a function given as a value or a timer's callback, which
+  // keep no frame in a backtrace, since nobody wrote them.
+  madeArrows: WeakNodeSet<Expr>;
   // The `fill length` checks that panic on a negative length.
   lengthChecks: WeakNodeSet<Expr>;
   // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -198,6 +201,8 @@ export type Tables = {
   // each interface method runs, then for each field the getter supplying it, or none when it is
   // a field. And each method call through a Dyn, with the receiver its interface declares.
   dynMembers: Map<string, DynTable>;
+  // A value boxed into a union's one Dyn member on its way into the union: the Dyn it becomes first.
+  boxedMembers: WeakNodeMap<Expr, DynType>;
   // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
   // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
   promiseVariants: WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>;
@@ -319,6 +324,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     stringBuilds: new WeakNodeMap<Expr, "units" | "points">(),
     namedParams: new WeakNodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>(),
     presetParams: new WeakNodeMap<Param, Type>(),
+    madeArrows: new WeakNodeSet<Expr>(),
     lengthChecks: new WeakNodeSet<Expr>(),
     fileCalls: new WeakNodeSet<Expr>(),
     syncFileCalls: new WeakNodeMap<Expr, string>(),
@@ -351,6 +357,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     restStarts: new WeakNodeMap<Expr, number>(),
     computed: new WeakNodeSet<Expr>(),
     dynMembers: new Map<string, DynTable>(),
+    boxedMembers: new WeakNodeMap<Expr, DynType>(),
     promiseVariants: new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>(),
     jsUses: [],
     jsCrossings: new WeakNodeSet<Expr>(),

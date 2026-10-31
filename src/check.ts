@@ -1,4 +1,4 @@
-import { declareClass, extend, inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, named } from "./diag.ts";
@@ -15,7 +15,7 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, infer, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
@@ -29,7 +29,7 @@ import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { expressions, stringLike } from "./values.ts";
+import { expressions, stringLike, type DynTable } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -106,6 +106,8 @@ export type Instance = {
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
   envs?: NodeMap<Expr, { of: Instance; env: Local[] }>;
+  // What each value boxed into a Dyn runs for the interface's members.
+  dyns?: NodeMap<Expr, DynTable>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
@@ -252,6 +254,7 @@ function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instan
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const { typing } = instance.tables;
+  const { leafFuture, lower, lentPromise, nextResult, yieldsOf, promiseInterface } = typing;
   const fields: Field[] = [{ name: "state", type: "i32" }];
   const locals = new Map<Local, number>();
   const loops = new NodeMap<Stmt, number>();
@@ -274,7 +277,18 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     const s = node as Stmt;
     if (s.kind === "forOf") {
       loops.set(s, fields.length);
-      fields.push({ name: "loop", type: iterated(instance, s.right) }, { name: "at", type: "i64" });
+      const kept = iterated(instance, s.right);
+      const held = isRef(kept) ? kept.to : kept;
+      // A `for await` loop holds its generator, or a count on its channel, and the future it awaits.
+      if (s.await && typeof held !== "string" && held.kind === "block") fields.push({ name: "loop", type: held }, { name: "at", type: "i64" }, { name: "await", type: leafFuture("receive", lower(held.of)) });
+      else if (s.await) {
+        // In a generic body, a parameter standing for the generator awaits what its bound's `next()` gives.
+        const generator = typeof held !== "string" && held.kind === "param" && held.concrete ? held.concrete : held;
+        // A boxed one awaits the boxed future its vtable's `next()` gives.
+        const next = typeof generator !== "string" && generator.kind === "generator" ? leafFuture("next", generator)
+          : typeof generator !== "string" && generator.kind === "dyn" ? lentPromise(nextResult(yieldsOf(held, true)!)) : promiseInterface(nextResult(yieldsOf(held, true)!));
+        fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" }, { name: "await", type: next });
+      } else fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" });
     }
     const e = node as Expr;
     if (isAwait(e)) {
@@ -390,7 +404,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, tupleType,
   } = typing;
   const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
-  const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations } = tables;
+  const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations, equalities, madeArrows } = tables;
   const files = compilation.fileNames.get(written);
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
@@ -420,6 +434,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const enums = new Map<string, EnumInfo>();
   // For each class declaring lifetimes, which of its type parameters are lifetimes.
   const slots = new Map<string, boolean[]>();
+  separatePrivateNames(program.flatMap((s) => (s.kind === "class" && s.name !== undefined ? [{ ...s, name: s.name }] : [])));
   for (const s of program) {
     // A `declare const enum` writes its values, so it is an enum like any other.
     const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
@@ -526,7 +541,6 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const rest = f.params.at(-1)!;
       throw new CompileError("a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
     }
-    if (f.async && f.generator) throw unsupported("async generators", f);
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
@@ -730,6 +744,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
+  classes.forEach(implementsSignatures);
   // An enum with computed members is settled when first read; one nothing reads still reports
   // a bad initializer.
   for (const e of enums.values()) void e.members;
@@ -751,9 +766,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
-  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
+  // An abstract member and a template are checked but never compiled; each concrete class's copy is.
+  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
+  // So is an instance made for an abstract class, which only a template's check makes.
+  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some(abstractPart) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
+  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
+  unreached(equalities, compiledInstances, (i) => i.body.abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
-  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)];
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
   if (used) throw new CompileError("reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
@@ -1099,6 +1118,55 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
+  // Each member a class writes that implements an abstract member takes what the declaration
+  // takes and gives what it gives, as a template calling it through the abstract class expects.
+  function implementsSignatures(c: ClassInfo) {
+    for (const table of ["methods", "getters", "setters"] as const) {
+      for (const [name, f] of c[table]) {
+        if (f.abstract || f.copyOf) continue;
+        for (let b = c.base; b; b = b.base) {
+          const declared = b[table].get(name);
+          if (declared?.abstract) implementsSignature(f, declared, b);
+        }
+      }
+    }
+    for (let b = c.base; b; b = b.base) {
+      for (const [name, declared] of b.getters) {
+        const own = c.type.fields.find((x) => x.name === name);
+        if (!declared.abstract || !own) continue;
+        const wanted = returnOf(instanceOf(declared), declared);
+        const at = c.fields.find((x) => x.name === name)!;
+        // A field is read as it is, so it has the declared type exactly.
+        if (own.type !== wanted) throw new CompileError(`'${name}' must be a '${show(wanted)}', not a '${show(own.type)}', as '${b.type.name}' declares it abstract`, at.start, at.end);
+      }
+    }
+  }
+
+  function implementsSignature(f: Body, declared: Body, b: ClassInfo) {
+    const why = (text: string) => new CompileError(`'${declared.name.slice(b.type.name.length + 1)}' ${text}, as '${b.type.name}' declares it abstract`, f.start, f.end);
+    const want = declaredParams(declared);
+    const rest = f.params.find((p) => p.rest);
+    if (rest && !declared.params.some((p) => p.rest)) throw new CompileError(`'${f.name.slice(f.owner!.name.length + 1)}' can't gather its arguments into a rest parameter yet where '${b.type.name}' declares it abstract with separate ones`, rest.start, rest.end);
+    // A generic implementation is the instance its type parameters take from the declaration's.
+    const names = new Set(typeParamsOf(f).map((p) => p.name));
+    const bindings = new Map<string, Type>();
+    if (names.size > 0) f.params.forEach((p, i) => p.type && want[i] !== undefined && infer(tables, p.type, want[i]!, names, bindings, f));
+    if (bindings.size < names.size) throw why(`must take (${want.map(show).join(", ")})`);
+    const instance = names.size > 0 ? instanceOf(f, new Map([...(f.scope ?? []), ...bindings])) : instanceOf(f);
+    const have = names.size > 0 ? paramTypes(instance) : declaredParams(f);
+    // Parameters past the declaration's must be optional, as the calls through it leave them out.
+    const extra = f.params.slice(want.length).some((p) => !p.optional);
+    if (have.length < want.length || extra || want.some((t, i) => !fits(t, have[i]!))) throw why(`must take (${want.map(show).join(", ")})`);
+    if (!!f.async !== !!declared.async) throw why(declared.async ? "must be async" : "can't be async");
+    if (!!f.generator !== !!declared.generator) throw why(declared.generator ? "must be a generator" : "can't be a generator");
+    if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
+    if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
+    const [error, allowed] = [errorOf(instance), errorOf(instanceOf(declared))];
+    if (error && (!allowed || !fits(error, allowed))) throw why(allowed ? `can only throw '${show(allowed)}'` : "can't throw");
+    const [gives, wanted] = [returnOf(instance, f), returnOf(instanceOf(declared), declared)];
+    if (!fits(gives, wanted)) throw why(`must return '${show(wanted)}', not '${show(gives)}'`);
+  }
+
   // What a call of an instance may throw, as its caller sees it.
   function errorOf(instance: Instance): Type | undefined {
     const f = instance.body;
@@ -1158,6 +1226,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.returns = "void";
     delete instance.throws;
     delete instance.envs;
+    delete instance.dyns;
     delete instance.made;
     delete instance.predicates;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
@@ -1179,6 +1248,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (fixedParam && f.foreign && !f.rust) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
     if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
+    if (f.abstract) {
+      instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
+      done.add(instance);
+      return;
+    }
     if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
@@ -1188,16 +1262,18 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // take that type.
     const given = f.closure?.expected?.returns;
     let declared = f.closure ? (f.returnType ? stored(resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
-    // A generator's declared `Generator<T>` says what it yields; calling it gives its own type.
-    const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete), instance)) : undefined;
-    let yielded = generator && declared ? generatorElement(declared) : undefined;
-    if (generator && declared && !yielded) throw new CompileError("a generator function's return type is 'Generator<T>', the type of what it yields", f.returnType!.start, f.returnType!.end);
+    // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
+    // yields; calling it gives its own type.
+    const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete, f.async === true), instance)) : undefined;
+    const generatorName = f.async ? "AsyncGenerator" : "Generator";
+    let yielded = generator && declared ? generatorElement(declared, f.async === true) : undefined;
+    if (generator && declared && !yielded) throw new CompileError(`${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
     if (generator && f.throws) throw unsupported("generators that throw", f.throws);
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
     // give that, and calling it gives its own future, which runs nothing until awaited.
-    const future = f.async ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
+    const future = f.async && !f.generator ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
     if (future && declared) {
       const gives = promiseElement(declared);
       if (gives === undefined) throw new CompileError("an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
@@ -1283,10 +1359,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
+      dynOf: (e, table) => void (instance.dyns ??= new NodeMap()).set(e, table),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
       self,
-      owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
+      owner: f.closure ? closureOwner(f) : f.declared ?? (f.owner && f.owner === f.self?.type ? self!.type : f.owner),
       superCall,
       selfCall,
       thisReady,
@@ -1406,10 +1483,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     if (generator) {
-      if (!yielded) throw new CompileError("this generator never yields, so what it gives can't be told; declare it as 'Generator<T>'", (f.returnType ?? f).start, (f.returnType ?? f).end);
+      if (!yielded) throw new CompileError(`this generator never yields, so what it gives can't be told; declare it as '${generatorName}<T>'`, (f.returnType ?? f).start, (f.returnType ?? f).end);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);
       generator.yields = laid(yielded);
       generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
+      // An async generator method's frame holds its object, as an async method's future does.
+      if (f.self && !f.self.constructor) generator.params.unshift(receiverField(typing, f.self, laid));
     }
     const gives = declared ?? inferred ?? "void";
     // A closure's signature and an async result are kept as written, so a pattern in one would
@@ -1907,7 +1986,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
+        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e), made: madeArrows.has(e) || undefined },
         body: value ? [{ id: nextId(ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
@@ -2173,7 +2252,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           throw unsupported("'for...in' loops", s);
         // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
         case "forOf": {
-          if (s.await) throw unsupported("'for await...of' loops", s);
+          if (s.await) {
+            if (!f.async || timerMains.has(f as Func)) throw new CompileError("'for await' can only be used inside an 'async' function", s.start, s.end);
+            if (targets.some((t) => t.kind === "arm")) throw unsupported("'for await' loops inside match arms", s);
+            if (finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
+          }
           const left = s.left;
           if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
           const d = left.declarations[0]!;
@@ -2182,6 +2265,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
+          if (s.await) {
+            awaitLoop(s, d.target.name, left.keyword === "let", through, object);
+            return;
+          }
           // A loop borrows what it reads from as long as it runs, so it can't read a part of a
           // value made for the statement, which is gone before the first pass.
           // A reference reaches a value living elsewhere, wherever it came from.
@@ -2231,6 +2318,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             scopes.pop();
             return;
           }
+          if (yieldsOf(object, true) !== undefined) throw new CompileError("an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
           if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a Map, a Set, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
@@ -2381,6 +2469,21 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       }
     }
 
+    // `for await`: an async generator gives each value it yields, as a generator's loop does, and
+    // a Channel each value it receives until it is closed and drained.
+    function awaitLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
+      const yields = yieldsOf(object, true);
+      const channel = typeof object !== "string" && object.kind === "block" && object.which === "Channel" ? lower(object.of) : undefined;
+      if (yields === undefined && channel === undefined) {
+        throw new CompileError(`'for await' loops over an async generator or a Channel, not '${show(through)}'`, s.right.start, s.right.end);
+      }
+      if (yields !== undefined && isRef(through) && !through.mutable) throw new CompileError("a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+      scopes.push(new Map());
+      declare(name, yields ?? channel!, mutable, false, s.left as Stmt);
+      within({ stmt: s, kind: "loop" }, () => scoped(s.body));
+      scopes.pop();
+    }
+
     // The `this.x` a statement assigns, when it is a plain assignment to one of the class's
     // own fields. A setter is a method, which can't run until every field is set.
     // `yield v;`: the generator gives `v` and stops until `next()` is called again. It runs as
@@ -2395,14 +2498,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const t = value(e.value);
       if (!yielded) yielded = widenLet(t);
       if (holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
-      coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's 'Generator<${show(yielded)}>'`);
+      coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's '${generatorName}<${show(yielded)}>'`);
     }
 
     // An `await` written as a statement of its own, or as all of a declaration's initializer,
     // an assignment's value or a return's: one the state machine can stop at with nothing else
     // of the statement pending.
     function awaiting(e: Expr) {
-      if (!future) return;
+      if (!f.async) return;
       if (targets.some((t) => t.kind === "arm")) throw unsupported("'await' inside match arms", e);
       if (finalizing > 0) throw unsupported("'await' statements in a 'try' with a 'finally'", e);
       awaitable.add(e);
@@ -2647,7 +2750,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function closureOwner(b: Body): Body["owner"] {
       let outerBody = b;
       while (outerBody.closure) outerBody = outerBody.closure.parent.body;
-      return outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner;
+      return outerBody.declared ?? (outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner);
     }
 
     // A variable's type where something narrowed it: a captured one as it was where the closure
@@ -2694,3 +2797,61 @@ export type Origin = number | "this";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
+// An abstract class a type holds as a value, not one embedded as a concrete class's base.
+function abstractPart(t: Type): ClassType | undefined {
+  const bases = new Set<Type>();
+  let found: ClassType | undefined;
+  holdsPart(t, (u) => {
+    if (typeof u === "string" || u.kind !== "class") return false;
+    if (u.base) bases.add(u.base);
+    if (u.abstract && !bases.has(u)) found = u;
+    return found !== undefined;
+  }, true);
+  return found;
+}
+
+// A net under the rules that decide what is compiled: no compiled function calls, and no
+// compiled Dyn's table holds, an instance that isn't compiled. Only a value of an abstract
+// class's own type, which escaped where no rule saw it, could reach one.
+export function unreached(equalities: Tables["equalities"], compiled: Instance[], dropped: (i: Instance) => boolean) {
+  for (const i of compiled) {
+    const reached: [Expr, Instance, string][] = [
+      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, Instance, string] => [at, target, ""]),
+      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, Instance, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
+    ];
+    // A comparison of values runs each class's `equals` it reaches, through objects and unions.
+    for (const [e] of i.types) {
+      if (e.kind !== "binary" || !["===", "!==", "==", "!="].includes(e.op)) continue;
+      for (const target of [...comparedBy(equalities, i.types.get(e.left)), ...comparedBy(equalities, i.types.get(e.right))]) reached.push([e, target, " to compare them"]);
+    }
+    const found = reached.find(([, target]) => dropped(target));
+    if (!found) continue;
+    const [at, target, through] = found;
+    const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map(abstractPart).find((t) => t) ?? target.body.declared ?? target.body.owner;
+    const root = (i.body.closure ? closureRoot(i) : i).body;
+    const member = (root.owner ? root.name.slice(root.owner.name.length + 1) : root.name).replace(/#.*$/, "");
+    // The name the call wrote, rather than the prelude function it may run.
+    const callee = at.kind === "call" || at.kind === "new" ? at.callee : undefined;
+    const named = callee?.kind === "ident" || callee?.kind === "member" ? callee.name : target.body.name.replace(/#.*$/, "");
+    throw new CompileError(`a value of the abstract class '${abstract?.name}' can't reach '${named}'${through} here yet; pass a subclass's value instead, or give '${member}' to each subclass`, at.start, at.end);
+  }
+}
+
+// Each `equals` a comparison of two values runs, as codegen finds them: a class's own stops the
+// search, and otherwise its base and fields, an object's fields and a union's members compare.
+function comparedBy(equalities: Tables["equalities"], t: Type | undefined, seen: Set<Type> = new Set<Type>()): Instance[] {
+  if (t === undefined || typeof t === "string" || seen.has(t)) return [];
+  seen.add(t);
+  if (t.kind === "ref") return comparedBy(equalities, t.to, seen);
+  if (t.kind === "class") {
+    const own = equalities.get(t);
+    return own ? [own] : [t.base, ...t.fields.map((f) => f.type)].flatMap((u) => comparedBy(equalities, u, seen));
+  }
+  if (t.kind === "union") return t.members.flatMap((u) => comparedBy(equalities, u, seen));
+  if (t.kind === "object") return t.fields.flatMap((f) => comparedBy(equalities, f.type, seen));
+  return [];
+}
+
+function closureRoot(i: Instance): Instance {
+  return i.body.closure ? closureRoot(i.body.closure.parent) : i;
+}

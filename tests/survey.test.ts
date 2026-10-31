@@ -48,7 +48,6 @@ test("each rule counts what the sample shows", () => {
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
     numberKeys: 1, forIn: 1, decorators: 1,
-    classForms: 1,
     G1: 3, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
@@ -101,7 +100,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({});
   expect(counts("function f(n: number) { class C { m() { return n; } } class D { m(k: number) { return k; } } }\n")).toEqual({ localCaptures: 1 });
   expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\nconst q = Promise.any([]);\n")).toEqual({ G9: 1 });
-  expect(counts("class A { #x = 1; get #g() { return 1; } m() { return this.#x; } }\n")).toEqual({ classForms: 3 });
+  expect(counts("class A { #x = 1; get #g() { return 1; } m(o: A) { return this.#x + (#x in o ? 1 : 0); } }\n")).toEqual({ classForms: 1 });
   expect(counts("﻿var y = 2;\n")).toEqual({ A1: 1 });
   expect(counts("function f(a?: string) { return () => class {}; }\n")).toEqual({ A2: 1 });
   expect(counts("const a = Number.parseInt(s);\nconst f = Function(\"x\");\n")).toEqual({ R1: 1 });
@@ -114,7 +113,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("const a = s.match(\"x\") && s.search(`y`);\nconst n = s.matchAll(/z/g).next();\nconst r = s.replaceAll(\"a\", \"b\") + s.replaceAll(/a/g, \"b\");\n")).toEqual({ regexStrings: 3 });
   expect(counts("const r = new RegExp(p);\nconst t = s.replace(/a/g, \"b\").split(/,/);\nconst u = s.replace(\"a\", \"b\");\n")).toEqual({ dynamicRegex: 1 });
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2, R7: 2 });
-  expect(counts("abstract class A { abstract x: number; }\n")).toEqual({ classForms: 2 });
+  expect(counts("abstract class A { abstract x: number; abstract m(): void; abstract get g(): number; }\n")).toEqual({ classForms: 1 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
 });
 
@@ -203,7 +202,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(55);
+  expect(r.rules.length + r.waiting.length).toBe(56);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -244,13 +243,13 @@ function projects(repos: Record<string, string>[], run: (dirs: string[]) => void
 const big = "const xs = console.debug(f, 1);\n".repeat(10);
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "abstract class A {}\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
+  projects([{ "a.ts": big, "b.ts": "for (const k in o) {}\n", "c.ts": "namespace N {}\nfor (const k in o) {}\n" }, { "d.ts": "function main(): void {}\n" }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start).toEqual({ files: 1, lines: 1, share: 7.1 });
     expect(r.curve.steps.map((s) => [s.feature, s.gained.files, s.gained.lines, s.portable.share])).toEqual([
       ["The rest of console", 1, 10, 78.5],
       ["for...in", 1, 1, 85.7],
-      ["Abstract classes and #private fields", 1, 2, 100],
+      ["Namespaces", 1, 2, 100],
     ]);
     expect(r.curve.steps[1]!).toMatchObject({ rules: ["forIn"], files: 2, lines: 3 });
     expect(r.repos.map((x) => x.files)).toEqual([3, 1]);
@@ -307,10 +306,10 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
 });
 
 test("a plan names each feature's item and whether it is done", () => {
-  project({ "a.ts": big + "for (const k in o) {}\nabstract class A {}\n", "plan.md": "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
+  project({ "a.ts": big + "for (const k in o) {}\nnamespace N {}\n", "plan.md": "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n" }, (dir) => {
     const r = rank([dir], undefined, readPlan(join(dir, "plan.md")));
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
-      "The rest of console": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Abstract classes and #private fields": null,
+      "The rest of console": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Namespaces": null,
     });
     expect(formatRanking(r)).toContain("(plan item 9b, done)");
   });
@@ -577,6 +576,27 @@ test("node:fs members the std module answers are portable; others are Node built
   project({ "a.ts": "import { readFileSync, statSync, rmSync } from \"node:fs\";\n", "b.ts": "import { mkdirSync } from \"fs\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
   });
+});
+
+test("async generators, their methods and for await are portable", () => {
+  project({ "a.ts": "async function* ticks(): AsyncGenerator<number> { yield 1; }\nclass Feed { async *each(): AsyncGenerator<number> { yield 1; } }\nasync function main() { for await (const t of ticks()) console.log(t); }\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
+    expect(scanFiles(dir)[0]!.findings).toEqual([]);
+  });
+});
+
+test("for await over an array of promises is a guided rewrite, counted as Fish refuses it", () => {
+  expect(counts([
+    "async function f(urls: string[], ps: Promise<number>[]) {",
+    "  for await (const x of [Promise.resolve(1)]) {}",
+    "  for await (const r of urls.map((u) => fetch(u))) {}",
+    "  for await (const p of ps) {}",
+    "  const held = [Promise.resolve(2)];",
+    "  for await (const h of held) {}",
+    "  for await (const t of ticks()) {}",
+    "}",
+    "",
+  ].join("\n"))).toEqual({ forAwaitArrays: 4 });
 });
 
 test("std's random functions make Math.random, crypto imports of them, and uuid and nanoid portable", () => {

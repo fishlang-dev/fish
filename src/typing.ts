@@ -26,8 +26,9 @@ export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
-// `rust`: the Rust type a class a Rust module declares stands for.
-export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass };
+// `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
+// exists embedded in a concrete one, so it is never a value's type.
+export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
@@ -233,7 +234,7 @@ export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.ki
 // `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
-export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait";
+export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait" | "next";
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
@@ -368,8 +369,9 @@ export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "r
 
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
-// empty. One per generator instance, so `===` is nominal identity.
-export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
+// empty. One per generator instance, so `===` is nominal identity. An async one's `next()` gives
+// a future, and its body may await between yields.
+export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean };
 
 // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
 // argument or a property, since the place may later hold another member.
@@ -845,6 +847,8 @@ export function newTyping() {
     timerNext: () => [],
     // A JS promise, and whether the task already waits for it to settle.
     jsAwait: () => [{ name: "promise", type: blockType("JsValue") }, { name: "waiting", type: "i32" }],
+    // An async generator's `next()`, which runs the generator where it lives, in the awaiting task.
+    next: (of) => [{ name: "generator", type: refType(of, true) }],
   };
 
   // A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
@@ -856,9 +860,11 @@ export function newTyping() {
       const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
       if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
       const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
-        : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of : "void";
+        : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of
+        : method === "next" ? nextResult((of as GeneratorType).yields) : "void";
       t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
       leaves.set(key, t);
+      keys.set(t, `leaf ${key}`);
       leafOf.set(t, { method, of, signal });
     }
     return t;
@@ -975,7 +981,7 @@ export function newTyping() {
   // nothing through its interface changes or takes over the value. A boxed future never does,
   // since polling changes it.
   function sharesDyn(t: DynType): boolean {
-    return !promised.has(t.of) && t.of.methods.every((m) => !m.mutable && !m.owned);
+    return !promised.has(t.of) && generatorElement(t.of, true) === undefined && t.of.methods.every((m) => !m.mutable && !m.owned);
   }
 
   // What a `Promise<T>` gives, when the interface is one.
@@ -1123,8 +1129,8 @@ export function newTyping() {
     return t;
   }
 
-  function generatorType(name: string, concrete: boolean): GeneratorType {
-    const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete };
+  function generatorType(name: string, concrete: boolean, async = false): GeneratorType {
+    const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete, ...(async ? { async } : {}) };
     keys.set(t, `generator ${declared++}`);
     return t;
   }
@@ -1136,6 +1142,7 @@ export function newTyping() {
 
   const generators = new Map<string, InterfaceType>();
   const elements = new WeakMap<InterfaceType, Type>();
+  const asyncElements = new WeakMap<InterfaceType, Type>();
 
   // `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
   function generatorInterface(t: Type): InterfaceType {
@@ -1149,17 +1156,31 @@ export function newTyping() {
     return found;
   }
 
-  // What a generator, or a type parameter standing for one or bounded by `Generator<T>`, yields.
-  function yieldsOf(t: Type): Type | undefined {
-    if (typeof t === "string") return undefined;
-    if (t.kind === "generator") return t.yields;
-    if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete) : t.bound && generatorElement(t.bound);
-    return generatorElement(t);
+  // `AsyncGenerator<T>`: anything whose awaited `next()` gives `T`s.
+  function asyncGeneratorInterface(t: Type): InterfaceType {
+    let found = generators.get(`async ${keyOf(t)}`);
+    if (!found) {
+      found = interfaceType(`AsyncGenerator<${show(t)}>`);
+      found.methods.push({ name: "next", params: [], returns: promiseInterface(nextResult(t)) });
+      generators.set(`async ${keyOf(t)}`, found);
+      asyncElements.set(found, t);
+    }
+    return found;
   }
 
-  // What a `Generator<T>` yields, when the interface is one.
-  function generatorElement(t: Type): Type | undefined {
-    return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;
+  // What a generator, or a type parameter standing for one or bounded by `Generator<T>`, yields.
+  // `async` asks the same of an async generator and `AsyncGenerator<T>`.
+  function yieldsOf(t: Type, async = false): Type | undefined {
+    if (typeof t === "string") return undefined;
+    if (t.kind === "generator") return !!t.async === async ? t.yields : undefined;
+    if (t.kind === "dyn") return async ? generatorElement(t.of, true) : undefined;
+    if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete, async) : t.bound && generatorElement(t.bound, async);
+    return generatorElement(t, async);
+  }
+
+  // What a `Generator<T>`, or with `async` an `AsyncGenerator<T>`, yields, when the interface is one.
+  function generatorElement(t: Type, async = false): Type | undefined {
+    return typeof t !== "string" && t.kind === "interface" ? (async ? asyncElements : elements).get(t) : undefined;
   }
 
   function functionType(names: string[], params: Type[], returns: Type, throws?: Type): FunctionType {
@@ -1783,7 +1804,7 @@ export function newTyping() {
     setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
     leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
     promiseElement, regexType, recursiveType, blockFor, holdsBlock, lowersRecursive, partOfItself, unjson, unfolded, pointerType, classType,
-    interfaceType, generatorType, nextResult, generatorInterface, yieldsOf, generatorElement, functionType, closureType, genericFunctionType,
+    interfaceType, generatorType, nextResult, generatorInterface, asyncGeneratorInterface, yieldsOf, generatorElement, functionType, closureType, genericFunctionType,
     literalType, standInLiteral, unionType, membersFor, typeParameter, refType, fixedType, arrayType, standsFor, tiedBy, mapType, variantType,
     holdsRef, lockCallbacks, sharedCallbacks, wrapped, lower, replaced, lowersClasses, lowersInterfaces, lowersVariants, keyOf, tupleType, retuple,
     matchType, objectType, shapeKey, withoutNull, optionalField, fits, unlocks, madeFor, described, show,

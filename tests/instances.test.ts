@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
 import { newSession } from "../src/compilation.ts";
+import { unreached, type Instance } from "../src/check.ts";
+import type { Expr } from "../src/parser.ts";
+import { NodeMap } from "../src/nodes.ts";
+import { newTyping, type ClassType, type Type } from "../src/typing.ts";
 
 const session = newSession();
 
@@ -17,4 +21,37 @@ test("one function per instance", () => {
   expect(defined("first")).toBe(2);
   expect(defined("getX")).toBe(3);
   expect(ir).not.toContain("@\"fsh.identity\"(");
+});
+
+// An abstract member's signature and a template are checked but never compiled, so no compiled
+// code may call one: every Fish symbol a program's IR names is one it defines.
+test("abstract classes compile no call to what isn't compiled", () => {
+  const file = join(import.meta.dir, "programs", "abstract.fsh");
+  const cases = readFileSync(file, "utf8").split(/^\/\/ case: .*$/m).slice(1).filter((c) => !/^\/\/ error:/m.test(c));
+  expect(cases.length).toBeGreaterThan(5);
+  for (const src of cases) {
+    const ir = compile(session, src, file);
+    const defined = new Set([...ir.matchAll(/^(?:define [^@]*)?@("fsh\.[^"]+")(?: =|\()/gm)].map((m) => m[1]));
+    const named = [...ir.matchAll(/@("fsh\.[^"]+")/g)].map((m) => m[1]!);
+    expect(named.filter((n) => !defined.has(n))).toEqual([]);
+  }
+});
+
+// Once copies of `this` are refused, no program makes a value of an abstract class for '==='
+// to compare, so the net under them is tested directly: a comparison reaching an `equals`
+// that isn't compiled, through an object holding the class, is refused at its span.
+test("a comparison can't reach an equals that isn't compiled", () => {
+  const { classType, objectType } = newTyping();
+  const shape = classType("Shape");
+  shape.abstract = true;
+  const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
+  const equalities = new WeakMap<ClassType, Instance>([[shape, equals]]);
+  const at = { start: 10, end: 20 };
+  const [left, right] = [{ id: 1, kind: "ident", name: "a", ...at }, { id: 2, kind: "ident", name: "b", ...at }] as Expr[];
+  const compare = { id: 3, kind: "binary", op: "===", left, right, ...at } as Expr;
+  const held = objectType([{ name: "s", type: shape }]);
+  const types = new NodeMap<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
+  const caller = { body: { name: "check" }, bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types } as unknown as Instance;
+  expect(() => unreached(equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
+  expect(() => unreached(equalities, [caller], () => false)).not.toThrow();
 });

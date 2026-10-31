@@ -69,7 +69,8 @@ for (const [type, what, part] of MEMBERS) {
 
 // Class forms that parse but have no meaning yet: the rejected part is the third column.
 const CLASSES: [string, string, string][] = [
-  ["abstract class A {}", "abstract classes", "abstract class A {}"],
+  ["abstract class A { abstract n: i64 }", "abstract fields", "abstract n: i64"],
+  ["abstract class A<T> {}", "generic abstract classes", "abstract class A<T> {}"],
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A<T> { static readonly n = 1 }\nconst a = new A<i64>()", "static fields in generic classes", "static readonly n = 1"],
   ["class A { override n = 1 }", "'override' modifiers", "override n = 1"],
@@ -176,7 +177,6 @@ const STATEMENTS: [string, string][] = [
   ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
   ["for (const k in o) {}", "'for...in' loops"],
-  ["for await (const x of xs) {}", "'for await...of' loops"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];
@@ -187,16 +187,6 @@ for (const [stmt, what] of STATEMENTS) {
     const start = src.indexOf(stmt);
     expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + stmt.length,
-    }));
-  });
-}
-
-// Declarations that parse but have no meaning yet, at the top level.
-for (const [decl, what] of [["async function* f() {}", "async generators"]]) {
-  test(decl!, () => {
-    const src = `${decl}\nfunction main() {}`;
-    expect(() => checkSource(src)).toThrow(expect.objectContaining({
-      message: `${what} are not supported yet`, start: 0, end: decl!.length,
     }));
   });
 }
