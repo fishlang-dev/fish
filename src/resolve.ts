@@ -1,4 +1,6 @@
 import { CompileError } from "./diag.ts";
+import { STD_BASE } from "./std.ts";
+import { didYouMean } from "./suggest.ts";
 import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
@@ -61,7 +63,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
 export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
-  conforms: (from: Type, to: Type, at: Span) => boolean) {
+  conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: number) => string[]) {
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
@@ -442,7 +444,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
       }
       return apply(args, t, t.args);
     }
-    throw new CompileError(`cannot find type '${t.name}'`, t.start, t.end);
+    throw new CompileError(`cannot find type '${t.name}'${didYouMean(t.name, [...scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...typeNames(t.start)])}`, t.start, t.end);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
@@ -469,7 +471,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
     // A generic alias checked before any use holds its parameters anywhere; each use gives them types.
-    if (typeof t !== "string" && t.kind === "param" && deferring === 0) throw unsupported("unions holding a type parameter", node);
+    // Std's own helpers, like the generators' 'find', return one only to give back a value
+    // they hold or nothing, which needs no narrowing against the placeholder.
+    if (typeof t !== "string" && t.kind === "param" && deferring === 0 && node.start < STD_BASE) throw unsupported("unions holding a type parameter", node);
     // A union holds a value, so a function type in one is a stored callable.
     if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
@@ -545,6 +549,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         return;
       }
       if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
+        if ((at as { kind?: string }).kind === "method" && t.methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
         throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
     };

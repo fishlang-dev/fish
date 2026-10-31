@@ -599,7 +599,7 @@ test("a future holding a Rust value is boxed by moving it: stored as a Promise, 
   return c.get();
 }
 
-async function counted(req: Request): Promise<Response> {
+async function counted(_req: Request): Promise<Response> {
   const c = new Counter(7);
   await yieldNow();
   return new Response(\`count \${c.get()}\`);
@@ -613,7 +613,7 @@ async function main() {
   console.log(a, b, drops());
   let app = new Router();
   app.get("/n", counted);
-  app.get("/m", async (req) => {
+  app.get("/m", async (_req) => {
     const c = new Counter(3);
     await yieldNow();
     return new Response(\`m \${c.get()}\`);

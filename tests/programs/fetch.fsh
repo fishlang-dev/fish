@@ -57,6 +57,37 @@ async function main(): Promise<void> throws IoError | AbortError {
     console.log(what + ": " + saw);
   }
 }
+// case: fetch_binary
+// expect: server got 3|0 255 195
+// expect: 200 3|0 255 195|content-type: true|text 3
+// expect: big 20000 true
+// A u8[] body goes out from fetch as it is, and res.bytes() gives a binary download as it came,
+// one past the size the server joins to its head included.
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    if (req.path === "/big") {
+      let big: u8[] = [];
+      for (let i = 0; i < 20000; i++) big.push((i % 256) as u8);
+      return new Response(big);
+    }
+    const got = await req.bytes();
+    console.log("server got " + String(got.length) + "|" + String(got[0]) + " " + String(got[1]) + " " + String(got[2]));
+    return new Response(got);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const sent: u8[] = [0, 255, 195];
+  const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/upload", { method: "POST", body: sent });
+  const back = await res.bytes();
+  const text = await res.text();
+  console.log(String(res.status) + " " + String(back.length) + "|" + String(back[0]) + " " + String(back[1]) + " " + String(back[2]) + "|content-type: " + String(res.headers.get("content-type") === null) + "|text " + String(text.length));
+  const download = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/big");
+  const all = await download.bytes();
+  let same = true;
+  for (let i: usize = 0; i < all.length; i++) if (all[i] !== ((i % 256) as u8)) same = false;
+  console.log("big " + String(all.length) + " " + String(same));
+}
 // case: fetch_errors
 // expect: refused: can't connect: Connection refused ECONNREFUSED
 // expect: malformed: the response's status line 'garbage' isn't HTTP/1.x
@@ -206,7 +237,8 @@ async function main(): Promise<void> throws IoError | AbortError | JsonError {
   const seen = found.clone();
   spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
     if (req.path === "/data") return Response.json({ n: 3 });
-    return new Response(req.method + " " + req.path + " " + req.body);
+    const body = await req.text();
+    return new Response(req.method + " " + req.path + " " + body);
   }));
   while (found.port.load() === 0) await sleep(1);
   const port = found.port.load();
@@ -241,6 +273,52 @@ async function main(): Promise<void> throws IoError | AbortError | TypeError {
   const said = await spaced.text();
   console.log(said.replaceAll(port, "PORT"));
 }
+// case: fetch_ipv6
+// expect: listening on ::1
+// expect: [::1]:PORT http://[::1]:PORT/a [::1]:PORT
+// expect: no host: http://[::1]:PORT/b
+// expect: dual stack: 127.0.0.1:PORT
+// A server on ::1 fetched by a bracketed URL, the brackets kept in the Host header and the URL;
+// a request with no Host header named by the server's own address; and a server on :: reached
+// over IPv4.
+async function listen(hostname: string, quiet: boolean): Promise<i64> {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: hostname, onListen: (info: ServeInfo) => {
+    if (!quiet) console.log("listening on " + info.hostname);
+    seen.port.store(info.port);
+  } }, async (req: Request) => {
+    const host = req.headers.get("host") ?? "none";
+    return new Response(host + " " + req.url);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  return found.port.load();
+}
+
+async function main(): Promise<void> throws IoError | AbortError | TypeError {
+  const port = await listen("::1", false);
+  const p = String(port);
+  const url = new URL("http://[::1]:" + p + "/a");
+  const host = url.host;
+  const res = await fetch(url);
+  const text = await res.text();
+  console.log(text.replaceAll(p, "PORT"), host.replace(p, "PORT"));
+  const conn = await TcpStream.connect("::1", port);
+  await conn.write(new TextEncoder().encode("GET /b HTTP/1.0\r\n\r\n"));
+  let got: u8[] = [];
+  while (true) {
+    const more = await conn.read(4096);
+    if (more.length === 0) break;
+    for (const b of more) got.push(b);
+  }
+  const reply = new TextDecoder().decode(got);
+  console.log("no host: " + reply.slice(reply.indexOf("none ") + 5).replaceAll(p, "PORT"));
+  const dual = await listen("::", true);
+  const both = String(dual);
+  const four = await fetch("http://127.0.0.1:" + both + "/");
+  const said = await four.text();
+  console.log("dual stack: " + said.slice(0, said.indexOf(" ")).replaceAll(both, "PORT"));
+}
 // case: fetch_post
 // expect: POST /submit
 // expect: host: 127.0.0.1:PORT
@@ -261,7 +339,8 @@ async function main(): Promise<void> throws IoError | AbortError {
   spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
     let text = req.method + " " + req.path + "\n";
     req.headers.forEach((value: string, name: string) => { text = text + name + ": " + value + "\n"; });
-    return new Response(text + "body: " + req.body);
+    const body = await req.text();
+    return new Response(text + "body: " + body);
   }));
   while (found.port.load() === 0) await sleep(1);
   const port = found.port.load();

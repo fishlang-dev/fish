@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { kindTests } from "./narrow.ts";
-import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
+import { asserts, computed, jsCrossings, restText, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -480,13 +480,16 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
+        if (joinCalls.has(e)) return expr((e.callee as Extract<Expr, { kind: "member" }>).object, (p) => `'${p}' moved here: 'join' takes the handle over, as awaiting it would`);
         // `Promise.all` and `Promise.race` take each future in their list as an argument, so what
         // one borrows is lent while the others are made, and two can't conflict.
         if (combinedCalls.has(e)) {
           const [list] = e.args as [Expr];
           return during(e, () => handOver(list.kind === "array" ? (list.elements as Expr[]) : [list], `'Promise.${(e.callee as { name: string }).name}'`, e));
         }
-        const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
+        // An iterator helper's call is named by the method written.
+        const shown = (e as { shown?: string }).shown;
+        const name = shown ? `'${shown}'` : e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
@@ -797,8 +800,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         expr(a, kept ? (p) => `'${p}' moved here: JS keeps a callback or a Promise given to it, as it may use it later; pass '${p}.clone()' to keep a copy` : undefined);
       });
     }
+    const helper = (call as { shown?: string }).shown;
     for (const a of args) {
-      expr(a, (p) => `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`);
+      expr(a, (p) => (helper && a === args[0] ? `'${p}' moved here: ${name} takes its generator over` : `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`));
       lent(a).forEach(([place, part, mutable], i) => lend(place, mutable, part, undefined, name, call, part.start, partKey(part, i)));
     }
   }

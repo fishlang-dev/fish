@@ -81,7 +81,6 @@ const RULES: Rule[] = [
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
-  { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
@@ -191,8 +190,11 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
-  ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", STD("the setTimeout and setInterval globals")],
-  ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
+  ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
+  // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
+  // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
+  // `crypto` is more than the random functions std has: an import of only those is portable.
+  ["readline", PLANNED("Reading standard input")], ["dgram", PLANNED("UDP sockets")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
@@ -288,12 +290,12 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   }
   // A std module imported whole, by its local name, with what it exports: a member it doesn't
   // have still waits, though the import is portable.
-  const wholes = new Map<string, { module: string; has: Set<string> }>();
+  const wholes = new Map<string, { module: string; has: Set<string>; names: Record<string, string> }>();
   for (const s of program) {
     if (!isNode(s) || s.kind !== "import" || typeof s.module !== "string") continue;
     const name = stdModule(s.module);
     const whole = (s.namespace ?? s.default) as string | undefined;
-    if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name) });
+    if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name), names: NAME_MODULES[name] ?? {} });
   }
   const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
   const heads = new WeakSet<object>();
@@ -315,7 +317,7 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
       for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
       const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
-      if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as number, whole.module);
+      if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as number, Object.hasOwn(whole.names, o.name as string) ? whole.names[o.name as string] : whole.module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -442,7 +444,8 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const dynamic = n.kind === "import" && isNode(first) && first.kind === "string" ? first.value : undefined;
   const specifier = n.module ?? n.require ?? dynamic;
   const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
-  if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
+  if (rule === "nodeBuiltins") for (const module of waitingModules(n, String(specifier))) found.push([rule, at, module]);
+  else if (rule) found.push([rule, at]);
   // A class's base is one expression; an interface's are a list, which Fish keeps.
   if (n.abstract === true && "members" in n) push("classForms");
   return found;
@@ -486,9 +489,30 @@ function stdHas(n: Node, specifier: string): boolean {
   return (names ?? []).every((sp) => has.has(sp.name));
 }
 
-// What a std module exports: its functions and its consts.
+// Names of a std module's Node counterpart that wait on something besides the module's own
+// equivalent, by the built-in each is filed under. Node's randomBytes gives a Buffer and std's a
+// u8[], so code calling Buffer methods on it, as 'randomBytes(16).toString("hex")', waits on typed
+// arrays. randomInt has no plan item, so it is filed under its own name, which nothing replaces.
+const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" } };
+
+// What a std module exports that ports as written: its functions and its consts, less those.
 function stdExports(name: string): Set<string> {
-  return new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])));
+  const names = NAME_MODULES[name] ?? {};
+  return new Set(parse(STD_MODULES[name]!).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])).filter((n) => !Object.hasOwn(names, n)));
+}
+
+// The built-ins an import waits on, one for each that a name std lacks is filed under, so a file
+// importing names that wait on different features waits on all of them.
+function waitingModules(n: Node, specifier: string): string[] {
+  const name = stdModule(specifier);
+  const module = builtinModule(specifier);
+  if (!name) return [module];
+  const named = ((n.kind === "exportNamed" ? n.specifiers : n.named) as { name: string }[] | undefined) ?? [];
+  const has = stdExports(name);
+  const names = NAME_MODULES[name] ?? {};
+  const lacking = named.filter((sp) => !has.has(sp.name));
+  if (lacking.length === 0) return [module];
+  return [...new Set(lacking.map((sp) => (Object.hasOwn(names, sp.name) ? names[sp.name]! : module)))];
 }
 
 // The built-in an import names: its subpath when that has its own equivalent, else its module.
@@ -505,7 +529,6 @@ export const NODE_MODULES = new Set(["assert", "async_hooks", "buffer", "child_p
 
 function callRules(n: Node, push: (id: string) => void) {
   const callee = n.callee as Node;
-  if (memberOf(callee, "Math", ["random"])) push("math");
   if (named(callee, "setImmediate") || named(callee, "clearImmediate")) push("timerForms");
   if ((named(callee, "setTimeout") || named(callee, "setInterval")) && (n.args as unknown[]).length > 4) push("timerForms");
   if (isNode(callee) && callee.kind === "member" && callee.name === "unref") push("timerForms");
