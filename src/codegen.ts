@@ -1,6 +1,6 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
-import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, boxedMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -1923,7 +1923,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const cloned = table.clone === "copy" ? copied : dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
-      const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle"));
+      const pinned = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "generator"));
       const copy = !pinned || promiseElement(to.of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
       slots = [dynDrop(type, n), copy, cloned];
     }
@@ -2038,13 +2038,51 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function dynSlots(type: Type, n: string, to: DynType, { methods, fields }: DynTable): string[] {
     // A boxed future's slots are its poll, which takes its frame as the block, and its cancel.
     if (promiseElement(to.of) !== undefined) {
+      if (leafOf.get(type as FutureType)?.method === "next") return nextSlots(type as FutureType, n);
       const instance = futureOf.get(type as FutureType)!;
       cancelled.add(instance);
       return [symbol(instance), cancelSymbol(instance)];
     }
+    if (typeof type !== "string" && type.kind === "generator") return [generatorNext(type, n)];
     const abstract = (t: Type) => typeof t !== "string" && t.kind === "interface" && promiseElement(t) === undefined;
     const made = to.of.methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
     return [...made, ...to.of.fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
+  }
+
+  // A boxed async generator's `next()`: its future, borrowing the generator in the block, boxed.
+  function generatorNext(type: GeneratorType, n: string): string {
+    const name = `@"fsh.dyn.${n}.next"`;
+    thunk(name, DYN, () => {
+      const future = leafFuture("next", type);
+      const made = temp();
+      emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr %p, 1`);
+      emit(`ret ${DYN} ${box(made, future, lentPromise(nextResult(type.yields)))}`);
+    });
+    return name;
+  }
+
+  // A boxed `next()` future's poll and cancel: the generator's own, through the pointer to it.
+  function nextSlots(future: FutureType, n: string): string[] {
+    const target = generatorOf.get(leafOf.get(future)!.of as GeneratorType)!;
+    cancelled.add(target);
+    const generator = () => {
+      const [slot, p] = [temp(), temp()];
+      emit(`${slot} = getelementptr ${llvm(future)}, ptr %p, i32 0, i32 1`);
+      emit(`${p} = load ptr, ptr ${slot}`);
+      return p;
+    };
+    const poll = `@"fsh.dyn.${n}.poll"`;
+    thunk(poll, pollType(future), () => {
+      const result = temp();
+      emit(`${result} = call ${pollType(future)} ${symbol(target)}(ptr ${generator()}, ptr %cx)`);
+      emit(`ret ${pollType(future)} ${result}`);
+    }, ["ptr %cx"]);
+    const cancel = `@"fsh.dyn.${n}.cancel"`;
+    thunk(cancel, "void", () => {
+      emit(`call void ${cancelSymbol(target)}(ptr ${generator()}, ptr %cx)`);
+      emit("ret void");
+    }, ["ptr %cx"]);
+    return [poll, cancel];
   }
 
   // A method's slot: the type's method run on the block, its result as the interface gives it.
@@ -2440,7 +2478,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const base = current.frame!.loops.get(s)!;
     const [held, at] = [`%loop${base}`, `%loop${base + 2}`];
     const kept = resuming!.type.frame[base]!.type;
-    const future = resuming!.type.frame[base + 2]!.type as FutureType;
+    const awaited = resuming!.type.frame[base + 2]!.type as FutureType | DynType;
+    const boxed = awaited.kind === "dyn" ? awaited : undefined;
+    const future = awaited as FutureType;
     const channel = typeof kept !== "string" && kept.kind === "block" ? kept : undefined;
     scopes.push([]);
     if (channel) {
@@ -2457,7 +2497,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`store ${llvm(kept)} ${owned(s.right)}, ptr ${held}`);
     }
     settle();
-    scopes.at(-1)!.push({ slot: at, type: future });
+    scopes.at(-1)!.push({ slot: at, type: awaited });
     const [test, loop, end] = [label(), label(), label()];
     emit(`br label %${test}`);
     startBlock(test);
@@ -2466,11 +2506,22 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       source = temp();
       emit(`${source} = load ptr, ptr ${held}`);
     }
-    const frame = temp();
-    emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${channel ? copied(source, channel) : source}, 1`);
-    emit(`store ${llvm(future)} ${frame}, ptr ${at}`);
-    const result = suspend(future, at, base + 2, s.right)!;
-    const gives = future.gives as UnionType;
+    if (boxed) {
+      // A boxed generator's `next()` is its vtable's first slot after drop, copy and clone.
+      const [dyn, data, table] = [temp(), temp(), temp()];
+      emit(`${dyn} = load ${DYN}, ptr ${source}`);
+      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      const made = temp();
+      unwinding(`call ${DYN} ${vslot(table, 0)}(ptr ${data})`, made);
+      emit(`store ${DYN} ${made}, ptr ${at}`);
+    } else {
+      const frame = temp();
+      emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${channel ? copied(source, channel) : source}, 1`);
+      emit(`store ${llvm(future)} ${frame}, ptr ${at}`);
+    }
+    const result = suspend(awaited, at, base + 2, s.right)!;
+    const gives = (boxed ? promiseElement(boxed.of)! : future.gives) as UnionType;
     let v: string;
     if (channel) {
       emit(`br i1 ${holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
@@ -5830,13 +5881,14 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function owned(e: Expr): string {
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
-    // else a copy of it.
-    if (to && isDyn(to) && !isDyn(types.get(e)!)) {
+    // else a copy of it. One boxed into a union's Dyn then goes into the union.
+    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
+    if (to && dyn && !isDyn(types.get(e)!)) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
       if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
       else if (!fresh(e)) v = copied(v, type);
-      return box(v, type, to);
+      return to === dyn ? box(v, type, dyn) : convert(box(v, type, dyn), dyn, to);
     }
     // A value read out of a recursive type's block, when it is given up, leaves the block to be
     // freed.
@@ -8214,8 +8266,9 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
       return boxed;
     }
-    if (to && isDyn(to) && !isDyn(type)) {
-      const boxed = box(result, type, to);
+    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
+    if (to && dyn && !isDyn(type)) {
+      const boxed = to === dyn ? box(result, type, dyn) : convert(box(result, type, dyn), dyn, to);
       if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
       return boxed;
     }

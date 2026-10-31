@@ -618,3 +618,415 @@ async function main(): Promise<void> throws IoError {
   const rest = await readAll(slow);
   console.log("continue|" + interim.split("\r\n")[0] + "|" + String(rest.endsWith("POST /c hi")));
 }
+// case: http_stream
+// expect: head|HTTP/1.1 200 OK|true|false
+// expect: piece 0 arrived|made 1
+// expect: piece 1 arrived|made 2
+// expect: piece 2 arrived|made 3
+// expect: chunked|7\r\npiece 0\r\n7\r\npiece 1\r\n7\r\npiece 2\r\n0\r\n\r\n
+// expect: 1.0|false|true|piece 0piece 1piece 2
+// expect: HEAD|true|0
+// expect: disconnect stopped the stream|true
+// expect: text|piece 0piece 1piece 2
+// A body made by an async generator goes out a piece at a time, as each is made: chunked to an
+// HTTP/1.1 client, closed-delimited to a 1.0 one, not at all for HEAD, and no further once the
+// client leaves.
+async function* pieces(state: shared<{ made: Atomic<i64>; read: Atomic<i64> }>): AsyncGenerator<string> {
+  for (let i = 0; i < 3; i++) {
+    // The next piece waits until the client has read the last, so each is seen before the next is made.
+    while (state.read.load() < i) await sleep(1);
+    await sleep(10);
+    state.made.add(1);
+    yield "piece " + i;
+  }
+}
+
+async function* endless(count: shared<{ n: Atomic<i64> }>): AsyncGenerator<string> {
+  const held = "tick" + 1;
+  while (true) {
+    count.n.add(1);
+    await sleep(5);
+    yield held;
+  }
+}
+
+async function readAll(conn: Ref<TcpStream>): Promise<string> throws IoError {
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+
+// What the connection has sent once its text so far includes want.
+async function readTo(conn: Ref<TcpStream>, sofar: string, want: string): Promise<string> throws IoError {
+  let text = sofar;
+  while (!text.includes(want)) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    text = text + new TextDecoder().decode(got);
+  }
+  return text;
+}
+
+async function ask(port: i64, raw: string): Promise<string> throws IoError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode(raw));
+  const text = await readAll(conn);
+  return text;
+}
+
+async function main(): Promise<void> throws IoError {
+  const state = shared({ made: new Atomic(0), read: new Atomic(0) });
+  const count = shared({ n: new Atomic(0) });
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const made = state.clone();
+  const ticks = count.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info) => { seen.port.store(info.port); } }, async (req: Request) => {
+    let headers = new Headers();
+    headers.set("content-length", "999");
+    if (req.path === "/endless") return new Response(endless(ticks.clone()));
+    return new Response(pieces(made.clone()), { headers: headers });
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode("GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"));
+  let text = await readTo(conn, "", "\r\n\r\n");
+  const head = text.slice(0, text.indexOf("\r\n\r\n"));
+  console.log("head|" + head.split("\r\n")[0] + "|" + String(head.includes("transfer-encoding: chunked")) + "|" + String(head.includes("999")));
+  for (let i = 0; i < 3; i++) {
+    text = await readTo(conn, text, "piece " + i + "\r\n");
+    console.log("piece " + i + " arrived|made " + state.made.load());
+    state.read.store(i + 1);
+  }
+  const rest = await readAll(conn);
+  text = text + rest;
+  console.log("chunked|" + text.slice(text.indexOf("\r\n\r\n") + 4).replaceAll("\r\n", "\\r\\n"));
+
+  state.read.store(99);
+  const old = await ask(port, "GET / HTTP/1.0\r\n\r\n");
+  const oldHead = old.slice(0, old.indexOf("\r\n\r\n"));
+  console.log("1.0|" + String(oldHead.includes("transfer-encoding")) + "|" + String(oldHead.includes("connection: close")) + "|" + old.slice(old.indexOf("\r\n\r\n") + 4));
+
+  const before = state.made.load();
+  const headOnly = await ask(port, "HEAD / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+  console.log("HEAD|" + String(headOnly.endsWith("\r\n\r\n")) + "|" + (state.made.load() - before));
+
+  {
+    const gone = await TcpStream.connect("127.0.0.1", port);
+    await gone.write(new TextEncoder().encode("GET /endless HTTP/1.1\r\nHost: h\r\n\r\n"));
+    const first = await readTo(gone, "", "tick1");
+  }
+  // Once the client has left, the generator is dropped where it paused and makes no more.
+  let last = -1;
+  while (last !== count.n.load()) {
+    last = count.n.load();
+    await sleep(100);
+  }
+  console.log("disconnect stopped the stream|" + String(last < 100));
+
+  let res = new Response(pieces(state.clone()));
+  const whole = await res.text();
+  console.log("text|" + whole);
+}
+// case: http_sse
+// expect: headers|HTTP/1.1 200 OK|text/event-stream|no-cache|true
+// expect: own headers|text/event-stream; charset=utf-8|max-age=5
+// expect: events|data: hello\n\ndata: two\ndata: lines\n\nevent: tick\nid: 7\nretry: 1500\ndata: x\n\n
+// expect: middleware|true|true|data: hello
+// expect: handled|data: hello
+// expect: stopped|true|true
+// expect: serve returned
+// Server-sent events framed as EventSource reads them, through middleware, and an endless
+// stream ended cleanly when the server stops.
+async function* events(): AsyncGenerator<string | ServerSentEvent> {
+  yield "hello";
+  await sleep(5);
+  yield "two\nlines";
+  yield { data: "x", event: "tick", id: "7", retry: 1500 };
+}
+
+async function* forever(): AsyncGenerator<string | ServerSentEvent> {
+  while (true) {
+    await sleep(10);
+    yield "beat";
+  }
+}
+
+async function readAll(conn: Ref<TcpStream>): Promise<string> throws IoError {
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+
+async function get(port: i64, path: string): Promise<string> throws IoError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode("GET " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"));
+  const text = await readAll(conn);
+  return text;
+}
+
+// A chunked body's data, its chunk sizes taken out.
+function unchunked(body: string): string {
+  let out = "";
+  let rest = body;
+  while (true) {
+    const end = rest.indexOf("\r\n");
+    const size = parseInt(rest.slice(0, end), 16) ?? 0;
+    if (size === 0) return out;
+    out = out + rest.slice(end + 2, end + 2 + size);
+    rest = rest.slice(end + 4 + size);
+  }
+}
+
+function bodyOf(text: string): string {
+  return text.slice(text.indexOf("\r\n\r\n") + 4);
+}
+
+async function main(): Promise<void> throws IoError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const ctl = new AbortController();
+  let app = new Router();
+  app.use(async (req, next) => {
+    let res = await next(req);
+    res.headers.set("x-middleware", "yes");
+    return res;
+  });
+  app.get("/events", async (req) => Response.sse(events()));
+  app.get("/own", async (req) => {
+    let headers = new Headers();
+    headers.set("content-type", "text/event-stream; charset=utf-8");
+    headers.set("cache-control", "max-age=5");
+    return Response.sse(events(), { headers: headers });
+  });
+  app.get("/forever", async (req) => Response.sse(forever()));
+  const handled = await app.handle(new Request("http://h/events"));
+  const text = await handled.text();
+  const server = spawn(serve({ port: 0, hostname: "127.0.0.1", signal: ctl.signal, onListen: (info) => { seen.port.store(info.port); } }, app.handler()));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+
+  const got = await get(port, "/events");
+  const head = got.slice(0, got.indexOf("\r\n\r\n"));
+  console.log("headers|" + head.split("\r\n")[0] + "|" + String(head.includes("content-type: text/event-stream\r\n") ? "text/event-stream" : "?") + "|" + String(head.includes("cache-control: no-cache") ? "no-cache" : "?") + "|" + String(head.includes("transfer-encoding: chunked")));
+  const own = await get(port, "/own");
+  console.log("own headers|" + String(own.includes("content-type: text/event-stream; charset=utf-8") ? "text/event-stream; charset=utf-8" : "?") + "|" + String(own.includes("cache-control: max-age=5") ? "max-age=5" : "?"));
+  console.log("events|" + unchunked(bodyOf(got)).replaceAll("\n", "\\n"));
+  console.log("middleware|" + String(head.includes("x-middleware: yes")) + "|" + String(head.includes("transfer-encoding: chunked")) + "|" + unchunked(bodyOf(got)).split("\n")[0]);
+  console.log("handled|" + text.split("\n")[0]);
+
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode("GET /forever HTTP/1.1\r\nHost: h\r\n\r\n"));
+  // Once the stream is surely running, the server stops.
+  let first = "";
+  while (!first.includes("data: beat")) {
+    const got = await conn.read(4096);
+    first = first + new TextDecoder().decode(got);
+  }
+  ctl.abort();
+  const rest = await readAll(conn);
+  const all = first + rest;
+  console.log("stopped|" + String(all.includes("data: beat")) + "|" + String(all.endsWith("\r\n0\r\n\r\n")));
+  await server;
+  console.log("serve returned");
+}
+// case: http_response_clone
+// expect: 201 hi 201
+// expect: Response {
+// expect:   status: 201,
+// expect:   statusText: '',
+// expect:   headers: Headers {
+// expect:     names: [ 'content-type' ],
+// expect:     values: [ 'text/plain;charset=UTF-8' ]
+// expect:   },
+// expect:   body: 'hi',
+// expect:   url: ''
+// expect: }
+// expect: true
+// A response clones and prints as it always has, a streamed body left out of the print.
+import { inspect } from "node:util";
+async function* one(): AsyncGenerator<string> { yield "x"; }
+
+async function main() {
+  const res = new Response("hi", { status: 201 });
+  const copy = res.clone();
+  console.log(copy.status, copy.body, res.status);
+  console.log(copy);
+  const streamed = new Response(one(), { status: 201 });
+  console.log(inspect(streamed) === inspect(new Response("", { status: 201 })));
+}
+// case: http_response_clone_streamed
+// panic: a Response with a streamed body can't be cloned, since its generator runs once; read it with 'await res.text()' and make each copy from that text
+async function* one(): AsyncGenerator<string> { yield "x"; }
+
+async function main() {
+  const res = new Response(one());
+  const copy = res.clone();
+}
+// case: http_sse_lines
+// expect: data: a|data: b||data: c|data: d|data: e||event: xdata: injected|id: 12|data: z||
+// Event data ends a line at CR LF, CR and LF, as EventSource does, and a line break can't
+// smuggle a field in through an event's type or ID.
+async function* ev(): AsyncGenerator<string | ServerSentEvent> {
+  yield "a\rb";
+  yield "c\r\nd\ne";
+  yield { data: "z", event: "x\ndata: injected", id: "1\r2" };
+}
+
+async function main() {
+  const res = Response.sse(ev());
+  const text = await res.text();
+  console.log(text.replaceAll("\n", "|"));
+}
+// case: http_stream_pipelined_disconnect
+// expect: started
+// expect: the stream was dropped
+// A client that pipelines its next request during a stream, then leaves, still ends the stream.
+async function* idle(gate: shared<{ sem: Semaphore }>): AsyncGenerator<string> {
+  const held = await gate.sem.acquire();
+  yield "start";
+  await sleep(100000000);
+}
+
+async function freed(gate: shared<{ sem: Semaphore }>): Promise<string> {
+  const p = await gate.sem.acquire();
+  return "the stream was dropped";
+}
+
+async function held(): Promise<string> {
+  await sleep(5000);
+  return "the stream still holds its permit";
+}
+
+async function main(): Promise<void> throws IoError {
+  const gate = shared({ sem: new Semaphore(1) });
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const inner = gate.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info) => { seen.port.store(info.port); } }, async (req: Request) => {
+    if (req.path === "/wait") return new Response(idle(inner.clone()));
+    return new Response("next");
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  {
+    const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+    await conn.write(new TextEncoder().encode("GET /wait HTTP/1.1\r\nHost: h\r\n\r\n"));
+    let text = "";
+    while (!text.includes("start")) {
+      const got = await conn.read(4096);
+      text = text + new TextDecoder().decode(got);
+    }
+    console.log("started");
+    await conn.write(new TextEncoder().encode("GET /next HTTP/1.1\r\nHost: h\r\n\r\n"));
+    await sleep(20);
+  }
+  const said = await Promise.race([freed(gate.clone()), held()]);
+  console.log(said);
+}
+// case: http_stream_idle_disconnect
+// expect: started
+// expect: the stream was dropped
+// A client leaving ends a stream whose generator is paused and would never write again, so its
+// connection is freed at once.
+async function* idle(gate: shared<{ sem: Semaphore }>): AsyncGenerator<string> {
+  const held = await gate.sem.acquire();
+  yield "start";
+  await sleep(100000000);
+}
+
+async function freed(gate: shared<{ sem: Semaphore }>): Promise<string> {
+  const p = await gate.sem.acquire();
+  return "the stream was dropped";
+}
+
+async function held(): Promise<string> {
+  await sleep(5000);
+  return "the stream still holds its permit";
+}
+
+async function main(): Promise<void> throws IoError {
+  const gate = shared({ sem: new Semaphore(1) });
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const inner = gate.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info) => { seen.port.store(info.port); } }, async (req: Request) => new Response(idle(inner.clone()))));
+  while (found.port.load() === 0) await sleep(1);
+  {
+    const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+    await conn.write(new TextEncoder().encode("GET / HTTP/1.1\r\nHost: h\r\n\r\n"));
+    let text = "";
+    while (!text.includes("start")) {
+      const got = await conn.read(4096);
+      text = text + new TextDecoder().decode(got);
+    }
+    console.log("started");
+  }
+  const said = await Promise.race([freed(gate.clone()), held()]);
+  console.log(said);
+}
+// case: http_stream_pipeline_flood
+// expect: started
+// expect: the stream was dropped
+// A client that pipelines more than one request may take during a stream is treated as gone,
+// so the stream ends and its connection is freed even though no end of stream is seen.
+async function* idle(gate: shared<{ sem: Semaphore }>): AsyncGenerator<string> {
+  const held = await gate.sem.acquire();
+  yield "start";
+  await sleep(100000000);
+}
+
+async function freed(gate: shared<{ sem: Semaphore }>): Promise<string> {
+  const p = await gate.sem.acquire();
+  return "the stream was dropped";
+}
+
+async function held(): Promise<string> {
+  await sleep(5000);
+  return "the stream still holds its permit";
+}
+
+async function main(): Promise<void> throws IoError {
+  const gate = shared({ sem: new Semaphore(1) });
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const inner = gate.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info) => { seen.port.store(info.port); } }, async (req: Request) => new Response(idle(inner.clone()))));
+  while (found.port.load() === 0) await sleep(1);
+  {
+    const conn = await TcpStream.connect("127.0.0.1", found.port.load());
+    await conn.write(new TextEncoder().encode("GET / HTTP/1.1\r\nHost: h\r\n\r\n"));
+    let text = "";
+    while (!text.includes("start")) {
+      const got = await conn.read(4096);
+      text = text + new TextDecoder().decode(got);
+    }
+    console.log("started");
+    // Just past the 16 KiB and 1 MiB a request may take, so the rest fits in the socket's buffers.
+    const flood = "GET /x HTTP/1.1\r\nHost: h\r\n\r\n".repeat(39000);
+    try {
+      await conn.write(new TextEncoder().encode(flood));
+    } catch (e) {}
+    await sleep(50);
+  }
+  const said = await Promise.race([freed(gate.clone()), held()]);
+  console.log(said);
+}
+// case: http_response_clone_read
+// panic: this Response's streamed body was already read, so it can't be cloned; make each copy from the text it gave
+async function* one(): AsyncGenerator<string> { yield "x"; }
+
+async function main() {
+  const res = new Response(one());
+  const text = await res.text();
+  const copy = res.clone();
+}

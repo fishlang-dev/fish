@@ -17,7 +17,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, leafFuture, nextResult, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, leafFuture, lentPromise, nextResult, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -266,7 +266,9 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
       else if (s.await) {
         // In a generic body, a parameter standing for the generator awaits what its bound's `next()` gives.
         const generator = typeof held !== "string" && held.kind === "param" && held.concrete ? held.concrete : held;
-        const next = typeof generator !== "string" && generator.kind === "generator" ? leafFuture("next", generator) : promiseInterface(nextResult(yieldsOf(held, true)!));
+        // A boxed one awaits the boxed future its vtable's `next()` gives.
+        const next = typeof generator !== "string" && generator.kind === "generator" ? leafFuture("next", generator)
+          : typeof generator !== "string" && generator.kind === "dyn" ? lentPromise(nextResult(yieldsOf(held, true)!)) : promiseInterface(nextResult(yieldsOf(held, true)!));
         fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" }, { name: "await", type: next });
       } else fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" });
     }

@@ -188,3 +188,91 @@ test("a second SIGINT exits even while stdout is stuck on a full pipe", async ()
     closeSync(fd);
   }
 });
+
+const FIREHOSE = `async function* firehose(): AsyncGenerator<string> {
+  let s = "";
+  for (let i = 0; i < 65536; i++) s = s + "y";
+  while (true) yield s;
+}
+
+async function main(): Promise<void> throws IoError {
+  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, async (req: Request) => new Response(firehose()));
+  console.log("after serve");
+}
+`;
+
+test("a stream to a client that stops reading ends at SIGINT, freeing its connection", async () => {
+  const run = start(await build("firehose", FIREHOSE));
+  const port = Number((await run.line(/^listening \d+$/)).split(" ")[1]);
+  const socket = connect(port, "127.0.0.1");
+  socket.write("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
+  // Nothing is read until the server's writes have filled both sides' buffers and block.
+  socket.pause();
+  await Bun.sleep(500);
+  run.proc.kill("SIGINT");
+  expect(await run.exited()).toEqual({ stdout: "after serve\n", exitCode: 0, signal: null });
+  const ended = new Promise<boolean>((resolve) => {
+    socket.on("end", () => resolve(true));
+    socket.on("error", () => resolve(true));
+  });
+  socket.resume();
+  expect(await Promise.race([ended, Bun.sleep(5000).then(() => false)])).toBe(true);
+  socket.destroy();
+});
+
+test("a stream's write under way at SIGINT gets a second's grace, then the stream ends cleanly", async () => {
+  const run = start(await build("firehose_grace", FIREHOSE));
+  const port = Number((await run.line(/^listening \d+$/)).split(" ")[1]);
+  const socket = connect(port, "127.0.0.1");
+  let text = "";
+  const ended = new Promise<boolean>((resolve) => {
+    socket.on("data", (d) => (text = (text + d.toString()).slice(-16)));
+    socket.on("end", () => resolve(true));
+    socket.on("error", () => resolve(false));
+  });
+  socket.write("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
+  socket.pause();
+  await Bun.sleep(500);
+  run.proc.kill("SIGINT");
+  // Reading again within the second lets the blocked write and the last chunk go out.
+  await Bun.sleep(200);
+  socket.resume();
+  expect(await Promise.race([ended, Bun.sleep(5000).then(() => false)])).toBe(true);
+  expect(text.endsWith("\r\n0\r\n\r\n")).toBe(true);
+  expect(await run.exited()).toEqual({ stdout: "after serve\n", exitCode: 0, signal: null });
+});
+
+// A half-closed client looks the same as one that has gone, so its end of the stream ends a
+// streamed body as Node's server does: the head goes out, the body is cut short with no last
+// chunk, and the connection is closed.
+test("a client that half-closes after its request gets the head and a cut-short streamed body", async () => {
+  const run = start(await build("halfclose", `async function* pieces(): AsyncGenerator<string> {
+  for (let i = 0; i < 3; i++) {
+    await sleep(20);
+    yield "piece " + String(i) + ";";
+  }
+}
+
+async function main(): Promise<void> throws IoError {
+  const ctl = new AbortController();
+  await serve({ port: 0, hostname: "127.0.0.1", signal: ctl.signal, onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, async (req: Request) => {
+    if (req.path === "/stop") ctl.abort();
+    return new Response(pieces());
+  });
+}
+`));
+  const port = Number((await run.line(/^listening \d+$/)).split(" ")[1]);
+  const received = await new Promise<string>((resolve) => {
+    const socket = connect({ port, host: "127.0.0.1", allowHalfOpen: true });
+    let text = "";
+    socket.on("data", (d) => (text += d.toString()));
+    socket.on("end", () => resolve(text));
+    socket.write("GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n", () => socket.end());
+  });
+  expect(received.startsWith("HTTP/1.1 200 OK\r\n")).toBe(true);
+  expect(received).toContain("transfer-encoding: chunked\r\n");
+  expect(received.includes("piece 2;")).toBe(false);
+  expect(received.endsWith("0\r\n\r\n")).toBe(false);
+  await fetch(`http://127.0.0.1:${port}/stop`).then((res) => res.text());
+  await run.exited();
+});

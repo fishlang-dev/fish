@@ -455,3 +455,102 @@ async function main() {
 // expect: quick
 // expect: after slept40-0
 // expect: rest slept40-1
+// case: async_generator_dyn
+async function* letters(): AsyncGenerator<string> {
+  const held = "a" + 1;
+  yield held;
+  await sleep(1);
+  yield "b" + 2;
+}
+
+async function* counted(n: i64): AsyncGenerator<string> {
+  for (let i = 0; i < n; i++) {
+    await sleep(1);
+    yield "n" + i;
+  }
+}
+
+class Feed {
+  name: string;
+  source: Dyn<AsyncGenerator<string>>;
+  later: Dyn<AsyncGenerator<string>> | null = null;
+  constructor(name: string, source: Dyn<AsyncGenerator<string>>) {
+    this.name = name;
+    this.source = source;
+  }
+}
+
+async function main() {
+  let d: Dyn<AsyncGenerator<string>> = letters();
+  const r = await d.next();
+  if (r.done === false) console.log("next", r.value);
+  for await (const x of d) console.log("loop", x);
+  let f = new Feed("f", counted(3));
+  const boxed: Dyn<AsyncGenerator<string>> = letters();
+  f.later = boxed;
+  const q = await f.source.next();
+  if (q.done === false) console.log("field", q.value);
+  for await (const x of f.source) console.log("field loop", x);
+  const later = f.later;
+  if (later !== null) {
+    let l = later;
+    for await (const x of l) console.log("option", x);
+  }
+}
+// expect: next a1
+// expect: loop b2
+// expect: field n0
+// expect: field loop n1
+// expect: field loop n2
+// expect: option a1
+// expect: option b2
+// case: async_generator_dyn_dropped
+// A box dropped mid-stream drops its generator where it is paused, with what it holds.
+async function* endless(count: shared<{ n: Atomic<i64> }>): AsyncGenerator<string> {
+  const held = "kept" + 1;
+  while (true) {
+    count.n.add(1);
+    await sleep(1);
+    yield held + count.n.load();
+  }
+}
+
+async function firstTwo(d: Dyn<AsyncGenerator<string>>): Promise<void> {
+  let g = d;
+  let seen = 0;
+  for await (const x of g) {
+    console.log(x);
+    seen++;
+    if (seen === 2) break;
+  }
+}
+
+async function main() {
+  const count = shared({ n: new Atomic(0) });
+  await firstTwo(endless(count.clone()));
+  let d: Dyn<AsyncGenerator<string>> = endless(count.clone());
+  const r = await d.next();
+  if (r.done === false) console.log(r.value);
+  d = endless(count.clone());
+  console.log(count.n.load());
+}
+// expect: kept11
+// expect: kept12
+// expect: kept13
+// expect: 3
+// case: async_generator_dyn_not_send
+// error: a 'Dyn<AsyncGenerator<i64>>' may cross to another thread, so it can't hold a 'Cell<i64>'
+async function* local(c: Cell<i64>): AsyncGenerator<i64> {
+  await sleep(1);
+  yield c.get();
+}
+
+async function main() {
+  const d: Dyn<AsyncGenerator<i64>> = local(new Cell(1));
+}
+// case: dyn_promise_refused
+// error: 'Dyn' takes the interface its values implement
+async function one(): Promise<i64> { return 1; }
+async function main() {
+  const d: Dyn<Promise<i64>> = one();
+}
