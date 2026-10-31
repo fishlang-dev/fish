@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, runsOnMusl, staticTarget } from "../src/target.ts";
+import { dockerfile, dockerfilePath, HOST_TARGET, hostTriple, resolveTarget, runsOnMusl, staticTarget } from "../src/target.ts";
 
 const mac = "aarch64-apple-darwin";
 const linux = "x86_64-unknown-linux-gnu";
@@ -96,7 +96,7 @@ for (const [arch, cpu] of [["arm64", "aarch64"], ["amd64", "x86_64"]] as const) 
     writeFileSync(join(dir, "main.fsh"), PROGRAM);
     const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", join(dir, "main.fsh"), "-o", join(dir, "app"), "--target", `${cpu}-unknown-linux-musl`, "--sysroot", sysroot!, "--static", "--dockerfile"]);
     expect(built.stderr.toString()).toBe("");
-    expect(readFileSync(join(dir, "Dockerfile"), "utf8")).toBe('FROM scratch\nCOPY app /app\nENTRYPOINT ["/app"]\n');
+    expect(readFileSync(join(dir, "Dockerfile"), "utf8")).toBe('FROM scratch\nCOPY ["app","/app"]\nENTRYPOINT ["/app"]\n');
     const image = `fish-static-test-${arch}`;
     expect(Bun.spawnSync(["docker", "build", "-q", "--platform", `linux/${arch}`, "-t", image, dir]).exitCode).toBe(0);
     try {
@@ -143,7 +143,21 @@ test("--static links only musl targets statically", () => {
 });
 
 test("a Dockerfile holding only the binary", () => {
-  expect(dockerfile("api")).toBe('FROM scratch\nCOPY api /api\nENTRYPOINT ["/api"]\n');
+  expect(dockerfile("dist/api")).toBe('FROM scratch\nCOPY ["api","/api"]\nENTRYPOINT ["/api"]\n');
+  expect(dockerfile("my app")).toBe('FROM scratch\nCOPY ["my app","/my app"]\nENTRYPOINT ["/my app"]\n');
+  for (const name of ["a$b", "a*", "a?", "a[1]", "a\\b", 'a"b', "it's"]) expect(() => dockerfile(name)).toThrow(`fishc build: a Dockerfile reads $, *, ?, [, quotes and \\ in '${name}' specially, so '--dockerfile' can't copy it; choose another name with -o`);
+});
+
+test("the Dockerfile goes beside the binary, never over the user's own or the binary", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-dockerfile-"));
+  const binary = join(dir, "dist", "api");
+  expect(dockerfilePath(binary)).toBe(join(dir, "dist", "Dockerfile"));
+  mkdirSync(join(dir, "dist"));
+  writeFileSync(join(dir, "dist", "Dockerfile"), dockerfile(binary));
+  expect(dockerfilePath(binary)).toBe(join(dir, "dist", "Dockerfile"));
+  writeFileSync(join(dir, "dist", "Dockerfile"), "FROM node\n");
+  expect(() => dockerfilePath(binary)).toThrow(`fishc build: '--dockerfile' would replace ${join(dir, "dist", "Dockerfile")}, which holds something else; move it, or build into another directory with -o`);
+  for (const name of ["Dockerfile", "dockerfile"]) expect(() => dockerfilePath(join(dir, name))).toThrow(`fishc build: '--dockerfile' writes ${join(dir, "Dockerfile")}, which is the binary's own name; choose another name with -o`);
 });
 
 test.skipIf(hostTriple()?.endsWith("-musl") ?? true)("--static and --dockerfile refused where they can't apply", () => {
@@ -159,6 +173,11 @@ test.skipIf(hostTriple()?.endsWith("-musl") ?? true)("--static and --dockerfile 
   const docker = fishc("--dockerfile");
   expect(docker.stderr.toString()).toBe("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'\n");
   expect(docker.exitCode).toBe(2);
+  for (const flag of ["--static", "--dockerfile"]) {
+    const ir = fishc(flag, "--emit-llvm");
+    expect(ir.stderr.toString()).toBe("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out\n");
+    expect(ir.exitCode).toBe(2);
+  }
   expect(existsSync(join(dir, "main"))).toBe(false);
   expect(existsSync(join(dir, "Dockerfile"))).toBe(false);
 });

@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
@@ -75,7 +76,22 @@ export function staticTarget(target: Target, host: string | undefined = hostTrip
   return { ...target, link: [...target.link, "-static"] };
 }
 
-// A container image holding only the static binary named `binary`, built from the directory it's in.
+// A container image holding only the static binary at `binary`, built from the directory it's in.
+// COPY reads `$` as a variable, `*`, `?` and `[` as a pattern, and removes quotes and backslashes,
+// even in its JSON form.
 export function dockerfile(binary: string): string {
-  return `FROM scratch\nCOPY ${binary} /${binary}\nENTRYPOINT ${JSON.stringify([`/${binary}`])}\n`;
+  const name = basename(binary);
+  if (/[$*?[\\"']/.test(name)) throw new Error(`fishc build: a Dockerfile reads $, *, ?, [, quotes and \\ in '${name}' specially, so '--dockerfile' can't copy it; choose another name with -o`);
+  return `FROM scratch\nCOPY ${JSON.stringify([name, `/${name}`])}\nENTRYPOINT ${JSON.stringify([`/${name}`])}\n`;
+}
+
+// Where `--dockerfile` writes for `binary`, beside it. A Dockerfile already there is replaced only
+// when it is the one this would write, so a rebuild works and the user's own is kept.
+export function dockerfilePath(binary: string): string {
+  const text = dockerfile(binary);
+  const at = join(dirname(binary), "Dockerfile");
+  // Compared without case, as macOS's file system names files.
+  if (basename(binary).toLowerCase() === "dockerfile") throw new Error(`fishc build: '--dockerfile' writes ${at}, which is the binary's own name; choose another name with -o`);
+  if (existsSync(at) && readFileSync(at, "utf8") !== text) throw new Error(`fishc build: '--dockerfile' would replace ${at}, which holds something else; move it, or build into another directory with -o`);
+  return at;
 }

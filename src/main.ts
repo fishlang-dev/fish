@@ -19,7 +19,7 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
-import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, staticTarget, type Target } from "./target.ts";
+import { dockerfile, dockerfilePath, HOST_TARGET, hostTriple, resolveTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
@@ -757,6 +757,7 @@ else if (import.meta.main) {
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
   if (values.static && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
+  if ((values.static || values.dockerfile) && values["emit-llvm"]) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
   if (values.dockerfile && !values.static) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
   try {
     if (values["emit-llvm"]) process.stdout.write(compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined, values.leaks, values.debug));
@@ -766,9 +767,10 @@ else if (import.meta.main) {
       const resolved = resolveTarget(values.target, sysroot);
       const platform = values.static ? staticTarget(resolved) : resolved;
       const binary = out ?? basename(target, ".fsh");
+      const image = values.dockerfile ? dockerfilePath(binary) : undefined;
       try {
         const warnings = lib ? buildLibrary(session, target, binary, lib, values.release, panic, values.link ?? [], platform, values.debug) : build(session, target, binary, values.release, panic, values.link ?? [], platform, values.leaks, values.debug);
-        if (values.dockerfile) writeFileSync(join(dirname(binary), "Dockerfile"), dockerfile(basename(binary)));
+        if (image) writeFileSync(image, dockerfile(binary));
         for (const w of warnings) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.
