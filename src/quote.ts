@@ -16,7 +16,7 @@ export type Category = "AstExpr" | "AstStmt" | "AstType";
 // `asExpressions` are the splices written as statements that are expressions, each the
 // expression of its statement, as `e;` is; `names` are those where a name goes, each taking an
 // identifier's name.
-export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: Expr[]; asExpressions: Set<number>; names: Set<number> };
+export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: Expr[]; asExpressions: Set<usize>; names: Set<usize> };
 
 // The tree a quote's text parses to: a type for `quoteType`, else an expression when the whole
 // text is one and doesn't start as JavaScript's statements do, else one statement or
@@ -85,14 +85,14 @@ function startsStatement(text: string): boolean {
 }
 
 // Which splice a name stands for, if it is one.
-function nameSplice(text: unknown): number | undefined {
+function nameSplice(text: unknown): usize | undefined {
   if (typeof text !== "string" || !text.startsWith(SPLICE)) return undefined;
   const i = text.slice(SPLICE.length);
   return /^\d+$/.test(i) ? Number(i) : undefined;
 }
 
 // Which splice a node stands for, if it is one.
-function spliceOf(node: unknown): number | undefined {
+function spliceOf(node: unknown): usize | undefined {
   if (!node || typeof node !== "object") return undefined;
   const n = node as { kind?: string; name?: unknown; args?: unknown[]; expr?: unknown };
   if ((n.kind !== "ident" && !(n.kind === "ref" && n.args?.length === 0)) || typeof n.name !== "string" || !n.name.startsWith(SPLICE)) return undefined;
@@ -133,7 +133,7 @@ function memberFor(node: unknown, union: UnionType): Type | undefined {
   });
 }
 
-function walk(typing: Typing, node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: number, category: Category) => void) {
+function walk(typing: Typing, node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: usize, category: Category) => void) {
   const t = typing.unfolded(type);
   // A splice where a name goes takes an identifier, its name put there.
   const name = nameSplice(node);
@@ -158,7 +158,7 @@ function walk(typing: Typing, node: unknown, type: Type, types: Record<Category,
 
 // The splice a node in a union's place stands for: a statement written as a splice alone, or a
 // splice where an expression or a type goes.
-function spliceIn(node: unknown, t: UnionType, types: Record<Category, Type>, asExpressions: Set<number>): { i: number; category: Category } | undefined {
+function spliceIn(node: unknown, t: UnionType, types: Record<Category, Type>, asExpressions: Set<usize>): { i: usize; category: Category } | undefined {
   const n = node as { kind?: string; expr?: unknown };
   const member = memberFor(node, t);
   const statements = unfold(types.AstStmt) as UnionType;
@@ -181,8 +181,8 @@ export type Builder<V> = {
   record(type: ObjectType, fields: Map<string, V>): V;
   array(items: V[]): V;
   member(value: V, of: Type, member: Type): V;
-  splice(i: number, into: Type): V;
-  name(i: number): V;
+  splice(i: usize, into: Type): V;
+  name(i: usize): V;
   int(n: bigint): V;
   none: V;
 };
@@ -192,7 +192,7 @@ export type Builder<V> = {
 // wherever its expansion lands; the spellings that pin them, `name-fsh<file>`, which the linker
 // gives the declaration the name means in that file; and the names of the program's enum
 // members, which a bare name in a quoted match means rather than binds.
-export type Hygiene = { declared: Map<string, string>; namesIn(file: number): Set<string>; pins: Set<string>; members: Set<string>; fresh(name: string): string };
+export type Hygiene = { declared: Map<string, string>; namesIn(file: usize): Set<string>; pins: Set<string>; members: Set<string>; fresh(name: string): string };
 
 // Runs `run` with the quotes it builds in the check `tables` belongs to taking hygiene `h`.
 export function withHygiene<T>(tables: Tables, h: Hygiene, run: () => T): T {
@@ -229,7 +229,7 @@ const VARIANTS = new Set(["None"]);
 // spliced into to bind.
 export type Free = Map<string, string>;
 
-function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: number, bound: Map<string, string>, free: Free): unknown {
+function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
   const copy = renumber(structuredClone(tree), () => nextId(ids));
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
@@ -310,7 +310,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     }
     if (node === null || node === undefined || t === "null") return b.none;
     if (t === "string" && nameSplice(node) !== undefined) return b.name(nameSplice(node)!);
-    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as number | bigint), here)) : (node as V);
+    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as i64 | bigint), here)) : (node as V);
     if (t.kind === "literal") return t.value as V;
     if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element, here)));
     if (t.kind !== "object") throw new Error(`internal error: an Ast field of type '${t.kind}'`);
@@ -318,7 +318,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     const own = !at && typeof n.start === "number" && typeof n.end === "number" ? { start: n.start, end: n.end } : here;
     const fields = new Map<string, V>();
     for (const f of t.fields) {
-      if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(at ? at[f.name] : (n[f.name] as number))));
+      if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(at ? at[f.name] : (n[f.name] as usize))));
       else fields.set(f.name, make(n[f.name], f.type, own));
     }
     return b.record(t, fields);

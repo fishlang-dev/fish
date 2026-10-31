@@ -147,7 +147,7 @@ function isStmt(x: unknown): boolean {
 }
 
 // Renames a local declaration in the statements after it, until one declares the name again.
-type Rename = { name: string; mangled: string; args: TypeNode[]; own: number; values: boolean };
+type Rename = { name: string; mangled: string; args: TypeNode[]; own: usize; values: boolean };
 
 // A nested block that declares the name again isn't its scope there; a type alias or interface
 // is hidden only by another type.

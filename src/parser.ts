@@ -6,7 +6,7 @@ import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
 import { nextId, type Id, type Ids } from "./nodes.ts";
 
-export type Span = { start: number; end: number };
+export type Span = { start: usize; end: usize };
 
 // `id` is not part of `Span`, so spreading a span never copies one.
 export type { Id };
@@ -39,7 +39,7 @@ export type Expr = Span & Id & (
   // Every integer form, in any base.
   | { kind: "int"; value: bigint }
   // Has a fraction or an exponent.
-  | { kind: "float"; value: number }
+  | { kind: "float"; value: f64 }
   | { kind: "bigint"; value: bigint }
   | { kind: "null" } | { kind: "this" } | { kind: "super" }
   | { kind: "regex"; pattern: string; flags: string }
@@ -252,7 +252,7 @@ export type Interface = Span & Id & { kind: "interface"; name: string; typeParam
 // What a package's declaration names: the package and the name it exports it by. A const is
 // read as a value.
 // `package` is the specifier's index among the program's, naming it in the bundle.
-export type JsName = { module: string; package: number; name: string; const?: true;
+export type JsName = { module: string; package: usize; name: string; const?: true;
   // A function declared with several signatures: its other signatures, in the order declared.
   overloads?: Func[] };
 
@@ -293,7 +293,7 @@ export type Cursor = {
   // Every token lexed so far, in source order: once a whole program is parsed, all its tokens,
   // each `/` read as the parser decided.
   tokens: Token[];
-  pos: number;
+  pos: usize;
   // False only directly inside a conditional type's `extends` clause, as in TypeScript.
   conditionalAllowed: boolean;
   // False only directly inside a `for` initializer, so `for (x in y)` isn't read as an
@@ -303,7 +303,7 @@ export type Cursor = {
   topic: { used: boolean } | undefined;
   // The token `offset` places ahead of the current one. Never look past a `/` where an
   // expression starts: it may begin a regex, and lexing its body as tokens can fail.
-  peek(offset?: number): Token;
+  peek(offset?: usize): Token;
   next(): Token;
   at(text: string): boolean;
   // Consumes the token when it is `text`.
@@ -315,7 +315,7 @@ export type Cursor = {
   // Items up to and including `close`, separated by commas, with an optional trailing comma.
   list<T>(item: () => T, close: string): T[];
   // Where the last consumed token ended.
-  end(): number;
+  end(): usize;
   // Takes the `/` or `/=` at the cursor as the start of a regular expression instead.
   regex(): Token;
   // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
@@ -449,7 +449,7 @@ const LEADING = new Set(["export", "default", "declare", "macro"]);
 
 // Whether the token at `i` is a word starting the declaration after it, rather than a property
 // name as in `a.default`.
-function leading(c: Cursor, i: number): boolean {
+function leading(c: Cursor, i: usize): boolean {
   const t = c.tokens[i]!;
   const before = c.tokens[i - 1];
   return t.kind === "ident" && LEADING.has(t.text) && !(before && (isToken(before, ".") || isToken(before, "?.")));
@@ -461,7 +461,7 @@ const members = (t: TypeNode): TypeNode[] => (t.kind === "union" ? t.types.flatM
 // A declaration's `throws` type: its written clause, or else the types its JSDoc names in
 // `@throws {E}` tags, as a union when there are several. `at` is where the declaration starts,
 // and its JSDoc is the `/** ... */` comments between it and the token before.
-export function documentedThrows(c: Cursor, at: number, written: TypeNode | undefined): TypeNode | undefined {
+export function documentedThrows(c: Cursor, at: usize, written: TypeNode | undefined): TypeNode | undefined {
   if (!c.docs) return written;
   let i = c.pos - 1;
   while (i > 0 && c.tokens[i]!.start > at) i--;
@@ -513,7 +513,7 @@ function thrownTypes(src: string, ids: Ids, m: Comment): TypeNode[] {
 
 // The type written from `start` to `end` of `src`, its spans offsets into the whole text, or
 // undefined when that text isn't one type.
-function typeAt(src: string, ids: Ids, start: number, end: number): TypeNode | undefined {
+function typeAt(src: string, ids: Ids, start: usize, end: usize): TypeNode | undefined {
   const c = cursor(src.slice(0, end), ids, start);
   return c.attempt(() => {
     const t = type(c);
@@ -524,7 +524,7 @@ function typeAt(src: string, ids: Ids, start: number, end: number): TypeNode | u
 
 // A function, type alias, interface or enum after decorators, which Fish applies as macros
 // where TypeScript allows only classes.
-export function decorated(c: Cursor, start: number, decorators: Expr[]): Stmt {
+export function decorated(c: Cursor, start: usize, decorators: Expr[]): Stmt {
   const next = c.peek(1);
   const at = c.at("function") || (c.at("async") && isToken(next, "function") && !next.newlineBefore) || (c.at("type") && next.kind === "ident")
     || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
@@ -799,7 +799,7 @@ export function endStatement(c: Cursor) {
 }
 
 // Moves every span in a parsed tree by `by`, for a source placed past others in one program.
-export function shiftSpans(v: unknown, by: number, seen: Set<unknown> = new Set<unknown>()) {
+export function shiftSpans(v: unknown, by: usize, seen: Set<unknown> = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   if (Array.isArray(v)) return v.forEach((x) => shiftSpans(x, by, seen));

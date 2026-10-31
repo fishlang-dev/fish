@@ -8,12 +8,12 @@ export type Token = {
   kind: "ident" | "private" | "int" | "float" | "bigint" | "string" | "regex" | "template" | "templateHead" | "templateMiddle" | "templateTail" | "punct" | "eof";
   // Source text; for strings and templates, the decoded value. Keywords are idents, since most TS keywords are contextual.
   text: string;
-  start: number;
-  end: number;
+  start: usize;
+  end: usize;
   // Drives automatic semicolon insertion.
   newlineBefore: boolean;
   // On `/` and `/=`: the template substitutions open there, for rescanning it as a regex.
-  substitutions?: number[];
+  substitutions?: usize[];
   // On a template piece: its text as written, escapes undecoded.
   raw?: string;
 };
@@ -37,7 +37,7 @@ const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f:
 // Decodes the escape whose backslash is at `i`, returning its value and where it ends.
 // Any other character escapes to itself, as in JavaScript; octal escapes are errors in
 // strict mode, which every module is.
-function escape(src: string, i: number): [string, number] {
+function escape(src: string, i: usize): [string, usize] {
   const c = src[i + 1] ?? "";
   const simple = ESCAPES[c];
   if (simple !== undefined) return [simple, i + 2];
@@ -59,7 +59,7 @@ function escape(src: string, i: number): [string, number] {
 
 // The decoded text of a template piece starting at `i`, where it ends, and whether a
 // substitution follows.
-function template(src: string, i: number): [string, number, boolean] {
+function template(src: string, i: usize): [string, usize, boolean] {
   let value = "";
   for (;;) {
     if (i >= src.length) throw new CompileError("unterminated template literal", i);
@@ -80,7 +80,7 @@ function template(src: string, i: number): [string, number, boolean] {
 }
 
 // The end of the number starting at `i`, and which kind of number it is.
-function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
+function number(src: string, i: usize): [usize, "int" | "float" | "bigint"] {
   const radix = { x: /[0-9a-fA-F_]/, o: /[0-7_]/, b: /[01_]/ }[src[i] === "0" ? (src[i + 1] ?? "").toLowerCase() : ""];
   let end = i + (radix ? 2 : 0);
   let kind: "int" | "float" | "bigint" = "int";
@@ -107,7 +107,7 @@ function number(src: string, i: number): [number, "int" | "float" | "bigint"] {
 }
 
 // A comment as written, markers included, kept for the formatter and doc comments.
-export type Comment = { kind: "line" | "block" | "shebang"; text: string; start: number; end: number };
+export type Comment = { kind: "line" | "block" | "shebang"; text: string; start: usize; end: usize };
 
 export type Lexer = {
   next(): Token;
@@ -125,10 +125,10 @@ export function lexer(src: string, from = 0): Lexer {
   let newlineBefore = false;
   // For each template substitution we are inside, how many `{` it has open, so the `}` that
   // closes the substitution can be told from one that closes a block or an object.
-  let substitutions: number[] = [];
+  let substitutions: usize[] = [];
   const comments: Comment[] = [];
-  const comment = (kind: Comment["kind"], start: number) => comments.push({ kind, text: src.slice(start, i), start, end: i });
-  const token = (kind: Token["kind"], text: string, start: number): Token => {
+  const comment = (kind: Comment["kind"], start: usize) => comments.push({ kind, text: src.slice(start, i), start, end: i });
+  const token = (kind: Token["kind"], text: string, start: usize): Token => {
     const t: Token = { kind, text, start, end: i, newlineBefore };
     newlineBefore = false;
     return t;

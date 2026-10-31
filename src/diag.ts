@@ -20,22 +20,22 @@ export function shown(text: string, names: Names): string {
 export const written = (text: string, names: Names) => text.replace(/([\w$]+)@m?\d+/g, (m, name: string) => (names.local.has(m) ? name : m));
 
 // A second location an error refers to, like where a value was moved.
-export type Note = { message: string; start: number; end: number };
+export type Note = { message: string; start: usize; end: usize };
 
 // A file of a program other than the one an error is rendered against, from `base` on.
-export type Source = { base: number; src: string; file: string };
+export type Source = { base: usize; src: string; file: string };
 
 // A user-facing compile error pointing at a [start, end) source range. `sources` holds the
 // program's other files, when it spans several, and `names` the names its compilation made up,
 // both given by `named` where the error leaves the compilation.
 export class CompileError extends Error {
-  start: number;
-  end: number;
+  start: usize;
+  end: usize;
   note: Note | undefined;
   sources: Source[] = [];
   names: Names = { local: new Set(), madeUp: new Map() };
 
-  constructor(message: string, start: number, end: number = start + 1, note?: Note) {
+  constructor(message: string, start: usize, end: usize = start + 1, note?: Note) {
     super(message);
     this.start = start;
     this.end = end;
@@ -53,16 +53,16 @@ export function named(e: CompileError, names: Names): CompileError {
 
 // Which source an offset is in: the entry file's, or another file's from `sources`, which ends
 // with std's when the program was loaded with it.
-export function sourceOf(src: string, file: string, offset: number, sources: Source[] = []): { src: string; file: string; offset: number } {
+export function sourceOf(src: string, file: string, offset: usize, sources: Source[] = []): { src: string; file: string; offset: usize } {
   const other = sources.findLast((s) => offset >= s.base);
   return other ? { src: other.src, file: other.file, offset: offset - other.base } : { src, file, offset };
 }
 
 // 1-based line and column of a source offset, plus the bounds of its line.
-export function locate(src: string, offset: number) {
-  const lineStart = src.lastIndexOf("\n", offset - 1) + 1;
+export function locate(src: string, offset: usize) {
+  const lineStart = (src.lastIndexOf("\n", offset - 1) + 1) as usize;
   const newline = src.indexOf("\n", offset);
-  const lineEnd = newline < 0 ? src.length : newline;
+  const lineEnd = newline < 0 ? src.length : newline as usize;
   const line = src.slice(0, offset).split("\n").length;
   return { line, col: offset - lineStart + 1, lineStart, lineEnd };
 }

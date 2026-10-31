@@ -128,10 +128,10 @@ function printOnce(program: Stmt[], src: string, comments: Comment[], ids: Ids):
 }
 
 // Whether the source has a blank line after the `,` that follows an element ending at `end`.
-function blankAfterElement(src: string, end: number): boolean {
+function blankAfterElement(src: string, end: usize): boolean {
   let i = end;
   while (i < src.length && src[i] !== ",") {
-    if (src.startsWith("/*", i)) i = src.indexOf("*/", i + 2) + 2 || src.length;
+    if (src.startsWith("/*", i)) i = (src.indexOf("*/", i + 2) + 2) as usize || src.length;
     else if (src.startsWith("//", i)) while (i < src.length && src[i] !== "\n") i++;
     else i++;
   }
@@ -190,13 +190,13 @@ function trailingComment(p: Placed, src: string, previous: { isBlock: boolean; h
 
 // `docs` with `separator` between them, and one blank line more after any node the source
 // follows with a blank line, as Prettier keeps them between statements, members and properties.
-function separated(nodes: { end: number }[], docs: Doc[], separator: Doc, blank: Doc, src: string): Doc[] {
+function separated(nodes: { end: usize }[], docs: Doc[], separator: Doc, blank: Doc, src: string): Doc[] {
   return docs.flatMap((d, i) => (i === docs.length - 1 ? [d] : [d, separator, isNextLineEmpty(src, pastParens(src, nodes[i]!.end)) ? blank : ""]));
 }
 
 // Past the `)` that close parentheses the tree dropped from around a node's end, such as a
 // parenthesized type ending a type alias.
-function pastParens(src: string, end: number): number {
+function pastParens(src: string, end: usize): usize {
   let last = end;
   for (let i = end; i < src.length && /[\s)]/.test(src[i]!); i++) if (src[i] === ")") last = i + 1;
   return last;
@@ -348,9 +348,9 @@ const isCallOrNew = (e: Expr | undefined) => e?.kind === "call" || e?.kind === "
 const parentExpr = (path: Path): Expr | undefined => (path.parent?.sort === "expr" ? path.parent.node : undefined);
 const stmtKind = (path: Path | undefined) => (path?.sort === "stmt" ? path.node.kind : undefined);
 
-const precedence = new Map<string, number>(
+const precedence = new Map<string, usize>(
   [["|>"], ["??"], ["||"], ["&&"], ["|"], ["^"], ["&"], ["==", "===", "!=", "!=="], ["<", ">", "<=", ">=", "in", "instanceof"],
-    [">>", "<<", ">>>"], ["+", "-"], ["*", "/", "%"], ["**"]].flatMap((ops, i) => ops.map((op): [string, number] => [op, i])),
+    [">>", "<<", ">>>"], ["+", "-"], ["*", "/", "%"], ["**"]].flatMap((ops, i) => ops.map((op): [string, usize] => [op, i])),
 );
 const equality = new Set(["==", "!=", "===", "!=="]);
 const multiplicative = new Set(["*", "/", "%"]);
@@ -609,7 +609,7 @@ function moreArgumentsThanCaller(e: Expr, path: At<"expr">): boolean {
 
 // `useEffect(() => { ... }, [a, b])`, and `useImperativeHandle(ref, () => { ... }, [a])`.
 function isReactHookCall(args: Expr[]): boolean {
-  const hook = (i: number) => {
+  const hook = (i: usize) => {
     const f = args[i];
     const deps = args[i + 1];
     return f?.kind === "arrow" && f.params.length === 0 && Array.isArray(f.body) && deps?.kind === "array";
@@ -725,7 +725,7 @@ function chainSignatures(signatures: Doc[], path: At<"expr">, opts: Opts, should
 const identifierName = /^[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*$/u;
 
 // The width of leading whitespace, a tab reaching the next stop of two.
-function columns(whitespace: string): number {
+function columns(whitespace: string): usize {
   let size = 0;
   for (const ch of whitespace) size = ch === "\t" ? size + 2 - (size % 2) : size + 1;
   return size;
@@ -886,7 +886,7 @@ function printer(attached: Attachment, ids: Ids) {
 
   // A braced list of members: `{}` when empty, else each on its own line, with the comments
   // dangling inside it.
-  function membersBlock(list: unknown[], docs: Doc[], nodes: { end: number }[], src: string): Doc {
+  function membersBlock(list: unknown[], docs: Doc[], nodes: { end: usize }[], src: string): Doc {
     const node = attached.blocks.get(list);
     const dangling = node ? danglingComments(node, src) : [];
     if (docs.length === 0 && dangling.length === 0) return "{}";
@@ -1342,7 +1342,7 @@ function printer(attached: Attachment, ids: Ids) {
       case "query":
         return ["typeof ", type(t.target, "exprName", path, src)];
       case "import": {
-        const at = src.indexOf("(", t.start) + 1;
+        const at = (src.indexOf("(", t.start) + 1) as usize;
         const tokens = lexer(src.slice(at));
         const literal = tokens.next();
         return ["import(", quoted(src.slice(at + literal.start, at + literal.end)), ")", t.name ? [".", t.name] : "", typeArguments(t.args, path, src)];
@@ -1474,12 +1474,12 @@ function printer(attached: Attachment, ids: Ids) {
   // `{ readonly [K in T as N]?: V }`; one written with a line break after its `{` stays expanded.
   function mappedType(t: Extract<TypeNode, { kind: "mapped" }>, path: At<"type">, src: string): Doc {
     // The tree records `readonly` and `?` as "+" whether or not a `+` was written.
-    const signed = (from: number, sign: "+" | "-" | undefined, text: string) => {
+    const signed = (from: usize, sign: "+" | "-" | undefined, text: string) => {
       if (sign === undefined) return "";
       if (sign === "-") return `-${text}`;
       return src.slice(from).trimStart().startsWith("+") ? `+${text}` : text;
     };
-    const afterKey = src.indexOf("]", (t.as ?? t.constraint).end) + 1;
+    const afterKey = (src.indexOf("]", (t.as ?? t.constraint).end) + 1) as usize;
     const expanded = /^\s*/.exec(src.slice(t.start + 1))![0].includes("\n");
     const key = group(["[", indent([softline, t.name, " in ", type(t.constraint, "sourceType", path, src), t.as ? [" as ", type(t.as, "nameType", path, src)] : ""]), softline, "]"]);
     const dangling = commentsOf(t).filter((p) => p.placement === "dangling");
@@ -1506,7 +1506,7 @@ function printer(attached: Attachment, ids: Ids) {
     t.types.forEach((x) => {
       const open = src.lastIndexOf("${", x.start);
       parts.push(join(literalline, src.slice(from, open).split("\n")), group(["${", type(x, "types", path, src), lineSuffixBoundary, "}"]));
-      from = src.indexOf("}", x.end) + 1;
+      from = (src.indexOf("}", x.end) + 1) as usize;
     });
     parts.push(join(literalline, src.slice(from, t.end - 1).split("\n")), "`");
     return parts;
@@ -1997,7 +1997,7 @@ function printer(attached: Attachment, ids: Ids) {
     const trailing = e.kind === "import" ? "" : ifBreak(",");
     const allBroken = () => group(["(", indent([line, ...printedArgs]), trailing, line, ")"], { shouldBreak: true });
     if (blank || functionArguments(args)) return allBroken();
-    const hugged = (i: number, opts: Opts): Doc | undefined => {
+    const hugged = (i: usize, opts: Opts): Doc | undefined => {
       try {
         return printed(at(args[i]!, "arguments", path), src, opts);
       } catch (err) {
@@ -2380,7 +2380,7 @@ function printer(attached: Attachment, ids: Ids) {
   // A property name as written, with quotes dropped where they aren't needed (Prettier's
   // `quoteProps: "as-needed"`): a quoted identifier loses them; a quoted number keeps them.
   // A class field's quoted name keeps its quotes, as Prettier's typescript printer leaves them.
-  function propertyKey(key: PropertyName, start: number, skip: number, parent: Path, src: string, unquote = true): Doc {
+  function propertyKey(key: PropertyName, start: usize, skip: usize, parent: Path, src: string, unquote = true): Doc {
     if (typeof key !== "string") return ["[", expr(key, "key", parent, src), "]"];
     // The tree keeps a string key's value, not how it was written, so it is read again from the
     // source, after `skip` tokens such as `async`, `*`, `get` or `set`.
@@ -2460,7 +2460,7 @@ function printer(attached: Attachment, ids: Ids) {
     return parts;
   }
 
-  function substitution(x: Expr, path: At<"expr">, src: string, indentSize: number, previous: string): Doc {
+  function substitution(x: Expr, path: At<"expr">, src: string, indentSize: usize, previous: string): Doc {
     let doc = expr(x, "expressions", path, src);
     const open = src.lastIndexOf("${", x.start);
     const close = src.indexOf("}", x.end);
@@ -2614,7 +2614,7 @@ function printer(attached: Attachment, ids: Ids) {
 
   // The first string literal from `from` on, printed with Prettier's quotes; the tree keeps only
   // a module name's value.
-  function stringAfter(from: number, src: string): string {
+  function stringAfter(from: usize, src: string): string {
     const tokens = lexer(src.slice(from));
     for (let t = tokens.next(); t.kind !== "eof"; t = tokens.next()) {
       if (t.kind === "string") return quoted(src.slice(from + t.start, from + t.end));

@@ -70,14 +70,14 @@ function namespaceDeclaration(c: Cursor): Stmt {
 
 export const atClass = (c: Cursor) => c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore);
 
-export function classDeclaration(c: Cursor, start: number, decorators: Expr[]): Stmt {
+export function classDeclaration(c: Cursor, start: usize, decorators: Expr[]): Stmt {
   const abstract = c.eat("abstract");
   return { kind: "class", ...classNode(c, start, abstract, decorators), id: nextId(c.ids) };
 }
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
 // `start` is where the class's first decorator or modifier began.
-export function classNode(c: Cursor, start: number, abstract: boolean, decorators: Expr[]): ClassNode {
+export function classNode(c: Cursor, start: usize, abstract: boolean, decorators: Expr[]): ClassNode {
   c.expect("class");
   // A class expression may be anonymous, and so may `export default class`.
   const name = c.peek().kind === "ident" && !c.at("extends") && !c.at("implements") ? c.ident().text : undefined;
@@ -292,7 +292,7 @@ export function moduleName(c: Cursor): string {
 }
 
 // Every form of `export`. Decorators written before `export` belong to the class after it.
-export function exportDeclaration(c: Cursor, start: number, decorators: Expr[]): Stmt {
+export function exportDeclaration(c: Cursor, start: usize, decorators: Expr[]): Stmt {
   c.expect("export");
   const end = () => c.end();
   if (c.eat("default")) {

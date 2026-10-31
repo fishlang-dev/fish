@@ -26,7 +26,7 @@ const isExport = (d: Decl) => d.kind === "export" && !!d.body && TOP_LEVEL.has(d
 
 type Decl = Stmt & { decorators?: Expr[] };
 // A decorated top-level declaration of a file, and whether it is exported.
-type Site = { module: Module; index: number; decl: Decl; exported: boolean };
+type Site = { module: Module; index: usize; decl: Decl; exported: boolean };
 
 // Expands every file's macros in place. A round links a copy of the files, checks the macros
 // with every decorator's arguments, then applies each declaration's decorators in turn: its
@@ -78,7 +78,7 @@ export function expandMacros(compilation: Compilation, loaded: Loaded, library: 
           return d && allDecorators(d).some((x) => prepared.has(x));
         });
         if (at < 0) break;
-        const s = range[at]!;
+        const s = range[at as usize]!;
         const d = (s.kind === "export" ? s.body : s) as Decl;
         const pending = pendingOf(d);
         const ready = prepared.get(pending.decorator);
@@ -146,7 +146,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
 }
 
 // Gives every node of a tree one span, as code a decorator made.
-function respan(node: unknown, at: { start: number; end: number }) {
+function respan(node: unknown, at: { start: usize; end: usize }) {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node)) return node.forEach((x) => respan(x, at));
   const n = node as Record<string, unknown>;
@@ -228,7 +228,7 @@ function allDecorators(d: Decl): Expr[] {
 
 // The decorator that applies next: a member's or a parameter's, nearest first, before the
 // declaration's own.
-type Pending = { where: "own" | "member" | "param"; index: number; decorator: Expr };
+type Pending = { where: "own" | "member" | "param"; index: usize; decorator: Expr };
 function pendingOf(d: Decl): Pending {
   if (d.kind === "class") {
     for (const m of d.members) {
@@ -236,11 +236,11 @@ function pendingOf(d: Decl): Pending {
       if (p) throw new CompileError("decorators on method and constructor parameters aren't supported yet; decorate the method, or a top-level function's parameter", p.decorators[0]!.start, p.decorators[0]!.end);
     }
     const index = d.members.findIndex((m) => m.decorators.length > 0);
-    if (index >= 0) return { where: "member", index, decorator: d.members[index]!.decorators.at(-1)! };
+    if (index >= 0) return { where: "member", index: index as usize, decorator: d.members[index as usize]!.decorators.at(-1)! };
   }
   if (d.kind === "function") {
     const index = d.params.findIndex((p) => p.decorators.length > 0);
-    if (index >= 0) return { where: "param", index, decorator: d.params[index]!.decorators.at(-1)! };
+    if (index >= 0) return { where: "param", index: index as usize, decorator: d.params[index as usize]!.decorators.at(-1)! };
   }
   return { where: "own", index: 0, decorator: d.decorators!.at(-1)! };
 }
@@ -474,7 +474,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
 // macro gives in its place.
 function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore(given: Decl[]): void } {
   const own = pending.where === "own" ? (decl.decorators ?? []).slice(0, -1) : (decl.decorators ?? []);
-  const later = <T extends { decorators: Expr[] }>(x: T, i: number, where: Pending["where"]) => (pending.where === where && pending.index === i ? x.decorators.slice(0, -1) : x.decorators);
+  const later = <T extends { decorators: Expr[] }>(x: T, i: usize, where: Pending["where"]) => (pending.where === where && pending.index === i ? x.decorators.slice(0, -1) : x.decorators);
   const members = decl.kind === "class" ? decl.members.map((m, i) => later(m, i, "member")) : [];
   const params = decl.kind === "function" ? decl.params.map((p, i) => later(p, i, "param")) : [];
   const clear = <T extends { decorators: Expr[] }>(x: T) => ({ ...x, decorators: [] });
