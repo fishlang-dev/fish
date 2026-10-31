@@ -1,4 +1,5 @@
 import type { CompileError } from "./diag.ts";
+import type { Expr } from "./parser.ts";
 import type { RustClass } from "./rust.ts";
 
 // The checker's types. Object types are interned, so two types are structurally identical,
@@ -176,6 +177,20 @@ export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
 
 // Whether a type is an Option: a union one of whose members is the empty value.
 export const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
+
+// A `!` on a value that can't be empty, which is that value itself in every stage. An
+// overload's narrowing `!` is never one.
+export function redundantBang(e: Expr, types: { get(e: Expr): Type | undefined }): boolean {
+  if (e.kind !== "nonNull" || (e as { narrows?: unknown }).narrows) return false;
+  const t = types.get(e.expr);
+  return t !== undefined && !isOption(typeof t !== "string" && t.kind === "ref" ? t.to : t);
+}
+
+// An expression with its redundant `!`s taken off.
+export function bare(e: Expr, types: { get(e: Expr): Type | undefined }): Expr {
+  while (e.kind === "nonNull" && redundantBang(e, types)) e = e.expr;
+  return e;
+}
 
 // The reference a `Ref<T> | null` holds when it isn't empty.
 export function optionRef(t: Type | undefined): RefType | undefined {

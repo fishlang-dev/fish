@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, redundantBang, bare, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -2590,7 +2590,7 @@ export function expressions(ctx: Context) {
       return element(e) && inPlace(e.object);
     };
     if (inPlace(callee.object)) return;
-    const hint = callee.object.kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
+    const hint = bare(callee.object, types).kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
     throw new CompileError(`'${callee.name}' works on the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
   }
 
@@ -3922,7 +3922,7 @@ export function expressions(ctx: Context) {
       case "member":
         return calls.has(e) ? undefined : copied(e.object, through);
       case "nonNull":
-        return copied(e.expr, "!");
+        return copied(e.expr, redundantBang(e, types) ? through : "!");
       case "binary":
         return e.op === "??" ? (copied(e.left, "??") ?? copied(e.right, "??")) : undefined;
       case "conditional":
@@ -4176,13 +4176,14 @@ export function expressions(ctx: Context) {
       case "throw":
         thrown(e, e.value);
         return "never";
-      // `x!` is what an Option holds; it panics when there is nothing.
+      // `x!` is what an Option holds; it panics when there is nothing. On a value that can't be
+      // empty, as `xs[i]!` written for TypeScript's unchecked indexes, it is that value itself.
       case "nonNull": {
         const narrows = (e as Narrowing).narrows;
         if (narrows) return narrowedReturn(e.expr, narrows);
-        const option = read(e.expr);
-        if (!isOption(option)) throw new CompileError(`'!' takes the value out of an Option, and this is a '${show(option)}', which is never empty`, e.start, e.end);
-        return held(option);
+        const given = value(e.expr);
+        if (redundantBang(e, types)) return given;
+        return held(loaded(e.expr, given) as UnionType);
       }
       case "bool":
         return "boolean";
@@ -5462,6 +5463,13 @@ export function expressions(ctx: Context) {
   }
 
   function assignableTo(target: Expr, reads: boolean): Type {
+    // Only a `!` that can't fail is a place: the place it is written on.
+    if (target.kind === "nonNull") {
+      const type = assignableTo(target.expr, reads);
+      if (!redundantBang(target, types)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
+      types.set(target, types.get(target.expr)!);
+      return type;
+    }
     untuple(target);
     if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
@@ -5484,8 +5492,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     }
     // A top-level const, or a part of one, was computed while compiling and never changes.
-    let root = target;
-    while (root.kind === "member" || root.kind === "index") root = root.object;
+    let root: Expr = target;
+    while (root.kind === "member" || root.kind === "index" || root.kind === "nonNull") root = root.kind === "nonNull" ? root.expr : root.object;
     if (root.kind === "ident" && !lookup(root.name) && byName.has(`const ${root.name}`)) {
       throw new CompileError(`'${root.name}' is a top-level const, computed while compiling, so it never changes; a global that changes is a const holding an Atomic or a Lock`, target.start, target.end);
     }
@@ -5575,12 +5583,11 @@ export function expressions(ctx: Context) {
   // temporary.
   // A getter's result is a temporary, so a path through one isn't a place.
   function place(e: Expr): boolean {
-    while ((e.kind === "member" && !e.optional && !calls.has(e)) || element(e)) {
+    for (e = bare(e, types); (e.kind === "member" && !e.optional && !calls.has(e)) || element(e); e = bare(e.object, types)) {
       // An enum's member, and a field every member of a union shares, are values, not places.
       const object = types.get(e.object);
       const held = typeof object !== "string" && object?.kind === "ref" ? object.to : object;
       if (!held || (typeof held !== "string" && held.kind === "union")) return false;
-      e = e.object;
     }
     return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
   }
@@ -5591,7 +5598,7 @@ export function expressions(ctx: Context) {
   function changeable(target: Expr, action: string) {
     // Below a read through a Dyn, the place is part of a copy.
     if (readCopy(target) && !computed.has(target)) throw new CompileError(`cannot ${action} this: it is part of a value read through a Dyn, which gives a copy, so the change would be lost; change it through a method`, target.start, target.end);
-    let root = target;
+    let root = bare(target, types);
     let path = "";
     // Through a mutable reference anything below it may change, whatever variable holds the
     // reference, as long as nothing above it is shared.
@@ -5613,7 +5620,7 @@ export function expressions(ctx: Context) {
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && restStarts.has(root.object)) path = `[${BigInt(restStarts.get(root.object)!) + root.index.value}]${path}`;
       else if (!(root.kind === "member" && restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${shownName(root.name)}`) : "[...]"}${path}`;
-      root = root.object;
+      root = bare(root.object, types);
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {
       const whole = types.get(root)!;

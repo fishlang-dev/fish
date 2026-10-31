@@ -6,7 +6,7 @@ import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
-import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
+import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -568,6 +568,7 @@ function interpreter(tables: Tables) {
           if (!kept.includes(memberType(typing, held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
           return retag(typing, held, from, to);
         }
+        if (redundantBang(e, f.instance.types)) return expr(f, e.expr);
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
         return v;
@@ -845,6 +846,7 @@ function interpreter(tables: Tables) {
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
   function place(f: Frame, target: Expr, object?: Value): Place {
+    if (target.kind === "nonNull" && redundantBang(target, f.instance.types)) return place(f, target.expr, object);
     if (target.kind === "this") return { kind: "place", get: () => f.self, set: () => unsupported("replacing 'this'", target) };
     if (target.kind === "ident") {
       const local = f.instance.locals.get(target);

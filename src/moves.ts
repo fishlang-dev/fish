@@ -6,7 +6,7 @@ import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
-import { field, holdsHandle, holdsPart, holdsMut, optionRef, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsHandle, holdsPart, holdsMut, optionRef, redundantBang, bare, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { nextId, NodeMap } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -607,46 +607,47 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         expr(e.operand);
         return change(e.operand);
       case "assign": {
+        const target = bare(e.target, types);
         // A whole value written through a mutable reference changes everything it points to,
         // and can't keep references there, nor be handed on as well.
-        if (isRef(types.get(e.target)!) && coercions.has(e.target)) {
-          expr(e.target);
-          expr(e.value, (p) => `'${p}' moved here into what '${text(e.target)}' points to; use '${p}.clone()' to keep a copy`);
-          change(e.target, e.end);
-          if (holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(e.target, [e.value]);
+        if (isRef(types.get(target)!) && coercions.has(target)) {
+          expr(target);
+          expr(e.value, (p) => `'${p}' moved here into what '${text(target)}' points to; use '${p}.clone()' to keep a copy`);
+          change(target, e.end);
+          if (holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(target, [e.value]);
           if (consume && !isCopy(types.get(e)!)) {
-            throw new CompileError(`this assignment's value can't be used: it was moved into what '${text(e.target)}' points to, which only borrows it`, e.start, e.end);
+            throw new CompileError(`this assignment's value can't be used: it was moved into what '${text(target)}' points to, which only borrows it`, e.start, e.end);
           }
           return;
         }
-        if (e.op !== "=") expr(e.target);
+        if (e.op !== "=") expr(target);
         // A target's indexes run before the value, as in JavaScript.
-        else for (const index of indexes(e.target)) expr(index);
+        else for (const index of indexes(target)) expr(index);
         // A place inside a variable is found before the value runs, so a nested function the
         // value calls can't replace the variable from under it.
         const nested = instance.envs !== undefined && holdsNode(e.value, (n) => instance.envs!.has(n as Expr));
-        const root = nested && (e.target.kind === "member" || e.target.kind === "index") ? rootOf(e.target) : undefined;
+        const root = nested && (target.kind === "member" || target.kind === "index") ? rootOf(target) : undefined;
         const held = root && key(root);
-        const hold = -(e.target.start + 0.75);
-        if (held !== undefined) lend(held, false, root!, undefined, `the assignment to '${text(e.target)}'`, e, root!.start, hold);
-        expr(e.value, (p) => `'${p}' moved here into '${text(e.target)}'; use '${p}.clone()' to keep a copy`);
+        const hold = -(target.start + 0.75);
+        if (held !== undefined) lend(held, false, root!, undefined, `the assignment to '${text(target)}'`, e, root!.start, hold);
+        expr(e.value, (p) => `'${p}' moved here into '${text(target)}'; use '${p}.clone()' to keep a copy`);
         if (held !== undefined) state?.loans.delete(hold);
         // The target changes once the value is ready, after the value's reads.
-        assign(e.target, e.end);
-        const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
+        assign(target, e.end);
+        const local = target.kind === "ident" ? locals.get(target) : undefined;
         // Pointing a reference elsewhere lets go of what it held; a value holding references
         // given another one to hold adds it.
-        if (local && instance.captures?.has(local) && holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(e.target, [e.value]);
+        if (local && instance.captures?.has(local) && holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(target, [e.value]);
         if (local && holdsRef(local.type)) rehold(local, e.value);
         // A value given a reference to keep, through a field or a setter, holds it; `this` may
         // only be given what outlives the call.
-        if (e.target.kind === "member" && holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(e.target.object, [e.value]);
+        if (target.kind === "member" && holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(target.object, [e.value]);
         // An assignment used as a value hands over what it just stored. A setter keeps what it
         // was given, with nothing left to read or hand on.
-        if (!discarded && state && !isCopy(types.get(e)!) && setters.has(e.target)) {
-          throw new CompileError(`'${text(e.target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
+        if (!discarded && state && !isCopy(types.get(e)!) && setters.has(target)) {
+          throw new CompileError(`'${text(target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
         }
-        if (consume && !isCopy(types.get(e)!) && key(e.target) !== undefined) use(e.target, consume);
+        if (consume && !isCopy(types.get(e)!) && key(target) !== undefined) use(target, consume);
         return;
       }
       // Each arm runs from the state after the subject and any guards before it that failed,
@@ -723,6 +724,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       // `x!` is x's value, handed over or read as x is.
       case "nonNull":
+        if (redundantBang(e, types)) return expr(e.expr, consume, discarded);
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
       case "as":
@@ -1392,7 +1394,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
-    if ((e.kind === "nonNull" && optionRef(types.get(e.expr))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
+    if ((e.kind === "nonNull" && (optionRef(types.get(e.expr)) || redundantBang(e, types))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
@@ -1409,7 +1411,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The indexes into arrays along a place's path, outermost first.
   function indexes(e: Expr): Expr[] {
     const found: Expr[] = [];
-    for (; e.kind === "member" || e.kind === "index"; e = e.object) if (element(e)) found.unshift(e.index);
+    for (e = bare(e, types); e.kind === "member" || e.kind === "index"; e = bare(e.object, types)) if (element(e)) found.unshift(e.index);
     return found;
   }
 

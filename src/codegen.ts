@@ -12,7 +12,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
+import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, redundantBang, bare, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -7090,7 +7090,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // outermost first, so each runs once and before the value, as in JavaScript.
   function fixing(target: Expr, run: () => string): string {
     const nodes: Expr[] = [];
-    for (let e = target; e.kind === "member" || e.kind === "index"; e = e.object) if (e.kind === "index" && indexes(valueType(e.object))) nodes.unshift(e.index);
+    for (let e = bare(target, types); e.kind === "member" || e.kind === "index"; e = bare(e.object, types)) if (e.kind === "index" && indexes(valueType(e.object))) nodes.unshift(e.index);
     for (const index of nodes) fixed.set(index, value(index));
     const result = run();
     for (const index of nodes) fixed.delete(index);
@@ -8844,6 +8844,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
           panicIf(holds(v, union, union.members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
           return convert(v, union, to);
         }
+        if (redundantBang(e, types)) return value(e.expr);
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;
         const v = value(e.expr);
@@ -9247,6 +9248,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // Where an assignment target lives: a variable's slot, or a field inside one.
   function address(target: Expr): string {
+    target = bare(target, types);
     if (target.kind === "this") return "%this";
     if (target.kind === "index") return element(target);
     if (target.kind !== "member") {
@@ -9273,7 +9275,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
   function lendable(e: Expr): boolean {
-    for (; e.kind === "member" && !calls.has(e); e = e.object) {
+    for (e = bare(e, types); e.kind === "member" && !calls.has(e); e = bare(e.object, types)) {
       // A string's or an array's `length` is computed, not a field.
       const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
@@ -9293,6 +9295,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // The type a place is stored as. Read through a type parameter's bound, a field may have a
   // wider type than the one it is stored with.
   function stored(e: Expr): Type {
+    e = bare(e, types);
     if (e.kind === "index" && indexes(valueType(e.object))) return placeType(e);
     if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
     const holder = unfold(referent(stored(e.object)));
