@@ -396,6 +396,51 @@ function main() {
 // expect: done
 // expect: done
 // expect: 6
+// case: generator_send_finishes
+function* takes(): Generator<string, void, string> {
+  const x = yield "a";
+  console.log("got", x);
+}
+
+function* drops(): Generator<string, void, string> {
+  yield "a";
+}
+
+function* never(): Generator<string, void, string> {
+  console.log("ran");
+}
+
+function* stops(): Generator<string, void, string> {
+  while (true) {
+    const x = yield "more";
+    if (x === "stop1") return;
+    console.log("kept", x);
+  }
+}
+
+function main() {
+  let a = takes();
+  a.next();
+  console.log(a.next("hi" + 1).done);
+  console.log(a.next("late" + 1).done);
+  let b = drops();
+  b.next();
+  console.log(b.next("hi" + 2).done);
+  let c = never();
+  console.log(c.next("hi" + 3).done);
+  let d = stops();
+  d.next();
+  d.next("go" + 1);
+  console.log(d.next("stop" + 1).done);
+}
+// expect: got hi1
+// expect: true
+// expect: true
+// expect: true
+// expect: ran
+// expect: true
+// expect: kept go1
+// expect: true
 // case: generator_send_missing
 function* g(): Generator<i64, void, i64> {
   const n = yield 1;

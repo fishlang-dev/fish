@@ -388,12 +388,19 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (resuming) {
       // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
       // `await`, or the end. A finished future is never polled again.
+      // Advancing a generator already finished drops what was sent; one finishing in this very
+      // call has dropped or taken it already, and comes to `done` directly.
+      const finished = resuming.type.kind === "generator" && resuming.type.sends && needsDrop(resuming.type.sends) ? label() : resuming.done;
+      if (finished !== resuming.done) {
+        startBlock(finished);
+        dropSent();
+        emit(`br label %${resuming.done}`);
+      }
       startBlock(resuming.done);
-      if (resuming.type.kind === "generator") dropSent();
       if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resuming.type.yields))}`);
       else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
+      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
       // A generator taking values through `next(x)` is given one, and whether it was.
       const sends = resuming.type.kind === "generator" ? resuming.type.sends : undefined;
       const takes = resuming.type.kind === "future" || resuming.type.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
