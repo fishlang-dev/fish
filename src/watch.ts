@@ -91,7 +91,7 @@ export function watchProgram(w: Watching): Promise<never> {
     const child = Bun.spawn([w.binary, ...w.args], { stdio: ["inherit", "inherit", "inherit"] });
     state.child = child;
     void child.exited.then((code) => {
-      if (state.child === child) note(`${shown(w.entry)} exited with code ${code}; waiting for changes`);
+      if (state.child === child && !state.quitting) note(`${shown(w.entry)} exited with code ${code}; waiting for changes`);
     });
   };
   const cycle = async () => {
