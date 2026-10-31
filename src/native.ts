@@ -84,7 +84,8 @@ void fsh_rt_constants(void (*drop)(void)) {
 
 // What tears the JS engine down, when the program has one, so what JS still holds, like Fish
 // callbacks, is freed before the leak check counts it; after a panic, values it left held keep
-// the engine from being torn down.
+// the engine from being torn down. Only a panic that ends the program counts: one a spawned task
+// isolated has dropped what it held.
 static void (*fsh_engine_end)(void) = NULL;
 static int32_t fsh_panic_began = 0;
 // What frees the list of tasks that waited on the shutdown signal, when the program asked for it:
@@ -511,7 +512,10 @@ __attribute__((weak)) const int32_t fsh_panic_abort = 0;
 
 static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unwind_Exception_Class kind,
                                        struct _Unwind_Exception *exception, struct _Unwind_Context *context, void *data) {
-  if (actions & _UA_END_OF_STACK) exit(101);
+  if (actions & _UA_END_OF_STACK) {
+    fsh_panic_began = 1;
+    exit(101);
+  }
   return _URC_NO_REASON;
 }
 
@@ -522,15 +526,61 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
 static int32_t fsh_tokens = 0;
 static _Thread_local int32_t fsh_token = 0;
 
+// A panic's reason, without its "panicked at" line, kept for the task it ends: a TaskPanic's
+// message, or what its awaiter's own panic names. A long one is cut short.
+static _Thread_local char fsh_reason[1024];
+static _Thread_local int32_t fsh_reason_given = 0;
+static void fsh_panic_reason(const char *bytes, size_t length) {
+  while (length > 0 && bytes[length - 1] == '\n') length--;
+  // A cut lands on a character's first byte, so the reason stays valid text.
+  if (length >= sizeof fsh_reason) {
+    length = sizeof fsh_reason - 1;
+    while (length > 0 && ((unsigned char)bytes[length] & 0xC0) == 0x80) length--;
+  }
+  memcpy(fsh_reason, bytes, length);
+  fsh_reason[length] = 0;
+  fsh_reason_given = 1;
+}
+
+// Tokens of threads that panicked holding a lock, so whoever waits for one is told rather than
+// waiting forever: Rust's poisoning.
+static pthread_mutex_t fsh_poison_lock = PTHREAD_MUTEX_INITIALIZER;
+static int32_t *fsh_poison_tokens = NULL;
+static int64_t fsh_poison_count = 0;
+// How many locks this thread holds, so a call into JS under one, which could wait forever on a
+// callback JS runs that takes the same lock, is refused.
+static _Thread_local int32_t fsh_locks_held = 0;
+// How many Fish callbacks JS is running on this thread. A panic in one would unwind through the
+// engine's frames, leaving its lock held, so it ends the program instead, as Rust's panics that
+// would cross foreign frames do.
+static _Thread_local int32_t fsh_in_js = 0;
+
 void fsh_rt_panic(const char *message) {
   static _Thread_local struct _Unwind_Exception exception;
+  if (!fsh_reason_given) {
+    const char *nl = strncmp(message, "panicked ", 9) == 0 ? strchr(message, '\n') : NULL;
+    const char *reason = nl ? nl + 1 : message;
+    fsh_panic_reason(reason, strlen(reason));
+  }
+  fsh_reason_given = 0;
+  if (fsh_locks_held > 0 && fsh_token) {
+    pthread_mutex_lock(&fsh_poison_lock);
+    fsh_poison_tokens = realloc(fsh_poison_tokens, (fsh_poison_count + 1) * sizeof(int32_t));
+    fsh_poison_tokens[fsh_poison_count++] = fsh_token;
+    pthread_mutex_unlock(&fsh_poison_lock);
+  }
+  fsh_locks_held = 0;
   fsh_token = 0;
-  fsh_panic_began = 1;
   fflush(NULL);
   fputs(message, stderr);
   if (fsh_panic_abort) abort();
+  if (fsh_in_js > 0) {
+    fsh_panic_began = 1;
+    exit(101);
+  }
   exception.exception_class = 0x46495348; // "FISH"
   _Unwind_ForcedUnwind(&exception, fsh_unwound, NULL);
+  fsh_panic_began = 1;
   exit(101);
 }
 
@@ -1127,6 +1177,7 @@ void fsh_rt_panic_string(const char *at, fsh_str *reason) {
   fflush(NULL);
   fputs(at, stderr);
   fwrite(reason->bytes, 1, reason->length, stderr);
+  fsh_panic_reason(reason->bytes, reason->length);
   fsh_rt_panic("\n");
 }
 
@@ -1150,6 +1201,7 @@ void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
   fflush(NULL);
   fputs(at, stderr);
   fwrite(reason->bytes, 1, reason->length, stderr);
+  fsh_panic_reason(reason->bytes, reason->length);
   fsh_rt_panic("\n");
 }
 
@@ -3228,6 +3280,8 @@ struct fsh_task {
   fsh_drop_fn drop_output;
   fsh_task *joiner;
   fsh_task *prev, *next;
+  // The reason it panicked, when its outcome is 3.
+  struct fsh_str *panic;
   int64_t frame_size;
   int64_t output_size;
   char memory[];
@@ -3303,7 +3357,8 @@ static void fsh_schedule(fsh_task *t) {
 
 void fsh_task_release(fsh_task *t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
-  if (t->outcome) t->drop_output(fsh_output(t));
+  if (t->outcome == 1 || t->outcome == 2) t->drop_output(fsh_output(t));
+  fsh_rt_str_release(t->panic);
   fsh_rt_free(t);
 }
 
@@ -3327,16 +3382,23 @@ static void fsh_unlink(fsh_task *t) {
 }
 
 // Polls a task once. Pending, it waits for a wake, or goes round again if one came while it
-// ran. Finished, its output is kept and whoever awaits it is woken.
+// ran. Finished, its output is kept and whoever awaits it is woken. A panic in main, or in the
+// timer task, ends the program; in a spawned task, it ends only that task, its frame dropped
+// where it stopped and its reason kept for whoever awaits it, as tokio's tasks do.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
   int32_t result = t->poll(t, t->memory);
-  if (result == 3) {
+  if (result == 3 && (t == fsh_main_task || t == fsh_timeouts_task)) {
     pthread_mutex_lock(&fsh_alive_lock);
+    fsh_panic_began = 1;
     fsh_panicked = 1;
     pthread_cond_broadcast(&fsh_finished);
     pthread_mutex_unlock(&fsh_alive_lock);
     return;
+  }
+  if (result == 3) {
+    t->drop(t->memory);
+    t->panic = fsh_rt_str_from_cstring(fsh_reason);
   }
   if (result == 0) {
     int32_t running = FSH_RUNNING;
@@ -3400,6 +3462,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   t->outcome = 0;
   t->refs = 2;
   t->joiner = NULL;
+  t->panic = NULL;
   t->state = FSH_QUEUED;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
@@ -3424,6 +3487,7 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   t->outcome = 0;
   t->refs = 2;
   t->joiner = NULL;
+  t->panic = NULL;
   t->state = FSH_QUEUED;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
@@ -3436,12 +3500,28 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
 }
 
 // Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
-// it, and its outcome given; until then the awaiting task is woken when it finishes.
-int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out) {
+// it, and its outcome given; until then the awaiting task is woken when it finishes. A task that
+// panicked gives 3 and its reason through why, for 'join()'; awaited plainly, with why null, its
+// awaiter panics in turn at at, as Rust's 'join().unwrap()' does.
+int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fsh_str **why) {
   pthread_mutex_lock(&fsh_alive_lock);
   if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == FSH_DONE) {
     pthread_mutex_unlock(&fsh_alive_lock);
     int32_t outcome = t->outcome;
+    if (outcome == 3 && why) {
+      fsh_rt_str_retain(t->panic);
+      *why = t->panic;
+      return 3;
+    }
+    if (outcome == 3) {
+      char reason[1100];
+      int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)t->panic->length, t->panic->bytes);
+      fflush(NULL);
+      fputs(at, stderr);
+      fputs(reason, stderr);
+      fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
+      fsh_rt_panic("\nawait 'handle.join()' to catch it as a TaskPanic instead\n");
+    }
     memcpy(out, fsh_output(t), t->output_size);
     t->outcome = 0;
     return outcome;
@@ -3754,10 +3834,17 @@ static int32_t fsh_me(void) {
   return fsh_token;
 }
 
-// How many locks this thread holds, so a call into JS under one, which could wait forever on a
-// callback JS runs that takes the same lock, is refused.
-static _Thread_local int32_t fsh_locks_held = 0;
 
+// Whether a lock's holder is a thread's token from before it panicked.
+static int fsh_poison_holder(int32_t holder) {
+  pthread_mutex_lock(&fsh_poison_lock);
+  int found = 0;
+  for (int64_t i = 0; i < fsh_poison_count && !found; i++) found = fsh_poison_tokens[i] == holder;
+  pthread_mutex_unlock(&fsh_poison_lock);
+  return found;
+}
+
+// 2 when a task panicked holding the lock, which stays held, so the caller panics too.
 int32_t fsh_rt_lock(int32_t *word) {
   int32_t me = fsh_me();
   if (__atomic_load_n(word, __ATOMIC_RELAXED) == me) return 1;
@@ -3767,7 +3854,10 @@ int32_t fsh_rt_lock(int32_t *word) {
       fsh_locks_held++;
       return 0;
     }
-    if (spins >= 64) sched_yield();
+    if (spins >= 64) {
+      if (open && fsh_poison_holder(open)) return 2;
+      sched_yield();
+    }
   }
 }
 

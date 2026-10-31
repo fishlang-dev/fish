@@ -48,6 +48,8 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
   return out;
 }
 class AbortError { message: string = "This operation was aborted"; }
+// What awaiting 'handle.join()' throws when the task panicked: its panic's reason.
+class TaskPanic { message: string; constructor(message: string) { this.message = message; } }
 class IoError {
   message: string;
   code: string = "";
@@ -503,7 +505,17 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
       const req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, body: body, signal: signal });
-      const res = await handler(req);
+      // The handler runs as a task of its own, so a panic in it ends only that task: its client
+      // gets a bare 500 and the connection closes, and the server goes on serving.
+      let res: Response;
+      try {
+        res = await spawn(Http1.handle(handler.clone(), req)).join();
+      } catch (e) {
+        done.abort();
+        await watching;
+        await conn.write(new TextEncoder().encode(Http1.responseText(new Response("", { status: 500 }), false, true, version)), AbortSignal.timeout(30000));
+        return;
+      }
       done.abort();
       const early = await watching;
       for (const b of early) buffer.push(b);
@@ -675,6 +687,10 @@ class Http1 {
   static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>): Promise<void> {
     await serveConnection(conn, handler, host, stop);
     live.count.sub(1);
+  }
+
+  static async handle(handler: ServeHandler, req: Request): Promise<Response> {
+    return await handler(req);
   }
 
   // The client's next bytes, or nothing once the deadline passes or the server stops.
