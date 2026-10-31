@@ -1,8 +1,10 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, watch, type FSWatcher } from "node:fs";
+import { basename, dirname, relative, resolve } from "node:path";
 import type { Subprocess } from "bun";
 
-// How long a program is given to exit on SIGTERM before it is killed.
+// How long a burst of saves is let settle before rebuilding, and how long a program is given to
+// exit on SIGTERM before it is killed.
+const SETTLE_MS = 100;
 const GRACE_MS = 2000;
 
 // The files a rebuild depends on: those a build loaded, and the package's manifest, as real paths.
@@ -41,4 +43,78 @@ export async function stop(child: Subprocess, grace: number = GRACE_MS): Promise
   const timer = setTimeout(() => child.kill("SIGKILL"), grace);
   await child.exited;
   clearTimeout(timer);
+}
+
+// `build` builds the program into `binary`, printing its warnings or error as `fishc run` does,
+// gives whether it built, and tells `loaded` the files it read. `done` runs once before exiting.
+export type Watching = { entry: string; binary: string; args: string[]; manifest?: string; build: (loaded: (files: string[]) => void) => boolean; done: () => void };
+
+// Builds and runs the program, then rebuilds and restarts it each time a file it was built from
+// changes, until SIGINT or SIGTERM.
+export function watchProgram(w: Watching): Promise<never> {
+  const state = {
+    files: watchedFiles([w.entry], w.manifest),
+    contents: new Map<string, string | undefined>(),
+    watchers: [] as FSWatcher[],
+    child: undefined as Subprocess | undefined,
+    timer: undefined as ReturnType<typeof setTimeout> | undefined,
+    busy: false,
+    again: false,
+  };
+  const note = (text: string) => console.error(`[fishc] ${text}`);
+  const shown = (f: string) => relative(process.cwd(), f) || f;
+  const schedule = () => {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(cycle, SETTLE_MS);
+  };
+  const rewatch = () => {
+    for (const watcher of state.watchers) watcher.close();
+    state.watchers = [...directories(state.files)].map(([dir, names]) => watch(dir, (_, name) => {
+      if (name === null || names.has(basename(name))) schedule();
+    }));
+  };
+  const start = () => {
+    // Read before building, so a save during the build still differs afterwards.
+    const before = snapshot(state.files);
+    let loaded: string[] | undefined;
+    const built = w.build((files) => (loaded = files));
+    // A build that failed may not have reached every import, so the files watched only grow then.
+    state.files = watchedFiles(loaded ?? [...state.files, w.entry], w.manifest);
+    state.contents = new Map(state.files.map((f) => [f, before.has(f) ? before.get(f) : snapshot([f]).get(f)]));
+    rewatch();
+    if (!built) return note("waiting for changes");
+    const child = Bun.spawn([w.binary, ...w.args], { stdio: ["inherit", "inherit", "inherit"] });
+    state.child = child;
+    void child.exited.then((code) => {
+      if (state.child === child) note(`${shown(w.entry)} exited with code ${code}; waiting for changes`);
+    });
+  };
+  const cycle = async () => {
+    if (state.busy) return void (state.again = true);
+    state.busy = true;
+    do {
+      state.again = false;
+      const file = changed(state.contents);
+      if (file === undefined) continue;
+      note(`restarting: ${shown(file)} changed`);
+      const child = state.child;
+      state.child = undefined;
+      if (child) await stop(child);
+      start();
+    } while (state.again);
+    state.busy = false;
+  };
+  const quit = (code: number) => async () => {
+    for (const watcher of state.watchers) watcher.close();
+    clearTimeout(state.timer);
+    const child = state.child;
+    state.child = undefined;
+    if (child) await stop(child);
+    w.done();
+    process.exit(code);
+  };
+  process.on("SIGINT", quit(130));
+  process.on("SIGTERM", quit(143));
+  start();
+  return new Promise(() => {});
 }
