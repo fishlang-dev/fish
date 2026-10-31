@@ -219,7 +219,7 @@ export class Lexer {
       else if (c === "]") inClass = false;
     }
     i++;
-    for (let c = src.charAt(i as i64); identPart(c) && c !== "‌" && c !== "‍"; c = src.charAt(i as i64)) i++;
+    for (let c = src.charAt(i as i64); identPart(c); c = src.charAt(i as i64)) i++;
     this.i = i;
     return this.token("regex", src.slice(slash.start as i64, i as i64), slash.start);
   }

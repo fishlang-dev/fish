@@ -17,23 +17,30 @@ function regexAfter(kind: string, text: string): boolean {
   return kind === "ident" && OPERATOR_WORDS.includes(text);
 }
 
+// After an error the lexer is asked for the next token again, as the parser's recovery does, so
+// the position an error leaves behind is compared too; a few errors in a row end the file.
 function tokenize(src: string): void {
   let lex = lexer(src);
   let kind = "";
   let text = "";
-  try {
-    for (;;) {
+  let errors = 0;
+  while (errors < 3) {
+    try {
       let t = lex.next();
       if (t.kind === "punct" && (t.text === "/" || t.text === "/=") && regexAfter(kind, text)) t = lex.regex(t);
       const raw = t.raw === undefined ? "" : ` raw ${JSON.stringify(t.raw!)}`;
-      console.log(`${t.kind} ${t.start} ${t.end}${t.newlineBefore ? " nl" : ""} ${JSON.stringify(t.text)}${raw}`);
+      const substitutions = t.substitutions === undefined ? "" : ` subs ${t.substitutions!.join(",")}`;
+      console.log(`${t.kind} ${t.start} ${t.end}${t.newlineBefore ? " nl" : ""} ${JSON.stringify(t.text)}${raw}${substitutions}`);
       if (t.kind === "eof") break;
       kind = t.kind;
       text = t.text;
+      errors = 0;
+    } catch (e) {
+      const error = e as CompileError;
+      console.log(`error ${error.start} ${error.end} ${error.message}`);
+      kind = "";
+      errors++;
     }
-  } catch (e) {
-    const error = e as CompileError;
-    console.log(`error ${error.start} ${error.end} ${error.message}`);
   }
   for (const c of lex.comments) console.log(`comment ${c.kind} ${c.start} ${c.end} ${JSON.stringify(c.text)}`);
 }
