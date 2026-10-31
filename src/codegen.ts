@@ -6249,7 +6249,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       }
       if (clocks.has(e)) {
         const now = temp();
-        emit(clocks.get(e) === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_performance_now()`);
+        const clock = clocks.get(e);
+        emit(clock === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_${clock === "Math.random" ? "math_random" : "performance_now"}()`);
         return now;
       }
       if (jsonCalls.get(e) === "stringify") return stringifyCall(e);

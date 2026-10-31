@@ -266,8 +266,9 @@ export function formatPlan(format: string, count: number): { specs: string[]; re
 // The values printed as Node's util.inspect prints them, whose types as written say how their
 // fields were spelled.
 export const printed = new WeakSet<Expr>();
-// The `Date.now()` and `performance.now()` calls, by which each is.
-export const clocks = new WeakMap<Expr, "Date.now" | "performance.now">();
+// The `Date.now()`, `performance.now()` and `Math.random()` calls, by which each is: each reads
+// the world outside the program, so none has a value while compiling.
+export const clocks = new WeakMap<Expr, "Date.now" | "performance.now" | "Math.random">();
 // The `JSON.stringify` and `JSON.parse` calls, by which each is.
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
@@ -2386,8 +2387,12 @@ export function expressions(ctx: Context) {
   // the type of the numbers beside it as with an operator; the rest take and give `f64`.
   function mathCall(e: Call, name: string): { type: Type; what: string } {
     const what = `'Math.${name}'`;
-    if (name === "random") throw new CompileError("'Math.random' is not supported yet; it will come from the OS's secure random source", e.start, e.end);
     if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
+    if (name === "random") {
+      if (e.args.length > 0) throw new CompileError("'Math.random' takes no arguments", e.start, e.end);
+      clocks.set(e, "Math.random");
+      return { type: "f64", what };
+    }
     const arity = MATH_FLOAT[name];
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError(`${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
