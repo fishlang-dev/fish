@@ -2457,6 +2457,8 @@ class URLSearchParams {
 }
 `;
 
+const BYTE_METHODS = ["toBase64", "toHex"];
+const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
@@ -2485,6 +2487,214 @@ type Json = JsonValue;
 `;
 // The name untyped `JSON.parse` reads into.
 export const JSON_VALUE_NAME = "json value";
+
+// The encoders and decoders on bytes, in a program that calls one of them or btoa or atob.
+const BYTES = `
+// bytes.toBase64(options) and bytes.toHex(), as TC39's Uint8Array methods. Text is built as bytes
+// and decoded once, since appending to a string copies it.
+function __arrayToBase64(bytes: Ref<u8[]>, options?: { alphabet?: "base64" | "base64url"; omitPadding?: boolean }): string {
+  return __arrayBase64Text(bytes, options?.alphabet === "base64url", options?.omitPadding !== true);
+}
+function __arrayBase64Text(bytes: Ref<u8[]>, url: boolean, pad: boolean): string {
+  const table = new TextEncoder().encode(url ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/");
+  const n = bytes.length;
+  let out: u8[] = [];
+  out.reserve(((n + 2) / 3 * 4) as i64);
+  let i: usize = 0;
+  while (i + 3 <= n) {
+    const v = ((bytes[i] as i64) << 16) | ((bytes[i + 1] as i64) << 8) | (bytes[i + 2] as i64);
+    out.push(table[(v >> 18) as usize]);
+    out.push(table[((v >> 12) & 63) as usize]);
+    out.push(table[((v >> 6) & 63) as usize]);
+    out.push(table[(v & 63) as usize]);
+    i += 3;
+  }
+  const left = n - i;
+  if (left > 0) {
+    const v = ((bytes[i] as i64) << 16) | (left === 2 ? (bytes[i + 1] as i64) << 8 : 0);
+    out.push(table[(v >> 18) as usize]);
+    out.push(table[((v >> 12) & 63) as usize]);
+    if (left === 2) out.push(table[((v >> 6) & 63) as usize]);
+    if (pad) {
+      if (left === 1) out.push(61);
+      out.push(61);
+    }
+  }
+  return new TextDecoder().decode(out);
+}
+function __arrayToHex(bytes: Ref<u8[]>): string {
+  const digits = new TextEncoder().encode("0123456789abcdef");
+  let out: u8[] = [];
+  out.reserve((bytes.length * 2) as i64);
+  for (const b of bytes) {
+    out.push(digits[(b >> 4) as usize]);
+    out.push(digits[(b & 15) as usize]);
+  }
+  return new TextDecoder().decode(out);
+}
+// A base64 character's value, or -1 for one outside the alphabet.
+function __arrayBase64Value(c: i64, url: boolean): i64 {
+  if (c >= 65 && c <= 90) return c - 65;
+  if (c >= 97 && c <= 122) return c - 71;
+  if (c >= 48 && c <= 57) return c + 4;
+  if (c === (url ? 45 : 43)) return 62;
+  if (c === (url ? 95 : 47)) return 63;
+  return -1;
+}
+// ASCII whitespace, as the HTML spec and TC39 skip it.
+function __arrayBase64Space(c: i64): boolean {
+  return c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
+}
+// A chunk of 2, 3 or 4 characters' values as its bytes. A short chunk's bits past its last byte are
+// dropped, or refused when they must be zero.
+function __arrayBase64Chunk(out: Mut<u8[]>, v: i64, count: i64, strict: boolean): void throws TypeError {
+  const bits = v << ((4 - count) * 6);
+  if (strict && (bits & (count === 2 ? 0xFFFF : count === 3 ? 0xFF : 0)) !== 0) throw new TypeError("base64 input has bits set past its last byte; fix its last character, or decode with lastChunkHandling: \\"loose\\"");
+  out.push((bits >> 16) as u8);
+  if (count > 2) out.push(((bits >> 8) & 255) as u8);
+  if (count > 3) out.push((bits & 255) as u8);
+}
+// u8.fromBase64(s, options), TC39's FromBase64 with no length limit.
+function __arrayFromBase64(s: string, options?: { alphabet?: "base64" | "base64url"; lastChunkHandling?: "loose" | "strict" | "stop-before-partial" }): u8[] throws TypeError {
+  const url = options?.alphabet === "base64url";
+  const handling = options?.lastChunkHandling ?? "loose";
+  const text = new TextEncoder().encode(s);
+  const n = text.length as i64;
+  let out: u8[] = [];
+  out.reserve(n / 4 * 3);
+  let v: i64 = 0;
+  let count: i64 = 0;
+  let i: i64 = 0;
+  while (true) {
+    while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+    if (i === n) {
+      if (count === 0 || handling === "stop-before-partial") return out;
+      if (handling === "strict") throw new TypeError("base64 input ends in a chunk without its padding; pad it with '=', or decode with lastChunkHandling: \\"loose\\"");
+      if (count === 1) throw new TypeError("base64 input ends in a lone character, which holds no whole byte; check it isn't cut short");
+      __arrayBase64Chunk(out, v, count, false);
+      return out;
+    }
+    const c = text[i as usize] as i64;
+    i++;
+    if (c === 61) {
+      if (count < 2) throw new TypeError("base64 padding '=' goes after the second or third character of a chunk of four");
+      while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+      if (count === 2) {
+        if (i === n) {
+          if (handling === "stop-before-partial") return out;
+          throw new TypeError("base64 padding after two characters is '=='; add the second '='");
+        }
+        if (text[i as usize] === 61) {
+          i++;
+          while (i < n && __arrayBase64Space(text[i as usize] as i64)) i++;
+        }
+      }
+      if (i < n) throw new TypeError("base64 input goes on after its padding; '=' only ends it");
+      __arrayBase64Chunk(out, v, count, handling === "strict");
+      return out;
+    }
+    const d = __arrayBase64Value(c, url);
+    if (d < 0) throw new TypeError(url ? "base64url input holds a character outside A-Z, a-z, 0-9, '-' and '_'; decode standard base64 without alphabet: \\"base64url\\"" : "base64 input holds a character outside A-Z, a-z, 0-9, '+' and '/'; decode base64url with alphabet: \\"base64url\\"");
+    v = (v << 6) | d;
+    count++;
+    if (count === 4) {
+      __arrayBase64Chunk(out, v, 4, false);
+      v = 0;
+      count = 0;
+    }
+  }
+}
+function __arrayHexValue(c: i64): i64 {
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 97 && c <= 102) return c - 87;
+  if (c >= 65 && c <= 70) return c - 55;
+  return -1;
+}
+// u8.fromHex(s): two digits a byte, in either case.
+function __arrayFromHex(s: string): u8[] throws TypeError {
+  const text = new TextEncoder().encode(s);
+  if (text.length % 2 !== 0) throw new TypeError("hex input has an odd number of digits; each byte is two");
+  let out: u8[] = [];
+  out.reserve((text.length / 2) as i64);
+  let i: usize = 0;
+  while (i < text.length) {
+    const high = __arrayHexValue(text[i] as i64);
+    const low = __arrayHexValue(text[i + 1] as i64);
+    if (high < 0 || low < 0) throw new TypeError("hex input holds a character outside 0-9, a-f and A-F");
+    out.push((high * 16 + low) as u8);
+    i += 2;
+  }
+  return out;
+}
+`;
+// btoa and atob, each in a program that names it and doesn't declare it, so a program's own
+// polyfill of one keeps its name and std's other stays.
+const BTOA = `
+// btoa and atob, as the HTML spec has them: base64 of a string's characters as Latin-1 bytes. The
+// UTF-8 the string holds is read back as code points up to U+00FF.
+function btoa(data: string): string throws TypeError {
+  const text = new TextEncoder().encode(data);
+  let bytes: u8[] = [];
+  bytes.reserve(text.length as i64);
+  let i: usize = 0;
+  while (i < text.length) {
+    const b = text[i];
+    if (b < 0x80) {
+      bytes.push(b);
+      i += 1;
+    } else if (b === 0xC2 || b === 0xC3) {
+      bytes.push(((b & 3) << 6) | (text[i + 1] & 63));
+      i += 2;
+    } else {
+      throw new TypeError("btoa takes characters up to U+00FF; for other text, encode it as UTF-8 first, as in 'new TextEncoder().encode(s).toBase64()'");
+    }
+  }
+  return __arrayBase64Text(bytes, false, true);
+}
+`;
+const ATOB = `
+// The HTML spec's forgiving-base64 decode: whitespace is dropped, then up to two '=' that end a
+// whole chunk, and what is left must be a whole number of bytes in the standard alphabet.
+function atob(data: string): string throws TypeError {
+  const text = new TextEncoder().encode(data);
+  let chars: u8[] = [];
+  chars.reserve(text.length as i64);
+  for (const c of text) {
+    if (!__arrayBase64Space(c as i64)) chars.push(c);
+  }
+  let n = chars.length;
+  if (n % 4 === 0 && n > 0 && chars[n - 1] === 61) n -= chars[n - 2] === 61 ? 2 : 1;
+  const bad = "atob takes base64 in A-Z, a-z, 0-9, '+' and '/', with '=' only as padding; decode base64url with u8.fromBase64(s, { alphabet: \\"base64url\\" })";
+  if (n % 4 === 1) throw new TypeError(bad);
+  let bytes: u8[] = [];
+  bytes.reserve((n / 4 * 3) as i64);
+  let v: i64 = 0;
+  let count: i64 = 0;
+  for (let i: usize = 0; i < n; i++) {
+    const d = __arrayBase64Value(chars[i] as i64, false);
+    if (d < 0) throw new TypeError(bad);
+    v = (v << 6) | d;
+    count++;
+    if (count === 4) {
+      __arrayBase64Chunk(bytes, v, 4, false);
+      v = 0;
+      count = 0;
+    }
+  }
+  if (count > 0) __arrayBase64Chunk(bytes, v, count, false);
+  // Each byte as the code point of the same number, in UTF-8.
+  let out: u8[] = [];
+  out.reserve((bytes.length * 2) as i64);
+  for (const b of bytes) {
+    if (b < 0x80) out.push(b);
+    else {
+      out.push(0xC0 | (b >> 6));
+      out.push(0x80 | (b & 63));
+    }
+  }
+  return new TextDecoder().decode(out);
+}
+`;
 
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
@@ -3135,7 +3345,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB;
 export const STD_FILE = "<fish std>";
 
 // A hash of the std source, the compiler's own sources and Bun's version, which decides the
@@ -3217,22 +3427,36 @@ export function stdFor(written: Stmt[]): Stmt[] {
   const jsonName = next(JSON_NAME);
   const ast = next(AST + AST_HELPERS);
   const js = next(JS_ERROR);
+  const bytes = next(BYTES);
+  const btoa = next(BTOA);
+  const atob = next(ATOB);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]]] as const;
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]]] as const;
   const packages = written.some(fromPackage);
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.
   const declared = new Set(written.flatMap(declaredNames));
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
-  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url], own);
+  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob], own);
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentions(written, (n) => n.kind === "ident" && n.name === "Request"));
   const urls = [...(httpUsed && !urlWanted ? served : []), ...(httpUsed || urlWanted ? core : []), ...(urlWanted ? url : [])];
-  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []))];
+  const linked = parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []));
+  // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
+  // btoa and atob call them too.
+  const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
+  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
+}
+
+// A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
+function encodes(n: Record<string, unknown>): boolean {
+  if (n.kind !== "member" || typeof n.name !== "string") return false;
+  const object = n.object as { kind?: string; name?: string };
+  return BYTE_METHODS.includes(n.name) || (BYTE_STATICS.includes(n.name) && object.kind === "ident" && object.name === "u8");
 }
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which

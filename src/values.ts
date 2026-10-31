@@ -1058,6 +1058,17 @@ export function expressions(ctx: Context) {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
+    // `u8.fromBase64(s, options?)` and `u8.fromHex(s)`, TC39's Uint8Array statics on the byte type.
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "u8" && !lookup("u8") && !byName.has("u8") && !byName.has("const u8")) {
+      const helper = Object.hasOwn(BYTE_DECODERS, callee.name) ? BYTE_DECODERS[callee.name] : undefined;
+      if (!helper) throw new CompileError(`'u8' has no static '${callee.name}'; decode text into a 'u8[]' with 'u8.fromBase64' or 'u8.fromHex'`, callee.start, callee.end);
+      if (callee.optional || e.optional) throw new CompileError(`'u8.${callee.name}' is always there, so it is called without '?.'`, e.start, e.end);
+      if (e.typeArgs.length > 0) throw new CompileError(`'u8.${callee.name}' takes no type arguments`, e.start, e.end);
+      const most = callee.name === "fromBase64" ? 2 : 1;
+      if (e.args.length < 1 || e.args.length > most) throw new CompileError(most === 1 ? "'u8.fromHex' takes one string of hex digits" : "'u8.fromBase64' takes a string and an optional options object, as in '{ alphabet: \"base64url\" }'", e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: helper, start: callee.start, end: callee.end } });
+      return call(e);
+    }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !lookup("String") && !classes.has("String") && !byName.has("String") && !byName.has("const String") && !enums.has("String")) return stringStatic(e, callee);
     if (callee.kind === "member" && isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("'Math' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -1865,6 +1876,14 @@ export function expressions(ctx: Context) {
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError(`'${callee.name}' takes no arguments`, e.start, e.end);
       Object.assign(e, { callee: { kind: "ident", name: ITERATORS[callee.name], start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] });
+      return call(e);
+    }
+    // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
+    if (Object.hasOwn(BYTE_METHODS, callee.name)) {
+      if (lower(array.element) !== "u8") throw new CompileError(`'${callee.name}' encodes bytes, a 'u8[]', not '${show(array)}'`, callee.start, callee.end);
+      const most = callee.name === "toBase64" ? 1 : 0;
+      if (e.args.length > most) throw new CompileError(most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
+      Object.assign(e, { callee: { kind: "ident", name: BYTE_METHODS[callee.name], start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] });
       return call(e);
     }
     if (readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
@@ -5958,10 +5977,14 @@ const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
+// `u8`'s statics decoding text into bytes, and the prelude function each calls.
+const BYTE_DECODERS: Record<string, string> = { fromBase64: "array from base64", fromHex: "array from hex" };
+// The methods encoding a `u8[]` as text, and the prelude function each calls.
+const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHex: "array to hex" };
 // A Map's and a Set's methods, how many arguments each takes, and those changing it.
 const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
 const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
 const MAP_ARGUMENTS: Record<string, number> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
