@@ -72,7 +72,8 @@
     "unions.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "unsupported.ts": "generator methods are not supported yet",
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
+    "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "watch.ts": "can't find the package 'bun': no 'node_modules/bun' in 'src' or any directory above it; install it with npm"
   },
-  "count": 73
+  "count": 74
 }

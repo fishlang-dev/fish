@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
@@ -65,14 +65,15 @@ export function checkProgram(session: Session, file: string, library = false): C
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
+// `files` are the paths of the files it loaded from disk.
+function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[]; files: string[] } {
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
   return withSources(compilation, loaded.sources, () => {
     const checked = check(compilation, expanded(compilation, loaded, library), library);
     for (const w of checked.warnings) w.sources = loaded.sources;
     const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug }), loaded);
-    return { ir: debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir, instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings };
+    return { ir: debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir, instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings, files: loaded.modules.map((m) => m.path).filter((p) => isAbsolute(p)) };
   });
 }
 
@@ -186,9 +187,11 @@ function cType(t: Type): string {
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
-// program reports at exit what it never freed, by where it was allocated. Gives the warnings.
-export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false): CompileError[] {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug);
+// program reports at exit what it never freed, by where it was allocated. `loaded` is given the
+// paths of the files the program was read from. Gives the warnings.
+export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
+  const { ir, instances, shim, warnings, files } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug);
+  loaded?.(files);
   const rust = shim();
   if (rust) refuseForeignRust(target);
   linked(session, ir, instances, out, release, links, rust, target, leaks, debug);
