@@ -207,3 +207,43 @@ function main() {
   print(p.x)
 }
 // error: cannot assign to 'r!.x' because 'r' is a shared reference ('Ref'), which only reads
+// case: non_null_generic_class_order
+// A generic class's '!' is decided as written, even when an instance is checked first.
+function later() {
+  let b = new Box<i64 | null>(null)
+  b.bump(3)
+  print(b.v)
+  let n = new Box<string | null>("a")
+  n.add(4)
+  n.add(5)
+  print(n.count, n.read() === null)
+}
+class Box<T> {
+  v: T
+  count: i64 = 0
+  constructor(v: T) { this.v = v }
+  bump(this: Mut<this>, x: T) { this.v! = x }
+  add(this: Mut<this>, x: i64) { this.count! += x }
+  read(): Ref<T> { return this.v! }
+}
+function main() {
+  let c = new Box<string>("s")
+  c.bump("t")
+  print(c.v)
+  later()
+}
+// expect: t
+// expect: 3
+// expect: 9 false
+// case: non_null_constructor
+// A constructor may set a field through a '!'.
+class C {
+  v: i64
+  w: i64 = 0
+  constructor(v: i64) { this.v! = v; this.w! = v * 2 }
+}
+function main() {
+  const c = new C(4)
+  print(c.v, c.w)
+}
+// expect: 4 8

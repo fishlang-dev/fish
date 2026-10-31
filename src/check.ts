@@ -1192,6 +1192,18 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return instance.returns;
   }
 
+  // The check of a generic body as written, before an instance's: a generic function's
+  // definition, or the same member of its generic class's definition, with a closure's body
+  // checked within the body it is written in.
+  function asWritten(instance: Instance) {
+    let f = instance.body;
+    if (f.closure) return asWritten(f.closure.parent);
+    const template = f.scope && f.owner?.generic ? definedClass(f.owner.generic.name) : undefined;
+    if (template) f = bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
+    const written = definition(f);
+    if (written !== instance && !inProgress.has(written)) checkBody(written);
+  }
+
   // Checks an instance with its type arguments in scope.
   function checkBody(instance: Instance) {
     if (done.has(instance)) return;
@@ -1358,6 +1370,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
+      asWritten: () => asWritten(instance),
       envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
       dynOf: (e, table) => void (instance.dyns ??= new NodeMap()).set(e, table),
       nestedLocal,
@@ -2513,7 +2526,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     function fieldAssignment(s: Stmt): Extract<Expr, { kind: "member" }> | undefined {
       if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
-      const target = s.expr.target;
+      // This runs before the statement is checked; a `!` here that can unwrap is refused there.
+      let target = s.expr.target;
+      while (target.kind === "nonNull") target = target.expr;
       if (target.kind !== "member" || target.object.kind !== "this") return undefined;
       // Once `super(...)` has run, the base's fields are set, and may be set again before the
       // class's own are.

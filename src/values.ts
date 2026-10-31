@@ -146,6 +146,9 @@ export type Context = {
   errorOf(instance: Instance): Type | undefined;
   // What the body's function declares it throws.
   throwsDeclared(): Type | undefined;
+  // Checks the body as written first, when this is an instance of a generic one, so what that
+  // check decides holds for every instance.
+  asWritten(): void;
   // Whether the body is a sync `main` run as an async one, as a program setting timers does.
   syncMain: boolean;
   // Whether a binding stands for a variable a closure captures, and whether this is a closure;
@@ -5467,6 +5470,7 @@ export function expressions(ctx: Context) {
   // marked there. Only `null` itself is always empty.
   function redundant(e: Extract<Expr, { kind: "nonNull" }>, given: Type): boolean {
     const bang = e as Bang;
+    if (bang.redundant === undefined) ctx.asWritten();
     if (bang.redundant !== undefined) return bang.redundant;
     const held = isRefType(given) ? given.to : given;
     if (held === "null") throw new CompileError("'!' takes the value out of an Option, and this is a 'null', which is always empty", e.start, e.end);
