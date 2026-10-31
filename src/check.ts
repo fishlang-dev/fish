@@ -1,6 +1,7 @@
-import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, declareClass, extend, inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
+import { declarations, warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN, fileNames } from "./modules.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
@@ -38,7 +39,8 @@ type Func = Declared & { body: Stmt[] };
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
-export type Checked = { instances: Instance[] };
+// `warnings`: what the build reports without failing, in source order.
+export type Checked = { instances: Instance[]; warnings: CompileError[] };
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
@@ -760,7 +762,16 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
-  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
+  // An interface's method may be any class's, as interfaces are met by shape.
+  const signed = new Set([...interfaces.values()].flatMap((x) => x.members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : []))));
+  // A method's body is named for its class, as in `C.m`.
+  const method = (b: Body) => b.name.slice(b.name.lastIndexOf(".") + 1);
+  const overrides = (b: Body) => {
+    const base = classOf(b.owner!).base;
+    return base !== undefined && inherited(base, "methods", method(b)) !== undefined;
+  };
+  const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
+  return { instances: compiledInstances, warnings: warnings(compiledInstances, required) };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -2404,6 +2415,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       depths.set(local, scopes.length);
       scope.set(name, local);
       locals.set(node, local);
+      declarations.add(node);
     }
 
     function lookup(name: string, at?: Expr | ObjectProp): Local | undefined {

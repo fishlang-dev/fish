@@ -6,6 +6,7 @@ import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
+import { markGenerated } from "./warnings.ts";
 import { fits, show, type Type } from "./typing.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
@@ -141,6 +142,7 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
+    markGenerated(method);
     upcasts.add(`${at.start}:${at.end}`);
     decl.members = [...decl.members, method];
   }
@@ -447,6 +449,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
+  markGenerated(given);
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);

@@ -53,11 +53,17 @@ function located(path: string, text: string, sources: Source[], start: number, e
 }
 
 // The diagnostics checking `text`, the document at `path`, gives, with its imports read by `read`,
-// and the checked program when there are none. An error in another file shows at the document's
-// start, saying where it is.
+// and the checked program when there are none, with its warnings in this document. An error in
+// another file shows at the document's start, saying where it is.
 function diagnose(path: string, text: string, read: (path: string) => string): { diagnostics: object[]; checked?: Checked } {
   try {
-    return { diagnostics: [], checked: analyze(text, path, read).checked };
+    const { checked, sources } = analyze(text, path, read);
+    const uri = pathToFileURL(path).href;
+    const warnings = checked.warnings.flatMap((w) => {
+      const at = located(path, text, sources, w.start, w.end);
+      return at?.uri === uri ? [{ range: at.range, severity: 2, source: "fish", message: shown(w.message) }] : [];
+    });
+    return { diagnostics: warnings, checked };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     const uri = pathToFileURL(path).href;
