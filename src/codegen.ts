@@ -126,16 +126,18 @@ const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.construct
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
 // `harness`: the entry file is `fishc test`'s generated harness, whose functions keep no frame.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean };
+// `leaks`: a `--leaks` build, whose frames name each allocation's site, so it keeps them in release.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [], harness = false }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
-  // In a debug build each of the program's own functions keeps a frame on the runtime's shadow
-  // stack, `{ site, name, prev }`, for a panic's backtrace: `framing` is the body of the one being
-  // emitted, and `site` the expression or statement whose calls it is making.
+  // In a debug or `--leaks` build each of the program's own functions keeps a frame on the
+  // runtime's shadow stack, `{ site, name, prev }`, for a panic's backtrace and a leak's site:
+  // `framing` is the body of the one being emitted, and `site` the expression or statement whose
+  // calls it is making.
   let framing: string[] | undefined;
   let site: Span | undefined;
   let frames = false;
@@ -296,7 +298,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // hides std's internals; nor do the arrows the checker wraps around a callback.
     const from = sourceOf(src, file, f.start, sources).file;
     const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
-    framing = !release && !library && ours ? body : undefined;
+    framing = (!release || leaks) && !library && ours ? body : undefined;
     site = undefined;
     const machine = instance.generator ?? instance.future;
     resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };

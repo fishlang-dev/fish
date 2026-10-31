@@ -4,7 +4,8 @@ import { CASEMAP } from "./casemap.ts";
 // points are named `fsh_rt_*`.
 
 // Every allocation goes through fsh_rt_alloc and fsh_rt_free, which count what is live. With
-// FISH_LEAKS=1 in the environment, a program reports at exit what it never freed.
+// FISH_LEAKS=1 in the environment, a program reports at exit how many blocks it never freed; a
+// --leaks build always reports them, grouped by where each was allocated.
 //
 // A string is a block: a reference count, its length in bytes, a pointer to its bytes, the
 // block it shares them with when it is a slice, its UTF-16 length once known (-1 before), its
@@ -58,19 +59,52 @@ static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
 
+#ifdef FSH_LEAK_SITES
+// A --leaks build's blocks each start with a header naming the allocation's site, on one list
+// the report walks at exit. Its size keeps the block after it 16-byte aligned, as malloc's is.
+typedef struct fsh_block { const char *site; const char *name; int64_t size; struct fsh_block *prev, *next; int64_t pad; } fsh_block;
+static fsh_block fsh_blocks = { NULL, NULL, 0, &fsh_blocks, &fsh_blocks, 0 };
+static pthread_mutex_t fsh_blocks_lock = PTHREAD_MUTEX_INITIALIZER;
+static void fsh_site(fsh_block *b);
+#endif
+
 void *fsh_rt_alloc(int64_t size) {
+#ifdef FSH_LEAK_SITES
+  // A size the header would overflow fails as one malloc can't give.
+  fsh_block *b = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_block) ? NULL : malloc(sizeof(fsh_block) + size);
+  void *p = b ? b + 1 : NULL;
+#else
   void *p = malloc(size);
+#endif
   if (!p) {
     fputs("out of memory\n", stderr);
     exit(101);
   }
   __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
+#ifdef FSH_LEAK_SITES
+  fsh_site(b);
+  b->size = size;
+  pthread_mutex_lock(&fsh_blocks_lock);
+  b->prev = &fsh_blocks;
+  b->next = fsh_blocks.next;
+  b->next->prev = b;
+  fsh_blocks.next = b;
+  pthread_mutex_unlock(&fsh_blocks_lock);
+#endif
   return p;
 }
 
 void fsh_rt_free(void *p) {
   if (!p) return;
   __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
+#ifdef FSH_LEAK_SITES
+  fsh_block *b = (fsh_block *)p - 1;
+  pthread_mutex_lock(&fsh_blocks_lock);
+  b->prev->next = b->next;
+  b->next->prev = b->prev;
+  pthread_mutex_unlock(&fsh_blocks_lock);
+  p = b;
+#endif
   free(p);
 }
 
@@ -91,16 +125,27 @@ static int32_t fsh_panic_began = 0;
 // the signal itself lives to the end, so nothing else frees it.
 static void (*fsh_shutdown_end)(void) = NULL;
 
+#ifdef FSH_LEAK_SITES
+static void fsh_leak_report(void);
+#endif
+
 __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
   const char *check = getenv("FISH_LEAKS");
+#ifdef FSH_LEAK_SITES
+  check = "1";
+#endif
   if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   // After a panic, what JS frames it unwound held is still live in the engine, not leaked.
   int32_t held = fsh_engine_end && fsh_panic_began;
+#ifdef FSH_LEAK_SITES
+  if (live != 0 && !fsh_abandoned && !held) fsh_leak_report();
+#else
   if (check && check[0] == '1' && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
+#endif
 }
 
 typedef struct fsh_str {
@@ -530,6 +575,87 @@ _Thread_local fsh_frame *fsh_rt_frames = NULL;
 // Where the task this thread is polling was spawned, and the panic's "panicked at" line.
 static _Thread_local const char *fsh_spawned_at = NULL;
 static _Thread_local const char *fsh_panic_line = NULL;
+
+#ifdef FSH_LEAK_SITES
+// A block's site: the innermost of the program's own frames, so a block std makes is charged to
+// the program's call into std, and <runtime> when there is none.
+static void fsh_site(fsh_block *b) {
+  b->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  b->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
+}
+
+typedef struct { const char *site; const char *name; int64_t count, bytes; } fsh_leak;
+
+static int fsh_text_order(const char *a, const char *b) {
+  return a == b ? 0 : !a ? -1 : !b ? 1 : strcmp(a, b);
+}
+
+// Sites are "file:line:col", ordered by file, then line, then column, as numbers.
+static int fsh_site_order(const char *a, const char *b) {
+  if (!a || !b) return fsh_text_order(a, b);
+  const char *ca = strrchr(a, ':'), *cb = strrchr(b, ':');
+  const char *la = ca, *lb = cb;
+  while (la > a && la[-1] != ':') la--;
+  while (lb > b && lb[-1] != ':') lb--;
+  if (la == a || lb == b) return strcmp(a, b);
+  size_t fa = la - 1 - a, fb = lb - 1 - b;
+  int c = strncmp(a, b, fa < fb ? fa : fb);
+  if (c || fa != fb) return c ? c : fa < fb ? -1 : 1;
+  long long na = atoll(la), nb = atoll(lb);
+  if (na != nb) return na < nb ? -1 : 1;
+  na = atoll(ca + 1), nb = atoll(cb + 1);
+  return na < nb ? -1 : na > nb;
+}
+
+static int fsh_by_site(const void *x, const void *y) {
+  const fsh_leak *a = x, *b = y;
+  int c = fsh_text_order(a->name, b->name);
+  return c ? c : fsh_text_order(a->site, b->site);
+}
+
+// Largest group first: by count, then bytes, then where.
+static int fsh_by_size(const void *x, const void *y) {
+  const fsh_leak *a = x, *b = y;
+  if (a->count != b->count) return a->count > b->count ? -1 : 1;
+  if (a->bytes != b->bytes) return a->bytes > b->bytes ? -1 : 1;
+  int c = fsh_site_order(a->site, b->site);
+  return c ? c : fsh_text_order(a->name, b->name);
+}
+
+// Every block still live, grouped by site, after anything the program printed.
+static void fsh_leak_report(void) {
+  pthread_mutex_lock(&fsh_blocks_lock);
+  int64_t n = 0, total = 0;
+  for (fsh_block *b = fsh_blocks.next; b != &fsh_blocks; b = b->next) n++;
+  fsh_leak *all = malloc((n ? n : 1) * sizeof(fsh_leak));
+  if (!all) abort();
+  n = 0;
+  for (fsh_block *b = fsh_blocks.next; b != &fsh_blocks; b = b->next) {
+    all[n++] = (fsh_leak){ b->site, b->name, 1, b->size };
+    total += b->size;
+  }
+  pthread_mutex_unlock(&fsh_blocks_lock);
+  qsort(all, n, sizeof(fsh_leak), fsh_by_site);
+  int64_t groups = 0;
+  for (int64_t i = 0; i < n; i++) {
+    if (groups > 0 && fsh_by_site(&all[groups - 1], &all[i]) == 0) {
+      all[groups - 1].count++;
+      all[groups - 1].bytes += all[i].bytes;
+    } else all[groups++] = all[i];
+  }
+  qsort(all, groups, sizeof(fsh_leak), fsh_by_size);
+  fflush(NULL);
+  fprintf(stderr, "fish: leaked %lld allocation%s (%lld byte%s)\n", (long long)n, n == 1 ? "" : "s", (long long)total, total == 1 ? "" : "s");
+  for (int64_t i = 0; i < groups; i++) {
+    fsh_leak *g = &all[i];
+    fprintf(stderr, "  %lld allocation%s, %lld byte%s, ", (long long)g->count, g->count == 1 ? "" : "s", (long long)g->bytes, g->bytes == 1 ? "" : "s");
+    if (!g->name) fputs("at <runtime>\n", stderr);
+    else if (g->site) fprintf(stderr, "at %s in %s\n", g->site, g->name);
+    else fprintf(stderr, "in %s\n", g->name);
+  }
+  free(all);
+}
+#endif
 
 static void fsh_panic_at(const char *at) {
   fflush(NULL);
@@ -4544,6 +4670,11 @@ typedef struct fsh_file_job {
   fsh_array data;
   fsh_task *task;
   struct fsh_file_job *next;
+#ifdef FSH_LEAK_SITES
+  // The frame that submitted it, whose site what the job allocates is charged to.
+  const char *site;
+  const char *name;
+#endif
 } fsh_file_job;
 
 static pthread_mutex_t fsh_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -4875,9 +5006,16 @@ static void *fsh_pool_work(void *arg) {
     fsh_pool_head = job->next;
     if (!fsh_pool_head) fsh_pool_tail = NULL;
     pthread_mutex_unlock(&fsh_pool_lock);
+#ifdef FSH_LEAK_SITES
+    fsh_frame submitter = { job->site, job->name, NULL };
+    fsh_rt_frames = job->name ? &submitter : NULL;
+#endif
     if (job->op == 0) fsh_file_read(job);
     else if (job->op == 1) fsh_file_write(job);
     else fsh_host_lookup(job);
+#ifdef FSH_LEAK_SITES
+    fsh_rt_frames = NULL;
+#endif
     // Under the pool's lock, so a poll from another task can't hand the job over meanwhile.
     pthread_mutex_lock(&fsh_pool_lock);
     fsh_task *task = job->task;
@@ -4902,6 +5040,10 @@ static void fsh_pool_submit(fsh_file_job *job) {
     }
   }
   job->next = NULL;
+#ifdef FSH_LEAK_SITES
+  job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  job->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
+#endif
   __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
   if (fsh_pool_tail) fsh_pool_tail->next = job;
   else fsh_pool_head = job;
