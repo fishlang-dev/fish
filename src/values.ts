@@ -11,7 +11,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, joinedType, type HandleType, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -217,6 +217,8 @@ export const fileCalls = new WeakSet<Expr>();
 export const syncFileCalls = new WeakMap<Expr, string>();
 // The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
 export const printCalls = new WeakSet<Expr>();
+// `handle.join()` calls, which take the handle over and give it back awaitable as a TaskPanic.
+export const joinCalls = new WeakSet<Expr>();
 // node:util's `format` calls.
 export const formatCalls = new WeakSet<Expr>();
 // The ways several Promises are awaited at once.
@@ -1107,6 +1109,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
+    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "handle" && callee.name !== "clone") return handleCall(e, callee, receiver);
     if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) return toFixed(e);
@@ -2756,6 +2759,17 @@ export function expressions(ctx: Context) {
     }
     if (made) return made;
     throw new CompileError(set ? "'new Set()' needs the type of its members, as in 'new Set<string>()'" : "'new Map()' needs its key and value types, as in 'new Map<string, i64>()'", e.start, e.end);
+  }
+
+  // `handle.join()`: the task's handle, awaited as giving its value or throwing a TaskPanic.
+  function handleCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: HandleType): { type: Type; what: string } {
+    if (callee.name !== "join") throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${t.joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
+    if (t.joined) throw new CompileError("this is already the task's 'join()'; await it", callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling 'join'", callee);
+    if (e.args.length !== 0) throw new CompileError("'join' takes no arguments", e.start, e.end);
+    if (isRefType(types.get(callee.object)!)) throw new CompileError("'join' takes the handle over, so it needs the handle itself, not a borrow of it", callee.object.start, callee.object.end);
+    joinCalls.add(e);
+    return { type: joinedType(t, classes.get("TaskPanic")!.type), what: "'join'" };
   }
 
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and

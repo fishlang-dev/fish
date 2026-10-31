@@ -5,7 +5,7 @@ import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { kindTests } from "./narrow.ts";
-import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
+import { asserts, computed, jsCrossings, restText, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 
@@ -480,6 +480,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const a of e.args) expr(a);
           return;
         }
+        if (joinCalls.has(e)) return expr((e.callee as Extract<Expr, { kind: "member" }>).object, (p) => `'${p}' moved here: 'join' takes the handle over, as awaiting it would`);
         // `Promise.all` and `Promise.race` take each future in their list as an argument, so what
         // one borrows is lent while the others are made, and two can't conflict.
         if (combinedCalls.has(e)) {

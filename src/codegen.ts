@@ -1,7 +1,7 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import type { Narrowing } from "./overloads.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
-import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, joinCalls, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -782,12 +782,15 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     startBlock(done);
   }
 
-  // Takes a lock word, panicking if this thread already holds it, which would wait forever.
+  // Takes a lock word, panicking if this thread already holds it, which would wait forever, or
+  // if a task panicked holding it, which leaves it held over a value it may have half changed.
   function takeLock(word: string, at: Span) {
-    const [taken, held] = [temp(), temp()];
+    const [taken, held, poisoned] = [temp(), temp(), temp()];
     emit(`${taken} = call i32 @fsh_rt_lock(ptr ${word})`);
-    emit(`${held} = icmp ne i32 ${taken}, 0`);
+    emit(`${held} = icmp eq i32 ${taken}, 1`);
     panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
+    emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
+    panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
 
   // 'AbortSignal.any's handles and their count: a literal's, lent one by one, in a stack array,
@@ -5997,6 +6000,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
     if (fixedFills.has(e)) return fixedFilled(e, types.get(e) as FixedType);
     if (stringBuilds.has(e)) return stringBuilt(e, stringBuilds.get(e)!);
+    // A joined handle is the same task's pointer.
+    if (joinCalls.has(e)) return owned((e.callee as Extract<Expr, { kind: "member" }>).object);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
   }
@@ -7653,6 +7658,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // What is read only once it is ready, as reading it before would read nothing.
     let readied: (() => string | undefined) | undefined;
     let reason: string | undefined;
+    // A joined task's panic reason, when it panicked.
+    let why: string | undefined;
+    // The poll result as the runtime gives it: a joined task's is its own, throwing no TaskPanic.
+    const polledAs = inner.kind === "handle" && inner.joined ? inner.joined.base : shape;
     if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
@@ -7810,12 +7819,17 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else if (inner.kind === "handle") {
       // A spawned task: the runtime copies its result out once it is done.
-      const [buffer, task, outcome] = [alloca(pollType(shape)), temp(), temp()];
+      // Awaited plainly, a task that panicked panics its awaiter; joined, it fails with its reason.
+      const base = inner.joined?.base ?? inner;
+      const [buffer, task, outcome] = [alloca(pollType(base)), temp(), temp()];
       emit(`${task} = load ptr, ptr ${at}`);
-      emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer})`);
-      emit(`${result} = load ${pollType(shape)}, ptr ${buffer}`);
+      if (inner.joined) {
+        why = alloca("ptr");
+        emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr null, ptr ${why})`);
+      } else unwinding(`call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr ${panicAt(e)}, ptr null)`, outcome);
+      emit(`${result} = load ${pollType(base)}, ptr ${buffer}`);
       emit(`${tag} = trunc i32 ${outcome} to i8`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} i8 3, label %${failed} ]`);
     } else if (inner.kind === "dyn") {
       // Through its vtable: the slot after drop, copy and clone is the future's own poll.
       const [dyn, data, table, slot, fn] = [temp(), temp(), temp(), temp(), temp()];
@@ -7860,6 +7874,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
       } else if (leaf) error = abortError(thrown);
+      else if (why) error = joinError(why, tag, result, (inner as HandleType).joined!, thrown);
       else {
         error = temp();
         emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
@@ -7870,11 +7885,40 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       let v: string | undefined = readied ? readied() : given;
       if (shape.gives !== "void" && !leaf) {
         v = temp();
-        emit(`${v} = extractvalue ${pollType(shape)} ${result}, 1`);
+        emit(`${v} = extractvalue ${pollType(polledAs)} ${result}, 1`);
       }
       return v;
     };
     return { waiting, ready, failed, value, error };
+  }
+
+  // What a joined task's await throws: a TaskPanic holding the reason it panicked with, when its
+  // outcome `tag` is 3, or else the error it threw itself.
+  function joinError(why: string, tag: string, result: string, joined: { base: HandleType; panic: Type }, thrown: Type): string {
+    const [base, panicked] = [joined.base, joined.panic as ClassType];
+    const make = () => {
+      const [reason, made] = [temp(), temp()];
+      emit(`${reason} = load ptr, ptr ${why}`);
+      emit(`${made} = insertvalue ${llvm(panicked)} zeroinitializer, ptr ${reason}, ${panicked.fields.findIndex((f) => f.name === "message")}`);
+      return convert(made, panicked, thrown);
+    };
+    if (!base.throws) return make();
+    const [isPanic, onPanic, onThrow, join, made] = [temp(), label(), label(), label(), temp()];
+    emit(`${isPanic} = icmp eq i8 ${tag}, 3`);
+    emit(`br i1 ${isPanic}, label %${onPanic}, label %${onThrow}`);
+    startBlock(onPanic);
+    const asPanic = make();
+    const fromPanic = block;
+    emit(`br label %${join}`);
+    startBlock(onThrow);
+    const own = temp();
+    emit(`${own} = extractvalue ${pollType(base)} ${result}, 2`);
+    const asOwn = convert(own, base.throws, thrown);
+    const fromOwn = block;
+    emit(`br label %${join}`);
+    startBlock(join);
+    emit(`${made} = phi ${llvm(thrown)} [ ${asPanic}, %${fromPanic} ], [ ${asOwn}, %${fromOwn} ]`);
+    return made;
   }
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.

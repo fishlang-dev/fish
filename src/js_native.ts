@@ -694,7 +694,9 @@ static JSValue fsh_js_called(JSContext *cx, JSValueConst self, int argc, JSValue
   fsh_js_callback *c = opaque;
   fsh_js *boxes[c->length > 0 ? c->length : 1];
   for (int32_t i = 0; i < c->length; i++) boxes[i] = fsh_js_box(i < argc ? JS_DupValue(cx, argv[i]) : JS_UNDEFINED);
+  fsh_in_js++;
   fsh_js *gives = c->run(c->data, c->table, c->length, boxes);
+  fsh_in_js--;
   if (!gives) return JS_UNDEFINED;
   JSValue v = JS_DupValue(cx, gives->value);
   fsh_js_drop(cx, gives);

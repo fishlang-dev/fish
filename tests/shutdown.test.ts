@@ -53,7 +53,7 @@ function start(binary: string, out?: number) {
     expect(seen).not.toContain("fish: leaked");
     return { stdout: await stdout, exitCode: proc.exitCode, signal: proc.signalCode };
   }
-  return { proc, line, exited };
+  return { proc, line, exited, stderr: () => seen };
 }
 
 const ABORTED = `async function main(): Promise<void> {
@@ -187,4 +187,82 @@ test("a second SIGINT exits even while stdout is stuck on a full pipe", async ()
   } finally {
     closeSync(fd);
   }
+});
+
+// One raw HTTP/1.1 request, and everything the server sends until it closes the connection.
+const exchange = (port: number, path: string) =>
+  new Promise<string>((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(`GET ${path} HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n`));
+    let got = "";
+    socket.on("data", (d) => (got += d.toString()));
+    socket.on("end", () => resolve(got));
+    socket.on("error", reject);
+  });
+
+const PANICKY = `async function main(): Promise<void> throws IoError {
+  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, async (req: Request) => {
+    if (req.url.endsWith("/boom")) {
+      const xs = ["held" + req.url];
+      return new Response(xs[5]);
+    }
+    return new Response("fine");
+  });
+  console.log("after serve");
+}
+`;
+
+test("a handler that panics gets its request a bare 500, and the server keeps serving", async () => {
+  const run = start(await build("panicky", PANICKY));
+  const port = Number((await run.line(/^listening \d+$/)).split(" ")[1]);
+  const failed = await exchange(port, "/boom");
+  expect(failed).toStartWith("HTTP/1.1 500 Internal Server Error\r\n");
+  expect(failed.toLowerCase()).toContain("\r\nconnection: close\r\n");
+  expect(failed.toLowerCase()).toContain("\r\ncontent-length: 0\r\n");
+  expect(failed).toEndWith("\r\n\r\n");
+  await run.line("index out of bounds: the len is 1 but the index is 5");
+  for (const path of ["/a", "/boom", "/b"]) {
+    const answer = await fetch(`http://127.0.0.1:${port}${path}`);
+    expect([answer.status, await answer.text()]).toEqual(path === "/boom" ? [500, ""] : [200, "fine"]);
+  }
+  run.proc.kill("SIGTERM");
+  expect(await run.exited()).toEqual({ stdout: "after serve\n", exitCode: 0, signal: null });
+  expect(run.stderr()).toMatch(/panicked at .*panicky\.fsh:5:\d+:\nindex out of bounds/);
+});
+
+test("a detached task's panic is printed and the program ends normally", async () => {
+  const run = start(await build("detached", `async function boom(): Promise<void> {
+  const xs = ["a" + 1];
+  await yieldNow();
+  console.log(xs[2]);
+}
+async function main() {
+  spawn(boom());
+  await sleep(100);
+  console.log("main finished");
+}
+`));
+  expect(await run.exited()).toEqual({ stdout: "main finished\n", exitCode: 0, signal: null });
+  expect(run.stderr()).toMatch(/^panicked at .*detached\.fsh:4:\d+:\nindex out of bounds: the len is 1 but the index is 2\n$/);
+});
+
+test("a Router route that panics answers 500 while the other routes keep working", async () => {
+  const run = start(await build("routed", `async function main(): Promise<void> throws IoError {
+  let app = new Router();
+  app.get("/users/:id", async (req) => new Response("user " + req.param("id")));
+  app.get("/boom", async (req) => {
+    const xs = [req.path];
+    return new Response(xs[3]);
+  });
+  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, app.handler());
+  console.log("after serve");
+}
+`));
+  const port = Number((await run.line(/^listening \d+$/)).split(" ")[1]);
+  for (const path of ["/users/1", "/boom", "/users/2", "/boom", "/users/3"]) {
+    const answer = await fetch(`http://127.0.0.1:${port}${path}`);
+    expect([answer.status, await answer.text()]).toEqual(path === "/boom" ? [500, ""] : [200, `user ${path.slice(7)}`]);
+  }
+  run.proc.kill("SIGTERM");
+  expect(await run.exited()).toEqual({ stdout: "after serve\n", exitCode: 0, signal: null });
+  expect(run.stderr().match(/index out of bounds: the len is 1 but the index is 3/g)?.length).toBe(2);
 });
