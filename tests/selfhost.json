@@ -26,7 +26,6 @@
     "js.ts": "generator methods are not supported yet",
     "js_native.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
     "layout.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "lexer.ts": "methods in object types are not supported yet",
     "locals.ts": "generator methods are not supported yet",
     "lsp.ts": "'node:url' is a Node module Fish's std doesn't have yet",
     "macros.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -72,5 +71,5 @@
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 71
+  "count": 70
 }
