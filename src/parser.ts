@@ -364,7 +364,7 @@ function cursor(src: string): Cursor {
       if (RESERVED.has(c.peek().text)) throw c.error("expected a name");
       return c.next();
     },
-    error: (message, t = c.peek()) => new CompileError(`${message}, found ${describe(t)}`, t.start, t.end),
+    error: (message, t: Token | undefined = c.peek()) => new CompileError(`${message}, found ${describe(t)}`, t.start, t.end),
     list: (item, close) => allowingIn(c, true, () => {
       const items = [];
       while (!c.at(close)) {
@@ -706,7 +706,7 @@ export function endStatement(c: Cursor) {
 }
 
 // Moves every span in a parsed tree by `by`, for a source placed past others in one program.
-export function shiftSpans(v: unknown, by: number, seen = new Set<unknown>()) {
+export function shiftSpans(v: unknown, by: number, seen: Set<unknown> = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   if (Array.isArray(v)) return v.forEach((x) => shiftSpans(x, by, seen));

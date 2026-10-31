@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { dependencyLib, dependencyOf, packageOf, resolvePackages } from "./dependencies.ts";
+import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
@@ -51,7 +51,7 @@ export function fileAt(offset: number): string {
 
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`: an editor's unsaved text is newer than the disk's.
-export function load(entry: string, src = readFileSync(entry, "utf8"), read = (path: string) => readFileSync(path, "utf8"), fish = resolvePackages(entry)): Loaded {
+export function load(entry: string, src: string = readFileSync(entry, "utf8"), read: (path: string) => string = (path: string) => readFileSync(path, "utf8"), fish: FishPackage[] | undefined = resolvePackages(entry)): Loaded {
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
@@ -130,7 +130,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
   };
   // A declaration file a package's declarations come from: given its own place in the program's
   // offsets, so a message about a declaration shows its line.
-  const declarationFile = (file: string, text = readFileSync(file, "utf8")): number => {
+  const declarationFile = (file: string, text: string = readFileSync(file, "utf8")): number => {
     const key = `dts:${file}`;
     const known = byPath.get(key);
     if (known) return known.base;
@@ -166,7 +166,7 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
     const declaredHere = new Map<string, Declared>();
     // The names imported come first, so one also referred to is exported.
     const pending: { declared: Declared; name: string }[] = [];
-    const add = (declared: Declared, name: string, exported: boolean, at: Span, as = name) => {
+    const add = (declared: Declared, name: string, exported: boolean, at: Span, as: string = name) => {
       if (declaredHere.has(name)) {
         if (declaredHere.get(name)!.at !== declared.at) throw new CompileError(`'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
         return;
@@ -443,7 +443,7 @@ type Linked = {
 // macro has yet to make.
 export function flatten({ modules }: Loaded, library = false, lenient = false): Stmt[] {
   const linked = new Map(modules.map((m, i) => [m, linkOf(m, i, library)]));
-  const exported = (m: Module, name: string, seen = new Set<string>()): Decl | undefined => {
+  const exported = (m: Module, name: string, seen: Set<string> = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
     if (seen.has(key)) return undefined;
     seen.add(key);
@@ -457,7 +457,7 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
     }
     return undefined;
   };
-  const local = (l: Linked, name: string, seen = new Set<string>()): Decl | undefined => {
+  const local = (l: Linked, name: string, seen: Set<string> = new Set<string>()): Decl | undefined => {
     const imported = l.imports.get(name);
     return l.own.get(name) ?? (imported && exported(imported.from, imported.name, seen));
   };
@@ -814,7 +814,7 @@ const NAMED = new Set(["ident", "ref", "variant", "function", "class", "enum", "
 // Renames every binding and use of a name, at any depth, to what `to` gives for it; a name it
 // gives nothing for stays. Renaming a name everywhere in a file keeps its scoping, so a local
 // shadowing a top-level name still does. A qualified name renames its first part.
-export function renameIn(v: unknown, to: (name: string) => string | undefined, seen = new Set<unknown>()) {
+export function renameIn(v: unknown, to: (name: string) => string | undefined, seen: Set<unknown> = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   if (Array.isArray(v)) return v.forEach((x) => renameIn(x, to, seen));

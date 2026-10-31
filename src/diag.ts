@@ -32,7 +32,7 @@ export class CompileError extends Error {
   note: Note | undefined;
   sources: Source[] = [];
 
-  constructor(message: string, start: number, end = start + 1, note?: Note) {
+  constructor(message: string, start: number, end: number = start + 1, note?: Note) {
     super(written(message));
     this.start = start;
     this.end = end;

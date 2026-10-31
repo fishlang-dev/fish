@@ -24,7 +24,7 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
   const hoisted: Stmt[] = [];
   let count = 0;
 
-  const visit = (node: unknown, ctx: Context | undefined, seen = new Set<unknown>()) => {
+  const visit = (node: unknown, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
     if (!node || typeof node !== "object" || seen.has(node)) return;
     seen.add(node);
     if (Array.isArray(node)) return node.forEach((x) => visit(x, ctx, seen));
@@ -157,7 +157,7 @@ function declares(s: Stmt, r: Rename): boolean {
 
 // Every use of the name under `node`, as a type or, for a class or enum, a value, made a use of
 // the hoisted name, the outer type parameters given first among its type arguments.
-function rename(node: unknown, r: Rename, seen = new Set<unknown>()) {
+function rename(node: unknown, r: Rename, seen: Set<unknown> = new Set<unknown>()) {
   if (!node || typeof node !== "object" || seen.has(node)) return;
   seen.add(node);
   if (Array.isArray(node)) {
@@ -186,7 +186,7 @@ function rename(node: unknown, r: Rename, seen = new Set<unknown>()) {
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.
-function mentions(node: unknown, name: string, seen = new Set<unknown>()): boolean {
+function mentions(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => mentions(x, name, seen));
@@ -207,7 +207,7 @@ function runsUse(node: unknown, name: string): boolean {
   return Object.values(n).some((v) => runsUse(v, name));
 }
 
-function refersTo(node: unknown, name: string, seen = new Set<unknown>()): boolean {
+function refersTo(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => refersTo(x, name, seen));
@@ -217,7 +217,7 @@ function refersTo(node: unknown, name: string, seen = new Set<unknown>()): boole
 }
 
 // The value names a declaration reads.
-function namesUsed(node: unknown, found = new Set<string>(), seen = new Set<unknown>()): Set<string> {
+function namesUsed(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
   if (!node || typeof node !== "object" || seen.has(node)) return found;
   seen.add(node);
   if (Array.isArray(node)) {
@@ -231,7 +231,7 @@ function namesUsed(node: unknown, found = new Set<string>(), seen = new Set<unkn
 }
 
 // The names declared inside a declaration: its methods' parameters and locals.
-function declaredWithin(node: unknown, found = new Set<string>(), seen = new Set<unknown>()): Set<string> {
+function declaredWithin(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
   if (!node || typeof node !== "object" || seen.has(node)) return found;
   seen.add(node);
   if (Array.isArray(node)) {

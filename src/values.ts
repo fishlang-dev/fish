@@ -47,7 +47,7 @@ export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" &&
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 // Whether a value of the type can hold a float anywhere inside it.
-function holdsFloat(t: Type, seen = new Set<Type>()): boolean {
+function holdsFloat(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
   if (typeof t === "string") return isFloat(t);
   if (seen.has(t)) return false;
   seen.add(t);
@@ -2168,7 +2168,7 @@ export function expressions(ctx: Context) {
   }
 
   // A regex's pattern, parsed and compiled here so its errors come while compiling.
-  function regexLiteral(source: string, flags: string, at: Span, shown = source): RegexType {
+  function regexLiteral(source: string, flags: string, at: Span, shown: string = source): RegexType {
     try {
       const pattern = parsePattern(source, flags);
       compileRegex(pattern);
@@ -3443,7 +3443,7 @@ export function expressions(ctx: Context) {
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
   // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
-  function unsent(t: Type, seen = new Set<Type>()): Type | undefined {
+  function unsent(t: Type, seen: Set<Type> = new Set<Type>()): Type | undefined {
     // A type holding itself is looked into once.
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
@@ -3566,7 +3566,7 @@ export function expressions(ctx: Context) {
 
   // Refuses a value that can't be cloned, for `clone()` and for the array methods that give
   // clones of elements, named by `by`; `dyns` copies Dyns one by one, as those methods do.
-  function clonable(type: Type, at: Span, by?: string, dyns = by !== undefined) {
+  function clonable(type: Type, at: Span, by?: string, dyns: boolean = by !== undefined) {
     const stored = lower(type);
     const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
     const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));

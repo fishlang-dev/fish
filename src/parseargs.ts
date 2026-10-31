@@ -101,7 +101,7 @@ function keyOf(p: ObjectProp, within: string): string {
 }
 
 // Generated nodes take the call's span, so a message about one points at the call.
-function respan(v: unknown, at: Span, seen = new Set<unknown>()) {
+function respan(v: unknown, at: Span, seen: Set<unknown> = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   const node = v as Record<string, unknown>;

@@ -6,7 +6,7 @@ import { allFields, isNumeric, patternType, promiseElement, literalType, objectT
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
-export function openParam(t: Type, deep: boolean, seen = new Set<Type>()): ParamType | undefined {
+export function openParam(t: Type, deep: boolean, seen: Set<Type> = new Set<Type>()): ParamType | undefined {
   // A type holding itself is looked into once.
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);

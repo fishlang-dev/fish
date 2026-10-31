@@ -91,7 +91,7 @@ export type ClassInfo = {
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
-export function declareClass(node: ClassNode & { name: string }, name = node.name, scope = new Map<string, Type>()): ClassInfo {
+export function declareClass(node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
   if (node.abstract) throw unsupported("abstract classes", node);
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   if (node.extends && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {

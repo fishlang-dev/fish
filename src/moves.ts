@@ -862,7 +862,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Reads or hands over a place, which must still hold its value and not be lent so as to
   // forbid it.
-  function use(e: Named, consume?: Consumer, type = e.kind === "shorthand" ? locals.get(e)!.type : types.get(e)!) {
+  function use(e: Named, consume?: Consumer, type: Type = e.kind === "shorthand" ? locals.get(e)!.type : types.get(e)!) {
     const place = key(e)!;
     usable(e, place);
     const moving = consume !== undefined && !isCopy(type);
@@ -925,7 +925,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return [...new Set(holders.map((h) => (h.name === "for...of" ? "a 'for...of' loop" : `'${h.name}'`)))];
   }
 
-  function free(place: string, e: Named, access: Access, at = e.start) {
+  function free(place: string, e: Named, access: Access, at: number = e.start) {
     if (!state) return;
     for (const loan of state.loans.values()) {
       if (!overlaps(loan.place, place) || !live(loan, at)) continue;
@@ -958,7 +958,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
   // A loan is keyed by where it starts, or by `key` for one no source offset may share.
-  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at = e.start, key = e.start) {
+  function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at: number = e.start, key: number = e.start) {
     free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
     state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
@@ -1233,7 +1233,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // Changing a place needs it free of loans; a setter changes the object it is called on.
-  function change(target: Expr, at = target.start) {
+  function change(target: Expr, at: number = target.start) {
     const changed = setters.has(target) && target.kind === "member" ? target.object : target;
     const place = key(changed);
     if (place !== undefined) free(place, changed, "change", at);
