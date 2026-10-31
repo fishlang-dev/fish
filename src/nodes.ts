@@ -135,10 +135,12 @@ export class NodeSet<K extends Id> {
 }
 
 // A `WeakMap` from nodes, keyed by their ids. It holds each node only weakly, for the identity
-// check, so a table that outlives a program doesn't keep its tree alive; like a `WeakMap`, it
-// can't be iterated.
+// check, so a table that outlives a program doesn't keep its tree alive, and drops an entry once
+// its node is collected; like a `WeakMap`, it can't be iterated. Unlike one, it holds each value
+// strongly, so a value that reaches its own node keeps that node alive.
 export class WeakNodeMap<K extends Id, V> {
   private table = new Map<number, { node: WeakRef<K>; value: V }>();
+  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
 
   get(node: K): V | undefined {
     return this.table.get(idOf(node, this.table.get(node.id)?.node.deref()))?.value;
@@ -149,7 +151,9 @@ export class WeakNodeMap<K extends Id, V> {
   }
 
   set(node: K, value: V): this {
-    this.table.set(idOf(node, this.table.get(node.id)?.node.deref()), { node: new WeakRef(node), value });
+    const held = this.table.get(node.id);
+    if (!held) this.gone.register(node, node.id);
+    this.table.set(idOf(node, held?.node.deref()), { node: new WeakRef(node), value });
     return this;
   }
 
@@ -161,13 +165,16 @@ export class WeakNodeMap<K extends Id, V> {
 // A `WeakSet` of nodes, keyed by their ids, holding each only weakly as `WeakNodeMap` does.
 export class WeakNodeSet<K extends Id> {
   private table = new Map<number, WeakRef<K>>();
+  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
 
   has(node: K): boolean {
     return this.table.has(idOf(node, this.table.get(node.id)?.deref()));
   }
 
   add(node: K): this {
-    this.table.set(idOf(node, this.table.get(node.id)?.deref()), new WeakRef(node));
+    const held = this.table.get(node.id);
+    if (!held) this.gone.register(node, node.id);
+    this.table.set(idOf(node, held?.deref()), new WeakRef(node));
     return this;
   }
 

@@ -3012,7 +3012,9 @@ function stdBytes(): Uint8Array {
   let bytes: Uint8Array | undefined;
   try {
     bytes = readFileSync(path);
-    if (!Array.isArray(deserialize(bytes))) bytes = undefined;
+    // A tree from before nodes had ids, or anything else, is made again.
+    const cached = deserialize(bytes);
+    if (!Array.isArray(cached) || typeof cached[0]?.id !== "number") bytes = undefined;
   } catch {
     bytes = undefined;
   }
