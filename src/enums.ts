@@ -13,7 +13,7 @@ export type EnumInfo = { type: Type; members: Map<string, LiteralType>; data?: D
 // arguments, since its payload types may name its type parameters.
 // `eq` marks one that `@derive(Eq)` lets `===` compare, and `json` one `@derive(Json)` lets
 // `JSON` write and read.
-export type DataEnum = { name: string; id: number; params: string[]; members: EnumMember[]; instances: Map<string, EnumInstance>; at: Span; eq: boolean; json: boolean };
+export type DataEnum = { name: string; id: usize; params: string[]; members: EnumMember[]; instances: Map<string, EnumInstance>; at: Span; eq: boolean; json: boolean };
 export type EnumInstance = { type: Type; variants: Map<string, VariantType> };
 
 type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; derives?: string[] };
@@ -84,9 +84,9 @@ class Unsettled extends Map<string, LiteralType> {
 }
 
 // The innermost initializer being computed, as the span and name an error points at.
-const innermost = ({ enumInits }: Compilation, node: EnumNode): [number, number, string] => enumInits.at(-1) ?? [node.start, node.end, node.name];
+const innermost = ({ enumInits }: Compilation, node: EnumNode): [usize, usize, string] => enumInits.at(-1) ?? [node.start, node.end, node.name];
 
-function settle(compilation: Compilation, node: EnumNode, id: number, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
+function settle(compilation: Compilation, node: EnumNode, id: usize, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
   const { literalType, unionType } = compilation.typing;
   let next: bigint | undefined = 0n;
   for (const m of node.members) {
@@ -140,7 +140,7 @@ function qualified(ids: Ids, node: unknown, enumName: string, names: Set<string>
 }
 
 // An enum either names values or holds data, never both, so each member means one thing.
-function dataEnum(node: EnumNode, id: number): EnumInfo {
+function dataEnum(node: EnumNode, id: usize): EnumInfo {
   const seen = new Set<string>();
   for (const m of node.members) {
     if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);

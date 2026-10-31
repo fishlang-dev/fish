@@ -27,7 +27,7 @@ type Checker = {
   definition(f: Body): Instance;
   checkBody(i: Instance): void;
   // The names of the classes a use at `at` reaches, for suggesting one.
-  classNames(at: number): string[];
+  classNames(at: usize): string[];
 };
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {

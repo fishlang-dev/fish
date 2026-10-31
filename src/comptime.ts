@@ -26,7 +26,7 @@ export type Member = { kind: "member"; type: Type; value: Value };
 // A value while compiling: an integer as a bigint, a float as a number, a boolean, a string,
 // null for an empty Option, or an aggregate. Objects are values in Fish, moved rather than shared,
 // so a JS reference stands for one.
-export type Value = bigint | number | boolean | string | null | undefined | Record | Items | Variant | Interior | Member | Place;
+export type Value = bigint | f64 | boolean | string | null | undefined | Record | Items | Variant | Interior | Member | Place;
 
 // Where a value lives, as a `Mut` holds it: reading and writing go through to it.
 export type Place = { kind: "place"; get(): Value; set(v: Value): void };
@@ -86,7 +86,7 @@ class Thrown {
   }
 }
 
-type Frame = { instance: Instance; locals: Map<number, Value>; self: Record | undefined };
+type Frame = { instance: Instance; locals: Map<usize, Value>; self: Record | undefined };
 
 type Interpreter = ReturnType<typeof interpreter>;
 
@@ -132,7 +132,7 @@ export function comptimeCall(instance: Instance, args: Value[], site: Span): Val
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
-export const astValues = (splice: (i: number, into: Type) => Value, holes: Value[] = [], at: Span = { start: 0, end: 0 }): Builder<Value> => ({
+export const astValues = (splice: (i: usize, into: Type) => Value, holes: Value[] = [], at: Span = { start: 0, end: 0 }): Builder<Value> => ({
   record: (t, fields) => ({ kind: "record", type: t, fields }),
   array: (items) => ({ kind: "array", items }),
   member: (v, _, m) => ({ kind: "member", type: m, value: v }),
@@ -173,10 +173,10 @@ function seeded(instance: Instance): Frame {
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
 // the functions it is written in, through what it captures.
-function known(instance: Instance): Map<number, Value> {
+function known(instance: Instance): Map<usize, Value> {
   const parent = instance.body.closure?.parent;
-  const outer = parent ? known(parent) : new Map<number, Value>();
-  const locals = new Map<number, Value>();
+  const outer = parent ? known(parent) : new Map<usize, Value>();
+  const locals = new Map<usize, Value>();
   for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!.id, comptimeParameter(instance, p));
   for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from.id)) locals.set(alias.id, outer.get(from.id));
   return locals;
@@ -497,7 +497,7 @@ function interpreter(tables: Tables) {
         // this one's binding of it; what this one leaves free, a quote around it may bind.
         const scope = new Map(holes.flatMap((h) => [...(scopes.get(untagged(h.value) as object) ?? [])]));
         const free: Free = new Map();
-        const splice = (i: number, into: Type) => {
+        const splice = (i: usize, into: Type) => {
           const v = holes[i]!.value;
           const inner = frees.get(untagged(v) as object);
           if (inner) {
@@ -548,7 +548,7 @@ function interpreter(tables: Tables) {
         return assign(f, e);
       case "update": {
         const at = place(f, e.operand);
-        const old = unwrap(at.get()) as bigint | number;
+        const old = unwrap(at.get()) as bigint | f64;
         const one = typeof old === "bigint" ? 1n : 1;
         const next = numeric(e.op === "++" ? "+" : "-", old, one, typeOf(f, e.operand), e);
         at.set(next);
@@ -699,7 +699,7 @@ function interpreter(tables: Tables) {
   }
 
   function stringMethod(name: string, s: string, args: Value[], at: Span): Value {
-    const n = (i: number) => Number(args[i] as bigint);
+    const n = (i: usize) => Number(args[i] as bigint);
     switch (name) {
       case "charCodeAt": {
         const i = args[0] as bigint;
@@ -806,17 +806,17 @@ function interpreter(tables: Tables) {
       case "!==":
         return !equal(typing, a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
       case "<":
-        return (unwrap(a) as number) < (unwrap(b) as number);
+        return (unwrap(a) as f64) < (unwrap(b) as f64);
       case "<=":
-        return (unwrap(a) as number) <= (unwrap(b) as number);
+        return (unwrap(a) as f64) <= (unwrap(b) as f64);
       case ">":
-        return (unwrap(a) as number) > (unwrap(b) as number);
+        return (unwrap(a) as f64) > (unwrap(b) as f64);
       case ">=":
-        return (unwrap(a) as number) >= (unwrap(b) as number);
+        return (unwrap(a) as f64) >= (unwrap(b) as f64);
     }
     const [x, y] = [unwrap(a), unwrap(b)];
     if (e.op === "+" && (typeof x === "string" || typeof y === "string")) return joined(display(x, typeOf(f, e.left)), display(y, typeOf(f, e.right)), e);
-    return numeric(e.op, x as bigint | number, y as bigint | number, typeOf(f, e), e);
+    return numeric(e.op, x as bigint | f64, y as bigint | f64, typeOf(f, e), e);
   }
 
   // The place is found first, then the value; a compound assignment reads the place once.
@@ -837,7 +837,7 @@ function interpreter(tables: Tables) {
       return v;
     }
     const [x, y] = [unwrap(old), unwrap(expr(f, e.value))];
-    const v = op === "+" && typeof x === "string" ? joined(x, display(y, typeOf(f, e.value)), e) : numeric(op, x as bigint | number, y as bigint | number, typeOf(f, e.target), e);
+    const v = op === "+" && typeof x === "string" ? joined(x, display(y, typeOf(f, e.value)), e) : numeric(op, x as bigint | f64, y as bigint | f64, typeOf(f, e.target), e);
     at.set(v);
     return v;
   }
@@ -967,7 +967,7 @@ function interpreter(tables: Tables) {
     return unsupported(`'${op}' on 'bigint'`, at);
   }
 
-  function numeric(op: string, a: bigint | number, b: bigint | number, type: Type, at: Span): Value {
+  function numeric(op: string, a: bigint | f64, b: bigint | f64, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
       const v = op === "+" ? x + y : op === "-" ? x - y : op === "*" ? x * y : op === "/" ? x / y : op === "%" ? x % y : op === "**" ? x ** y : undefined;
@@ -1259,12 +1259,12 @@ function wrap(v: bigint, type: Integer): bigint {
   return signed ? BigInt.asIntN(bits, v) : BigInt.asUintN(bits, v);
 }
 
-function fit(v: number, type: Type): number {
+function fit(v: f64, type: Type): f64 {
   return type === "f32" ? Math.fround(v) : v;
 }
 
 // An integer as the f32 nearest it, rounding once, ties to even.
-function toF32(v: bigint): number {
+function toF32(v: bigint): f64 {
   const magnitude = v < 0n ? -v : v;
   const bits = magnitude.toString(2).length;
   if (bits <= 24) return Math.fround(Number(v));
@@ -1286,7 +1286,7 @@ function display(value: Value, type: Type | undefined): string {
   return String(v);
 }
 
-function shortestF32(v: number): string {
+function shortestF32(v: f64): string {
   if (!Number.isFinite(v) || v === 0) return Object.is(v, -0) ? "0" : String(v);
   for (let digits = 1; digits <= 9; digits++) {
     const near = Number(v.toPrecision(digits));

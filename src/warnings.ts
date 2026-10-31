@@ -30,7 +30,7 @@ export function warnings({ declarations, generated, prologues }: Tables, instanc
   }
   // By where the name is written, since a generic body's instances, and a body checked again,
   // each declare it anew: it is unused only when no declaration of it is used.
-  const found = new Map<number, { warning: CompileError; used: boolean }>();
+  const found = new Map<usize, { warning: CompileError; used: boolean }>();
   for (const i of instances) {
     if (i.body.start >= STD_BASE || generated.has(i.body)) continue;
     for (const [node, l] of i.locals) {
@@ -46,7 +46,7 @@ export function warnings({ declarations, generated, prologues }: Tables, instanc
       found.set(at.start, entry);
     }
   }
-  const unreachable = new Map<number, CompileError>();
+  const unreachable = new Map<usize, CompileError>();
   for (const i of instances) {
     if (i.body.start < STD_BASE && !generated.has(i.body)) unreachableIn(generated, i.body.body, i, unreachable);
   }
@@ -69,7 +69,7 @@ function variable(s: Stmt): Pattern | undefined {
 
 // Reports the first statement after one control never passes, once per such run, in these
 // statements and the blocks inside them.
-function unreachableIn(generated: Tables["generated"], stmts: Stmt[], i: Instance, out: Map<number, CompileError>) {
+function unreachableIn(generated: Tables["generated"], stmts: Stmt[], i: Instance, out: Map<usize, CompileError>) {
   for (const [k, s] of stmts.entries()) {
     for (const inner of blocks(s)) unreachableIn(generated, inner, i, out);
     const why = leaves(s, i);

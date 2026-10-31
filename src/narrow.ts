@@ -54,7 +54,7 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // variables may narrow; `types` gives each expression's type as checked.
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
-export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
+export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
 export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;

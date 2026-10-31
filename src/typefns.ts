@@ -194,7 +194,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   // Each takes its type argument count, the function, an example, which arguments it reads
   // inside, and whether it compares them by fitting, which a type parameter anywhere in them
   // would decide wrongly.
-  const entries: [string, number, Utility, string, number[], boolean][] = [
+  const entries: [string, usize, Utility, string, usize[], boolean][] = [
     ["Partial", 1, partialType, "Partial<User>", [0], false],
     ["Required", 1, requiredType, "Required<User>", [0], false],
     ["Readonly", 1, readonlyType, "Readonly<User>", [0], false],
@@ -211,7 +211,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     ["Capitalize", 1, intrinsic("Capitalize", (s) => s.charAt(0).toUpperCase() + s.slice(1)), 'Capitalize<"a">', [0], false],
     ["Uncapitalize", 1, intrinsic("Uncapitalize", (s) => s.charAt(0).toLowerCase() + s.slice(1)), 'Uncapitalize<"A">', [0], false],
   ];
-  const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [number, Utility, string]] => [name, [count, (args, at, argAt) =>
+  const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [usize, Utility, string]] => [name, [count, (args, at, argAt) =>
     standIn(typing, read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
   return { keyofType, indexedType, fieldsOf, keysOf, templateType, UTILITIES };
 }
