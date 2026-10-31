@@ -387,8 +387,11 @@ class Response {
 }
 
 type ServeInfo = { hostname: string; port: i64 };
-type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void };
+// Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
+type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
 type ServeHandler = (req: Request) => Promise<Response>;
+// What serve's options settle for each connection, under a name no program can write.
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -406,6 +409,12 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
+  // Bun's 128 MiB body limit and 10 second idle timeout, and Node's minute for a request's head.
+  const limits: __serveLimits = {
+    maxBodySize: Http1.option(options.maxBodySize, 134217728, "maxBodySize", "bytes"),
+    headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
+    idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
+  };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
   const stop = given ?? shutdownSignal();
@@ -423,7 +432,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
       try {
         const conn = await listener.accept(stop);
         live.count.add(1);
-        spawn(Http1.tracked(conn, boxed.clone(), host, stop.clone(), live.clone()));
+        spawn(Http1.tracked(conn, boxed.clone(), host, stop.clone(), live.clone(), limits.clone()));
       } catch (e) {
         if (e instanceof AbortError) break;
         // Out of file descriptors, say: those in use free up as connections end.
@@ -449,25 +458,28 @@ class HttpHead {
   }
 }
 
-// One connection's requests, one after another while both sides keep it open. Waiting for a
-// request ends after 5 seconds; once one starts, it has 30 seconds to arrive whole.
-async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal): Promise<void> {
+// One connection's requests, one after another while both sides keep it open. A request's head
+// must arrive within headerTimeout of the connection opening or the last response, and with no
+// byte of it yet the connection also closes after idleTimeout; a body must keep arriving, with
+// no gap between reads longer than idleTimeout. A request that stalls once begun gets a 408.
+async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> {
   let buffer: u8[] = [];
   try {
     while (true) {
       buffer = Http1.skipBlank(buffer);
-      let started = buffer.length > 0;
-      let deadline = nowMs() + (started ? 30000 : 5000);
+      const headBy = Http1.after(limits.headerTimeout);
+      const idleBy = Http1.after(limits.idleTimeout);
       let end = Http1.headEnd(buffer, 0);
       while (end < 0) {
-        // A head may take 16 KiB, and a body 1 MiB.
+        // A head may take 16 KiB.
         if ((buffer.length as i64) > 16384) { await Http1.refuse(conn, 431); return; }
-        const got = await Http1.readBy(conn, stop, deadline);
-        if (got.length === 0) return;
-        if (!started) {
-          started = true;
-          deadline = nowMs() + 30000;
+        const started = buffer.length > 0;
+        const got = await Http1.readBy(conn, stop, started ? headBy : Http1.sooner(headBy, idleBy));
+        if (got === null) {
+          if (started) await Http1.refuse(conn, 408);
+          return;
         }
+        if (got.length === 0) return;
         const from = buffer.length as i64 - 3;
         for (const b of got) buffer.push(b);
         buffer = Http1.skipBlank(buffer);
@@ -480,7 +492,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       if (head.headers.has("transfer-encoding")) { await Http1.refuse(conn, 501); return; }
       const length = Http1.contentLength(head.headers);
       if (length < 0) { await Http1.refuse(conn, 400); return; }
-      if (length > 1048576) { await Http1.refuse(conn, 413); return; }
+      if (length > limits.maxBodySize) { await Http1.refuse(conn, 413); return; }
       // The Host header names the server and nothing else, and HTTP/1.1 requires one.
       let authority = host;
       const named = head.headers.get("host");
@@ -491,7 +503,8 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
         await conn.write(new TextEncoder().encode("HTTP/1.1 100 Continue\\r\\n\\r\\n"), AbortSignal.timeout(30000));
       }
       while ((buffer.length as i64) < length) {
-        const got = await Http1.readBy(conn, stop, deadline);
+        const got = await Http1.readBy(conn, stop, Http1.after(limits.idleTimeout));
+        if (got === null) { await Http1.refuse(conn, 408); return; }
         if (got.length === 0) return;
         for (const b of got) buffer.push(b);
       }
@@ -685,29 +698,48 @@ class Router {
 // The wire format of HTTP/1.x.
 class Http1 {
   // A connection's requests, counted while it is open so the server can wait for it at shutdown.
-  static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>): Promise<void> {
-    await serveConnection(conn, handler, host, stop);
+  static async tracked(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, live: shared<{ count: Atomic<i64> }>, limits: __serveLimits): Promise<void> {
+    await serveConnection(conn, handler, host, stop, limits);
     live.count.sub(1);
+  }
+
+  // A serve option's value, or its default when it isn't given; serve refuses a negative one.
+  static option(given: i64 | null, fallback: i64, name: string, unit: string): i64 throws IoError {
+    if (given === null) return fallback;
+    if (given < 0) throw new IoError("serve's " + name + " is " + String(given) + ", but it can't be negative; give it in " + unit);
+    return given;
+  }
+
+  // The deadline ms from now, or 0, no deadline, for a timeout of 0.
+  static after(ms: i64): i64 {
+    return ms === 0 ? 0 : nowMs() + ms;
+  }
+
+  // The earlier of two deadlines, where 0 is none.
+  static sooner(a: i64, b: i64): i64 {
+    if (a === 0) return b;
+    if (b === 0 || a < b) return a;
+    return b;
   }
 
   static async handle(handler: ServeHandler, req: Request): Promise<Response> {
     return await handler(req);
   }
 
-  // The client's next bytes, or nothing once the deadline passes or the server stops.
-  // ponytail: wakes every 250 ms to look at the server's signal; AbortSignal.any would combine them.
-  static async readBy(conn: Ref<TcpStream>, stop: Ref<AbortSignal>, deadline: i64): Promise<u8[]> throws IoError {
-    while (!stop.aborted) {
+  // The client's next bytes, nothing once the stream ends or the server stops, or null once the
+  // deadline passes. A deadline of 0 is none.
+  static async readBy(conn: Ref<TcpStream>, stop: Ref<AbortSignal>, deadline: i64): Promise<u8[] | null> throws IoError {
+    if (stop.aborted) return [];
+    try {
+      if (deadline === 0) return await conn.read(16384, stop.clone());
       const left = deadline - nowMs();
-      if (left <= 0) return [];
-      try {
-        const got = await conn.read(16384, AbortSignal.timeout(left < 250 ? left : 250));
-        return got;
-      } catch (e) {
-        if (e instanceof IoError) throw e;
-      }
+      if (left <= 0) return null;
+      return await conn.read(16384, AbortSignal.any([stop.clone(), AbortSignal.timeout(left)]));
+    } catch (e) {
+      if (e instanceof IoError) throw e;
+      if (stop.aborted) return [];
+      return null;
     }
-    return [];
   }
 
   // Reads from the client while its request is handled: the end of the stream, or a broken
@@ -747,7 +779,7 @@ class Http1 {
   }
 
   // The bytes from start to end, as a new array.
-  // ponytail: copies byte by byte; array slicing would save a 1 MiB body two or three copies.
+  // ponytail: copies byte by byte; array slicing would save a large body two or three copies.
   static take(buffer: Ref<u8[]>, start: i64, end: i64): u8[] {
     let out: u8[] = [];
     for (let i = start as usize; i < (end as usize); i++) out.push(buffer[i]);
@@ -1029,6 +1061,7 @@ class Http1 {
       case 403 => "Forbidden",
       case 404 => "Not Found",
       case 405 => "Method Not Allowed",
+      case 408 => "Request Timeout",
       case 413 => "Content Too Large",
       case 431 => "Request Header Fields Too Large",
       case 500 => "Internal Server Error",
