@@ -6,13 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newSession, type Session } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
-import { checkProgram } from "../src/main.ts";
+import { analyze } from "../src/main.ts";
 
 export const BASELINE = join(import.meta.dir, "..", "tests", "selfhost.json");
 export type Baseline = { failing: Record<string, string>; count: number };
 
-// Each file's first error, or nothing when it checks. Each is checked as a library, since only
-// main.ts runs, and it starts from its own top-level code rather than a main().
+// Each file's first error, or nothing when it checks. Each is checked as a module another file
+// imports, needing no main(), since only main.ts runs.
 export function survey(src = join(import.meta.dir, "..", "src")): Record<string, string | null> {
   const mirror = mkdtempSync(join(tmpdir(), "fish-selfhost-"));
   const files = readdirSync(src).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")).sort();
@@ -31,7 +31,7 @@ export function survey(src = join(import.meta.dir, "..", "src")): Record<string,
 
 function firstError(session: Session, file: string): string | null {
   try {
-    checkProgram(session, file, true);
+    analyze(session, readFileSync(file, "utf8"), file);
     return null;
   } catch (e) {
     // An exception that isn't a CompileError is the checker failing on this file, which counts as
