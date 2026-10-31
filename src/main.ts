@@ -31,6 +31,7 @@ import { INTEGERS, type Type } from "./typing.ts";
 import { rustShim, type Shim } from "./rust.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
+import { watchProgram } from "./watch.ts";
 import { STD_BASE } from "./std.ts";
 
 export type Panic = "unwind" | "abort";
@@ -65,8 +66,17 @@ export function checkProgram(session: Session, file: string, library = false): C
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
+// `loaded` is given the files it read or looked for, whether or not it compiles.
+function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false, loaded?: (files: string[]) => void): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
   const compilation = newCompilation(session);
+  try {
+    return compiledIn(compilation, src, file, release, panic, library, leaks, debug);
+  } finally {
+    loaded?.(compilation.looked);
+  }
+}
+
+function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
   const loaded = load(compilation, file, src);
   return withSources(compilation, loaded.sources, () => {
     const checked = check(compilation, expanded(compilation, loaded, library), library);
@@ -186,9 +196,10 @@ function cType(t: Type): string {
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
-// program reports at exit what it never freed, by where it was allocated. Gives the warnings.
-export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false): CompileError[] {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug);
+// program reports at exit what it never freed, by where it was allocated. `loaded` is given the
+// files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
+export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
+  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
   const rust = shim();
   if (rust) refuseForeignRust(target);
   linked(session, ir, instances, out, release, links, rust, target, leaks, debug);
@@ -502,9 +513,9 @@ else if (import.meta.main) {
       return fail(`fishc: ${e instanceof Error ? e.message : e}`);
     }
   })();
-  // `fishc run` takes the program's arguments after the file, or all of them with no file.
+  // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const [command, named] = positionals;
-  const file = command === "run" && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
+  const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -668,7 +679,7 @@ else if (import.meta.main) {
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if ((command === "build" || command === "check" || command === "run") && !file && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run" || command === "watch") && !file && lib === undefined) {
     const found = findManifest(process.cwd());
     if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
@@ -713,8 +724,32 @@ else if (import.meta.main) {
     }
     process.exit(code);
   }
+  if (command === "watch" && target && !values.out && !values["emit-llvm"] && lib === undefined) {
+    const entry = target;
+    const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
+    const binary = out ?? join(scratch!, basename(entry, ".fsh"));
+    await watchProgram({
+      entry,
+      binary,
+      args: programArgs,
+      manifest: findManifest(dirname(resolve(entry))),
+      build: (loaded) => {
+        try {
+          for (const w of build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, loaded)) console.error(formatError(w, entry, readFileSync(entry, "utf8"), "warning"));
+          return true;
+        } catch (e) {
+          if (e instanceof CompileError) console.error(formatError(e, entry, readFileSync(entry, "utf8")));
+          else console.error(`fishc: ${e instanceof Error ? e.message : e}`);
+          return false;
+        }
+      },
+      done: () => {
+        if (scratch) rmSync(scratch, { recursive: true, force: true });
+      },
+    });
+  }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.

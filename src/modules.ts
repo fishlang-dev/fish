@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
@@ -57,6 +57,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
   const byPath = new Map<string, Module>();
   const std = (name: string) => visit(`std:${name}`, STD_MODULES[name]!, `node:${name}`);
   const visit = (path: string, text: string, file: string): Module => {
+    if (!path.startsWith("std:")) compilation.looked.push(resolve(path));
     const key = path.startsWith("std:") ? path : realpathSync(path);
     const known = byPath.get(key);
     if (known) return known;
@@ -117,7 +118,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       const outside = (file: string) => owner !== undefined && !file.startsWith(owner.dir + "/");
       const escape = () => new CompileError(`'${specifier}' leads outside the package '${owner!.manifest.name}'; a package imports its own files by path, and other packages by name`, s.start, s.end);
       if (outside(join(dirname(realpathSync(path)), specifier))) throw escape();
-      const target = resolveSpecifier(path, specifier, s);
+      const target = resolveSpecifier(path, specifier, s, compilation.looked);
       if (outside(realpathSync(target))) throw escape();
       // Another package's files are reached through its lib, by name, even from a directory
       // that holds it.
@@ -405,8 +406,9 @@ export function specifierOf(s: Stmt): string | undefined {
 }
 
 // The file a relative specifier names, as TypeScript resolves one: the extension may be left out
-// or written as TypeScript's or JavaScript's, and a directory means its `index.fsh`.
-export function resolveSpecifier(from: string, specifier: string, at: Span): string {
+// or written as TypeScript's or JavaScript's, and a directory means its `index.fsh`. When none is
+// found, the files looked for are added to `looked`.
+export function resolveSpecifier(from: string, specifier: string, at: Span, looked: string[] = []): string {
   if (!/^\.\.?(\/|$)/.test(specifier)) {
     throw new CompileError(`'${specifier}' isn't a path to a file; imports of packages aren't supported yet, so import another file with a relative path like './${specifier}'`, at.start, at.end);
   }
@@ -415,8 +417,9 @@ export function resolveSpecifier(from: string, specifier: string, at: Span): str
   const candidates = path.endsWith(".fsh") ? [path] : bare !== path ? [`${bare}.fsh`] : [`${path}.fsh`, join(path, "index.fsh")];
   const found = candidates.find((c) => existsSync(c) && statSync(c).isFile());
   if (found) return found;
-  const looked = candidates.map((c) => `'${relative(dirname(from), c)}'`).join(" and ");
-  throw new CompileError(`can't find the file '${specifier}' imports from; looked for ${looked}`, at.start, at.end);
+  looked.push(...candidates.map((c) => resolve(c)));
+  const tried = candidates.map((c) => `'${relative(dirname(from), c)}'`).join(" and ");
+  throw new CompileError(`can't find the file '${specifier}' imports from; looked for ${tried}`, at.start, at.end);
 }
 
 // A top-level declaration, under the name it has program-wide. A `fixed` one keeps its name: a C
