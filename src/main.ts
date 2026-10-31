@@ -50,11 +50,11 @@ export function compile(src: string, file: string, release = false, panic: Panic
   return compiled(src, file, release, panic, library).ir;
 }
 
-// Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
-// first CompileError.
-export function checkProgram(file: string) {
+// Checks the program whose entry is `file` as `compile` would, generating nothing, or a library
+// with no main; throws its first CompileError.
+export function checkProgram(file: string, library = false) {
   const loaded = load(file, readFileSync(file, "utf8"));
-  withSources(loaded.sources, () => check(expanded(loaded, false), false));
+  withSources(loaded.sources, () => check(expanded(loaded, library), library));
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
