@@ -7,13 +7,13 @@ import type { Package } from "./modules.ts";
 // file that exists only in memory, in the directory its import resolves from, so node_modules is
 // searched from there as Node would.
 
-type Request = { specifier: string; dir: string; index: number }[];
-type Result = { code: string } | { index: number; message: string };
+type Request = { specifier: string; dir: string; index: usize }[];
+type Result = { code: string } | { index: usize; message: string };
 type BuildLog = { message: string; position?: { file?: string } | null };
 
 // Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's
 // bundler runs only asynchronously, so it runs in a process of its own.
-export function bundle(packages: Package[], used: number[]): string {
+export function bundle(packages: Package[], used: usize[]): string {
   const request: Request = used.map((index) => ({ specifier: packages[index]!.specifier, dir: packages[index]!.dir, index }));
   const run = Bun.spawnSync([process.execPath, import.meta.path], { stdin: new TextEncoder().encode(JSON.stringify(request)) });
   if (run.exitCode !== 0) throw new Error(`bundling the program's packages failed:\n${run.stderr.toString()}`);
@@ -293,7 +293,7 @@ const packageOf = (file: string) => /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(
 
 async function main(request: Request): Promise<Result> {
   const files: Record<string, string> = {};
-  const virtual = (r: Request[number]) => join(r.dir, `__fish_package_${r.index}__.js`);
+  const virtual = (r: Request[usize]) => join(r.dir, `__fish_package_${r.index}__.js`);
   const entry = join(request[0]!.dir, "__fish_packages__.js");
   for (const r of request) files[virtual(r)] = `export * as ns from ${JSON.stringify(r.specifier)};\n`;
   // The globals come first, as a module's imports run in order.
@@ -354,7 +354,7 @@ async function main(request: Request): Promise<Result> {
 
 // A Node built-in the bundle would need, said of the program's import that reaches it, through
 // the package that uses it when that is another.
-function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string; external?: boolean }[] }>, virtual: (r: Request[number]) => string): Result {
+function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string; external?: boolean }[] }>, virtual: (r: Request[usize]) => string): Result {
   const graph = new Map(Object.entries(inputs).map(([file, input]) => [resolve(file), input.imports.filter((i) => !i.external).map((i) => resolve(i.path))]));
   const reaches = (from: string, seen: Set<string> = new Set<string>()): boolean => {
     if (from === used.importer) return true;

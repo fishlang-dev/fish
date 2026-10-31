@@ -32,7 +32,7 @@ export function layoutOf({ lower }: Typing): (t: Type) => string {
   };
 }
 
-function words(t: UnionType): number {
+function words(t: UnionType): usize {
   return Math.ceil(Math.max(...t.members.map((m) => size(m)[0])) / 8);
 }
 
@@ -44,9 +44,9 @@ export const ARRAY = "{ ptr, i64, i64 }";
 export const DYN = "{ ptr, ptr }";
 
 // A type's size in bytes as it is laid out.
-export const byteSize = (t: Type): number => size(t)[0];
+export const byteSize = (t: Type): usize => size(t)[0];
 
-function size(t: Type): [number, number] {
+function size(t: Type): [usize, usize] {
   if (typeof t !== "string" && t.kind === "array") return [24, 8];
   if (typeof t !== "string" && t.kind === "fixed") {
     const [bytes, align] = size(t.element);
@@ -64,7 +64,7 @@ function size(t: Type): [number, number] {
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
   if (t.kind === "interior" && t.which !== "Lock") return size(t.of);
-  const parts = t.kind === "interior" ? [[4, 4] as [number, number], size(t.of)] : [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => f.type)].map(size);
+  const parts = t.kind === "interior" ? [[4, 4] as [usize, usize], size(t.of)] : [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => f.type)].map(size);
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
   for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;
@@ -319,7 +319,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     // A class built from a literal starts with its embedded base, built the same way.
     const embeds = to.kind === "class" && to.base;
     let result = "undef";
-    const insert = (part: string, type: Type, i: number) => {
+    const insert = (part: string, type: Type, i: usize) => {
       const next = temp();
       emit(`${next} = insertvalue ${llvm(to)} ${result}, ${llvm(type)} ${part}, ${i}`);
       result = next;
