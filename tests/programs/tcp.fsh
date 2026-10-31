@@ -47,12 +47,35 @@ async function main(): Promise<void> throws IoError | AbortError {
     else console.log("io:", e.message);
   }
 }
+// case: tcp_ipv6
+// expect: ::1 got hi
+// expect: :: from IPv4 got hi
+// expect: :: from IPv6 got hi
+// IPv6 literals connect and listen, and "::" takes IPv4 clients too.
+async function echo(host: string, to: string, what: string): Promise<void> throws IoError {
+  const listener = await TcpListener.bind(host, 0);
+  const c = await TcpStream.connect(to, listener.port);
+  const server = await listener.accept();
+  await c.write(new TextEncoder().encode("hi"));
+  const got = await server.read(10);
+  console.log(what, "got", new TextDecoder().decode(got));
+}
+
+async function main(): Promise<void> throws IoError {
+  await echo("::1", "::1", "::1");
+  await echo("::", "127.0.0.1", ":: from IPv4");
+  await echo("::", "0:0:0:0:0:0:0:1", ":: from IPv6");
+}
 // case: tcp_lookup
 // expect: got 2
 // expect: ENOTFOUND getaddrinfo getaddrinfo ENOTFOUND no-such-host.invalid
 // expect: lookup: This operation was aborted
+// expect: over IPv6 got 2
+// expect: refused: io can't connect: Connection refused
 // Host names are looked up on the blocking pool, and an abort reaches a lookup still pending:
-// the attempt's first poll waits on the pool, then the second future aborts it.
+// the attempt's first poll waits on the pool, then the second future aborts it. localhost names
+// ::1 and 127.0.0.1, so each listener is reached whichever comes first, and with neither
+// listening the last address's refusal is the error.
 async function attempt(what: string, host: string, port: i64, signal: AbortSignal): Promise<string> {
   try {
     const conn = await TcpStream.connect(host, port, signal);
@@ -84,6 +107,53 @@ async function main(): Promise<void> throws IoError | AbortError {
   const first = new AbortController();
   const [looked, a] = await Promise.all([attempt("lookup", "localhost", listener.port, first.signal.clone()), abortNow(first)]);
   console.log(looked);
+  const six = await TcpListener.bind("::1", 0);
+  const c6 = await TcpStream.connect("localhost", six.port);
+  const server6 = await six.accept();
+  await c6.write(new TextEncoder().encode("hi"));
+  const got6 = await server6.read(10);
+  console.log("over IPv6 got", got6.length);
+  let free: i64 = 0;
+  {
+    const closed = await TcpListener.bind("::", 0);
+    free = closed.port;
+  }
+  const refused = await attempt("refused", "localhost", free, new AbortController().signal);
+  console.log(refused);
+}
+// case: tcp_lookup_many
+// expect: 127.0.0.1 only failed 0
+// expect: ::1 only failed 0
+// Many connects to localhost at once against a server on one address: each whose first address
+// is refused moves on to the next, however late the refusal lands.
+async function one(port: i64): Promise<string> {
+  try {
+    const c = await TcpStream.connect("localhost", port);
+    return "";
+  } catch (e) {
+    return e.code + " " + e.message;
+  }
+}
+
+async function run(what: string, port: i64): Promise<void> {
+  let tasks: Promise<string>[] = [];
+  for (let i = 0; i < 100; i++) tasks.push(one(port));
+  const all = await Promise.all(tasks);
+  let bad: i64 = 0;
+  for (const x of all) {
+    if (x.length > 0) {
+      bad++;
+      if (bad < 3) console.log(what, x);
+    }
+  }
+  console.log(what, "failed", bad);
+}
+
+async function main(): Promise<void> throws IoError {
+  const four = await TcpListener.bind("127.0.0.1", 0);
+  await run("127.0.0.1 only", four.port);
+  const six = await TcpListener.bind("::1", 0);
+  await run("::1 only", six.port);
 }
 // case: tcp_accept
 // expect: accepted 50 50
@@ -296,12 +366,19 @@ async function main(): Promise<void> throws IoError {
   console.log("closed", end.length);
 }
 // case: tcp_errors
-// expect: 'nowhere' is not an IPv4 address like 127.0.0.1; host names aren't looked up
+// expect: 'nowhere' is not an IP address like 127.0.0.1 or ::1; host names aren't looked up
+// expect: '[::1]' is not an IP address like 127.0.0.1 or ::1; host names aren't looked up
 // expect: can't listen there: Address already in use
 // expect: port 70000 is outside 0 to 65535
 async function main(): Promise<void> throws IoError {
   try {
     const l = await TcpListener.bind("nowhere", 0);
+    console.log("bound");
+  } catch (e) {
+    console.log(e.message);
+  }
+  try {
+    const l = await TcpListener.bind("[::1]", 0);
     console.log("bound");
   } catch (e) {
     console.log(e.message);

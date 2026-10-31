@@ -241,6 +241,52 @@ async function main(): Promise<void> throws IoError | AbortError | TypeError {
   const said = await spaced.text();
   console.log(said.replaceAll(port, "PORT"));
 }
+// case: fetch_ipv6
+// expect: listening on ::1
+// expect: [::1]:PORT http://[::1]:PORT/a [::1]:PORT
+// expect: no host: http://[::1]:PORT/b
+// expect: dual stack: 127.0.0.1:PORT
+// A server on ::1 fetched by a bracketed URL, the brackets kept in the Host header and the URL;
+// a request with no Host header named by the server's own address; and a server on :: reached
+// over IPv4.
+async function listen(hostname: string, quiet: boolean): Promise<i64> {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: hostname, onListen: (info: ServeInfo) => {
+    if (!quiet) console.log("listening on " + info.hostname);
+    seen.port.store(info.port);
+  } }, async (req: Request) => {
+    const host = req.headers.get("host") ?? "none";
+    return new Response(host + " " + req.url);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  return found.port.load();
+}
+
+async function main(): Promise<void> throws IoError | AbortError | TypeError {
+  const port = await listen("::1", false);
+  const p = String(port);
+  const url = new URL("http://[::1]:" + p + "/a");
+  const host = url.host;
+  const res = await fetch(url);
+  const text = await res.text();
+  console.log(text.replaceAll(p, "PORT"), host.replace(p, "PORT"));
+  const conn = await TcpStream.connect("::1", port);
+  await conn.write(new TextEncoder().encode("GET /b HTTP/1.0\r\n\r\n"));
+  let got: u8[] = [];
+  while (true) {
+    const more = await conn.read(4096);
+    if (more.length === 0) break;
+    for (const b of more) got.push(b);
+  }
+  const reply = new TextDecoder().decode(got);
+  console.log("no host: " + reply.slice(reply.indexOf("none ") + 5).replaceAll(p, "PORT"));
+  const dual = await listen("::", true);
+  const both = String(dual);
+  const four = await fetch("http://127.0.0.1:" + both + "/");
+  const said = await four.text();
+  console.log("dual stack: " + said.slice(0, said.indexOf(" ")).replaceAll(both, "PORT"));
+}
 // case: fetch_post
 // expect: POST /submit
 // expect: host: 127.0.0.1:PORT
