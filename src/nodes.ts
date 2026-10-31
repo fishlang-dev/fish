@@ -2,18 +2,9 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-// Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
-export type Id = { id: usize };
+import type { Id } from "./ids.ts";
 
-// The counter ids come from, the last one given. Each compilation holds its own, which serves
-// every tree it parses or makes, at any time, so none share an id; a tree parsed on its own, as
-// the formatter's, has a counter of its own.
-export type Ids = { last: usize };
-
-// A fresh id from `ids`.
-export function nextId(ids: Ids): usize {
-  return ++ids.last;
-}
+export { nextId, type Id, type Ids } from "./ids.ts";
 
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the

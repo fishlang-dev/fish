@@ -7,7 +7,7 @@ import {
 import { classNode, decoratorList } from "./declarations.ts";
 import { matchPattern, toPattern } from "./patterns.ts";
 import { isPropertyName, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters } from "./types.ts";
-import { nextId } from "./nodes.ts";
+import { nextId } from "./ids.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -32,7 +32,7 @@ const isBinaryOp = (text: string): text is BinaryOp => Object.hasOwn(PRECEDENCE,
 const UNARY = new Set(["-", "+", "!", "~", "typeof", "void", "delete", "await"]);
 
 // A full expression, commas included, as in a statement, a condition or parentheses.
-export function sequence(c: Cursor): Expr {
+export function sequence(c: Mut<Cursor>): Expr {
   const first = expression(c);
   if (!c.at(",")) return first;
   const exprs = [first];
@@ -41,7 +41,7 @@ export function sequence(c: Cursor): Expr {
 }
 
 // One expression without a top-level comma: an argument, an element, an initializer.
-export function expression(c: Cursor): Expr {
+export function expression(c: Mut<Cursor>): Expr {
   if (c.at("yield")) return yieldExpression(c);
   const arrow = atArrow(c) ? arrowFunction(c) : undefined;
   if (arrow) return arrow;
@@ -58,21 +58,21 @@ export function expression(c: Cursor): Expr {
 }
 
 // What can start an arrow function; the head is then tried in full before committing.
-function atArrow(c: Cursor): boolean {
+function atArrow(c: Mut<Cursor>): boolean {
   return c.at("(") || c.at("<") || c.at("async") || c.at("move") || (c.peek().kind === "ident" && isToken(c.peek(1), "=>"));
 }
 
 // The head decides: `(a)` and `(a) => a` differ only at the `=>`, so the head is parsed on a
 // trial basis and the body only once it is certain this is an arrow.
-function arrowFunction(c: Cursor): Expr | undefined {
+function arrowFunction(c: Mut<Cursor>): Expr | undefined {
   const start = c.peek().start;
-  const head = c.attempt(() => arrowHead(c));
+  const head = c.attempt((c) => arrowHead(c));
   if (!head) return undefined;
   const body = c.at("{") ? block(c) : expression(c);
   return { id: nextId(c.ids), kind: "arrow", ...head, body, start, end: c.end() };
 }
 
-function arrowHead(c: Cursor) {
+function arrowHead(c: Mut<Cursor>) {
   // `move` makes a closure take over what it captures. Like `async`, `move => 1` takes a
   // parameter named `move`, and `move(x)` without `=>` is a call.
   const move = c.at("move") && !isToken(c.peek(1), "=>") && !c.peek(1).newlineBefore && c.eat("move");
@@ -100,24 +100,26 @@ function arrowHead(c: Cursor) {
 
 // Hack-style pipes, as in the TC39 proposal: left-associative, looser than `? :`, with `%`
 // standing for the value on the left. A right side that never uses `%` is an error there too.
-function pipeline(c: Cursor): Expr {
+function pipeline(c: Mut<Cursor>): Expr {
   let value = conditional(c);
   while (c.eat("|>")) {
-    const outer = c.topic;
-    c.topic = { used: false };
+    const [inPipe, topicUsed] = [c.inPipe, c.topicUsed];
+    c.inPipe = true;
+    c.topicUsed = false;
     const body = conditional(c);
-    const used = c.topic.used;
-    c.topic = outer;
+    const used = c.topicUsed;
+    c.inPipe = inPipe;
+    c.topicUsed = topicUsed;
     if (!used) throw new CompileError("the right side of '|>' must use the topic '%'", body.start, body.end);
     value = { id: nextId(c.ids), kind: "pipe", value, body, start: value.start, end: body.end };
   }
   return value;
 }
 
-function conditional(c: Cursor): Expr {
+function conditional(c: Mut<Cursor>): Expr {
   const cond = binary(c);
   if (!c.eat("?")) return cond;
-  const then = allowingIn(c, true, () => expression(c));
+  const then = allowingIn(c, true, (c) => expression(c));
   c.expect(":");
   const otherwise = expression(c);
   return { id: nextId(c.ids), kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
@@ -126,7 +128,7 @@ function conditional(c: Cursor): Expr {
 const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "&&=", "||=", "??="]);
 
 // Like `>>`, `>>=`, `>>>=` and `<<=` arrive as separate adjacent tokens and are rejoined here.
-function assignOperator(c: Cursor): [AssignOp, usize] | undefined {
+function assignOperator(c: Mut<Cursor>): [AssignOp, usize] | undefined {
   const t = c.peek();
   if (t.kind !== "punct") return undefined;
   if (ASSIGN_OPERATORS.has(t.text)) return [t.text as AssignOp, 1];
@@ -144,7 +146,7 @@ function assignOperator(c: Cursor): [AssignOp, usize] | undefined {
 }
 
 // `yield` with nothing after it on the line yields undefined.
-function yieldExpression(c: Cursor): Expr {
+function yieldExpression(c: Mut<Cursor>): Expr {
   const start = c.expect("yield").start;
   const delegate = c.eat("*");
   const t = c.peek();
@@ -153,7 +155,7 @@ function yieldExpression(c: Cursor): Expr {
   return { id: nextId(c.ids), kind: "yield", value, delegate, start, end: c.end() };
 }
 
-function binary(c: Cursor, minPrecedence = 0): Expr {
+function binary(c: Mut<Cursor>, minPrecedence = 0): Expr {
   const startsUnary = UNARY.has(c.peek().text) && (c.peek().kind === "punct" || c.peek().kind === "ident");
   let left = unary(c);
   for (;;) {
@@ -177,7 +179,7 @@ function binary(c: Cursor, minPrecedence = 0): Expr {
 // `comptime` is a modifier only before a name, a literal or `new` on the same line. Anything
 // else keeps its TypeScript meaning: `comptime(x)` calls, `comptime[0]` indexes, and
 // `comptime - 1` subtracts.
-function atComptime(c: Cursor): boolean {
+function atComptime(c: Mut<Cursor>): boolean {
   if (!c.at("comptime")) return false;
   const next = c.peek(1);
   if (next.newlineBefore) return false;
@@ -186,11 +188,11 @@ function atComptime(c: Cursor): boolean {
 }
 
 // `as` and `satisfies` bind like relational operators, and only on the same line.
-const atTypeOperator = (c: Cursor) => (c.at("as") || c.at("satisfies")) && !c.peek().newlineBefore;
+const atTypeOperator = (c: Mut<Cursor>) => (c.at("as") || c.at("satisfies")) && !c.peek().newlineBefore;
 
 // The operator at the cursor and how many tokens it spans. The lexer emits `>` alone so that
 // `A<B<C>>` closes two generics; `>>`, `>>>` and `>=` are rejoined here from adjacent tokens.
-function binaryOperator(c: Cursor): [BinaryOp, usize] | undefined {
+function binaryOperator(c: Mut<Cursor>): [BinaryOp, usize] | undefined {
   const t = c.peek();
   if (t.kind === "ident") return t.text === "instanceof" || (t.text === "in" && c.inAllowed) ? [t.text, 1] : undefined;
   if (t.kind !== "punct") return undefined;
@@ -208,7 +210,7 @@ function binaryOperator(c: Cursor): [BinaryOp, usize] | undefined {
   return [count === 1 ? ">" : count === 2 ? ">>" : ">>>", count];
 }
 
-export function unary(c: Cursor): Expr {
+export function unary(c: Mut<Cursor>): Expr {
   const t = c.peek();
   // A throw expression, as the TC39 proposal has it, as in `x ?? throw err`.
   if (c.eat("throw")) {
@@ -248,11 +250,11 @@ export function unary(c: Cursor): Expr {
 
 // A newline before `++` or `--` ends the expression instead, as in JavaScript.
 // A member chain with calls, as in `extends mixin(Base)`.
-export function leftHandSide(c: Cursor): Expr {
+export function leftHandSide(c: Mut<Cursor>): Expr {
   return chain(c, c.at("new") ? newExpression(c) : primary(c), true);
 }
 
-function postfix(c: Cursor): Expr {
+function postfix(c: Mut<Cursor>): Expr {
   const e = chain(c, c.at("new") ? newExpression(c) : primary(c), true);
   if ((!c.at("++") && !c.at("--")) || c.peek().newlineBefore) return e;
   const op = c.next();
@@ -261,23 +263,23 @@ function postfix(c: Cursor): Expr {
 
 // Member accesses, calls, tagged templates and `!` after `e`. Without `calls`, it stops
 // before a call, as the callee of `new` does: `new a.b()` constructs `a.b`.
-function chain(c: Cursor, e: Expr, calls: boolean): Expr {
+function chain(c: Mut<Cursor>, e: Expr, calls: boolean): Expr {
   const start = e.start;
   for (;;) {
     const t = c.peek();
     const optional = calls && c.eat("?.");
     if (c.eat("[")) {
-      const index = allowingIn(c, true, () => sequence(c));
+      const index = allowingIn(c, true, (c) => sequence(c));
       e = { id: nextId(c.ids), kind: "index", object: e, index, optional, start, end: c.expect("]").end };
     } else if (c.eat(".") || (optional && !c.at("(") && !c.at("<"))) {
       e = { id: nextId(c.ids), kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
     } else if (calls && (c.at("(") || c.at("<"))) {
       // After `?.` a `<` can only start type arguments, so a failure there is a real error.
-      const typeArgs = !c.at("<") ? [] : optional ? typeArguments(c, true) : c.attempt(() => typeArguments(c, false));
+      const typeArgs = !c.at("<") ? [] : optional ? typeArguments(c, true) : c.attempt((c) => typeArguments(c, false));
       if (!typeArgs) return e;
       if (c.at("(")) {
         c.next();
-        const args = c.list(() => element(c), ")");
+        const args = c.list((c) => element(c), ")");
         e = { id: nextId(c.ids), kind: "call", callee: e, typeArgs, args, optional, start, end: c.end() };
       } else if (atTemplate(c)) {
         const quoted = template(c);
@@ -297,18 +299,18 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
 }
 
 // Property names after `.` may be reserved words, as in `a.default`.
-function propertyKey(c: Cursor): string {
+function propertyKey(c: Mut<Cursor>): string {
   if (c.peek().kind !== "ident" && c.peek().kind !== "private") throw c.error("expected a property name");
   return c.next().text;
 }
 
-const atTemplate = (c: Cursor) => c.peek().kind === "template" || c.peek().kind === "templateHead";
+const atTemplate = (c: Mut<Cursor>) => c.peek().kind === "template" || c.peek().kind === "templateHead";
 
 // `<T>` before a call is only type arguments when what follows confirms it, as in
 // TypeScript; otherwise `a < b > c` would be read as a generic. After `?.` it always is.
-function typeArguments(c: Cursor, certain: boolean): TypeNode[] {
+function typeArguments(c: Mut<Cursor>, certain: boolean): TypeNode[] {
   c.expect("<");
-  const args = c.list(() => type(c), ">");
+  const args = c.list((c) => type(c), ">");
   const t = c.peek();
   const follows = c.at("(") || atTemplate(c) || certain || t.newlineBefore || t.kind === "eof" ||
     [")", "]", "}", ";", ",", ".", "?."].some((text) => c.at(text));
@@ -316,20 +318,20 @@ function typeArguments(c: Cursor, certain: boolean): TypeNode[] {
   return args;
 }
 
-function newExpression(c: Cursor): Expr {
+function newExpression(c: Mut<Cursor>): Expr {
   const start = c.expect("new").start;
   if (c.eat(".")) {
     if (!c.at("target")) throw c.error("expected 'target'");
     return { id: nextId(c.ids), kind: "meta", name: "new.target", start, end: c.next().end };
   }
   const callee = chain(c, c.at("new") ? newExpression(c) : primary(c), false);
-  const typeArgs = c.at("<") ? c.attempt(() => typeArguments(c, false)) ?? [] : [];
-  const args = c.eat("(") ? c.list(() => element(c), ")") : undefined;
+  const typeArgs = c.at("<") ? c.attempt((c) => typeArguments(c, false)) ?? [] : [];
+  const args = c.eat("(") ? c.list((c) => element(c), ")") : undefined;
   return { id: nextId(c.ids), kind: "new", callee, typeArgs, args, start, end: c.end() };
 }
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
-export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
+export function templateParts<T>(c: Mut<Cursor>, part: (c: Mut<Cursor>) => T): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
   const first = c.next();
   const quasis = [first.text];
   const raw = [first.raw ?? ""];
@@ -346,17 +348,17 @@ export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: s
   return { quasis, raw, parts, start: first.start, end: piece.end };
 }
 
-function template(c: Cursor): Expr {
-  const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, () => sequence(c)));
+function template(c: Mut<Cursor>): Expr {
+  const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, (c) => sequence(c)));
   return { id: nextId(c.ids), kind: "template", quasis, raw, exprs: parts, start, end };
 }
 
-export function primary(c: Cursor): Expr {
+export function primary(c: Mut<Cursor>): Expr {
   if (c.peek().kind === "template" || c.peek().kind === "templateHead") return template(c);
   if (c.at("%")) {
     const t = c.next();
-    if (!c.topic) throw new CompileError("'%' is only valid on the right of '|>'", t.start, t.end);
-    c.topic.used = true;
+    if (!c.inPipe) throw new CompileError("'%' is only valid on the right of '|>'", t.start, t.end);
+    c.topicUsed = true;
     return { id: nextId(c.ids), kind: "topic", start: t.start, end: t.end };
   }
   if (c.at("/") || c.at("/=")) {
@@ -370,7 +372,7 @@ export function primary(c: Cursor): Expr {
   if (c.at("import")) return importExpression(c);
   if (c.at("match")) {
     const start = c.peek().start;
-    const subject = c.attempt(() => matchHead(c));
+    const subject = c.attempt((c) => matchHead(c));
     if (subject) return matchExpression(c, start, subject);
   }
   if (c.at("class") || c.at("@")) {
@@ -400,7 +402,7 @@ export function primary(c: Cursor): Expr {
       return { id: nextId(c.ids), kind: "ident", name: t.text, ...span };
   }
   if (t.text === "(") {
-    const e = allowingIn(c, true, () => sequence(c));
+    const e = allowingIn(c, true, (c) => sequence(c));
     c.expect(")");
     return e;
   }
@@ -408,37 +410,37 @@ export function primary(c: Cursor): Expr {
 }
 
 // `import.meta`, or `import(specifier)` loading a module at run time.
-function importExpression(c: Cursor): Expr {
+function importExpression(c: Mut<Cursor>): Expr {
   const start = c.expect("import").start;
   if (c.eat(".")) {
     if (!c.at("meta")) throw c.error("expected 'meta'");
     return { id: nextId(c.ids), kind: "meta", name: "import.meta", start, end: c.next().end };
   }
   c.expect("(");
-  const args = c.list(() => expression(c), ")");
+  const args = c.list((c) => expression(c), ")");
   return { id: nextId(c.ids), kind: "import", args, start, end: c.end() };
 }
 
 // `match (subject)` followed by `{` on the same line. In TypeScript that is a syntax error, so
 // anything else is a call to a function named `match`.
-function matchHead(c: Cursor): Expr {
+function matchHead(c: Mut<Cursor>): Expr {
   c.expect("match");
   c.expect("(");
-  const subject = allowingIn(c, true, () => sequence(c));
+  const subject = allowingIn(c, true, (c) => sequence(c));
   c.expect(")");
   if (!c.at("{") || c.peek().newlineBefore) throw c.error("expected '{'");
   return subject;
 }
 
-function matchExpression(c: Cursor, start: usize, subject: Expr): Expr {
+function matchExpression(c: Mut<Cursor>, start: usize, subject: Expr): Expr {
   c.expect("{");
-  const arms = c.list(() => matchArm(c), "}");
+  const arms = c.list((c) => matchArm(c), "}");
   return { id: nextId(c.ids), kind: "match", subject, arms, start, end: c.end() };
 }
 
 // `case P if guard => body`. The guard is parsed below the arrow and conditional levels, so in
 // `case x if (a) => b` the `(a)` is the guard rather than an arrow's parameters.
-function matchArm(c: Cursor): MatchArm {
+function matchArm(c: Mut<Cursor>): MatchArm {
   const start = c.expect("case").start;
   const pattern = matchPattern(c);
   const guard = c.eat("if") ? binary(c) : undefined;
@@ -449,17 +451,17 @@ function matchArm(c: Cursor): MatchArm {
 }
 
 // An array element or a call argument: an expression, or `...` and one.
-function element(c: Cursor): Expr {
+function element(c: Mut<Cursor>): Expr {
   const start = c.peek().start;
   if (!c.eat("...")) return expression(c);
   const value = expression(c);
   return { id: nextId(c.ids), kind: "spread", value, start, end: value.end };
 }
 
-function array(c: Cursor): Expr {
+function array(c: Mut<Cursor>): Expr {
   const start = c.expect("[").start;
   const elements: (Expr | undefined)[] = [];
-  allowingIn(c, true, () => {
+  allowingIn(c, true, (c) => {
     while (!c.eat("]")) {
       if (c.eat(",")) {
         elements.push(undefined);
@@ -472,15 +474,15 @@ function array(c: Cursor): Expr {
   return { id: nextId(c.ids), kind: "array", elements, start, end: c.end() };
 }
 
-function object(c: Cursor): Expr {
+function object(c: Mut<Cursor>): Expr {
   const start = c.expect("{").start;
-  const props = c.list(() => objectProp(c), "}");
+  const props = c.list((c) => objectProp(c), "}");
   return { id: nextId(c.ids), kind: "object", props, start, end: c.end() };
 }
 
 // `async`, `get` and `set` are modifiers only when a property name follows, so
 // `{ get: 1, async() {} }` has a property and a method with those names.
-function objectProp(c: Cursor): ObjectProp {
+function objectProp(c: Mut<Cursor>): ObjectProp {
   const start = c.peek().start;
   if (c.eat("...")) {
     const value = expression(c);
@@ -510,11 +512,11 @@ function objectProp(c: Cursor): ObjectProp {
 }
 
 // `async` starts an async function only when `next` follows on the same line.
-function atAsync(c: Cursor, next: string): boolean {
+function atAsync(c: Mut<Cursor>, next: string): boolean {
   return c.at("async") && isToken(c.peek(1), next) && !c.peek(1).newlineBefore;
 }
 
-function functionExpression(c: Cursor): Expr {
+function functionExpression(c: Mut<Cursor>): Expr {
   const start = c.peek().start;
   const async = c.eat("async");
   c.expect("function");
@@ -524,7 +526,7 @@ function functionExpression(c: Cursor): Expr {
 }
 
 // What follows a function's name: type parameters, parameters, return type and body.
-function functionRest(c: Cursor) {
+function functionRest(c: Mut<Cursor>) {
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returnType = returnAnnotation(c);

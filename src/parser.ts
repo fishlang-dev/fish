@@ -1,10 +1,10 @@
 import { CompileError } from "./diag.ts";
 import { expression, sequence } from "./expressions.ts";
-import { isToken, lexer, type Comment, type Token } from "./lexer.ts";
+import { isToken, lexer, type Comment, type Lexer, type Token } from "./lexer.ts";
 import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
-import { nextId, type Id, type Ids } from "./nodes.ts";
+import { nextId, type Id, type Ids } from "./ids.ts";
 
 export type Span = { start: usize; end: usize };
 
@@ -288,10 +288,18 @@ export const RESERVED = new Set([
   "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
 ]);
 
+// How a token is named in an error.
+function describe(t: Ref<Token>): string {
+  if (t.kind === "eof") return "end of file";
+  if (t.kind === "string") return "a string literal";
+  return t.kind.startsWith("template") ? "a template literal" : `'${t.text}'`;
+}
+
 // The parser's position in the token stream, shared by the grammar modules.
-export type Cursor = {
+export class Cursor {
+  lex: Lexer;
   // Every token lexed so far, in source order: once a whole program is parsed, all its tokens,
-  // each `/` read as the parser decided.
+  // each `/` read as the parser decided. Lookahead and backtracking move `pos` within it.
   tokens: Token[];
   pos: usize;
   // False only directly inside a conditional type's `extends` clause, as in TypeScript.
@@ -299,117 +307,127 @@ export type Cursor = {
   // False only directly inside a `for` initializer, so `for (x in y)` isn't read as an
   // expression; any bracket, list or block allows `in` again, as in TypeScript.
   inAllowed: boolean;
-  // Set while parsing the right side of `|>`, recording whether it used the topic `%`.
-  topic: { used: boolean } | undefined;
-  // The token `offset` places ahead of the current one. Never look past a `/` where an
-  // expression starts: it may begin a regex, and lexing its body as tokens can fail.
-  peek(offset?: usize): Token;
-  next(): Token;
-  at(text: string): boolean;
-  // Consumes the token when it is `text`.
-  eat(text: string): boolean;
-  expect(text: string): Token;
-  // A name that isn't a reserved word.
-  ident(): Token;
-  error(message: string, t?: Token): CompileError;
-  // Items up to and including `close`, separated by commas, with an optional trailing comma.
-  list<T>(item: () => T, close: string): T[];
-  // Where the last consumed token ended.
-  end(): usize;
-  // Takes the `/` or `/=` at the cursor as the start of a regular expression instead.
-  regex(): Token;
-  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
-  attempt<T>(parse: () => T): T | undefined;
-  // The comments scanned so far.
-  comments: Comment[];
+  // Set while parsing the right side of `|>`, with whether it used the topic `%` so far.
+  inPipe: boolean;
+  topicUsed: boolean;
   src: string;
   // Whether JSDoc `@throws` tags declare what a function throws: when compiling, not when
   // formatting or linting, which keep the comment as written.
   docs: boolean;
-  // Where each node's id comes from, given by the caller.
+  // Where each node's id comes from: a copy of the caller's counter, given back when parsing ends.
   ids: Ids;
-};
 
-function cursor(src: string, ids: Ids, from = 0, docs = false): Cursor {
-  const lex = lexer(src, from);
-  // Every token lexed so far; lookahead and backtracking move `pos` within it.
-  const tokens: Token[] = [];
-  const describe = (t: Token) => {
-    if (t.kind === "eof") return "end of file";
-    if (t.kind === "string") return "a string literal";
-    return t.kind.startsWith("template") ? "a template literal" : `'${t.text}'`;
-  };
-  const c: Cursor = {
-    tokens,
-    comments: lex.comments,
-    src,
-    docs,
-    ids,
-    pos: 0,
-    conditionalAllowed: true,
-    inAllowed: true,
-    topic: undefined,
-    peek: (offset = 0) => {
-      while (tokens.length <= c.pos + offset && tokens.at(-1)?.kind !== "eof") tokens.push(lex.next());
-      return tokens[Math.min(c.pos + offset, tokens.length - 1)]!;
-    },
-    next: () => {
-      const t = c.peek();
-      c.pos++;
-      return t;
-    },
-    at: (text) => isToken(c.peek(), text),
-    eat: (text) => {
-      if (!c.at(text)) return false;
-      c.next();
-      return true;
-    },
-    expect: (text) => {
-      if (!c.at(text)) throw c.error(`expected '${text}'`);
-      return c.next();
-    },
-    ident: () => {
-      if (c.peek().kind !== "ident") throw c.error("expected an identifier");
-      if (RESERVED.has(c.peek().text)) throw c.error("expected a name");
-      return c.next();
-    },
-    error: (message, t: Token | undefined = c.peek()) => new CompileError(`${message}, found ${describe(t)}`, t.start, t.end),
-    list: (item, close) => allowingIn(c, true, () => {
-      const items = [];
+  constructor(src: string, ids: Ids, from: usize, docs: boolean) {
+    this.lex = lexer(src, from);
+    this.tokens = [];
+    this.pos = 0;
+    this.conditionalAllowed = true;
+    this.inAllowed = true;
+    this.inPipe = false;
+    this.topicUsed = false;
+    this.src = src;
+    this.docs = docs;
+    this.ids = ids;
+  }
+
+  // The token `offset` places ahead of the current one. Never look past a `/` where an
+  // expression starts: it may begin a regex, and lexing its body as tokens can fail.
+  /** @throws {CompileError} */
+  peek(this: Mut<this>, offset: usize = 0): Token {
+    while (this.tokens.length <= this.pos + offset && (this.tokens.length === 0 || this.tokens[this.tokens.length - 1]!.kind !== "eof")) this.tokens.push(this.lex.next());
+    return this.tokens[Math.min(this.pos + offset, this.tokens.length - 1)]!;
+  }
+
+  /** @throws {CompileError} */
+  next(this: Mut<this>): Token {
+    const t = this.peek();
+    this.pos++;
+    return t;
+  }
+
+  /** @throws {CompileError} */
+  at(this: Mut<this>, text: string): boolean {
+    return isToken(this.peek(), text);
+  }
+
+  // Consumes the token when it is `text`.
+  /** @throws {CompileError} */
+  eat(this: Mut<this>, text: string): boolean {
+    if (!this.at(text)) return false;
+    this.next();
+    return true;
+  }
+
+  /** @throws {CompileError} */
+  expect(this: Mut<this>, text: string): Token {
+    if (!this.at(text)) throw this.error(`expected '${text}'`);
+    return this.next();
+  }
+
+  // A name that isn't a reserved word.
+  /** @throws {CompileError} */
+  ident(this: Mut<this>): Token {
+    if (this.peek().kind !== "ident") throw this.error("expected an identifier");
+    if (RESERVED.has(this.peek().text)) throw this.error("expected a name");
+    return this.next();
+  }
+
+  /** @throws {CompileError} */
+  error(this: Mut<this>, message: string, t: Token | undefined = undefined): CompileError {
+    const at = t ?? this.peek();
+    return new CompileError(`${message}, found ${describe(at)}`, at.start, at.end);
+  }
+
+  // Items up to and including `close`, separated by commas, with an optional trailing comma.
+  /** @throws {CompileError} */
+  list<T>(this: Mut<this>, item: (c: Mut<Cursor>) => T, close: string): T[] {
+    return allowingIn(this, true, (c) => {
+      const items: T[] = [];
       while (!c.at(close)) {
-        items.push(item());
+        items.push(item(c));
         if (!c.at(close)) c.expect(",");
       }
       c.next();
       return items;
-    }),
-    end: () => tokens[c.pos - 1]!.end,
-    attempt: (parse) => {
-      const [pos, conditionalAllowed, inAllowed, topic, used] = [c.pos, c.conditionalAllowed, c.inAllowed, c.topic, c.topic?.used];
-      try {
-        return parse();
-      } catch (e) {
-        if (!(e instanceof CompileError)) throw e;
-        [c.pos, c.conditionalAllowed, c.inAllowed, c.topic] = [pos, conditionalAllowed, inAllowed, topic];
-        if (topic && used !== undefined) topic.used = used;
-        return undefined;
-      }
-    },
-    regex: () => {
-      const slash = c.peek();
-      tokens.length = c.pos;
-      tokens.push(lex.regex(slash));
-      return c.next();
-    },
-  };
-  return c;
+    });
+  }
+
+  // Where the last consumed token ended.
+  end(): usize {
+    return this.tokens[this.pos - 1]!.end;
+  }
+
+  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
+  attempt<T>(this: Mut<this>, parse: (c: Mut<Cursor>) => T): T | undefined {
+    const [pos, conditionalAllowed, inAllowed, inPipe, topicUsed] = [this.pos, this.conditionalAllowed, this.inAllowed, this.inPipe, this.topicUsed];
+    try {
+      return parse(this);
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      [this.pos, this.conditionalAllowed, this.inAllowed, this.inPipe, this.topicUsed] = [pos, conditionalAllowed, inAllowed, inPipe, topicUsed];
+      return undefined;
+    }
+  }
+
+  // Takes the `/` or `/=` at the cursor as the start of a regular expression instead.
+  /** @throws {CompileError} */
+  regex(this: Mut<this>): Token {
+    const slash = this.peek();
+    this.tokens.length = this.pos;
+    this.tokens.push(this.lex.regex(slash));
+    return this.next();
+  }
+}
+
+function cursor(src: string, ids: Ids, from: usize = 0, docs = false): Cursor {
+  return new Cursor(src, { last: ids.last }, from, docs);
 }
 
 // Parses with the `in` operator allowed or not, restoring the outer setting after.
-export function allowingIn<T>(c: Cursor, allowed: boolean, parse: () => T): T {
+export function allowingIn<T>(c: Mut<Cursor>, allowed: boolean, parse: (c: Mut<Cursor>) => T): T {
   const outer = c.inAllowed;
   c.inAllowed = allowed;
-  const result = parse();
+  const result = parse(c);
   c.inAllowed = outer;
   return result;
 }
@@ -422,26 +440,38 @@ export function parse(src: string, ids: Ids): Stmt[] {
 
 // The program, and the comments the lexer kept, for the formatter, and its tokens.
 export function parseWithComments(src: string, ids: Ids, docs = false): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
-  const c = cursor(src, ids, 0, docs);
-  const program: Stmt[] = [];
-  while (c.peek().kind !== "eof") program.push(statement(c));
-  return { program, comments: c.comments, tokens: c.tokens };
+  let c = cursor(src, ids, 0, docs);
+  try {
+    let program: Stmt[] = [];
+    while (c.peek().kind !== "eof") program.push(statement(c));
+    return { program, comments: c.lex.comments, tokens: c.tokens };
+  } finally {
+    ids.last = c.ids.last;
+  }
 }
 
 // One expression filling the whole text, as a quote's is.
 export function parseExpression(src: string, ids: Ids): Expr {
-  const c = cursor(src, ids);
-  const e = expression(c);
-  if (c.peek().kind !== "eof") throw c.error("expected the end of the expression");
-  return e;
+  let c = cursor(src, ids);
+  try {
+    const e = expression(c);
+    if (c.peek().kind !== "eof") throw c.error("expected the end of the expression");
+    return e;
+  } finally {
+    ids.last = c.ids.last;
+  }
 }
 
 // One type filling the whole text.
 export function parseType(src: string, ids: Ids): TypeNode {
-  const c = cursor(src, ids);
-  const t = type(c);
-  if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
-  return t;
+  let c = cursor(src, ids);
+  try {
+    const t = type(c);
+    if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
+    return t;
+  } finally {
+    ids.last = c.ids.last;
+  }
 }
 
 // Words a declaration may start with before its keyword, all of which its JSDoc comes before.
@@ -449,7 +479,7 @@ const LEADING = new Set(["export", "default", "declare", "macro"]);
 
 // Whether the token at `i` is a word starting the declaration after it, rather than a property
 // name as in `a.default`.
-function leading(c: Cursor, i: usize): boolean {
+function leading(c: Mut<Cursor>, i: usize): boolean {
   const t = c.tokens[i]!;
   const before = c.tokens[i - 1];
   return t.kind === "ident" && LEADING.has(t.text) && !(before && (isToken(before, ".") || isToken(before, "?.")));
@@ -461,7 +491,7 @@ const members = (t: TypeNode): TypeNode[] => (t.kind === "union" ? t.types.flatM
 // A declaration's `throws` type: its written clause, or else the types its JSDoc names in
 // `@throws {E}` tags, as a union when there are several. `at` is where the declaration starts,
 // and its JSDoc is the `/** ... */` comments between it and the token before.
-export function documentedThrows(c: Cursor, at: usize, written: TypeNode | undefined): TypeNode | undefined {
+export function documentedThrows(c: Mut<Cursor>, at: usize, written: TypeNode | undefined): TypeNode | undefined {
   if (!c.docs) return written;
   let i = c.pos - 1;
   while (i > 0 && c.tokens[i]!.start > at) i--;
@@ -469,8 +499,8 @@ export function documentedThrows(c: Cursor, at: usize, written: TypeNode | undef
   const from = i > 0 ? c.tokens[i - 1]!.end : 0;
   const to = c.tokens[i]!.start;
   const jsdoc: Comment[] = [];
-  for (let k = c.comments.length - 1; k >= 0 && c.comments[k]!.end > from; k--) {
-    const m = c.comments[k]!;
+  for (let k = c.lex.comments.length - 1; k >= 0 && c.lex.comments[k]!.end > from; k--) {
+    const m = c.lex.comments[k]!;
     if (m.end <= to && /^\/\*\*[^/]/.test(m.text)) jsdoc.unshift(m);
   }
   const types = jsdoc.flatMap((m) => thrownTypes(c.src, c.ids, m));
@@ -514,17 +544,19 @@ function thrownTypes(src: string, ids: Ids, m: Comment): TypeNode[] {
 // The type written from `start` to `end` of `src`, its spans offsets into the whole text, or
 // undefined when that text isn't one type.
 function typeAt(src: string, ids: Ids, start: usize, end: usize): TypeNode | undefined {
-  const c = cursor(src.slice(0, end), ids, start);
-  return c.attempt(() => {
+  let c = cursor(src.slice(0, end), ids, start);
+  const t = c.attempt((c) => {
     const t = type(c);
     if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
     return t;
   });
+  ids.last = c.ids.last;
+  return t;
 }
 
 // A function, type alias, interface or enum after decorators, which Fish applies as macros
 // where TypeScript allows only classes.
-export function decorated(c: Cursor, start: usize, decorators: Expr[]): Stmt {
+export function decorated(c: Mut<Cursor>, start: usize, decorators: Expr[]): Stmt {
   const next = c.peek(1);
   const at = c.at("function") || (c.at("async") && isToken(next, "function") && !next.newlineBefore) || (c.at("type") && next.kind === "ident")
     || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
@@ -534,7 +566,7 @@ export function decorated(c: Cursor, start: usize, decorators: Expr[]): Stmt {
 }
 
 // Only `export default function` may leave out the name, so `name` is "" there.
-export function func(c: Cursor, anonymous = false): Func {
+export function func(c: Mut<Cursor>, anonymous = false): Func {
   const start = c.peek().start;
   const async = c.eat("async");
   c.expect("function");
@@ -551,10 +583,10 @@ export function func(c: Cursor, anonymous = false): Func {
   return { id: nextId(c.ids), kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
 }
 
-export function block(c: Cursor): Stmt[] {
+export function block(c: Mut<Cursor>): Stmt[] {
   c.expect("{");
   const stmts: Stmt[] = [];
-  allowingIn(c, true, () => {
+  allowingIn(c, true, (c) => {
     while (!c.eat("}")) {
       if (c.peek().kind === "eof") throw c.error("expected '}'");
       stmts.push(statement(c));
@@ -564,12 +596,12 @@ export function block(c: Cursor): Stmt[] {
 }
 
 // A braced block, or a single statement as in `if (x) return 1`.
-function body(c: Cursor): Stmt[] {
+function body(c: Mut<Cursor>): Stmt[] {
   return c.at("{") ? block(c) : [statement(c)];
 }
 
 // Statements that end in a block need nothing after them; the rest end as in JavaScript.
-export function statement(c: Cursor): Stmt {
+export function statement(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
   if (c.at("{")) return { id: nextId(c.ids), kind: "block", body: block(c), start, end: c.end() };
@@ -613,7 +645,7 @@ export function statement(c: Cursor): Stmt {
   return s;
 }
 
-function ifStatement(c: Cursor): Stmt {
+function ifStatement(c: Mut<Cursor>): Stmt {
   const start = c.next().start;
   c.expect("(");
   const cond = sequence(c);
@@ -623,7 +655,7 @@ function ifStatement(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "if", cond, then, else: otherwise, start, end: c.end() };
 }
 
-function whileStatement(c: Cursor): Stmt {
+function whileStatement(c: Mut<Cursor>): Stmt {
   const start = c.next().start;
   c.expect("(");
   const cond = sequence(c);
@@ -633,12 +665,12 @@ function whileStatement(c: Cursor): Stmt {
 }
 
 // `for (init; test; update)`, `for (left in right)`, `for (left of right)` and `for await`.
-function forStatement(c: Cursor): Stmt {
+function forStatement(c: Mut<Cursor>): Stmt {
   const start = c.expect("for").start;
   const isAwait = c.eat("await");
   c.expect("(");
-  const declared = atDeclaration(c) ? allowingIn(c, false, () => declaration(c)) : undefined;
-  const expr = declared || c.at(";") ? undefined : allowingIn(c, false, () => sequence(c));
+  const declared = atDeclaration(c) ? allowingIn(c, false, (c) => declaration(c)) : undefined;
+  const expr = declared || c.at(";") ? undefined : allowingIn(c, false, (c) => sequence(c));
   const init = declared ?? expr;
   if (init && (c.at("in") || c.at("of"))) {
     const kind = c.next().text === "in" ? "forIn" : "forOf";
@@ -657,7 +689,7 @@ function forStatement(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
 }
 
-function switchStatement(c: Cursor): Stmt {
+function switchStatement(c: Mut<Cursor>): Stmt {
   const start = c.expect("switch").start;
   c.expect("(");
   const discriminant = sequence(c);
@@ -680,7 +712,7 @@ function switchStatement(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "switch", discriminant, cases, start, end: c.end() };
 }
 
-function tryStatement(c: Cursor): Stmt {
+function tryStatement(c: Mut<Cursor>): Stmt {
   const start = c.expect("try").start;
   const tried = block(c);
   let param: Pattern | undefined;
@@ -701,7 +733,7 @@ function tryStatement(c: Cursor): Stmt {
 }
 
 // The `;` after `do...while (x)` is optional even on the same line, unlike other statements.
-function doWhileStatement(c: Cursor): Stmt {
+function doWhileStatement(c: Mut<Cursor>): Stmt {
   const start = c.expect("do").start;
   const loop = body(c);
   c.expect("while");
@@ -712,9 +744,9 @@ function doWhileStatement(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "doWhile", body: loop, cond, start, end: c.end() };
 }
 
-const atDeclaration = (c: Cursor) => c.at("let") || c.at("const") || c.at("var");
+const atDeclaration = (c: Mut<Cursor>) => c.at("let") || c.at("const") || c.at("var");
 
-function declaration(c: Cursor): Stmt {
+function declaration(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   const keyword = c.next().text as "let" | "const" | "var";
   const declarations: Declarator[] = [];
@@ -729,7 +761,7 @@ function declaration(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "let", keyword, declarations, start, end: c.end() };
 }
 
-function simpleStatement(c: Cursor): Stmt {
+function simpleStatement(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   if (atDeclaration(c)) return declaration(c);
   if (c.at("break") || c.at("continue")) {
@@ -755,7 +787,7 @@ function simpleStatement(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "expr", expr, start, end: expr.end };
 }
 
-function declarator(c: Cursor): Declarator {
+function declarator(c: Mut<Cursor>): Declarator {
   const start = c.peek().start;
   const target = bindingPattern(c);
   const type = c.at(":") ? annotation(c) : undefined;
@@ -764,12 +796,12 @@ function declarator(c: Cursor): Declarator {
 }
 
 // `type` is contextual: only a name following on the same line makes it a declaration.
-function atTypeAlias(c: Cursor) {
+function atTypeAlias(c: Mut<Cursor>) {
   const after = c.peek(1);
   return c.at("type") && after.kind === "ident" && !after.newlineBefore;
 }
 
-function typeAlias(c: Cursor): TypeAlias {
+function typeAlias(c: Mut<Cursor>): TypeAlias {
   const start = c.next().start;
   const name = c.ident().text;
   const typeParams = typeParameters(c);
@@ -778,7 +810,7 @@ function typeAlias(c: Cursor): TypeAlias {
   return { id: nextId(c.ids), kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
 }
 
-function interfaceDeclaration(c: Cursor): Interface {
+function interfaceDeclaration(c: Mut<Cursor>): Interface {
   const start = c.next().start;
   const name = c.ident().text;
   const typeParams = typeParameters(c);
@@ -793,7 +825,7 @@ function interfaceDeclaration(c: Cursor): Interface {
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.
-export function endStatement(c: Cursor) {
+export function endStatement(c: Mut<Cursor>) {
   if (c.eat(";")) return;
   if (!c.at("}") && !c.peek().newlineBefore && c.peek().kind !== "eof") throw c.error("expected ';'");
 }

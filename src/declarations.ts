@@ -5,14 +5,14 @@ import {
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters, typeReference } from "./types.ts";
-import { nextId } from "./nodes.ts";
+import { nextId } from "./ids.ts";
 
 // Declarations beyond functions, aliases and interfaces: classes with their members,
 // modifiers and decorators; enums; namespaces; and ambient `declare` forms.
 
 // The declaration starting at the cursor, if its keyword is one of these, or undefined.
 // Each keyword but `enum` is contextual, so it only counts with what follows on its line.
-export function atDeclarationKeyword(c: Cursor): Stmt | undefined {
+export function atDeclarationKeyword(c: Mut<Cursor>): Stmt | undefined {
   const start = c.peek().start;
   const next = c.peek(1);
   const sameLine = !next.newlineBefore;
@@ -37,7 +37,7 @@ const DECLARABLE = new Set([
   "interface", "type",
 ]);
 
-function enumDeclaration(c: Cursor): Stmt {
+function enumDeclaration(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   const isConst = c.eat("const");
   c.expect("enum");
@@ -45,10 +45,10 @@ function enumDeclaration(c: Cursor): Stmt {
   const typeParams = c.at("<") ? typeParameters(c) : [];
   c.expect("{");
   // A member may hold values, `Circle(f64)`, rather than be one.
-  const members = c.list((): EnumMember => {
+  const members = c.list((c): EnumMember => {
     const t = c.next();
     if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a member name", t);
-    const payload = c.eat("(") ? c.list(() => type(c), ")") : undefined;
+    const payload = c.eat("(") ? c.list((c) => type(c), ")") : undefined;
     const init = c.eat("=") ? expression(c) : undefined;
     return { id: nextId(c.ids), name: t.text, init, payload, start: t.start, end: c.end() };
   }, "}");
@@ -56,7 +56,7 @@ function enumDeclaration(c: Cursor): Stmt {
 }
 
 // `namespace A.B { }`, `module A { }`, `module "m" { }`, `declare module "m";`, `global { }`.
-function namespaceDeclaration(c: Cursor): Stmt {
+function namespaceDeclaration(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   const global = c.eat("global");
   if (!global) c.next();
@@ -68,16 +68,16 @@ function namespaceDeclaration(c: Cursor): Stmt {
   return { id: nextId(c.ids), kind: "namespace", name, quoted, global, body: undefined, start, end: c.end() };
 }
 
-export const atClass = (c: Cursor) => c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore);
+export const atClass = (c: Mut<Cursor>) => c.at("class") || (c.at("abstract") && isToken(c.peek(1), "class") && !c.peek(1).newlineBefore);
 
-export function classDeclaration(c: Cursor, start: usize, decorators: Expr[]): Stmt {
+export function classDeclaration(c: Mut<Cursor>, start: usize, decorators: Expr[]): Stmt {
   const abstract = c.eat("abstract");
   return { kind: "class", ...classNode(c, start, abstract, decorators), id: nextId(c.ids) };
 }
 
 // `class Name<T> extends Base<T> implements I { ... }`, as a declaration or an expression.
 // `start` is where the class's first decorator or modifier began.
-export function classNode(c: Cursor, start: usize, abstract: boolean, decorators: Expr[]): ClassNode {
+export function classNode(c: Mut<Cursor>, start: usize, abstract: boolean, decorators: Expr[]): ClassNode {
   c.expect("class");
   // A class expression may be anonymous, and so may `export default class`.
   const name = c.peek().kind === "ident" && !c.at("extends") && !c.at("implements") ? c.ident().text : undefined;
@@ -99,16 +99,16 @@ export function classNode(c: Cursor, start: usize, abstract: boolean, decorators
 
 // Any left-hand-side expression, as in `extends mixin(Base)`; type arguments after it, as
 // in `extends Base<T> {`, can't be confirmed the way a generic call's are, so they're read here.
-function baseClass(c: Cursor): Expr {
+function baseClass(c: Mut<Cursor>): Expr {
   const base = leftHandSide(c);
   if (!c.eat("<")) return base;
-  const typeArgs = c.list(() => type(c), ">");
+  const typeArgs = c.list((c) => type(c), ">");
   return { id: nextId(c.ids), kind: "instantiation", expr: base, typeArgs, start: base.start, end: c.end() };
 }
 
 const MODIFIERS = new Set(["public", "private", "protected", "static", "readonly", "abstract", "override", "declare", "accessor", "async"]);
 
-function classMember(c: Cursor): ClassMember {
+function classMember(c: Mut<Cursor>): ClassMember {
   const start = c.peek().start;
   const decorators = decoratorList(c);
   const startsName = (t: Token) => ["ident", "string", "int", "float", "bigint", "private"].includes(t.kind) || isToken(t, "[") || isToken(t, "*");
@@ -166,7 +166,7 @@ function classMember(c: Cursor): ClassMember {
 }
 
 // An overload signature or an abstract member has no body.
-function memberBody(c: Cursor): Stmt[] | undefined {
+function memberBody(c: Mut<Cursor>): Stmt[] | undefined {
   if (c.at("{")) return block(c);
   endMember(c);
   return undefined;
@@ -174,7 +174,7 @@ function memberBody(c: Cursor): Stmt[] | undefined {
 
 // `@a`, `@a.b`, `@a.b(args)` or `@(expression)`. A decorator never takes `[`, so in
 // `@dec [key]() {}` the brackets are the member's computed name.
-export function decoratorList(c: Cursor): Expr[] {
+export function decoratorList(c: Mut<Cursor>): Expr[] {
   const decorators: Expr[] = [];
   while (c.at("@")) {
     c.next();
@@ -192,7 +192,7 @@ export function decoratorList(c: Cursor): Expr[] {
       }
     }
     if (c.eat("(")) {
-      const args = c.list(() => expression(c), ")");
+      const args = c.list((c) => expression(c), ")");
       e = { id: nextId(c.ids), kind: "call", callee: e, typeArgs: [], args, optional: false, start: e.start, end: c.end() };
     }
     decorators.push(e);
@@ -201,17 +201,17 @@ export function decoratorList(c: Cursor): Expr[] {
 }
 
 // Member names may be reserved words or private names such as `#count`.
-function memberName(c: Cursor): PropertyName {
+function memberName(c: Mut<Cursor>): PropertyName {
   return c.peek().kind === "private" ? c.next().text : propertyName(c);
 }
 
 // A field ends with `;`, a line break, or the class's closing brace.
-function endMember(c: Cursor) {
+function endMember(c: Mut<Cursor>) {
   if (c.eat(";") || c.at("}") || c.peek().newlineBefore) return;
   throw c.error("expected ';'");
 }
 
-function importDeclaration(c: Cursor): Stmt {
+function importDeclaration(c: Mut<Cursor>): Stmt {
   const start = c.expect("import").start;
   const typeOnly = atTypeModifier(c) && c.eat("type");
   // `import defer * as ns` loads the module on first use; `import defer from` is a default.
@@ -258,16 +258,16 @@ function importDeclaration(c: Cursor): Stmt {
 
 // `import type from "m"` imports a default named `type`; `type` modifies only when an import
 // clause follows it.
-function atTypeModifier(c: Cursor): boolean {
+function atTypeModifier(c: Mut<Cursor>): boolean {
   if (!c.at("type")) return false;
   const next = c.peek(1);
   if (isToken(next, "{") || isToken(next, "*")) return true;
   return next.kind === "ident" && !(isToken(next, "from") && c.peek(2).kind === "string") && !isToken(next, "=");
 }
 
-export function specifiers(c: Cursor): Specifier[] {
+export function specifiers(c: Mut<Cursor>): Specifier[] {
   c.expect("{");
-  return c.list((): Specifier => {
+  return c.list((c): Specifier => {
     const start = c.peek().start;
     // `{ type as x }` renames `type`; `{ type x }` and `{ type as as x }` are type-only.
     const [next, after] = [c.peek(1), c.peek(2)];
@@ -280,19 +280,19 @@ export function specifiers(c: Cursor): Specifier[] {
 }
 
 // Specifier names may be reserved words, as in `default as d`, or strings.
-export function specifierName(c: Cursor): string {
+export function specifierName(c: Mut<Cursor>): string {
   const t = c.next();
   if (t.kind !== "ident" && t.kind !== "string") throw c.error("expected a name", t);
   return t.text;
 }
 
-export function moduleName(c: Cursor): string {
+export function moduleName(c: Mut<Cursor>): string {
   if (c.peek().kind !== "string") throw c.error("expected a module name");
   return c.next().text;
 }
 
 // Every form of `export`. Decorators written before `export` belong to the class after it.
-export function exportDeclaration(c: Cursor, start: usize, decorators: Expr[]): Stmt {
+export function exportDeclaration(c: Mut<Cursor>, start: usize, decorators: Expr[]): Stmt {
   c.expect("export");
   const end = () => c.end();
   if (c.eat("default")) {

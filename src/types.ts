@@ -3,16 +3,16 @@ import { isToken, type Token } from "./lexer.ts";
 import type { Cursor, Modifier, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { decoratorList } from "./declarations.ts";
 import { bindingPattern } from "./patterns.ts";
-import { nextId } from "./nodes.ts";
+import { nextId } from "./ids.ts";
 
 // The type grammar, and the parameter lists that functions and function types share.
 
-export function typeParameters(c: Cursor): TypeParam[] {
-  return c.eat("<") ? c.list(() => typeParameter(c), ">") : [];
+export function typeParameters(c: Mut<Cursor>): TypeParam[] {
+  return c.eat("<") ? c.list((c) => typeParameter(c), ">") : [];
 }
 
 // A modifier is only a modifier when a name follows it, so `<out>` names a parameter `out`.
-function typeParameter(c: Cursor): TypeParam {
+function typeParameter(c: Mut<Cursor>): TypeParam {
   const start = c.peek().start;
   const modifiers: TypeParam["modifiers"] = [];
   while ((c.at("const") || c.at("in") || c.at("out")) && c.peek(1).kind === "ident") {
@@ -25,15 +25,15 @@ function typeParameter(c: Cursor): TypeParam {
 }
 
 // Parameters in parentheses, or after an index signature's `[`, up to `close`.
-export function parameters(c: Cursor, close = ")"): Param[] {
+export function parameters(c: Mut<Cursor>, close = ")"): Param[] {
   if (close === ")") c.expect("(");
-  return c.list(() => parameter(c), close);
+  return c.list((c) => parameter(c), close);
 }
 
 // A parameter property's modifiers, each followed on the same line by what it modifies.
 const PARAMETER_MODIFIERS = ["public", "private", "protected", "readonly", "override"];
 
-function parameter(c: Cursor): Param {
+function parameter(c: Mut<Cursor>): Param {
   const start = c.peek().start;
   const decorators = decoratorList(c);
   const modifiers: Modifier[] = [];
@@ -54,26 +54,26 @@ function parameter(c: Cursor): Param {
 const startsBinding = (t: Token) => t.kind === "ident" || isToken(t, "{") || isToken(t, "[");
 
 // `: Type` after a declaration or parameter list.
-export function annotation(c: Cursor): TypeNode {
+export function annotation(c: Mut<Cursor>): TypeNode {
   c.expect(":");
   return type(c);
 }
 
 // `: Type` where a function's result goes, which may also be a type predicate.
-export function returnAnnotation(c: Cursor): TypeNode | undefined {
+export function returnAnnotation(c: Mut<Cursor>): TypeNode | undefined {
   if (!c.eat(":")) return undefined;
   return returnType(c);
 }
 
 // `throws T` after a function's result or parameters: the error type it may throw.
-export function throwsClause(c: Cursor): TypeNode | undefined {
+export function throwsClause(c: Mut<Cursor>): TypeNode | undefined {
   if (!c.at("throws") || c.peek().newlineBefore) return undefined;
   c.next();
   return type(c);
 }
 
 // `x is T`, `asserts x is T` and `asserts x`; otherwise an ordinary type.
-function returnType(c: Cursor): TypeNode {
+function returnType(c: Mut<Cursor>): TypeNode {
   const start = c.peek().start;
   const after = c.peek(1);
   // `asserts is T` narrows a parameter named `asserts`.
@@ -88,7 +88,7 @@ function returnType(c: Cursor): TypeNode {
   return { id: nextId(c.ids), kind: "predicate", asserts, name: subject.text, type: narrowed, start, end: c.end() };
 }
 
-export function type(c: Cursor, allowConditional = true): TypeNode {
+export function type(c: Mut<Cursor>, allowConditional = true): TypeNode {
   const outer = c.conditionalAllowed;
   c.conditionalAllowed = allowConditional;
   const t = conditionalType(c);
@@ -97,7 +97,7 @@ export function type(c: Cursor, allowConditional = true): TypeNode {
 }
 
 // An `extends` on a new line isn't a conditional, so the statement ends before it.
-function conditionalType(c: Cursor): TypeNode {
+function conditionalType(c: Mut<Cursor>): TypeNode {
   if (atFunctionType(c)) return functionType(c);
   const check = composite(c, "union", "|", () => composite(c, "intersection", "&", () => typeOperator(c)));
   if (!c.conditionalAllowed || !c.at("extends") || c.peek().newlineBefore) return check;
@@ -111,7 +111,7 @@ function conditionalType(c: Cursor): TypeNode {
 }
 
 // `(` starts a function type only when what follows can't be a parenthesised type.
-function atFunctionType(c: Cursor): boolean {
+function atFunctionType(c: Mut<Cursor>): boolean {
   if (c.at("<") || c.at("new") || (c.at("abstract") && isToken(c.peek(1), "new"))) return true;
   if (!c.at("(")) return false;
   const [a, b, d] = [c.peek(1), c.peek(2), c.peek(3)];
@@ -121,7 +121,7 @@ function atFunctionType(c: Cursor): boolean {
     // A destructured first parameter: read the pattern on trial, then look past it.
     const before = c.pos;
     c.next();
-    const follows = c.attempt(() => {
+    const follows = c.attempt((c) => {
       bindingPattern(c);
       return paramFollows(c.peek()) || (c.at(")") && isToken(c.peek(1), "=>"));
     });
@@ -132,7 +132,7 @@ function atFunctionType(c: Cursor): boolean {
   return paramFollows(b) || (isToken(b, ")") && isToken(d, "=>"));
 }
 
-function functionType(c: Cursor): TypeNode {
+function functionType(c: Mut<Cursor>): TypeNode {
   const start = c.peek().start;
   const abstract = c.eat("abstract");
   const construct = c.eat("new");
@@ -145,7 +145,7 @@ function functionType(c: Cursor): TypeNode {
 }
 
 // A union or intersection; a leading separator is allowed, as in a multi-line union.
-function composite(c: Cursor, kind: "union" | "intersection", separator: string, member: () => TypeNode): TypeNode {
+function composite(c: Mut<Cursor>, kind: "union" | "intersection", separator: string, member: () => TypeNode): TypeNode {
   const start = c.peek().start;
   c.eat(separator);
   const types = [member()];
@@ -154,7 +154,7 @@ function composite(c: Cursor, kind: "union" | "intersection", separator: string,
   return { id: nextId(c.ids), kind, types, start, end: types.at(-1)!.end };
 }
 
-function typeOperator(c: Cursor): TypeNode {
+function typeOperator(c: Mut<Cursor>): TypeNode {
   const t = c.peek();
   if (c.at("keyof") || c.at("readonly") || c.at("unique")) {
     c.next();
@@ -167,7 +167,7 @@ function typeOperator(c: Cursor): TypeNode {
 
 // `infer U extends C` is ambiguous with a conditional on `infer U`. Outside an `extends`
 // clause, a `?` after the constraint means it was a conditional, so it is read again as one.
-function inferType(c: Cursor): TypeNode {
+function inferType(c: Mut<Cursor>): TypeNode {
   const start = c.next().start;
   const name = c.ident().text;
   const before = c.pos;
@@ -180,7 +180,7 @@ function inferType(c: Cursor): TypeNode {
 }
 
 // `T[]` and `T[K]`. A `[` on a new line starts the next statement instead, as in TypeScript.
-function postfixType(c: Cursor): TypeNode {
+function postfixType(c: Mut<Cursor>): TypeNode {
   let t = primaryType(c);
   while (c.at("[") && !c.peek().newlineBefore) {
     c.next();
@@ -194,7 +194,7 @@ function postfixType(c: Cursor): TypeNode {
   return t;
 }
 
-function primaryType(c: Cursor): TypeNode {
+function primaryType(c: Mut<Cursor>): TypeNode {
   const t = c.peek();
   if (c.eat("(")) {
     const inner = type(c);
@@ -223,9 +223,9 @@ function primaryType(c: Cursor): TypeNode {
   return typeReference(c);
 }
 
-function tuple(c: Cursor): TypeNode {
+function tuple(c: Mut<Cursor>): TypeNode {
   const start = c.expect("[").start;
-  const elements = c.list(() => {
+  const elements = c.list((c) => {
     const start = c.peek().start;
     const rest = c.eat("...");
     const [after, then] = [c.peek(1), c.peek(2)];
@@ -240,7 +240,7 @@ function tuple(c: Cursor): TypeNode {
   return { id: nextId(c.ids), kind: "tuple", elements, start, end: c.end() };
 }
 
-function atMappedType(c: Cursor): boolean {
+function atMappedType(c: Mut<Cursor>): boolean {
   let i = 1;
   if (isToken(c.peek(i), "+") || isToken(c.peek(i), "-")) i++;
   if (isToken(c.peek(i), "readonly")) i++;
@@ -248,7 +248,7 @@ function atMappedType(c: Cursor): boolean {
 }
 
 // `{ readonly [K in T as N]?: V }`, where each modifier may carry `+` or `-`.
-function mappedType(c: Cursor): TypeNode {
+function mappedType(c: Mut<Cursor>): TypeNode {
   const start = c.expect("{").start;
   const readonly = modifier(c, "readonly");
   c.expect("[");
@@ -264,7 +264,7 @@ function mappedType(c: Cursor): TypeNode {
   return { id: nextId(c.ids), kind: "mapped", name, constraint, as, type: valueType, readonly, optional, start, end: c.end() };
 }
 
-function modifier(c: Cursor, text: string): "+" | "-" | undefined {
+function modifier(c: Mut<Cursor>, text: string): "+" | "-" | undefined {
   const sign = c.at("+") || c.at("-") ? c.next().text : undefined;
   if (sign) c.expect(text);
   else if (!c.eat(text)) return undefined;
@@ -272,7 +272,7 @@ function modifier(c: Cursor, text: string): "+" | "-" | undefined {
 }
 
 // `import("module").A.B<T>`
-function importType(c: Cursor): TypeNode {
+function importType(c: Mut<Cursor>): TypeNode {
   const start = c.expect("import").start;
   c.expect("(");
   if (c.peek().kind !== "string") throw c.error("expected a module name");
@@ -283,18 +283,18 @@ function importType(c: Cursor): TypeNode {
     if (c.peek().kind !== "ident") throw c.error("expected an identifier");
     name = name === undefined ? c.next().text : `${name}.${c.next().text}`;
   }
-  const args = c.eat("<") ? c.list(() => type(c), ">") : [];
+  const args = c.eat("<") ? c.list((c) => type(c), ">") : [];
   return { id: nextId(c.ids), kind: "import", module, name, args, start, end: c.end() };
 }
 
-function objectType(c: Cursor): TypeNode {
+function objectType(c: Mut<Cursor>): TypeNode {
   const start = c.expect("{").start;
   const members = typeMembers(c);
   return { id: nextId(c.ids), kind: "object", members, start, end: c.end() };
 }
 
 // Members up to and including `}`, separated by `;`, `,` or a newline.
-export function typeMembers(c: Cursor): TypeMember[] {
+export function typeMembers(c: Mut<Cursor>): TypeMember[] {
   const members: TypeMember[] = [];
   while (!c.eat("}")) {
     if (c.peek().kind === "eof") throw c.error("expected '}'");
@@ -306,7 +306,7 @@ export function typeMembers(c: Cursor): TypeMember[] {
 
 // `readonly`, `get`, `set` and `new` are only keywords here when what follows can't be
 // read any other way, so `{ get: T; new: U }` declares ordinary properties.
-function typeMember(c: Cursor): TypeMember {
+function typeMember(c: Mut<Cursor>): TypeMember {
   const start = c.peek().start;
   const startsName = (t: Token) => isPropertyName(t) || isToken(t, "[");
   if (c.at("(") || c.at("<")) return { id: nextId(c.ids), kind: "call", ...signature(c), start, end: c.end() };
@@ -337,7 +337,7 @@ function typeMember(c: Cursor): TypeMember {
 }
 
 // Property names may be reserved words, so any identifier is accepted.
-export function propertyName(c: Cursor): PropertyName {
+export function propertyName(c: Mut<Cursor>): PropertyName {
   const t = c.peek();
   if (c.eat("[")) {
     const key = expression(c);
@@ -351,7 +351,7 @@ export function propertyName(c: Cursor): PropertyName {
 export const isPropertyName = (t: Token) => ["ident", "string", "int", "float", "bigint"].includes(t.kind);
 
 // Type parameters, parameters and an optional return type, as in a method signature.
-function signature(c: Cursor) {
+function signature(c: Mut<Cursor>) {
   const typeParams = typeParameters(c);
   const params = parameters(c);
   const returns = returnAnnotation(c);
@@ -359,7 +359,7 @@ function signature(c: Cursor) {
 }
 
 // Type names may be reserved words, as in `void`, so any identifier is accepted.
-export function typeReference(c: Cursor): TypeNode {
+export function typeReference(c: Mut<Cursor>): TypeNode {
   if (c.peek().kind !== "ident") throw c.error("expected a type");
   const first = c.next();
   let name = first.text;
@@ -367,6 +367,6 @@ export function typeReference(c: Cursor): TypeNode {
     if (c.peek().kind !== "ident") throw c.error("expected an identifier");
     name += "." + c.next().text;
   }
-  const args = c.eat("<") ? c.list(() => type(c), ">") : [];
+  const args = c.eat("<") ? c.list((c) => type(c), ">") : [];
   return { id: nextId(c.ids), kind: "ref", name, args, start: first.start, end: c.end() };
 }

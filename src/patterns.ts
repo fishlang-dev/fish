@@ -3,12 +3,12 @@ import { expression, primary, unary } from "./expressions.ts";
 import { isToken } from "./lexer.ts";
 import { RESERVED, type Cursor, type Expr, type Pattern, type PatternProp } from "./parser.ts";
 import { propertyName } from "./types.ts";
-import { nextId } from "./nodes.ts";
+import { nextId } from "./ids.ts";
 
 // Destructuring patterns: binding patterns in declarations and parameters, and assignment
 // patterns, which arrive as object or array literals and are converted once an `=` follows.
 
-export function bindingPattern(c: Cursor): Pattern {
+export function bindingPattern(c: Mut<Cursor>): Pattern {
   if (c.at("{")) return objectPattern(c);
   if (c.at("[")) return arrayPattern(c);
   const name = c.ident();
@@ -16,16 +16,16 @@ export function bindingPattern(c: Cursor): Pattern {
 }
 
 // A pattern inside another, which may carry a default.
-function nested(c: Cursor): Pattern {
+function nested(c: Mut<Cursor>): Pattern {
   const target = bindingPattern(c);
   return c.eat("=") ? withDefault(c, target, expression(c)) : target;
 }
 
-function withDefault(c: Cursor, target: Pattern, value: Expr): Pattern {
+function withDefault(c: Mut<Cursor>, target: Pattern, value: Expr): Pattern {
   return { id: nextId(c.ids), kind: "default", target, value, start: target.start, end: value.end };
 }
 
-function objectPattern(c: Cursor): Pattern {
+function objectPattern(c: Mut<Cursor>): Pattern {
   const start = c.expect("{").start;
   const props: PatternProp[] = [];
   let rest: Pattern | undefined;
@@ -50,7 +50,7 @@ function objectPattern(c: Cursor): Pattern {
   return { id: nextId(c.ids), kind: "object", props, rest, start, end: c.end() };
 }
 
-function arrayPattern(c: Cursor): Pattern {
+function arrayPattern(c: Mut<Cursor>): Pattern {
   const start = c.expect("[").start;
   const elements: (Pattern | undefined)[] = [];
   let rest: Pattern | undefined;
@@ -68,7 +68,7 @@ function arrayPattern(c: Cursor): Pattern {
 
 // The left side of `[a, b] = [b, a]` parses as an array literal; this reads it as the pattern
 // it was. Member expressions are valid targets here, though not in a binding pattern.
-export function toPattern(c: Cursor, e: Expr): Pattern {
+export function toPattern(c: Mut<Cursor>, e: Expr): Pattern {
   const span = { start: e.start, end: e.end };
   switch (e.kind) {
     case "ident":
@@ -104,7 +104,7 @@ export function toPattern(c: Cursor, e: Expr): Pattern {
 }
 
 // A pattern after `case` in a `match`: alternatives separated by `|`.
-export function matchPattern(c: Cursor): Pattern {
+export function matchPattern(c: Mut<Cursor>): Pattern {
   const first = singlePattern(c);
   if (!c.at("|")) return first;
   const patterns = [first];
@@ -113,7 +113,7 @@ export function matchPattern(c: Cursor): Pattern {
 }
 
 // Object and array patterns here hold match patterns, so `{ status: 200 }` tests a field.
-function singlePattern(c: Cursor): Pattern {
+function singlePattern(c: Mut<Cursor>): Pattern {
   const t = c.peek();
   if (c.eat("(")) {
     const inner = matchPattern(c);
@@ -142,12 +142,12 @@ function singlePattern(c: Cursor): Pattern {
     name += "." + segment.text;
     dotted = true;
   }
-  const args = c.eat("(") ? c.list(() => matchPattern(c), ")") : undefined;
+  const args = c.eat("(") ? c.list((c) => matchPattern(c), ")") : undefined;
   if (!args && !dotted) return { id: nextId(c.ids), kind: "ident", name, start: t.start, end: c.end() };
   return { id: nextId(c.ids), kind: "variant", name, args, start: t.start, end: c.end() };
 }
 
-function matchObject(c: Cursor): Pattern {
+function matchObject(c: Mut<Cursor>): Pattern {
   const start = c.expect("{").start;
   const props: PatternProp[] = [];
   let rest: Pattern | undefined;
@@ -171,7 +171,7 @@ function matchObject(c: Cursor): Pattern {
   return { id: nextId(c.ids), kind: "object", props, rest, start, end: c.end() };
 }
 
-function matchArray(c: Cursor): Pattern {
+function matchArray(c: Mut<Cursor>): Pattern {
   const start = c.expect("[").start;
   const elements: (Pattern | undefined)[] = [];
   let rest: Pattern | undefined;
