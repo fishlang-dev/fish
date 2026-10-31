@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, staticTarget } from "../src/target.ts";
@@ -77,6 +77,31 @@ for (const [arch, cpu] of [["arm64", "aarch64"], ["amd64", "x86_64"]] as const) 
     expect(run.stdout.toString()).toBe("linux 40 1.4142135623730951\n");
     expect(run.stderr.toString()).toContain("index out of bounds");
     expect(run.exitCode).toBe(101);
+  }, 600000);
+}
+
+// With a musl sysroot, such as an extracted Alpine root with musl-dev and gcc, named in
+// FISH_TEST_SYSROOT_MUSL_ARM64 or FISH_TEST_SYSROOT_MUSL_AMD64, a static build runs alone in an
+// image built from the Dockerfile written beside it.
+for (const [arch, cpu] of [["arm64", "aarch64"], ["amd64", "x86_64"]] as const) {
+  const sysroot = process.env[`FISH_TEST_SYSROOT_MUSL_${arch.toUpperCase()}`];
+  test.skipIf(!sysroot || !docker)(`runs a static program for ${cpu} Linux from scratch`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "fish-static-"));
+    writeFileSync(join(dir, "main.fsh"), PROGRAM);
+    const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", join(dir, "main.fsh"), "-o", join(dir, "app"), "--target", `${cpu}-unknown-linux-musl`, "--sysroot", sysroot!, "--static", "--dockerfile"]);
+    expect(built.stderr.toString()).toBe("");
+    expect(readFileSync(join(dir, "Dockerfile"), "utf8")).toBe('FROM scratch\nCOPY app /app\nENTRYPOINT ["/app"]\n');
+    const image = `fish-static-test-${arch}`;
+    expect(Bun.spawnSync(["docker", "build", "-q", "--platform", `linux/${arch}`, "-t", image, dir]).exitCode).toBe(0);
+    try {
+      const run = Bun.spawnSync(["docker", "run", "--rm", "--platform", `linux/${arch}`, image]);
+      expect(run.stdout.toString()).toBe("linux 40 1.4142135623730951\n");
+      expect(run.stderr.toString()).toContain("index out of bounds");
+      expect(run.stderr.toString()).toContain("stack backtrace:\n   0: main at ");
+      expect(run.exitCode).toBe(101);
+    } finally {
+      Bun.spawnSync(["docker", "rmi", "-f", image]);
+    }
   }, 600000);
 }
 
