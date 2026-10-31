@@ -488,7 +488,15 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
     }
   }
   const foreign = new Map<string, { signature: string; file: string }>();
-  return all.flatMap((l) => {
+  const names = new Map(all.map((l) => {
+    const written = new Map([...l.own.values()].map((d) => [d.unique, d.name]));
+    for (const alias of l.imports.keys()) {
+      const d = local(l, alias);
+      if (d) written.set(d.unique, alias);
+    }
+    return [l.module.base, written];
+  }));
+  const program = all.flatMap((l) => {
     const to = new Map<string, string>();
     for (const name of l.used) {
       // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
@@ -518,7 +526,13 @@ export function flatten({ modules }: Loaded, library = false, lenient = false): 
       return !known;
     });
   });
+  fileNames.set(program, names);
+  return program;
 }
+
+// For a linked program, each file's top-level names by its base offset: the name each
+// declaration it reaches takes in the program, to the name the file writes for it.
+export const fileNames = new WeakMap<Stmt[], Map<number, Map<string, string>>>();
 
 // A name told apart from another file's: `-` can't be written in a name, and messages leave the
 // suffix out.
