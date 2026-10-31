@@ -145,7 +145,7 @@ export function bothSides({ show, unionType }: Typing, e: Extract<Expr, { kind: 
   const both = [then, otherwise];
   if (both.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
   if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
-    throw new CompileError("E0109", `both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
+    throw new CompileError("E0101", `both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
   }
   const union = unionType(both);
   coerce(e.then, then, union, `type '${show(then)}' is not assignable to type '${show(union)}'`);

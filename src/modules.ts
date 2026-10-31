@@ -63,7 +63,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     if (known) return known;
     const base = modules.length * FILE_SPAN;
     if (base > 0) sources.push({ base, src: text, file });
-    if (text.length >= FILE_SPAN) throw new CompileError("E0905", `'${file}' is larger than the 16 MiB a source file may be`, base, base);
+    if (text.length >= FILE_SPAN) throw new CompileError("E0909", `'${file}' is larger than the 16 MiB a source file may be`, base, base);
     let statements: Stmt[];
     try {
       // A TS-compat file isn't compiled, whether or not it parses.

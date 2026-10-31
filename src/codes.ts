@@ -14,6 +14,8 @@
 //   E10xx interop: unsafe, C functions, libraries, Rust crates, JS packages and raw pointers
 //   E11xx comptime, macros, decorators, quotes, tests and tags
 //   W0xxx warnings
+// A wrong argument count is E0501 for a function the program declares, and E0504 with the rest
+// of a built-in's argument rules, since a built-in's message says what it takes.
 // A code's one-line title, and for the common ones a longer explanation with a program that
 // fails with the code and one that compiles.
 export type Explained = { title: string; long?: { text: string; example: string; fixed: string } };
@@ -24,7 +26,7 @@ export const CODES: Record<string, Explained> = {
     long: {
       text: `The parser expected one thing and found another: a missing bracket, comma or operand, or a keyword in the wrong place. The message says what it expected and what it found.
 
-TypeScript reports the same code as a syntax error. Fish parses all of TypeScript's syntax, plus 'match', '|>' and 'comptime', so code that parses as TypeScript parses here too.
+TypeScript reports a syntax error here too. Fish parses all of TypeScript's syntax, plus 'match', '|>' and 'comptime', so code that parses as TypeScript parses here too.
 
 To fix it, look at the caret and just before it for what is missing or extra.`,
       example: `function main() {
@@ -528,7 +530,7 @@ To fix it, check the spelling (the message suggests a near match when there is o
     long: {
       text: `A function says it returns a value, but some path through its body reaches the end without returning one.
 
-TypeScript reports the same thing as 'Not all code paths return a value'.
+TypeScript reports the same thing as 'Function lacks ending return statement and return type does not include undefined' (TS2366); its 'noImplicitReturns' option is stricter still.
 
 To fix it, return a value on every path, often by adding a final 'return' or an 'else'.`,
       example: `function sign(n: i64): i64 {
@@ -640,6 +642,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E0906: { title: "a dependency that can't be resolved or verified" },
   E0907: { title: "an import that clashes with another name in its file" },
   E0908: { title: "a Node built-in Fish doesn't have, or uses differently" },
+  E0909: { title: "a source file larger than the compiler takes" },
 
   E1001: { title: "an operation that needs 'unsafe'" },
   E1002: { title: "invalid C function declaration" },
@@ -659,7 +662,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   W0001: {
     title: "unused binding",
     long: {
-      text: `A variable, parameter or function is declared and never used. It is a warning, so the program still builds.
+      text: `A variable or parameter is declared and never used. It is a warning, so the program still builds.
 
 TypeScript reports the same thing with 'noUnusedLocals' and 'noUnusedParameters'.
 

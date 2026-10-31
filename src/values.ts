@@ -1263,7 +1263,7 @@ export function expressions(ctx: Context) {
     if (target?.js?.const) {
       const held = resolveType(target.returnType!);
       const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
-      throw new CompileError("E1005", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
+      throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
     if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(files, target.start) === "node:assert") return assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
@@ -1277,7 +1277,7 @@ export function expressions(ctx: Context) {
       return { type: "string", what: "'format'" };
     }
     if (util === "inspect") {
-      if (e.args.length !== 1 || e.args[0]!.kind === "spread") throw new CompileError("E0801", e.args.length > 1 ? "'inspect' takes the value alone; its options aren't supported yet" : "'inspect' takes 1 argument", e.start, e.end);
+      if (e.args.length !== 1 || e.args[0]!.kind === "spread") throw new CompileError(e.args.length > 1 ? "E0801" : "E0504", e.args.length > 1 ? "'inspect' takes the value alone; its options aren't supported yet" : "'inspect' takes 1 argument", e.start, e.end);
       shown(e.args);
       inspectCalls.add(e);
       return { type: "string", what: "'inspect'" };
@@ -1472,7 +1472,7 @@ export function expressions(ctx: Context) {
     const argTypes = e.args.map((a) => value(a));
     const bindings = new Map<string, Type>();
     if (e.typeArgs.length > 0) {
-      if (e.typeArgs.length !== names.length) throw new CompileError("E0501", `expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
+      if (e.typeArgs.length !== names.length) throw new CompileError("E0106", `expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
       names.forEach((n, i) => bindings.set(n, resolveType(e.typeArgs[i]!)));
     } else written.params.forEach((p, i) => p.type && infer(ctx.tables, p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
     for (const [i, n] of names.entries()) {
@@ -2250,7 +2250,7 @@ export function expressions(ctx: Context) {
 
   // `JSON.stringify(x)`: x written as JSON text, which its type decides.
   function stringify(e: Call): { type: Type; what: string } {
-    if (e.typeArgs.length > 0) throw new CompileError("E0509", "'JSON.stringify' takes no type argument; the value's type decides how it is written", e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", "'JSON.stringify' takes no type argument; the value's type decides how it is written", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.stringify' replacer and indent arguments", e.args[1]!);
     const x = e.args[0];
     if (!x) throw new CompileError("E0509", "'JSON.stringify' takes the value to write", e.start, e.end);
@@ -2263,7 +2263,7 @@ export function expressions(ctx: Context) {
   function jsonParse(e: Call): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
     const [written = { id: nextId(ids), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
-    if (others.length > 0) throw new CompileError("E0509", "'JSON.parse' takes one type argument, the type to read", e.start, e.end);
+    if (others.length > 0) throw new CompileError("E0106", "'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
     const text = e.args[0];
     if (!text) throw new CompileError("E0509", "'JSON.parse' takes the text to read", e.start, e.end);
@@ -3192,7 +3192,7 @@ export function expressions(ctx: Context) {
     const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
     if (!method) {
       const field = shape?.fields.some((f) => f.name === callee.name);
-      throw untyped(shape, callee.name, callee) ?? new CompileError("E0503", field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${show(t)}'`, callee.start, callee.end);
+      throw untyped(shape, callee.name, callee) ?? new CompileError(field ? "E0503" : "E0502", field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
     jsMethods.add(e);
     // A generic one is typed for the call's type arguments, written or inferred.
@@ -3269,8 +3269,8 @@ export function expressions(ctx: Context) {
     const to = resolveType(node);
     if (fits(from, to)) return from;
     const kept = typeof from !== "string" && from.kind === "union" ? from.members.filter((m) => fits(m, to)) : [];
-    if (kept.length === 0 && fits(to, from)) throw new CompileError("E0507", `it returns '${show(to)}', narrower than the implementation's '${show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${show(to)} | ...'`, node.start, node.end);
-    if (kept.length === 0) throw new CompileError("E0507", `this overload signature is not compatible with its implementation, which returns '${show(from)}', never a '${show(to)}'`, node.start, node.end);
+    if (kept.length === 0 && fits(to, from)) throw new CompileError("E0410", `it returns '${show(to)}', narrower than the implementation's '${show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${show(to)} | ...'`, node.start, node.end);
+    if (kept.length === 0) throw new CompileError("E0410", `this overload signature is not compatible with its implementation, which returns '${show(from)}', never a '${show(to)}'`, node.start, node.end);
     return kept.length === 1 ? kept[0]! : unionType(kept);
   }
 
@@ -3728,7 +3728,7 @@ export function expressions(ctx: Context) {
   function variant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
-    if (!member) throw new CompileError("E0707", `property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
+    if (!member) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
     if (typeArgs.length > 0 && typeArgs.length !== data.params.length) {
       const n = data.params.length;
       throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, e.start, e.end);
@@ -4328,7 +4328,7 @@ export function expressions(ctx: Context) {
         if (named?.data) return variant(e, named, true);
         if (named) {
           const found = named.members.get(e.name);
-          if (!found) throw new CompileError("E0707", `property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'${didYouMean(e.name, named.members.keys())}`, e.start, e.end);
+          if (!found) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'${didYouMean(e.name, named.members.keys())}`, e.start, e.end);
           return found;
         }
         if (e.object.kind === "ident") objects.add(e.object);
@@ -5527,7 +5527,7 @@ export function expressions(ctx: Context) {
           return crossing(field.type, `property '${field.name}' is a`, target);
         }
         const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
-        throw new CompileError("E0211", through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
+        throw new CompileError(through ? "E0211" : "E0208", through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
       }
       // A whole value assigned to a mutable reference is written through it, to what it was
       // declared to point to, whatever a check narrowed it to. An update like `+=` keeps the

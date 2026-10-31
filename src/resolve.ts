@@ -388,7 +388,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       return dynType(of);
     }
     if (t.name === "RegExp") {
-      if (t.args.length !== 0) throw new CompileError("E0508", "'RegExp' takes no type arguments", t.start, t.end);
+      if (t.args.length !== 0) throw new CompileError("E0106", "'RegExp' takes no type arguments", t.start, t.end);
       return ANY_REGEX;
     }
     if (t.name === "Semaphore" || t.name === "Permit" || t.name === "AbortController" || t.name === "AbortSignal" || t.name === "TcpListener" || t.name === "TcpStream" || t.name === "JsValue") {

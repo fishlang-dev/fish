@@ -47,8 +47,8 @@ export function binaryType({ show }: Typing, op: BinaryOp, left: Type, right: Ty
   // A bigint mixes with no number, as TypeScript refuses; it has no unsigned shift.
   if (left === "bigint" || right === "bigint") {
     const other = left === "bigint" ? right : left;
-    if (isNumeric(other)) throw new CompileError("E0110", `operator '${op}' can't mix 'bigint' and '${show(other)}'; convert the number with 'BigInt(x)', or the bigint with 'as ${show(other)}'`, at.start, at.end);
-    if (left === right && op === ">>>") throw new CompileError("E0110", "operator '>>>' cannot be applied to type 'bigint'; a bigint has no unsigned right shift, so use '>>'", at.start, at.end);
+    if (isNumeric(other)) throw new CompileError("E0111", `operator '${op}' can't mix 'bigint' and '${show(other)}'; convert the number with 'BigInt(x)', or the bigint with 'as ${show(other)}'`, at.start, at.end);
+    if (left === right && op === ">>>") throw new CompileError("E0103", "operator '>>>' cannot be applied to type 'bigint'; a bigint has no unsigned right shift, so use '>>'", at.start, at.end);
     if (left === right) return op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : left;
   }
   // Numbers of different types never mix, as in Rust: one side is converted with `as`.

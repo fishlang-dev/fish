@@ -218,7 +218,7 @@ function main() {
 });
 
 test("a package needing a Node built-in, or with no JS, is refused", () => {
-  expect(run(`import { size } from "needsfs";\nfunction main() { console.log(size); }\n`)).toBe("main.fsh:1:1: error[E0901]: 'needsfs' needs Node's 'fs' module, which a package's JS can't use in Fish yet");
+  expect(run(`import { size } from "needsfs";\nfunction main() { console.log(size); }\n`)).toBe("main.fsh:1:1: error[E1005]: 'needsfs' needs Node's 'fs' module, which a package's JS can't use in Fish yet");
   expect(run(`import { gone } from "typesonly";\nfunction main() { console.log(gone); }\n`)).toStartWith("main.fsh:1:1: error[E0901]: 'typesonly' has no JS Fish could bundle: ");
 });
 
@@ -580,7 +580,7 @@ function main() {
 }
 `;
   expect(run(main, ["one", "two"], { NODE_ENV: "production" })).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production setfalse\n", stderr: "", exitCode: 0 });
-  expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error[E0901]: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
+  expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error[E1005]: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
 });
 
 test("bundled JS's fs/promises reads and writes through Fish's blocking pool, a failure as Node's error", () => {

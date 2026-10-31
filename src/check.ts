@@ -1101,7 +1101,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function incompatible(signature: Body, e: unknown): unknown {
     const prefix = "this overload signature is not compatible with its implementation";
     if (!(e instanceof CompileError) || e.start < signature.start || e.end > signature.end || e.message.startsWith(prefix)) return e;
-    return new CompileError("E0507", `${prefix}: ${e.message}`, e.start, e.end, e.note);
+    return new CompileError("E0410", `${prefix}: ${e.message}`, e.start, e.end, e.note);
   }
 
   // A call made inside an instance with one of its type parameters gets the type the definition

@@ -348,7 +348,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       const [narrowed, declared] = withScope(scope, () => [p.type && resolveType(p.type), param.type && resolveType(param.type)]);
       // A predicate on a borrowed parameter says what the value it points to is.
       const held = declared && typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
-      if (narrowed && held && !fits(narrowed, held)) throw new CompileError("E0109", `a type predicate's type must be assignable to its parameter's type, and '${show(narrowed)}' isn't a '${show(held)}'`, p.type!.start, p.type!.end);
+      if (narrowed && held && !fits(narrowed, held)) throw new CompileError("E0101", `a type predicate's type must be assignable to its parameter's type, and '${show(narrowed)}' isn't a '${show(held)}'`, p.type!.start, p.type!.end);
       return "boolean";
     }
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
@@ -433,7 +433,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
-      throw new CompileError("E0501", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
+      throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
     if (!generic(f)) return instanceOf(f);
     // Optional parameters may be left out at the end.
