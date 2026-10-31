@@ -2699,6 +2699,11 @@ function atob(data: string): string throws TypeError {
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
 export const STD_MODULES: Record<string, string> = {
+  // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
+  // they panic where they are made.
+  assert: String.raw`
+export function ok(_value: boolean, _message?: string): void {}
+`,
   os: String.raw`
 declare function fsh_rt_os_hostname(): Ptr<u8>;
 declare function fsh_rt_os_tmpdir(): Ptr<u8>;

@@ -1,4 +1,4 @@
-import { fileAt } from "./modules.ts";
+import { fileAt, textAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { inherited, isLifetime, upcasts, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
@@ -273,8 +273,8 @@ export const clocks = new WeakMap<Expr, "Date.now" | "performance.now" | "Math.r
 export const jsonCalls = new WeakMap<Expr, "stringify" | "parse">();
 // The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
 export const parses = new WeakMap<Expr, "parseInt" | "parseFloat" | "Number">();
-// Calls of the global `assert`, which panics where it is called.
-export const asserts = new WeakSet<Expr>();
+// Calls of the global `assert`, which panics where it is called, each with its condition as written.
+export const asserts = new WeakMap<Expr, string>();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
 export const regexStringCalls = new WeakMap<Expr, string>();
@@ -1353,6 +1353,7 @@ export function expressions(ctx: Context) {
       const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
       throw new CompileError(callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
+    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(target.start) === "node:assert") return assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
     const util = target && callee.kind === "ident" && fileAt(target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
@@ -2224,7 +2225,7 @@ export function expressions(ctx: Context) {
       if (!stringLike(t)) throw new CompileError(`an assertion's message is a string, not '${show(t)}'`, message.start, message.end);
       if (t !== "string") coerce(message, t, "string", "");
     }
-    asserts.add(e);
+    asserts.set(e, textAt(e.args[0]!));
     return { type: "void", what: "'assert'" };
   }
 

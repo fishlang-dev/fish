@@ -593,6 +593,18 @@ test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a
   });
 });
 
+test("node:assert ports for its default export and ok, and its other names wait on nothing planned", () => {
+  project({
+    "a.ts": "import assert from \"node:assert\";\nassert(1 < 2);\nassert.ok(true, \"fine\");\n",
+    "b.ts": "import { ok } from \"assert\";\nok(1 < 2);\n",
+    "c.ts": "import { ok, strictEqual } from \"node:assert\";\nok(true);\nstrictEqual(1, 1);\n",
+    "d.ts": "import assert from \"assert\";\nassert.deepStrictEqual([1], [1]);\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Node built-ins"], ["Node built-ins"]]);
+    expect(survey(dir).builtins!.map((b) => [b.module, b.equivalent?.name])).toEqual([["assert", "assert, for the default export and ok"]]);
+  });
+});
+
 test("an import whose missing names wait on different features waits on each, and isn't freed by one", () => {
   projects([
     { "a.ts": "import { randomBytes, createHash } from \"node:crypto\";\nconsole.log(randomBytes(4), createHash(\"sha1\"));\n" },

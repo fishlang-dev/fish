@@ -190,7 +190,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", PLANNED("Process spawning")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
-  ["buffer", PLANNED("Typed arrays and DataView")], ["assert", PLANNED("assert")], ["timers", STD("the setTimeout and setInterval globals")],
+  ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
   // `crypto` is more than the random functions std has: an import of only those is portable.

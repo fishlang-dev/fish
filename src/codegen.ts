@@ -613,16 +613,20 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return result;
   }
 
-  // An assertion: a panic at the call, with its message or `assertion failed`, when it is false.
+  // An assertion: a panic at the call when it is false, giving its message, or else
+  // `assertion failed: ` and its condition as written. The message is made only then, as Rust's is.
   function assertCall(e: Extract<Expr, { kind: "call" }>): undefined {
     const holds = value(e.args[0]!);
-    // The message is made whether or not the condition holds, as TypeScript evaluates any call's
-    // arguments.
-    const message = e.args[1] && operand(e.args[1], []);
     const [fail, ok] = [label(), label()];
     emit(`br i1 ${holds}, label %${ok}, label %${fail}`);
     startBlock(fail);
-    unwinding(message ? `call void @fsh_rt_panic_string(ptr ${panicAt(e)}, ptr ${message})` : `call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nassertion failed\n`)})`);
+    if (e.args[1]) {
+      // The message is handed over owned, and what making it left pending released first.
+      const mark = pending.length;
+      const message = owned(e.args[1]);
+      settle(mark);
+      unwinding(`call void @fsh_rt_panic_assert(ptr ${panicAt(e)}, ptr ${message})`);
+    } else unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nassertion failed: ${asserts.get(e)}\n`)})`);
     emit("unreachable");
     startBlock(ok);
     return undefined;
