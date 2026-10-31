@@ -53,7 +53,8 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // What a condition proves when it is true and when it is false. `narrowable` says which
 // variables may narrow; `types` gives each expression's type as checked.
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
-export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type } | undefined;
+// `narrows` hears whether its true and its false answers narrow, which codegen then checks.
+export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
 export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;
@@ -62,7 +63,11 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
-  if (proved && e.kind === "call" && e.args[proved.index]) return split(e.args[proved.index]!, (m) => (fits(m, proved.type) ? "yes" : "no"), true);
+  if (proved && e.kind === "call" && e.args[proved.index]) {
+    const facts = split(e.args[proved.index]!, (m) => (fits(m, proved.type) ? "yes" : "no"), true);
+    proved.narrows(facts.yes.size > 0, facts.no.size > 0);
+    return facts;
+  }
   if (e.kind === "unary" && e.op === "!") {
     const inner = of(e.operand);
     return { yes: inner.no, no: inner.yes };

@@ -4036,7 +4036,10 @@ export function expressions(ctx: Context) {
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
       case "as": {
-        const to = resolveType(e.type);
+        const written = resolveType(e.type);
+        // A function type or a `Promise<T>` makes the value a stored one, as a declared variable's does.
+        const to = storedType(written);
+        if (to !== written) expect(e.expr, to);
         const from = operand(e.expr);
         // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
         const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
@@ -4057,7 +4060,7 @@ export function expressions(ctx: Context) {
           // A reference widened to what it points to would be a copy nobody wrote.
           const read = types.get(e.expr) ?? from;
           if ((isRefType(from) || isRefType(read)) && !isCopy(lower(from)) && !isRefType(to) && !optionRef(to)) throw new CompileError(`'as' can't take the value out of '${show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
-          if (!(from === "boolean" && isInteger(to)) && fits(from, to)) {
+          if (!(from === "boolean" && isInteger(to)) && (fits(from, to) || fits(from, written))) {
             coerce(e.expr, from, to, "");
             return to;
           }

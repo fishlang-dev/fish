@@ -85,7 +85,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   const { emit, temp, label, startBlock, alloca, deep, typing } = b;
   const { membersFor } = typing;
   const llvm = layoutOf(typing);
-  return { convert, test, equals, unionField, holds, eachMember };
+  return { convert, test, equals, unionField, holds, holdsWhere, eachMember };
 
   // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with
   // x a union, to a check of x's tag, and of its payload when v isn't a literal. Undefined for
