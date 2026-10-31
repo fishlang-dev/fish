@@ -1,6 +1,6 @@
 import { fileAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
+import { abstractIn, copyFor, inherited, shownName, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
@@ -95,6 +95,7 @@ export type Context = {
   reach(l: Local, at?: Expr | ObjectProp): Local;
   // Records the bindings a call of a nested function builds its environment from.
   envOf(e: Expr, of: Instance, env: Local[]): void;
+  dynOf(e: Expr, table: DynTable): void;
   // Whether a binding is the one a sync nested function's declaration makes.
   nestedLocal(l: Local): boolean;
   // Whether this is a closure owning what it captures: async, or `move`.
@@ -1389,9 +1390,12 @@ export function expressions(ctx: Context) {
     calls.set(e, instance);
     if (target.js) e.args.forEach((a) => givenToJs(a, types.get(a)!));
     // An async function's call only makes its future; its error comes at the `await`.
-    const error = errorOf(instance);
+    // The error a call raises is the implementation's own, since that is what it gives, or what
+    // an abstract declaration says it may.
+    const declared = callee.kind === "member" ? abstractDeclaration(callee, "methods") : undefined;
+    const error = errorOf(instance) ?? (declared && errorOf(instanceOf(declared)));
     if (error && !target.async) raise(e, error, `'${target.name}'`);
-    const type = resultOf(instance, e);
+    const type = resultOf(declared ? instanceOf(declared) : instance, e);
     const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what
     // was lent to the call, its receiver included.
@@ -2239,7 +2243,7 @@ export function expressions(ctx: Context) {
     if (e.name === "source" || e.name === "flags") return "string";
     if (e.name in REGEX_FLAGS) return "boolean";
     if (e.name === "lastIndex") throw new CompileError("a Fish regex keeps no state, so it has no 'lastIndex'; use 'matchAll' to go through every match", e.start, e.end);
-    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
   // `Date.now()` and `performance.now()`, unless a name of the program's hides `Date` or
@@ -3139,7 +3143,7 @@ export function expressions(ctx: Context) {
     }
     const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
     if (method) throw new CompileError(`'${e.name}' is a method of '${show(t)}'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
-    throw untyped(shape, e.name, e) ?? new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    throw untyped(shape, e.name, e) ?? new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
   // `v.get(key)` and `v.at(i)` read a property or an element of a JsValue, and `v.has(key)` tests
@@ -3164,7 +3168,7 @@ export function expressions(ctx: Context) {
     const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
     if (!method) {
       const field = shape?.fields.some((f) => f.name === callee.name);
-      throw untyped(shape, callee.name, callee) ?? new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${callee.name}' does not exist on type '${show(t)}'`, callee.start, callee.end);
+      throw untyped(shape, callee.name, callee) ?? new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
     jsMethods.add(e);
     // A generic one is typed for the call's type arguments, written or inferred.
@@ -3303,7 +3307,7 @@ export function expressions(ctx: Context) {
     if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
     if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
     if (t.which === "TcpListener" && e.name === "port") return "i64";
-    throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
   // `shared(v)`: v moved into a new counted block, of its type argument, the type expected of
@@ -3336,7 +3340,7 @@ export function expressions(ctx: Context) {
     const inner = lower(t.of);
     if (typeof inner !== "string" && inner.kind === "class") classOf(inner);
     const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
-    if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'`, e.start, e.end);
+    if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
     if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
     // A Rust value is reached only under the lock, and a read here would copy its handle out.
     let rust: RustClass | undefined;
@@ -3628,7 +3632,7 @@ export function expressions(ctx: Context) {
   function traitCall(e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Extract<Type, { kind: "param" | "interface" }>): { type: Type; what: string } {
     const trait = receiver.kind === "param" ? receiver.bound : receiver;
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
-    if (!found) throw new CompileError(`property '${callee.name}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
+    if (!found) throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${receiver.name}'`, callee.start, callee.end);
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
@@ -3722,14 +3726,14 @@ export function expressions(ctx: Context) {
     if (named) {
       const found = inherited(named, "statics", name);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
-      visible(found.access, found.owner!, name, callee);
+      visible(found.access, found.declared ?? found.owner!, name, callee);
       return found;
     }
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'`, callee.start, callee.end);
-    visible(found.access, found.owner!, name, callee);
+    visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);
     else if (found.self!.mutable) mutates(object, name);
     return found;
@@ -3737,18 +3741,32 @@ export function expressions(ctx: Context) {
 
   // `super.m()` runs the base's `m` on the embedded base.
   function superMethod(callee: Extract<Expr, { kind: "member" }>): Body {
-    const base = self?.type.base;
+    // In a copy of a base's member, `super` is the base of the class it was written in.
+    const base = (owner && self && derives(self.type, owner) ? owner : self?.type)?.base;
     if (!base) throw new CompileError("'super' can only be used in a class that extends another", callee.start, callee.end);
     if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
-    const found = inherited(classOf(base), "methods", callee.name);
+    let found = inherited(classOf(base), "methods", callee.name);
     if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'`, callee.start, callee.end);
-    visible(found.access, found.owner!, callee.name, callee);
+    if (found.abstract) throw new CompileError(`'${callee.name}' is abstract in '${found.owner!.name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
+    // A template runs as this class's own copy of it, on this class's `this`.
+    const original = found.copyOf ?? found;
+    const copied = original.template === true && !self!.type.abstract;
+    if (copied) found = copyFor(classOf(self!.type), original);
+    visible(found.access, found.declared ?? found.owner!, callee.name, callee);
     if (found.self!.mutable && !self!.mutable) {
       throw new CompileError(`cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
     }
-    types.set(callee.object, base);
+    types.set(callee.object, copied ? self!.type : base);
     if (found.self!.owned) takesOver(callee.object, callee.name);
     return found;
+  }
+
+  // Inside an abstract class's code, its copies included, `this.name` naming one of its abstract
+  // members is typed by the declaration, which each implementation's result is converted to.
+  function abstractDeclaration(e: Extract<Expr, { kind: "member" }>, table: "methods" | "getters"): Body | undefined {
+    if (e.object.kind !== "this" || !owner?.abstract) return undefined;
+    const declared = inherited(classOf(owner), table, e.name);
+    return declared?.abstract ? declared : undefined;
   }
 
   // TypeScript's access rules: a private member is reachable only from inside its class, and
@@ -3756,8 +3774,10 @@ export function expressions(ctx: Context) {
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
     if (!access || access === "public" || owner === declaring) return;
     if (access === "protected" && owner && derives(owner, declaring)) return;
+    // A base reaches a subclass's implementation of its abstract member.
+    if (access === "protected" && owner && derives(declaring, owner) && abstractIn(classOf(owner), name)) return;
     const message = name.startsWith("#")
-      ? `property '${name}' is not accessible outside class '${declaring.name}' because it has a private identifier`
+      ? `property '${shownName(name)}' is not accessible outside class '${declaring.name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
   }
@@ -3793,6 +3813,11 @@ export function expressions(ctx: Context) {
   function value(e: Expr): Type {
     if (once.delete(e)) return types.get(e)!;
     const type = typeOf(e);
+    // An abstract class's code sees `this` as the abstract class, which exists only embedded in
+    // a subclass, so a value of that type, such as `this.clone()`, can't be made there.
+    if (owner?.abstract && type === owner && e.kind !== "this" && e.kind !== "super") {
+      throw new CompileError(`this would make a value of the abstract class '${owner.name}', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there`, e.start, e.end);
+    }
     types.set(e, type);
     return type;
   }
@@ -3962,7 +3987,7 @@ export function expressions(ctx: Context) {
         // A Map's or a Set's one property is its size, the number of entries it holds.
         if (typeof object !== "string" && object.kind === "map") {
           if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "size") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "size") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -3974,7 +3999,7 @@ export function expressions(ctx: Context) {
         }
         // A fixed array's one property is its length, known while compiling.
         if (isFixed(object)) {
-          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
           load();
           return "usize";
         }
@@ -3984,14 +4009,14 @@ export function expressions(ctx: Context) {
           if (ARRAY_METHODS.has(e.name)) throw new CompileError(`array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
           // A shared value's array is read as a copy, which has only the room it needs.
           if (e.name === "capacity" && ctx.copiesOut.has(e.object)) throw new CompileError(`a shared value's array is read as a copy, so read its capacity inside '${placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
-          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+          if (e.name !== "length" && e.name !== "capacity") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
         // A string's one property is its length in UTF-16 code units.
         if (stringLike(object)) {
           if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'`, e.start, e.end);
+          if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type 'string'`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -3999,16 +4024,16 @@ export function expressions(ctx: Context) {
         const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
-          visible(getter.access, getter.owner!, e.name, e);
+          visible(getter.access, getter.declared ?? getter.owner!, e.name, e);
           calls.set(e, instanceOf(getter));
-          const returns = returnOf(instanceOf(getter), e);
+          const returns = returnOf(instanceOf(abstractDeclaration(e, "getters") ?? getter), e);
           // A getter's reference borrows from its object.
           if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
           return linked(e) ? optional(returns, e) : returns;
         }
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
-        if (!found) throw new CompileError(`property '${e.name}' does not exist on type '${show(object)}'`, e.start, e.end);
+        if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'`, e.start, e.end);
         if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
         // Through a type parameter the field has its bound's type, and in an instance the
         // concrete class may give it with a getter.
@@ -4163,6 +4188,7 @@ export function expressions(ctx: Context) {
           return blockType("AbortController");
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
+        if (named?.node.abstract) throw new CompileError(`cannot create an instance of the abstract class '${named.type.name}'`, e.start, e.end);
         const written = named?.constructor.params ?? (e.callee.kind === "ident" && !lookup(e.callee.name) ? ctx.templateParams(e.callee.name) : undefined);
         if (written?.at(-1)?.rest && e.args) packRest(e, e.args, written);
         else refuseSpread(list);
@@ -4308,6 +4334,9 @@ export function expressions(ctx: Context) {
         if (e.op === "instanceof") return instanceofCheck(e, unions);
         if (e.op === "**") return power(e.left, operand(e.left), e.right, operand(e.right), e);
         if (e.op === "??") return orElse(e);
+        if (e.op === "in" && e.left.kind === "privateName") {
+          throw new CompileError(`'${e.left.name} in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling`, e.start, e.end);
+        }
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [operand(e.left), operand(e.right)];
@@ -5132,7 +5161,7 @@ export function expressions(ctx: Context) {
     if (!setter && inherited(c, "getters", target.name)) {
       throw new CompileError(`cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
     }
-    if (setter) visible(setter.access, setter.owner!, target.name, target);
+    if (setter) visible(setter.access, setter.declared ?? setter.owner!, target.name, target);
     return setter;
   }
 
@@ -5177,7 +5206,7 @@ export function expressions(ctx: Context) {
       }
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && restStarts.has(root.object)) path = `[${BigInt(restStarts.get(root.object)!) + root.index.value}]${path}`;
-      else if (!(root.kind === "member" && restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${root.name}`) : "[...]"}${path}`;
+      else if (!(root.kind === "member" && restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${shownName(root.name)}`) : "[...]"}${path}`;
       root = root.object;
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {
@@ -5209,7 +5238,11 @@ export function expressions(ctx: Context) {
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.
-    if (typeof held === "string" || held.kind !== "param") dynMembers.set(`${keyOf(held)} ${keyOf(lower(to))}`, dynTable(e, held, lower(to) as DynType));
+    if (typeof held === "string" || held.kind !== "param") {
+      const table = dynTable(e, held, lower(to) as DynType);
+      dynMembers.set(`${keyOf(held)} ${keyOf(lower(to))}`, table);
+      ctx.dynOf(e, table);
+    }
     coercions.set(e, to);
   }
 
@@ -5306,7 +5339,7 @@ export function expressions(ctx: Context) {
     const m = t.of.methods[index];
     if (!m) {
       const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : "";
-      throw new CompileError(`property '${callee.name}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
+      throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
     if (m.generic) throw new CompileError(`'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${t.of.name}' instead`, callee.start, callee.end);
@@ -5364,7 +5397,7 @@ export function expressions(ctx: Context) {
     const f = t.of.fields.find((x) => x.name === e.name);
     if (!f) {
       const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : "";
-      throw new CompileError(`property '${e.name}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
+      throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
     }
     // A copy of an Atomic, a Lock or a Dyn would change apart from the original.
     if (interiorMutable(f.type) || holdsHandle(f.type)) throw new CompileError(`'${e.name}' can't be read through a Dyn, which gives a copy of it, and a copy of a '${show(f.type)}' would change apart from the one the Dyn holds; read it through a method`, e.start, e.end);
@@ -5452,7 +5485,7 @@ export function expressions(ctx: Context) {
   function placeText(e: Expr): string {
     const rest = restText(e, placeText);
     if (rest) return rest;
-    if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${e.name}`;
+    if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${shownName(e.name)}`;
     if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
