@@ -806,7 +806,14 @@ function typeAlias(c: Mut<Cursor>): TypeAlias {
   const name = c.ident().text;
   const typeParams = typeParameters(c);
   c.expect("=");
-  const t = type(c);
+  let t = type(c);
+  // A function type's alias takes its JSDoc `@throws` tags as that type's clause, in the place a
+  // written clause has; any other alias has no clause for them to give.
+  if (t.kind === "function") {
+    const { construct, abstract, ...head } = t;
+    const throws = documentedThrows(c, start, t.throws);
+    if (throws) t = { ...head, throws, construct, abstract };
+  }
   return { id: nextId(c.ids), kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
 }
 
