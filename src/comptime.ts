@@ -3,7 +3,7 @@ import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { clocks, equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
+import { asserts, clocks, equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, lower, range, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -53,6 +53,9 @@ class Stop {
     this.panic = panic;
   }
 }
+
+// A false `assert`, which fails the build at the assert itself.
+class Assertion extends Stop {}
 
 // A `return`, unwinding to its function's call or to its match arm.
 class Return {
@@ -219,8 +222,9 @@ function guarded(site: Span, go: (run: Interpreter) => Value): Value {
     // A string or array past what the compiler can hold.
     if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
     if (!(stop instanceof Stop)) throw e;
-    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
     const inside = stop.at.start !== site.start || stop.at.end !== site.end;
+    if (stop instanceof Assertion) throw new CompileError(stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
+    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
     throw new CompileError(what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
   }
 }
@@ -658,6 +662,10 @@ function interpreter() {
     // A data-carrying enum's member, as `Shape.Circle(2)`.
     if (type !== undefined && typeof type !== "string" && type.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
       return { kind: "variant", type, args: e.args.map((a) => expr(f, a)) };
+    }
+    if (asserts.has(e)) {
+      if (expr(f, e.args[0]!) === true) return undefined;
+      throw new Assertion(e.args[1] ? String(unwrap(expr(f, e.args[1]))) : `assertion failed: ${asserts.get(e)}`, e, true);
     }
     const target = f.instance.calls.get(e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return call(target, args(f, target, e.args), f.self, e);

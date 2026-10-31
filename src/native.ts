@@ -1171,13 +1171,15 @@ void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   fsh_rt_panic(reason);
 }
 
-// A panic whose reason is a string the program made, as an assertion's message; at is the
-// "panicked at" line.
-void fsh_rt_panic_string(const char *at, fsh_str *reason) {
+// An assertion's panic, its message the reason; at is the "panicked at" line. The message is
+// released here, as the panic unwinds past the statement that would release it.
+void fsh_rt_panic_assert(const char *at, fsh_str *message) {
+  size_t length = message ? message->length : 0;
   fflush(NULL);
   fputs(at, stderr);
-  fwrite(reason->bytes, 1, reason->length, stderr);
-  fsh_panic_reason(reason->bytes, reason->length);
+  if (length > 0) fwrite(message->bytes, 1, length, stderr);
+  fsh_panic_reason(length > 0 ? message->bytes : "", length);
+  fsh_rt_str_release(message);
   fsh_rt_panic("\n");
 }
 

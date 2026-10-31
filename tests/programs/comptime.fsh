@@ -812,3 +812,49 @@ function main() {
   const small: u8 = 200;
   console.log(fib(25), label(5), 7.5 / 2, small, "abc".toUpperCase(), 1 << 10);
 }
+// case: comptime_assert_passing
+// expect: 6
+function factorial(n: i64): i64 {
+  assert(n >= 0, "n is not negative");
+  return n === 0 ? 1 : n * factorial(n - 1);
+}
+const six = comptime factorial(3);
+function main() {
+  console.log(six);
+}
+// case: comptime_assert_message
+// error: comptime_assert_message.fsh:4:3: error: n is positive, not -1
+// error: while running this comptime code
+function positive(n: i64): i64 {
+  assert(n > 0, "n is positive, not " + String(n));
+  return n;
+}
+const n = comptime positive(-1);
+function main() {
+  console.log(n);
+}
+// case: comptime_assert_without_message
+// error: comptime_assert_without_message.fsh:4:5: error: assertion failed: n > 0
+function repeat(comptime n: i64, s: string): string {
+  comptime {
+    assert(n > 0)
+  }
+  return s;
+}
+function main() {
+  console.log(repeat(0, "a"));
+}
+// case: comptime_assert_message_only_on_failure
+// expect: 1
+function boom(): string {
+  const xs: i64[] = [];
+  return String(xs[1]);
+}
+function one(): i64 {
+  assert(true, boom());
+  return 1;
+}
+const v = comptime one();
+function main() {
+  console.log(v);
+}
