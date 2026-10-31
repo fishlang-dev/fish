@@ -17,7 +17,7 @@ export function directive(src: string): { edition: Edition; start: number; end: 
   if (!/^\/\/\s*@fish-edition(?=\s|$)/.test(line)) return undefined;
   const end = start + line.length;
   const edition = /^\/\/ @fish-edition (native|ts-compat)$/.exec(line)?.[1] as Edition | undefined;
-  if (!edition) throw new CompileError("an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'", start, end);
+  if (!edition) throw new CompileError("E0005", "an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'", start, end);
   return { edition, start, end };
 }
 
@@ -28,7 +28,7 @@ export function refuseCompat(src: string, packaged: Edition | undefined) {
   if ((declared?.edition ?? packaged) !== "ts-compat") return;
   const newline = src.indexOf("\n");
   const at = declared ?? { start: 0, end: Math.max(newline < 0 ? src.length : newline, 1) };
-  throw new CompileError("this file is in the TS-compat edition, which Fish doesn't compile; run 'fishc lint' to find what to change, then mark it '// @fish-edition native'", at.start, at.end);
+  throw new CompileError("E0006", "this file is in the TS-compat edition, which Fish doesn't compile; run 'fishc lint' to find what to change, then mark it '// @fish-edition native'", at.start, at.end);
 }
 
 // A construct a migration rule finds, by the rule's id, over a file's text. An auto rule's hit

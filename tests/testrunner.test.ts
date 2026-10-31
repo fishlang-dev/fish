@@ -168,7 +168,7 @@ test("a test name used twice in a package is refused at its second use", () => {
   });
   const { code, err } = fishc(dir);
   expect(code).toBe(1);
-  expect(err).toBe(`src/b.fsh:2:6: error: there is already a test named 'same' in 'src/a.fsh'; give each test a name of its own\n 2 | test("same", () => {});\n   |      ^^^^^^\n`);
+  expect(err).toBe(`src/b.fsh:2:6: error[E1106]: there is already a test named 'same' in 'src/a.fsh'; give each test a name of its own\n 2 | test("same", () => {});\n   |      ^^^^^^\n`);
 });
 
 const SYSTEM = "declare function system(command: Ptr<u8>): i32;\nfunction main() {}\n";

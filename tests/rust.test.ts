@@ -116,8 +116,8 @@ test("a crate's name with '-' is spelled with '_' in its shim's symbols", () => 
 
 test("Rust declarations and imports are refused where they go wrong", () => {
   expect(refused(pkg({ "src/main.fsh": `import { add } from "rust:other";\nfunction main() {}\n` })))
-    .toBe(`src/main.fsh:1:1: error: 'other' isn't a Rust dependency of this package; list it under [rust-dependencies] in fish.toml, as in other = "1.0"`);
-  expect(refused(pkg({ "src/main.fsh": `import { nope } from "rust:demo";\nfunction main() {}\n` }))).toBe("src/main.fsh:1:10: error: 'rust:demo' has no export named 'nope'");
+    .toBe(`src/main.fsh:1:1: error[E1004]: 'other' isn't a Rust dependency of this package; list it under [rust-dependencies] in fish.toml, as in other = "1.0"`);
+  expect(refused(pkg({ "src/main.fsh": `import { nope } from "rust:demo";\nfunction main() {}\n` }))).toBe("src/main.fsh:1:10: error[E0902]: 'rust:demo' has no export named 'nope'");
   const unsupported = pkg({
     "src/rust.fsh": `declare module "rust:demo" {\n  export function s(x: Map<string, i64>): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n}\n`,
@@ -132,14 +132,14 @@ test("Rust declarations and imports are refused where they go wrong", () => {
     "src/rust.fsh": `const name = "x";\ndeclare module "rust:demo" {\n  @rust(name) export function s(): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n`,
   });
-  expect(refused(path)).toBe(`rust.fsh:3:4: error: @rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`);
+  expect(refused(path)).toBe(`rust.fsh:3:4: error[E1004]: @rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`);
   const notPath = pkg({
     "src/rust.fsh": `declare module "rust:demo" {\n  @rust("a; b") export function s(): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n`,
   });
-  expect(refused(notPath)).toBe(`rust.fsh:2:9: error: this isn't a Rust path; write one from the crate's root, as in "util::mul"`);
+  expect(refused(notPath)).toBe(`rust.fsh:2:9: error[E1004]: this isn't a Rust path; write one from the crate's root, as in "util::mul"`);
   expect(refused(pkg({ "src/rust.fsh": "", "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n` })))
-    .toBe(`src/main.fsh:1:1: error: no file of this package declares the functions of 'demo'; declare them in one, as in 'declare module "rust:demo" { export function f(x: i64): i64; }'`);
+    .toBe(`src/main.fsh:1:1: error[E1004]: no file of this package declares the functions of 'demo'; declare them in one, as in 'declare module "rust:demo" { export function f(x: i64): i64; }'`);
 });
 
 test("a package builds and runs with a Rust crate's functions", () => {
@@ -256,7 +256,7 @@ test("only the package being built lists Rust crates", () => {
   }, `demo = { path = "rust/demo" }\n\n[dependencies]\ndep = { path = "dep" }`);
   const run = fishc(dir, ["build"]);
   expect(run.code).toBe(1);
-  expect(run.err.split("\n")[0]).toBe("dep/fish.toml:5:1: error: the dependency 'dep' lists Rust crates under [rust-dependencies]; only the package being built may list them for now");
+  expect(run.err.split("\n")[0]).toBe("dep/fish.toml:5:1: error[E0906]: the dependency 'dep' lists Rust crates under [rust-dependencies]; only the package being built may list them for now");
   expect(existsSync(join(dir, "cache", "fish", "rust"))).toBe(false);
 });
 
@@ -401,13 +401,13 @@ test("what a Rust handle can't do is refused where it is written", () => {
   ];
   for (const [program, error] of cases) expect(refused(handles(program))).toBe(error);
   const declared = (body: string) => refused(handles(`function main() {}\n`, `declare module "rust:demo" {\n${body}\n}\n`));
-  expect(declared(`  export class A extends B {}`)).toBe("rust.fsh:2:26: error: a Rust type's class can't extend another");
-  expect(declared(`  export class A implements I {}`)).toBe("rust.fsh:2:29: error: a Rust type's class can't implement an interface yet");
-  expect(declared(`  export class A {\n    x: i64;\n  }`)).toBe("rust.fsh:3:5: error: a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish");
-  expect(declared(`  export class A {\n    get(): i64 {\n      return 1;\n    }\n  }`)).toBe("rust.fsh:3:5: error: a Rust type's members are declared without bodies; the crate has them");
-  expect(declared(`  @rust.other export class A {}`)).toBe(`rust.fsh:2:4: error: a Rust type takes only '@rust("path::to::Type")'`);
-  expect(declared(`  @rust.local export class A {}`)).toBe("rust.fsh:2:4: error: Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send");
-  expect(declared(`  export class A {\n    @rust("a::b") get(): i64;\n  }`)).toBe(`rust.fsh:3:11: error: a member's Rust name is one name, as in "with_value"`);
+  expect(declared(`  export class A extends B {}`)).toBe("rust.fsh:2:26: error[E1004]: a Rust type's class can't extend another");
+  expect(declared(`  export class A implements I {}`)).toBe("rust.fsh:2:29: error[E1004]: a Rust type's class can't implement an interface yet");
+  expect(declared(`  export class A {\n    x: i64;\n  }`)).toBe("rust.fsh:3:5: error[E1004]: a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish");
+  expect(declared(`  export class A {\n    get(): i64 {\n      return 1;\n    }\n  }`)).toBe("rust.fsh:3:5: error[E1004]: a Rust type's members are declared without bodies; the crate has them");
+  expect(declared(`  @rust.other export class A {}`)).toBe(`rust.fsh:2:4: error[E1004]: a Rust type takes only '@rust("path::to::Type")'`);
+  expect(declared(`  @rust.local export class A {}`)).toBe("rust.fsh:2:4: error[E1004]: Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send");
+  expect(declared(`  export class A {\n    @rust("a::b") get(): i64;\n  }`)).toBe(`rust.fsh:3:11: error[E1004]: a member's Rust name is one name, as in "with_value"`);
   const lent = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    peek(): Ref<A>;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
   expect(refused(lent)).toBe("rust.fsh:4:13: error: the Rust function 'A.peek' can't give a 'Ref<A>': a borrow's lifetime can't cross from Rust yet; give the value itself");
   const text = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: i64 | string): i64;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });

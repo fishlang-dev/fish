@@ -373,7 +373,7 @@ function cursor(src: string, ids: Ids, from = 0, docs = false): Cursor {
       if (RESERVED.has(c.peek().text)) throw c.error("expected a name");
       return c.next();
     },
-    error: (message, t: Token | undefined = c.peek()) => new CompileError(`${message}, found ${describe(t)}`, t.start, t.end),
+    error: (message, t: Token | undefined = c.peek()) => new CompileError("E0001", `${message}, found ${describe(t)}`, t.start, t.end),
     list: (item, close) => allowingIn(c, true, () => {
       const items = [];
       while (!c.at(close)) {
@@ -485,7 +485,7 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
   });
   if (shape(doc) !== shape(written)) {
     const text = (t: TypeNode) => c.src.slice(t.start, t.end);
-    throw new CompileError(`the JSDoc says '@throws {${types.map(text).join(" | ")}}' but the function says 'throws ${text(written)}'; make them the same type, or keep one`, doc.start, doc.end);
+    throw new CompileError("E0602", `the JSDoc says '@throws {${types.map(text).join(" | ")}}' but the function says 'throws ${text(written)}'; make them the same type, or keep one`, doc.start, doc.end);
   }
   return written;
 }
@@ -740,7 +740,7 @@ function simpleStatement(c: Cursor): Stmt {
   }
   if (c.at("throw")) {
     c.next();
-    if (c.peek().newlineBefore) throw new CompileError("a line break is not allowed after 'throw'", start, c.peek().start);
+    if (c.peek().newlineBefore) throw new CompileError("E0004", "a line break is not allowed after 'throw'", start, c.peek().start);
     const value = sequence(c);
     return { id: nextId(c.ids), kind: "throw", value, start, end: value.end };
   }

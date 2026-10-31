@@ -111,7 +111,7 @@ const WHOLE = {"node_modules/dflt/index.d.ts": "export default function slug(s: 
 
 test("default, namespace and export = imports reach a package's declarations", () => {
   expect(stops({ ...WHOLE, "main.fsh": "import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n" })).toMatch(TYPE_CHECKED);
-  expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error: 'ns' has no export 'nope'");
+  expect(stops({ ...WHOLE, "main.fsh": "import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n" })).toContain("main.fsh:2:29: error[E0902]: 'ns' has no export 'nope'");
 });
 
 test("a const of an interface with generic methods, as lodash declares itself", () => {

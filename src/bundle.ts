@@ -20,7 +20,7 @@ export function bundle(packages: Package[], used: number[]): string {
   const result = JSON.parse(run.stdout.toString()) as Result;
   if ("code" in result) return result.code;
   const at = packages[result.index]!.at;
-  throw new CompileError(result.message, at.start, at.end);
+  throw new CompileError("E0901", result.message, at.start, at.end);
 }
 
 // The Node modules Fish's std has, as bundled JS sees them: `path` as Node's POSIX path written

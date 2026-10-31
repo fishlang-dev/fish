@@ -108,7 +108,7 @@ function pipeline(c: Cursor): Expr {
     const body = conditional(c);
     const used = c.topic.used;
     c.topic = outer;
-    if (!used) throw new CompileError("the right side of '|>' must use the topic '%'", body.start, body.end);
+    if (!used) throw new CompileError("E0004", "the right side of '|>' must use the topic '%'", body.start, body.end);
     value = { id: nextId(c.ids), kind: "pipe", value, body, start: value.start, end: body.end };
   }
   return value;
@@ -355,7 +355,7 @@ export function primary(c: Cursor): Expr {
   if (c.peek().kind === "template" || c.peek().kind === "templateHead") return template(c);
   if (c.at("%")) {
     const t = c.next();
-    if (!c.topic) throw new CompileError("'%' is only valid on the right of '|>'", t.start, t.end);
+    if (!c.topic) throw new CompileError("E0004", "'%' is only valid on the right of '|>'", t.start, t.end);
     c.topic.used = true;
     return { id: nextId(c.ids), kind: "topic", start: t.start, end: t.end };
   }
