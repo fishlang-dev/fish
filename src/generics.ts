@@ -209,7 +209,16 @@ export function concrete(t: Type): boolean {
   if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
   // An interface describes values without being one, so only a definition check holds one.
   if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
-  if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+  if (t.kind === "class") {
+    // A class may name itself in its base's type arguments, as `N extends Base<N>` does.
+    if (visiting.has(t)) return true;
+    visiting.add(t);
+    try {
+      return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+    } finally {
+      visiting.delete(t);
+    }
+  }
   // A type holding itself through an array is as concrete as the type arguments it was made with.
   const tied = tiedBy(t);
   if (tied) return tied.args.every(concrete);
@@ -233,6 +242,7 @@ export function concrete(t: Type): boolean {
 }
 
 const concreteObjects = new WeakMap<ObjectType, boolean>();
+const visiting = new Set<ClassType>();
 
 // What instantiating needs from the checker.
 type Checker = {

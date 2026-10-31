@@ -4209,7 +4209,7 @@ export function expressions(ctx: Context) {
         // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
         const early = !named && e.typeArgs.length > 0 && e.callee.kind === "ident" && !lookup(e.callee.name) ? construct(e.callee.name, e.typeArgs, [], e) : undefined;
         early?.constructor.params.forEach((p, i) => {
-          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? early.scope.get(p.type.name) : undefined;
+          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? (early.constructor.scope ?? early.scope).get(p.type.name) : undefined;
           if (list[i]?.kind === "arrow" && held) expect(list[i]!, held);
         });
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.

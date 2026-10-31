@@ -235,16 +235,17 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
 
   // As in TypeScript, a static member can't name the class's type parameters, only its own.
   function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
-    const own = new Set(m.typeParams.map((p) => p.name));
     const outer = new Set(node.typeParams.map((p) => p.name));
-    const find = (t: unknown): Span | undefined => {
+    // A function inside declaring its own type parameter of that name hides the class's.
+    const find = (t: unknown, hidden: Set<string>): Span | undefined => {
       if (!t || typeof t !== "object") return undefined;
-      if (Array.isArray(t)) return t.map(find).find((x) => x);
-      const n = t as { kind?: string; name?: string; args?: unknown[] } & Span;
-      if (n.kind === "ref" && n.args?.length === 0 && outer.has(n.name!) && !own.has(n.name!)) return n;
-      return Object.values(n).map(find).find((x) => x);
+      if (Array.isArray(t)) return t.map((x) => find(x, hidden)).find((x) => x);
+      const n = t as { kind?: string; name?: string; args?: unknown[]; typeParams?: TypeParam[] } & Span;
+      if (n.kind === "ref" && n.args?.length === 0 && outer.has(n.name!) && !hidden.has(n.name!)) return n;
+      const inner = n.typeParams?.length ? new Set([...hidden, ...n.typeParams.map((p) => p.name)]) : hidden;
+      return Object.values(n).map((x) => find(x, inner)).find((x) => x);
     };
-    const used = find([m.params, m.returnType, m.throws, m.body]) as (Span & { name: string }) | undefined;
+    const used = find(m, new Set()) as (Span & { name: string }) | undefined;
     if (used) throw new CompileError(`a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
   }
 
@@ -285,7 +286,7 @@ export const upcasts = new Set<string>();
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
-export function extend(c: ClassInfo, base: ClassInfo) {
+export function extend(c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
   c.base = base;
   c.type.base = base.type;
   for (let b: ClassInfo | undefined = base; b; b = b.base) {
@@ -307,10 +308,13 @@ export function extend(c: ClassInfo, base: ClassInfo) {
     c.constructor.body = [...defaults, first, ...c.prelude, ...rest];
     return;
   }
-  // The base's parameters are typed in its scope, which may name its type parameters as this
-  // class names other things, so they are renamed apart into this constructor's own scope.
-  const names = new Map([...(base.constructor.scope ?? [])].map(([k]) => [k, `${k} of ${base.type.name}`]));
-  if (names.size > 0) c.constructor.scope = new Map([...c.scope, ...[...base.constructor.scope!].map(([k, t]): [string, Type] => [names.get(k)!, t])]);
+  // The base's parameters are typed in its scope, where a name may mean something other than it
+  // does here: one of its own type parameters, or a type this class's type parameter hides. Each
+  // such name is renamed apart into this constructor's own scope, standing for what it means there.
+  const outer = base.constructor.scope ?? new Map<string, Type>();
+  const names = new Map([...new Set(base.constructor.params.flatMap((p) => refNames(p.type)))]
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${base.type.name}`]));
+  if (names.size > 0) c.constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = base.constructor.params.map((p) => {
     const copy = { ...p, modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
@@ -326,6 +330,14 @@ export function extend(c: ClassInfo, base: ClassInfo) {
   const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;
   c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];
+}
+
+// The names a type refers to without type arguments.
+function refNames(t: unknown): string[] {
+  if (Array.isArray(t)) return t.flatMap(refNames);
+  if (!t || typeof t !== "object") return [];
+  const n = t as { kind?: string; name?: string; args?: unknown[] };
+  return [...(n.kind === "ref" && n.args?.length === 0 ? [n.name!] : []), ...Object.values(t).flatMap(refNames)];
 }
 
 // A copy of a type with the type parameters `names` maps renamed.

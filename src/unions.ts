@@ -123,7 +123,11 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
   // A generic class written without its type arguments is the instance of it the value may be.
   const name = e.right.kind === "ident" ? e.right.name : undefined;
   const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
-  const instances = c || !name ? [] : members.filter((m): m is ClassType => typeof m !== "string" && m.kind === "class" && m.generic?.name === name);
+  // A member may be one through its base, as `Words extends List<string>` is a `List`.
+  const instances = c || !name ? [] : [...new Set(members.flatMap((m) => {
+    for (let x: Type | undefined = m; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x.generic?.name === name) return [x];
+    return [];
+  }))];
   if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c ?? instances[0];
   if (!tested) throw new CompileError("the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);

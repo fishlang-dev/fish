@@ -59,7 +59,8 @@ export function registry({ classes, templates, members, resolveType, withScope, 
     const rust = rustClassOf(base.type);
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
-    extend(c, base);
+    const at = c.node.extends!;
+    extend(c, base, (name) => withScope(new Map(), () => resolveType({ kind: "ref", name, args: [], start: at.start, end: at.end })));
     checkOverrides(c);
     linked.add(c);
   }
