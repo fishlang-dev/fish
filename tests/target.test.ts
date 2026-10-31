@@ -11,7 +11,8 @@ const none = () => null;
 
 test("the host's triple", () => {
   expect(hostTriple("darwin", "arm64")).toBe(mac);
-  expect(hostTriple("linux", "x64")).toBe(linux);
+  expect(hostTriple("linux", "x64", false)).toBe(linux);
+  expect(hostTriple("linux", "arm64", true)).toBe("aarch64-unknown-linux-musl");
   expect(hostTriple("win32", "x64")).toBeUndefined();
   expect(hostTriple("linux", "ia32")).toBeUndefined();
 });
@@ -88,3 +89,14 @@ test("FISH_SYSROOT leaves a build for the host alone", () => {
     expect(Bun.spawnSync([join(dir, "main")]).stdout.toString()).toBe("host\n");
   }
 }, 120000);
+
+test("Linux over musl takes a musl sysroot from any host whose libc isn't musl", () => {
+  const arm = "aarch64-unknown-linux-musl";
+  expect(resolveTarget(arm, "/s", mac, has)).toEqual({ triple: arm, compile: ["-target", arm, "-Wno-override-module", "--sysroot", "/s"], link: ["-fuse-ld=lld"], ar: "llvm-ar" });
+  expect(() => resolveTarget(arm, undefined, mac, has)).toThrow("from macOS needs a musl sysroot, a directory holding the target's /usr/include and /usr/lib with musl and libgcc, such as the root of an Alpine Linux system with musl-dev and gcc installed; give it with --sysroot <dir> or FISH_SYSROOT");
+  expect(() => resolveTarget("x86_64-unknown-linux-musl", undefined, linux, has)).toThrow("from Linux needs a musl sysroot");
+  expect(resolveTarget("x86_64-unknown-linux-musl", "/s", linux, has)).toEqual({ triple: "x86_64-unknown-linux-musl", compile: ["-target", "x86_64-unknown-linux-musl", "-Wno-override-module", "--sysroot", "/s"], link: ["-fuse-ld=lld"], ar: "ar" });
+  // On a musl host, its own triple is a plain build, and glibc is the other libc.
+  expect(resolveTarget("x86_64-unknown-linux-musl", undefined, "x86_64-unknown-linux-musl", none)).toBe(HOST_TARGET);
+  expect(() => resolveTarget(linux, undefined, "x86_64-unknown-linux-musl", has)).toThrow("needs a Linux sysroot");
+});
