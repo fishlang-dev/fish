@@ -77,3 +77,43 @@ test("a function from an imported file is described in that file", () => {
   expect(ir).toMatch(new RegExp(`!DISubprogram\\(name: "twice", [^)]*file: ${util}, line: 1,`));
   expect(lineOf(ir, "@llvm.smul.with.overflow.i64")).toBe(3);
 });
+
+const STD_PROGRAM = `function main() {
+  const words = ["a", "bb", "ccc"].map((w) => w.toUpperCase());
+  let m = new Map<string, usize>();
+  for (const w of words) m.set(w, w.length);
+  console.log(words.join(","), m.get("BB"));
+}
+`;
+
+test("-g dev and release builds run as plain ones do, and share std's cached object", () => {
+  const file = place("binaries", { "main.fsh": STD_PROGRAM });
+  const cache = join(root, "cache");
+  const dir = join(root, "binaries");
+  const objects = () => readdirSync(join(cache, "objects")).filter((f) => f.startsWith("std-"));
+  const built = (out: string, ...flags: string[]) => {
+    expect(fishc(dir, ["build", file, "-o", out, ...flags], { FISH_CACHE_DIR: cache })).toEqual({ code: 0, out: "", err: "" });
+    return Bun.spawnSync([join(dir, out)]).stdout.toString();
+  };
+  expect(built("plain")).toBe("A,BB,CCC 2\n");
+  const std = objects();
+  expect(std).toHaveLength(1);
+  expect(built("debug", "-g")).toBe("A,BB,CCC 2\n");
+  expect(built("release", "-g", "--release")).toBe("A,BB,CCC 2\n");
+  expect(objects()).toEqual(std);
+});
+
+test("fishc run -g runs the program", () => {
+  const file = place("run", { "main.fsh": PROGRAM });
+  expect(fishc(join(root, "run"), ["run", file, "-g"])).toEqual({ code: 0, out: "3\n", err: "" });
+});
+
+test.skipIf(!Bun.which("lldb"))("lldb stops at a breakpoint on a .fsh line", () => {
+  const file = place("lldb", { "main.fsh": PROGRAM });
+  const dir = join(root, "lldb");
+  expect(fishc(dir, ["build", file, "-g", "-o", "prog"]).code).toBe(0);
+  const session = Bun.spawnSync(["lldb", "-b", "-o", "b main.fsh:6", "-o", "run", "-o", "bt", "-o", "kill", "prog"], { cwd: dir });
+  const out = session.stdout.toString();
+  expect(out).toContain("Breakpoint 1: where = prog`main + ");
+  expect(out).toMatch(/frame #0: .* prog`main at main\.fsh:6:13/);
+});
