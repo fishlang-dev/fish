@@ -18,6 +18,12 @@ test("a note renders after the error at its own location", () => {
   );
 });
 
+test("an error at the start of a file that opens with a newline points at its first line", () => {
+  expect(formatError(new CompileError("no main() function; execution starts there", 0, 0), "f.fsh", "\nfunction f() {}\n")).toBe(
+    ["f.fsh:1:1: error: no main() function; execution starts there", " 1 | ", "   | ^"].join("\n"),
+  );
+});
+
 test("only names the compiler made up are rewritten in messages, never text a user wrote", () => {
   const names = { local: new Set<string>(), madeUp: new Map([['test "made"', "the test 'made'"]]) };
   expect(shown(`'test "made"-fsh3' throws`, names)).toBe("the test 'made' throws");

@@ -53,12 +53,12 @@ export function compile(session: Session, src: string, file: string, release = f
   return compiled(session, src, file, release, panic, library, leaks).ir;
 }
 
-// Checks the program whose entry is `file` as `compile` would, generating nothing, or a library
-// with no main; throws its first CompileError. Gives the warnings.
-export function checkProgram(session: Session, file: string, library = false): CompileError[] {
+// Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
+// first CompileError. Gives the warnings.
+export function checkProgram(session: Session, file: string): CompileError[] {
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, readFileSync(file, "utf8"));
-  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, library), library));
+  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, false)));
   for (const w of checked.warnings) w.sources = loaded.sources;
   return checked.warnings;
 }

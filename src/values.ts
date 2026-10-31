@@ -5,7 +5,7 @@ import { abstractIn, copyFor, inherited, shownName, isLifetime, type Body, type 
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { Direct, Narrowing } from "./overloads.ts";
-import { CompileError, indexText } from "./diag.ts";
+import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
@@ -6069,3 +6069,7 @@ const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, d
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
 
+// How an index reads in a message: a name or a number as written, anything else as `...`.
+export function indexText(e: Expr): string {
+  return e.kind === "ident" ? e.name : e.kind === "int" ? String(e.value) : "...";
+}

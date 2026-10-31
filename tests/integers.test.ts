@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "../src/parser.ts";
 
-// The compiler's source names its numbers with Fish's types (src/integers.d.ts aliases them for
+// The compiler's source names its numbers with Fish's types (src/fish.d.ts aliases them for
 // tsc), because Fish reads `number` as `f64`, which can't index an array or mix with a length.
 const SRC = join(import.meta.dir, "..", "src");
 
