@@ -487,7 +487,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const [list] = e.args as [Expr];
           return during(e, () => handOver(list.kind === "array" ? (list.elements as Expr[]) : [list], `'Promise.${(e.callee as { name: string }).name}'`, e));
         }
-        const name = e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
+        // An iterator helper's call is named by the method written.
+        const shown = (e as { shown?: string }).shown;
+        const name = shown ? `'${shown}'` : e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
         let keeps: (() => void) | undefined;
         during(e, () => {
@@ -798,8 +800,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         expr(a, kept ? (p) => `'${p}' moved here: JS keeps a callback or a Promise given to it, as it may use it later; pass '${p}.clone()' to keep a copy` : undefined);
       });
     }
+    const helper = (call as { shown?: string }).shown;
     for (const a of args) {
-      expr(a, (p) => `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`);
+      expr(a, (p) => (helper && a === args[0] ? `'${p}' moved here: ${name} takes its generator over` : `'${p}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${p}.clone()' to keep a copy`));
       lent(a).forEach(([place, part, mutable], i) => lend(place, mutable, part, undefined, name, call, part.start, partKey(part, i)));
     }
   }

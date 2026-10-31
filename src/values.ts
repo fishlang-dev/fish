@@ -3643,7 +3643,8 @@ export function expressions(ctx: Context) {
 
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
   function generatorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, generator: Type, yields: Type): { type: Type; what: string } {
-    if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet; 'next' is the one they have`, callee.start, callee.end);
+    if (Object.hasOwn(GENERATOR_HELPERS, callee.name)) return helperCall(e, callee, yields);
+    if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet${didYouMean(callee.name, ["next", ...Object.keys(GENERATOR_HELPERS)])}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
     if (e.args.length > 0) throw unsupported("values sent into 'next'", e.args[0]!);
     const held = types.get(callee.object)!;
@@ -3651,6 +3652,86 @@ export function expressions(ctx: Context) {
     if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
     changeable(callee.object, "advance");
     return { type: nextResult(yields), what: "'next'" };
+  }
+
+  // The iterator helpers call std's generators and functions over the generator, which they take
+  // over. `map`, `filter`, `take`, `drop` and `flatMap` give a generator that pulls from it only
+  // when pulled; the rest run it at once. Callbacks get each value and its index, the predicates
+  // a borrow of the value.
+  function helperCall(e: Call, callee: Extract<Expr, { kind: "member" }>, yields: Type): { type: Type; what: string } {
+    const name = callee.name;
+    const source = callee.object;
+    if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
+    if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
+    if (isRefType(types.get(source)!)) throw new CompileError(`'${name}' takes its generator over, and this one is borrowed; call it on a generator this code owns`, source.start, source.end);
+    once.add(source);
+    const at = { start: e.start, end: e.end };
+    const helper = (helperName: string, args: Expr[]): Call => ({ kind: "call", callee: { kind: "ident", name: helperName, ...at }, args, typeArgs: [], optional: false, shown: name, ...at }) as Call;
+    // A count or a fold that can't give a value panics at the call, with JavaScript's reason.
+    const unwrap = (expr: Expr, reason: string): Expr => ({ kind: "nonNull", expr, reason, ...at }) as Expr;
+    const counted = name === "take" || name === "drop";
+    if (name === "toArray" ? e.args.length !== 0 : name === "reduce" ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
+      const takes = name === "toArray" ? "no arguments" : counted ? "1 argument, a count" : name === "reduce" ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'";
+      throw new CompileError(`'${name}' takes ${takes}`, e.start, e.end);
+    }
+    if (name === "toArray") {
+      Object.assign(e, helper("array collect", [source]));
+      return call(e);
+    }
+    if (counted) {
+      Object.assign(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)]));
+      return call(e);
+    }
+    const [callback, init] = e.args as [Expr, Expr | undefined];
+    // A declared function given by name becomes an arrow calling it, as for array methods.
+    namedFunction(callback);
+    const reducing = name === "reduce";
+    const lent = PREDICATES.has(name);
+    const each = lent ? refType(yields, false) : yields;
+    const acc = !reducing ? undefined : init ? widenLet(value(init)) : yields;
+    if (init) once.add(init);
+    const params = acc ? [acc, each, "i64" as const] : [each, "i64" as const];
+    if (callback.kind === "arrow" && callback.params.length > params.length) {
+      throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the value and its index`, callback.params[params.length]!.start, callback.params[params.length]!.end);
+    }
+    const names = acc ? ["accumulator", "value", "index"] : ["value", "index"];
+    // std calls the callback with every argument, so an arrow leaving some out takes them under
+    // names no program can write.
+    if (callback.kind === "arrow") {
+      for (let i = callback.params.length; i < params.length; i++) {
+        const pattern = { kind: "ident" as const, name: `_ ${names[i]}`, start: callback.start, end: callback.start };
+        callback.params.push({ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: callback.start, end: callback.start });
+      }
+    }
+    // std lends a predicate even a value that copies; a function taking the copy reads it there.
+    if (callback.kind === "arrow" && lent && isCopy(yields) && presetParams.get(callback.params[0]!) === yields) presetParams.delete(callback.params[0]!);
+    expect(callback, functionType(names, params, "void"));
+    const c = value(callback);
+    once.add(callback);
+    if (typeof c === "string" || c.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
+    c.params.forEach((p, i) => passedExactly(name, params[i]!, p, callback.kind === "arrow" ? callback.params[i] : undefined, callback, i !== params.length - 1));
+    runsOften(c, name, "its callback once per value", callback);
+    const gives = c.returns;
+    if (lent && gives !== "boolean") {
+      throw new CompileError(`'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${show(gives)}'`, callback.start, callback.end);
+    }
+    if (acc && !fits(gives, acc)) throw new CompileError(`'reduce''s callback gives the next accumulator, a '${show(acc)}', but this one gives '${show(gives)}'`, callback.start, callback.end);
+    if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
+    let target = GENERATOR_HELPERS[name]!;
+    if (name === "flatMap") {
+      if (yieldsOf(lower(gives)) !== undefined) target = "iter flat map generator";
+      else if (!isArray(lower(gives))) throw new CompileError(`'flatMap''s callback gives a generator or an array for each value, whose values make up the result; this one gives '${show(gives)}'`, callback.start, callback.end);
+      else clonable((lower(gives) as ArrayType).element, callback, "flatMap");
+    }
+    if (reducing && !init) {
+      // std gives the fold in a one-element tuple, or nothing when the generator was empty.
+      const folded = unwrap(helper("iter reduce first", [source, callback]), "reduce of empty generator with no initial value");
+      for (const stale of ["callee", "args", "typeArgs"] as const) delete (e as Partial<Call>)[stale];
+      Object.assign(e, { kind: "index", object: folded, index: { kind: "int", value: 0n, ...at }, optional: false });
+      return { type: typeOf(e as Expr), what: "'reduce'" };
+    }
+    Object.assign(e, helper(target, init ? [source, callback, init] : [source, callback]));
+    return call(e);
   }
 
   // Whether an expression is an index into an array, a place inside it.
@@ -5864,6 +5945,11 @@ const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "
 
 // The methods that run a callback on each element.
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+// Generators' iterator helpers, and the std function each calls.
+const GENERATOR_HELPERS: Record<string, string> = {
+  map: "iter map", filter: "iter filter", take: "iter take", drop: "iter drop", flatMap: "iter flat map",
+  reduce: "iter reduce", toArray: "array collect", forEach: "iter for each", some: "iter some", every: "iter every", find: "iter find",
+};
 // The callback methods whose callback decides yes or no.
 const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
 // The methods that read an array's elements by value.
