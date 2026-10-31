@@ -9,7 +9,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, promiseInterface, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, promiseInterface, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method, generatorElement, membersFor } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -337,6 +337,8 @@ export const dynMembers = new Map<string, DynTable>();
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
 export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
+// A value boxed into a union's one Dyn member on its way into the union: the Dyn it becomes first.
+export const boxedMembers = new WeakMap<Expr, DynType>();
 // A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
 // instance: its name and type arguments for a T that isn't, the void helper taking the rest.
 const promiseVariants = new WeakMap<Expr, { name: string; typeArgs: TypeNode[] }>();
@@ -1054,7 +1056,7 @@ export function expressions(ctx: Context) {
     const parser = parserOf(callee);
     if (parser && (e.optional || (callee.kind === "member" && callee.optional))) throw new CompileError(`'${parser}' is always there, so it is called without '?.'`, e.start, e.end);
     if (parser) return parse(e, parser);
-    if (callee.kind === "ident" && callee.name === "assert" && !lookup("assert") && !classes.has("assert") && !byName.has("assert") && !byName.has("const assert")) return assertion(e);
+    if (callee.kind === "ident" && callee.name === "assert" && (e.start >= STD_BASE || (!lookup("assert") && !classes.has("assert") && !byName.has("assert") && !byName.has("const assert")))) return assertion(e);
     // `new Array(n).fill(x)`: n copies of x, the only form `new Array(n)` takes.
     if (callee.kind === "member" && callee.name === "fill" && callee.object.kind === "new" && callee.object.callee.kind === "ident" && callee.object.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
       const made = callee.object;
@@ -1097,7 +1099,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
-    if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver, true) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver, true)!, true);
+    if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver, true) !== undefined && (typeof receiver === "string" || receiver.kind !== "dyn")) return generatorCall(e, callee, receiver, yieldsOf(receiver, true)!, true);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
@@ -4692,6 +4694,15 @@ export function expressions(ctx: Context) {
       return;
     }
     if (typeof to !== "string" && to.kind === "union") {
+      // A value no member takes as it is goes into the union's one Dyn, boxed.
+      const dyns = to.members.filter((m): m is DynType => typeof m !== "string" && m.kind === "dyn");
+      const boxable = typeof type !== "string" && (type.kind === "class" || type.kind === "generator");
+      if (boxable && dyns.length === 1 && membersFor(type, to).length === 0 && !callableOf.has(dyns[0]!.of)) {
+        boxing(e, type, dyns[0]!, message);
+        boxedMembers.set(e, dyns[0]!);
+        coercions.set(e, to);
+        return;
+      }
       intoUnion(e, type, to, message, unions);
       return;
     }
@@ -5299,6 +5310,12 @@ export function expressions(ctx: Context) {
   function dynTable(e: Expr, type: Type, to: DynType): DynTable {
     const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
     const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
+    // A boxed async generator's one slot is its `next()`, whose future borrows the generator in
+    // the Dyn's block and is boxed in turn. A generator runs once, so it is never copied.
+    if (typeof type !== "string" && type.kind === "generator") {
+      dynMembers.set(`${keyOf(leafFuture("next", type))} ${keyOf(lentPromise(nextResult(type.yields)))}`, { methods: [], fields: [], clone: undefined });
+      return { methods: [undefined], fields: [], clone: undefined };
+    }
     if (typeof type !== "string" && type.kind === "closure") {
       const body = closureBody(type);
       futureTable(body, to.of.methods[0]!.returns, false, e);
@@ -5360,15 +5377,17 @@ export function expressions(ctx: Context) {
       if (m.owned) throw new CompileError(`'${m.name}' takes its object over and frees it, so the reference it gives would point at nothing`, callee.start, callee.end);
       borrowsFrom.set(e, [callee.object]);
     }
+    // A boxed async generator's `next()` runs it on, changing it.
+    const mutable = m.mutable === true || generatorElement(t.of, true) !== undefined;
     if (m.owned) takesOver(callee.object, m.name);
-    else if (m.mutable) mutates(callee.object, m.name);
+    else if (mutable) mutates(callee.object, m.name);
     e.args.forEach((a, i) => {
       const want = m.params[i]!;
       expect(a, want);
       const given = value(a);
       coerce(a, given, want, `argument of type '${show(given)}' is not assignable to parameter of type '${show(want)}'`);
     });
-    dynCalls.set(e, { index, mutable: m.mutable === true, owned: m.owned === true });
+    dynCalls.set(e, { index, mutable, owned: m.owned === true });
     // An async method's future, boxed, borrows the Dyn until it is done.
     if (async !== undefined) {
       borrowsFrom.set(e, [callee.object, ...e.args.filter(lends)]);

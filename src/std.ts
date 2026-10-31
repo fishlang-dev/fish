@@ -329,16 +329,24 @@ class Request {
 }
 
 type ResponseInit = { status?: i64; statusText?: string; headers?: Headers };
+// One server-sent event: its data, and the event type, ID and reconnection delay it may name.
+type ServerSentEvent = { data: string; event?: string; id?: string; retry?: i64 };
 
 class Response {
   status: i64;
   statusText: string;
   headers: Headers;
   body: string;
+  // A body sent in pieces as the generator produces them, in place of body. Locked, in an
+  // array of at most one, so whoever reads it can take it out through a shared borrow; private,
+  // so a response prints as it would without one.
+  #stream: Lock<Dyn<AsyncGenerator<string>>[]>;
+  // 1 once text() has read a streamed body, which no copy can then have.
+  #read: Atomic<i64> = new Atomic(0);
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
 
-  constructor(body?: string | null, init?: ResponseInit) {
+  constructor(body?: string | Dyn<AsyncGenerator<string>> | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
     let headers = new Headers();
@@ -351,14 +359,17 @@ class Response {
       if (h !== null) headers = h;
     }
     let text = "";
+    let stream: Dyn<AsyncGenerator<string>>[] = [];
     if (body !== null) {
-      text = body;
+      if (typeof body === "string") text = body;
+      else stream.push(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
     }
     this.status = status;
     this.statusText = statusText;
     this.headers = headers;
     this.body = text;
+    this.#stream = new Lock(stream);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -370,18 +381,78 @@ class Response {
     return res;
   }
 
+  // A response streaming server-sent events as EventSource reads them, each string an event's
+  // data, typed 'text/event-stream' and uncached unless the headers given say otherwise.
+  static sse(events: AsyncGenerator<string | ServerSentEvent>, init?: ResponseInit): Response {
+    let res = new Response(null, init);
+    if (!res.headers.has("content-type")) res.headers.set("content-type", "text/event-stream");
+    if (!res.headers.has("cache-control")) res.headers.set("cache-control", "no-cache");
+    return new Response(__sseFrames(events), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }
+
   get ok(): boolean {
     return this.status >= 200 && this.status < 300;
   }
 
+  // A copy of the response. A streamed body runs its generator once, so it can't be copied.
+  clone(): Response {
+    const streamed = this.#stream.update((s) => s.length > 0);
+    assert(this.#read.load() === 0, "this Response's streamed body was already read, so it can't be cloned; make each copy from the text it gave");
+    assert(!streamed, "a Response with a streamed body can't be cloned, since its generator runs once; read it with 'await res.text()' and make each copy from that text");
+    let copy = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers.clone() });
+    copy.body = this.body;
+    copy.url = this.url;
+    return copy;
+  }
+
+  // The streamed body, taken out for whoever sends or reads it, or null when there is none.
+  __stream(): Dyn<AsyncGenerator<string>> | null {
+    return this.#stream.update((s) => s.pop());
+  }
+
+  // The whole body. A streamed one is read to its end, once: a second read finds it empty.
   async text(): Promise<string> {
-    return this.body;
+    const stream = this.__stream();
+    if (stream === null) return this.body;
+    this.#read.store(1);
+    let pieces = stream;
+    let text = "";
+    for await (const piece of pieces) text += piece;
+    return text;
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
     return JSON.parse<T>(this.body);
   }
+}
+
+// Each event as the event-stream format writes it: a field per line, a data line per line of
+// data, and a blank line to end it.
+async function* __sseFrames(events: AsyncGenerator<string | ServerSentEvent>): AsyncGenerator<string> {
+  let source = events;
+  for await (const e of source) {
+    let text = "";
+    let data = "";
+    if (typeof e === "string") data = e;
+    else {
+      // A line break would end the field and start another, so single-line fields lose theirs.
+      const event = e.event;
+      if (event !== null) text = text + "event: " + __sseLine(event) + "\\n";
+      const id = e.id;
+      if (id !== null) text = text + "id: " + __sseLine(id) + "\\n";
+      const retry = e.retry;
+      if (retry !== null) text = text + "retry: " + String(retry) + "\\n";
+      data = e.data;
+    }
+    // EventSource ends a line at CR LF, at a lone CR and at a lone LF.
+    for (const line of data.replaceAll("\\r\\n", "\\n").replaceAll("\\r", "\\n").split("\\n")) text = text + "data: " + line + "\\n";
+    yield text + "\\n";
+  }
+}
+
+function __sseLine(value: string): string {
+  return value.replaceAll("\\r", "").replaceAll("\\n", "");
 }
 
 type ServeInfo = { hostname: string; port: i64 };
@@ -502,16 +573,29 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const signal = client.signal;
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
-      const req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, body: body, signal: signal });
+      const req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, body: body, signal: signal.clone() });
       const res = await handler(req);
+      const said = res.headers.get("connection");
+      const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
+      const sendable = Http1.sendable(res);
+      // A streamed body is taken out of the response; one that won't be sent is dropped unstarted.
+      const stream = res.__stream();
+      if (stream !== null && sendable && res.status !== 204 && res.status !== 304) {
+        let pieces = stream;
+        const open = await Http1.stream(conn, res, pieces, method === "HEAD", close, version, signal, stop);
+        // The watcher holds the connection too, so it is stopped however the stream ended.
+        done.abort();
+        const early = await watching;
+        if (!open) return;
+        for (const b of early) buffer.push(b);
+        continue;
+      }
       done.abort();
       const early = await watching;
       for (const b of early) buffer.push(b);
-      const said = res.headers.get("connection");
-      const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A response that can't be sent as it stands, like a header value holding a line break,
       // goes out as a 500 instead.
-      const text = Http1.sendable(res) ? Http1.responseText(res, method === "HEAD", close, version) : Http1.responseText(new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
+      const text = sendable ? Http1.responseText(res, method === "HEAD", close, version) : Http1.responseText(new Response("Internal Server Error\\n", { status: 500 }), false, close, version);
       await conn.write(new TextEncoder().encode(text), AbortSignal.timeout(30000));
       if (close) return;
     }
@@ -693,16 +777,27 @@ class Http1 {
     return [];
   }
 
-  // Reads from the client while its request is handled: the end of the stream, or a broken
-  // connection, aborts the request's signal. Bytes that arrive are handed back for the next request.
+  // Reads from the client while its request is handled and its response sent: the end of the
+  // stream, or a broken connection, aborts the request's signal. Bytes that arrive are handed
+  // back for the next request, and watching goes on past them, up to what one request may take.
   static async watch(conn: TcpStream, client: AbortController, done: AbortSignal): Promise<u8[]> {
+    let early: u8[] = [];
     try {
-      const got = await conn.read(16384, done);
-      if (got.length === 0) client.abort();
-      return got;
+      while ((early.length as i64) <= 16384 + 1048576) {
+        const got = await conn.read(16384, done.clone());
+        if (got.length === 0) {
+          client.abort();
+          return early;
+        }
+        for (const b of got) early.push(b);
+      }
+      // A client sending more than one request may take while waiting on this one can't be
+      // served as it asks, so it is treated as gone, and watching stops.
+      client.abort();
+      return early;
     } catch (e) {
       if (e instanceof IoError) client.abort();
-      return [];
+      return early;
     }
   }
 
@@ -979,23 +1074,110 @@ class Http1 {
   // The server frames the body itself, so a handler's own framing headers are left out; 204
   // and 304 have no body at all.
   static responseText(res: Ref<Response>, head: boolean, close: boolean, version: string): string {
+    const bodiless = res.status === 204 || res.status === 304;
+    let framing = "";
+    if (!bodiless) framing = "content-length: " + String(new TextEncoder().encode(res.body).length as i64) + "\\r\\n";
+    let text = Http1.headText(res, framing, close, version);
+    if (!head && !bodiless) text = text + res.body;
+    return text;
+  }
+
+  // A response's status line and headers, framing its body as the framing header says.
+  static headText(res: Ref<Response>, framing: string, close: boolean, version: string): string {
     let reason = res.statusText;
     if (reason.length === 0) reason = Http1.reasonPhrase(res.status);
     let text = "HTTP/1.1 " + String(res.status) + " " + reason + "\\r\\n";
     res.headers.forEach((value: string, name: string) => {
       if (name !== "content-length" && name !== "transfer-encoding" && name !== "connection" && name !== "date") text = text + name + ": " + value + "\\r\\n";
     });
-    const bodiless = res.status === 204 || res.status === 304;
-    if (!bodiless) {
-      const size = new TextEncoder().encode(res.body).length;
-      text = text + "content-length: " + String(size as i64) + "\\r\\n";
-    }
-    text = text + "date: " + httpDate() + "\\r\\n";
+    text = text + framing + "date: " + httpDate() + "\\r\\n";
     if (close) text = text + "connection: close\\r\\n";
     else if (version === "HTTP/1.0") text = text + "connection: keep-alive\\r\\n";
-    text = text + "\\r\\n";
-    if (!head && !bodiless) text = text + res.body;
-    return text;
+    return text + "\\r\\n";
+  }
+
+  // Sends a response with a streamed body: its head, then each piece as its generator makes it,
+  // a chunk apiece to an HTTP/1.1 client and closed-delimited to a 1.0 one, which has no chunks.
+  // The server stopping ends the body cleanly at the generator's next await or yield. The
+  // client's end of the stream, as Node's server takes it, ends it there with nothing more
+  // written, as does a write that fails or times out: a half-closed client and one that has gone
+  // look the same. Whether the connection may serve another request.
+  static async stream(conn: Ref<TcpStream>, res: Ref<Response>, pieces: Mut<Dyn<AsyncGenerator<string>>>, head: boolean, close: boolean, version: string, client: Ref<AbortSignal>, stop: Ref<AbortSignal>): Promise<boolean> {
+    const chunked = version === "HTTP/1.1";
+    const framing = chunked ? "transfer-encoding: chunked\\r\\n" : "";
+    const started = await Http1.put(conn, Http1.headText(res, framing, close || !chunked, version), stop);
+    if (!started) return false;
+    if (head) return chunked && !close;
+    while (!stop.aborted) {
+      const piece = await Promise.race([Http1.next(pieces), Http1.abortOf(client), Http1.abortOf(stop)]);
+      if (client.aborted) return false;
+      if (piece === null) break;
+      if (piece.length === 0) continue;
+      const size = new TextEncoder().encode(piece).length as i64;
+      const framed = chunked ? Http1.hexOf(size) + "\\r\\n" + piece + "\\r\\n" : piece;
+      const sent = await Http1.put(conn, framed, stop);
+      if (!sent) return false;
+    }
+    if (!chunked) return false;
+    const sent = await Http1.put(conn, "0\\r\\n\\r\\n", stop);
+    return sent && !close && !stop.aborted;
+  }
+
+  // Whether text was written within 30 seconds, and within a second of the server stopping.
+  static async put(conn: Ref<TcpStream>, text: string, stop: Ref<AbortSignal>): Promise<boolean> {
+    const sent = await Promise.race([Http1.written(conn, text), Http1.late(30000), Http1.graced(stop)]);
+    return sent;
+  }
+
+  static async written(conn: Ref<TcpStream>, text: string): Promise<boolean> {
+    try {
+      await conn.write(new TextEncoder().encode(text));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // False, a second after the server stops.
+  static async graced(stop: Ref<AbortSignal>): Promise<boolean> {
+    await Http1.abortOf(stop);
+    await sleep(1000);
+    return false;
+  }
+
+  // False, once ms have passed.
+  static async late(ms: i64): Promise<boolean> {
+    await sleep(ms);
+    return false;
+  }
+
+  // A stream's next piece, or null once it ends.
+  static async next(pieces: Mut<Dyn<AsyncGenerator<string>>>): Promise<string | null> {
+    const r = await pieces.next();
+    if (r.done === false) return r.value;
+    return null;
+  }
+
+  // Null once the signal aborts.
+  static async abortOf(signal: Ref<AbortSignal>): Promise<string | null> {
+    while (!signal.aborted) {
+      try {
+        await sleep(86400000, signal.clone());
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  // A count in hexadecimal digits, as a chunk's size is written.
+  static hexOf(n: i64): string {
+    const digits = "0123456789abcdef";
+    let text = "";
+    let left = n;
+    while (true) {
+      text = digits.charAt(left & 15) + text;
+      left = left >> 4;
+      if (left === 0) return text;
+    }
   }
 
   static reasonPhrase(status: i64): string {

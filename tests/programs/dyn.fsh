@@ -748,3 +748,22 @@ class C {
 function main() {
   let one: Dyn<Counter> = new C();
 }
+// case: dyn_into_union
+// expect: 9
+// expect: none
+// A value no member of a union takes as it is goes into the union's one Dyn, boxed.
+interface Shape { area(): i64; }
+class Sq {
+  s: i64;
+  name: string;
+  constructor(s: i64) { this.s = s; this.name = "sq" + s; }
+  area(): i64 { return this.s * this.s; }
+}
+function describe(x: Dyn<Shape> | null): string {
+  if (x === null) return "none";
+  return String(x.area());
+}
+function main() {
+  console.log(describe(new Sq(3)));
+  console.log(describe(null));
+}

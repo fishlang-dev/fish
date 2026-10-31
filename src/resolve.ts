@@ -358,7 +358,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.name === "Dyn") {
       const of = t.args.length === 1 ? resolveType(t.args[0]!) : undefined;
-      if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined || generatorElement(of, true) !== undefined) {
+      if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined) {
         throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
       }
       return dynType(of);

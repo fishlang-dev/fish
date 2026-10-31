@@ -540,6 +540,7 @@ export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false
       : method === "next" ? nextResult((of as GeneratorType).yields) : "void";
     t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
     leaves.set(key, t);
+    keys.set(t, `leaf ${key}`);
     leafOf.set(t, { method, of, signal });
   }
   return t;
@@ -670,7 +671,7 @@ export function lentPromise(t: Type): DynType {
 // nothing through its interface changes or takes over the value. A boxed future never does,
 // since polling changes it.
 export function sharesDyn(t: DynType): boolean {
-  return !promised.has(t.of) && t.of.methods.every((m) => !m.mutable && !m.owned);
+  return !promised.has(t.of) && generatorElement(t.of, true) === undefined && t.of.methods.every((m) => !m.mutable && !m.owned);
 }
 
 // What a `Promise<T>` gives, when the interface is one.
@@ -991,6 +992,7 @@ export function asyncGeneratorInterface(t: Type): InterfaceType {
 export function yieldsOf(t: Type, async = false): Type | undefined {
   if (typeof t === "string") return undefined;
   if (t.kind === "generator") return !!t.async === async ? t.yields : undefined;
+  if (t.kind === "dyn") return async ? generatorElement(t.of, true) : undefined;
   if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete, async) : t.bound && generatorElement(t.bound, async);
   return generatorElement(t, async);
 }
