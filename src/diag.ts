@@ -9,11 +9,31 @@ export type Names = { local: Set<string>; madeUp: Map<string, string> };
 // How a message reads: without the suffix a top-level name takes to tell it apart from another
 // file's (`helper-fsh2`), and with made-up names shown as the user knows them.
 export function shown(text: string, names: Names): string {
-  for (const [name, display] of names.madeUp) {
-    const quoted = new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-fsh\\d+)?'`, "g");
-    text = text.replace(quoted, () => display);
+  let out = text;
+  for (const [name, display] of names.madeUp) out = quotedAs(out, name, display);
+  return out.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+}
+
+// `text` with each `'name'` in it, or `'name-fsh2'` for another file's, as `display`.
+function quotedAs(text: string, name: string, display: string): string {
+  let out = "";
+  let from = 0;
+  for (let at = text.indexOf(`'${name}`); at >= 0; at = text.indexOf(`'${name}`, from)) {
+    let end = at + name.length + 1;
+    if (text.startsWith("-fsh", end)) {
+      let digits = end + 4;
+      while (digits < text.length && text[digits]! >= "0" && text[digits]! <= "9") digits++;
+      if (digits > end + 4) end = digits;
+    }
+    if (text[end] !== "'") {
+      out += text.slice(from, at + 1);
+      from = at + 1;
+      continue;
+    }
+    out += text.slice(from, at) + display;
+    from = end + 1;
   }
-  return text.replace(/(?<=[\w$])-fsh\d+\b/g, "");
+  return out + text.slice(from);
 }
 
 // `text` with the hoisted names in it as they were written.
