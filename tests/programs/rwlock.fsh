@@ -152,3 +152,43 @@ async function main() {
   s.rw.update((v) => { v += 1; });
   console.log(s.rw.read((v) => v + 0));
 }
+// case: rwlock_writer_among_readers
+// expect: 100 0 true
+type Pair = { a: i64; b: i64 };
+type S = { rw: RwLock<Pair>; done: Atomic<boolean>; reads: Atomic<i64>; torn: Atomic<i64> };
+async function reader(s: shared<S>): Promise<void> {
+  await yieldNow();
+  // Bounded, so a writer starved by overlapping reads shows as a wrong line, not a hang.
+  while (!s.done.load() && s.reads.load() < 2000000) {
+    const same = s.rw.read((p) => {
+      let k = 0;
+      for (let i = 0; i < 200; i++) k = k + 1;
+      return p.a === p.b;
+    });
+    if (!same) s.torn.add(1);
+    s.reads.add(1);
+  }
+}
+async function writer(s: shared<S>): Promise<void> {
+  while (s.reads.load() < 1000) await yieldNow();
+  for (let n = 0; n < 50; n++) {
+    s.rw.update((p) => {
+      p.a += 1;
+      for (let i = 0; i < 1000; i++) {}
+      p.b += 1;
+    });
+  }
+  s.done.store(true);
+}
+async function main() {
+  const s = shared({ rw: new RwLock<Pair>({ a: 0, b: 0 }), done: new Atomic(false), reads: new Atomic(0), torn: new Atomic(0) });
+  let hs: JoinHandle<void>[] = [];
+  for (let n = 0; n < 3; n++) hs.push(spawn(reader(s.clone())));
+  const w = spawn(writer(s.clone()));
+  await w;
+  for (let n = 0; n < 3; n++) {
+    const h = hs.pop()!;
+    await h;
+  }
+  console.log(s.rw.read((p) => p.a + p.b), s.torn.load(), s.reads.load() < 2000000);
+}
