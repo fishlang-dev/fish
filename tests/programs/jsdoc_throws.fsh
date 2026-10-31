@@ -11,7 +11,7 @@ function lookup(key: string): i64 {
   if (key === "a") return 1
   throw new NotFound(key)
 }
-/** @throws NotFound */
+/** @throws {NotFound} */
 export function twice(key: string): i64 {
   return lookup(key) * 2
 }

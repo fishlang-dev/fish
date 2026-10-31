@@ -444,6 +444,17 @@ export function parseType(src: string): TypeNode {
 // Words a declaration may start with before its keyword, all of which its JSDoc comes before.
 const LEADING = new Set(["export", "default", "declare", "macro"]);
 
+// Whether the token at `i` is a word starting the declaration after it, rather than a property
+// name as in `a.default`.
+function leading(c: Cursor, i: number): boolean {
+  const t = c.tokens[i]!;
+  const before = c.tokens[i - 1];
+  return t.kind === "ident" && LEADING.has(t.text) && !(before && (isToken(before, ".") || isToken(before, "?.")));
+}
+
+// The members of a union, nested ones included, as a written `A | B | C` has them.
+const members = (t: TypeNode): TypeNode[] => (t.kind === "union" ? t.types.flatMap(members) : [t]);
+
 // A declaration's `throws` type: its written clause, or else the types its JSDoc names in
 // `@throws {E}` tags, as a union when there are several. `at` is where the declaration starts,
 // and its JSDoc is the `/** ... */` comments between it and the token before.
@@ -451,7 +462,7 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
   if (!c.docs) return written;
   let i = c.pos - 1;
   while (i > 0 && c.tokens[i]!.start > at) i--;
-  while (i > 0 && c.tokens[i - 1]!.kind === "ident" && LEADING.has(c.tokens[i - 1]!.text)) i--;
+  while (i > 0 && leading(c, i - 1)) i--;
   const from = i > 0 ? c.tokens[i - 1]!.end : 0;
   const to = c.tokens[i]!.start;
   const jsdoc: Comment[] = [];
@@ -461,9 +472,13 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
   }
   const types = jsdoc.flatMap((m) => thrownTypes(c.src, m));
   if (types.length === 0) return written;
-  const doc: TypeNode = types.length === 1 ? types[0]! : { id: nextId(), kind: "union", types, start: types[0]!.start, end: types.at(-1)!.end };
+  const doc: TypeNode = types.length === 1 ? types[0]! : { id: nextId(), kind: "union", types: types.flatMap(members), start: types[0]!.start, end: types.at(-1)!.end };
   if (!written) return doc;
-  const shape = (t: TypeNode) => JSON.stringify(t, (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : typeof v === "bigint" ? `${v}n` : v));
+  const shape = (t: TypeNode) => JSON.stringify(t, (k, v) => {
+    if (k === "id" || k === "start" || k === "end") return undefined;
+    if (typeof v === "bigint") return `${v}n`;
+    return v?.kind === "union" ? { kind: "union", types: members(v) } : v;
+  });
   if (shape(doc) !== shape(written)) {
     const text = (t: TypeNode) => c.src.slice(t.start, t.end);
     throw new CompileError(`the JSDoc says '@throws {${types.map(text).join(" | ")}}' but the function says 'throws ${text(written)}'; make them the same type, or keep one`, doc.start, doc.end);
@@ -471,10 +486,9 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
   return written;
 }
 
-// The types of a JSDoc comment's `@throws` tags. `@throws {E} why` names `E`, and so does
-// `@throws E` alone on its line; any other `@throws` only describes, and names nothing. As in
-// TypeScript, a tag whose type doesn't parse, such as `{@link E}` or `{?E}`, names nothing
-// either, so any TypeScript file still parses.
+// The types of a JSDoc comment's `@throws` tags. As in TypeScript, only `@throws {E} why` names a
+// type: `@throws INVALID_PARAM` only describes, and so does a tag whose type doesn't parse, such
+// as `{@link E}` or `{?E}`, so any TypeScript file still parses.
 function thrownTypes(src: string, m: Comment): TypeNode[] {
   const types: TypeNode[] = [];
   const close = m.end - 2;
@@ -487,10 +501,6 @@ function thrownTypes(src: string, m: Comment): TypeNode[] {
         else if (src[end] === "}" && --depth === 0) break;
       }
       const t = end < close ? typeAt(src, start + 1, end) : undefined;
-      if (t) types.push(t);
-    } else {
-      const word = /^[\p{ID_Start}_$][\p{ID_Continue}$.]*(?=[ \t]*(\r?\n|$))/u.exec(src.slice(start, close));
-      const t = word ? typeAt(src, start, start + word[0].length) : undefined;
       if (t) types.push(t);
     }
   }
