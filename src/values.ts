@@ -9,7 +9,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, optionRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, heldArgument, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, optionRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -2559,10 +2559,10 @@ export function expressions(ctx: Context) {
   function interiorNew(e: Extract<Expr, { kind: "new" }>, which: InteriorType["which"], list: Expr[]): Type {
     if (list.length !== 1 || e.typeArgs.length > 1) throw new CompileError(`'${which}' takes the value it starts with, as in 'new ${which}(0)'`, e.start, e.end);
     const expected = wanted.get(e);
-    const given = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "interior" && expected.which === which ? expected.of : undefined;
+    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : typeof expected !== "string" && expected?.kind === "interior" && expected.which === which ? expected.of : undefined;
     if (given) expect(list[0]!, given);
     const t = value(list[0]!);
-    const of = given ?? widenLet(t);
+    const of = given ?? heldArgument(widenLet(t));
     coerce(list[0]!, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
     return interior(which, of, e);
   }
@@ -2746,6 +2746,9 @@ export function expressions(ctx: Context) {
       const element = isArray(t) ? lower(t.element) : undefined;
       const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 && (element as ObjectType).rest === undefined && (element as ObjectType).required === undefined ? elementsOf(element as ObjectType) : undefined;
       if (element === undefined || (!set && !pair)) throw new CompileError(`'new ${name}' takes ${shape}, not '${show(t)}'`, from.start, from.end);
+      // Each closure is its own type, so which callable type the values share must be written.
+      const v = set ? undefined : lower(pair![1]!);
+      if (typeof v !== "string" && v?.kind === "closure") throw new CompileError(`a 'Map' of functions needs its types written, as in 'new Map<${show(widenLet(pair![0]!))}, ${v.name}>(...)'`, e.start, e.end);
       const result = collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
       const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
       coerce(from, t, wants, `argument of type '${show(t)}' is not assignable to parameter of type '${show(wants)}'`);
@@ -3315,11 +3318,11 @@ export function expressions(ctx: Context) {
   function sharedNew(e: Call): { type: Type; what: string } {
     if (e.args.length !== 1 || e.typeArgs.length > 1) throw new CompileError("'shared' takes the value it starts with, as in 'shared({ hits: 0 })'", e.start, e.end);
     const expected = wanted.get(e);
-    const given = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "shared" ? expected.of : undefined;
+    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : typeof expected !== "string" && expected?.kind === "shared" ? expected.of : undefined;
     const a = e.args[0]!;
     if (given) expect(a, given);
     const t = value(a);
-    const of = given ?? widenLet(t);
+    const of = given ?? heldArgument(widenLet(t));
     coerce(a, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
     return { type: shareable(of, e), what: "'shared'" };
   }
@@ -4195,6 +4198,13 @@ export function expressions(ctx: Context) {
         if (written?.at(-1)?.rest && e.args) packRest(e, e.args, written);
         else refuseSpread(list);
         if (named) expectFrom(named.constructor, list);
+        // A generic class's written type arguments type the arrows given for parameters they name,
+        // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
+        const early = !named && e.typeArgs.length > 0 && e.callee.kind === "ident" && !lookup(e.callee.name) ? construct(e.callee.name, e.typeArgs, [], e) : undefined;
+        early?.constructor.params.forEach((p, i) => {
+          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? early.scope.get(p.type.name) : undefined;
+          if (list[i]?.kind === "arrow" && held) expect(list[i]!, held);
+        });
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
         if (e.callee.kind === "ident" && e.callee.name === "Array" && !lookup("Array") && !classes.has("Array")) {
           const one = list.length === 1 ? value(list[0]!) : undefined;

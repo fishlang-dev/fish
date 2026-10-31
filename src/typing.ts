@@ -272,7 +272,9 @@ export function sharedType(of: Type): SharedType {
 
 // `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
 // of what that type does: drop it, clone it, and each of I's members.
-export type DynType = { kind: "dyn"; of: InterfaceType; fields: Field[] };
+// A stored callable written with other parameter names is its own DynType, `shown` as written,
+// for the same interface and key, which `lower` gives.
+export type DynType = { kind: "dyn"; of: InterfaceType; fields: Field[]; shown?: string };
 
 const dyns = new Map<InterfaceType, DynType>();
 
@@ -288,9 +290,9 @@ export function dynType(of: InterfaceType): DynType {
 
 // A stored callable: a written function type in a field, an element, an annotated variable or
 // a return is a Dyn of an interface with one method, `call`, which a closure satisfies by its
-// signature. One per function type as written, so messages show its own parameter names;
-// those with the same types convert freely (`sameCallable`).
+// signature. One per signature, parameter names aside; each spelling is shown as written.
 const callables = new Map<string, InterfaceType>();
+const spellings = new Map<string, DynType>();
 export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 
 // Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
@@ -398,7 +400,9 @@ export const timerCallback = (): DynType => callableType(functionType([], [], pr
 export function callableType(fn: FunctionType): DynType {
   // In an instance, what its type parameters stand for decides the layout.
   const [params, returns, throws] = [fn.params.map(lower), lower(fn.returns), fn.throws && lower(fn.throws)];
-  const key = `${fn.name} ${params.map(keyOf).join(", ")} => ${keyOf(returns)}${throws ? ` throws ${keyOf(throws)}` : ""}`;
+  // Keyed by types alone, as parameter names don't make another function type, so
+  // `Box<(n: i64) => i64>` and `Box<(m: i64) => i64>` are one class; the first spelling met is shown.
+  const key = `${params.map(keyOf).join(", ")} => ${keyOf(returns)}${throws ? ` throws ${keyOf(throws)}` : ""}`;
   let i = callables.get(key);
   if (!i) {
     i = interfaceType(fn.name);
@@ -406,7 +410,14 @@ export function callableType(fn: FunctionType): DynType {
     callables.set(key, i);
     callableOf.set(i, { ...fn, params, returns, throws });
   }
-  return dynType(i);
+  if (fn.name === i.name) return dynType(i);
+  let spelled = spellings.get(`${key} ${fn.name}`);
+  if (!spelled) {
+    spelled = { kind: "dyn", of: i, fields: [], shown: fn.name };
+    keys.set(spelled, keys.get(dynType(i))!);
+    spellings.set(`${key} ${fn.name}`, spelled);
+  }
+  return spelled;
 }
 
 // Whether two stored callables take and give the same types, so either holds the other's value.
@@ -429,6 +440,22 @@ export function stored(t: Type): Type {
   if (t.kind === "fixed") return fixedType(stored(t.element), t.size);
   if (t.kind === "map") return mapType(t.key, stored(t.value), t.set);
   return t;
+}
+
+// A type argument holds its values, so a function type or a closure's type given as one is a
+// stored callable, as Rust's `Box<dyn Fn>` is.
+export function heldArgument(t: Type): Type {
+  if (typeof t === "string" || (t.kind !== "function" && t.kind !== "closure") || t.generic) return t;
+  if (t.kind === "function") return callableType(t);
+  // An async closure gives a Promise, as a written `() => Promise<T>` does. One whose future
+  // throws has no written form yet, so it stays as it is, for its holder to refuse.
+  const future = typeof t.returns !== "string" && t.returns.kind === "future" ? t.returns : undefined;
+  if (future?.throws) return t;
+  // What it gives widens as a `let` would, so `() => "a"` and `() => "b"` meet as `() => string`.
+  const returns = future ? promiseInterface(future.gives) : widenLet(t.returns);
+  const fn = functionType(t.params.map((_, i) => `p${i}`), t.params, returns, t.throws);
+  // Shown as the closure was written, with its own parameter names, when that is still its type.
+  return callableType(returns === t.returns ? { ...fn, name: t.name } : fn);
 }
 
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
@@ -1319,6 +1346,7 @@ export function lower(t: Type): Type {
   // A generic interface made from type parameters is the one made from what they stand for.
   if (typeof t !== "string" && t.kind === "interface" && t.generic?.args.some((a) => lower(a) !== a)) return instanceInterface(t, t.generic.args.map(lower));
   if (typeof t !== "string" && t.kind === "dyn" && t.of.generic?.args.some((a) => lower(a) !== a)) return dynType(lower(t.of) as InterfaceType);
+  if (typeof t !== "string" && t.kind === "dyn" && t.shown !== undefined) return dynType(t.of);
   if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn" || t.kind === "regex") return t;
   if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
   if (t.kind === "pattern") return "string";
@@ -1356,12 +1384,12 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   const found = swap.get(t);
   if (found) return found;
   if (typeof t !== "string" && t.kind === "class") {
-    const args = t.generic?.args.map((a) => replaced(a, swap));
+    const args = t.generic?.args.map((a) => heldArgument(replaced(a, swap)));
     return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
   }
   if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
   if (typeof t !== "string" && t.kind === "interface" && t.generic) {
-    const args = t.generic.args.map((a) => replaced(a, swap));
+    const args = t.generic.args.map((a) => heldArgument(replaced(a, swap)));
     return args.some((a, i) => a !== t.generic!.args[i]) ? instanceInterface(t, args) : t;
   }
   if (typeof t !== "string" && t.kind === "function") {
@@ -1385,9 +1413,15 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
   }
   if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
   if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
-  if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), replaced(t.value, swap), t.set);
+  if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), heldArgument(replaced(t.value, swap)), t.set);
+  // What a lock, a shared value or a channel holds is a type argument, boxed as one.
+  if (typeof t !== "string" && (t.kind === "interior" || t.kind === "shared" || (t.kind === "block" && t.which === "Channel"))) {
+    const of = heldArgument(replaced(t.of, swap));
+    if (of === t.of) return t;
+    return t.kind === "interior" ? interiorType(t.which, of) : t.kind === "shared" ? sharedType(of) : blockType("Channel", of);
+  }
   if (typeof t !== "string" && t.kind === "variant") {
-    const args = t.args.map((a) => replaced(a, swap));
+    const args = t.args.map((a) => heldArgument(replaced(a, swap)));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
   }
   const tied = typeof t !== "string" ? ties.get(t) : undefined;
@@ -1714,7 +1748,7 @@ export function show(t: Type): string {
   // A JS handle shows the shape its declaration gives it.
   // A package's shape is shown by the name the package gives it, not the one linking gave it.
   if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
-  if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.of.name : `Dyn<${t.of.name}>`;
+  if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.shown ?? t.of.name : `Dyn<${t.of.name}>`;
   if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
   if (t.kind === "handle") return `JoinHandle<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
   if (t.kind !== "object") return t.name;
