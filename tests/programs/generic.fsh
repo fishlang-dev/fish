@@ -847,15 +847,6 @@ function main() {
   console.log("no instance of it can be built")
 }
 // expect: no instance of it can be built
-// case: generic_class_static
-class Box<T> {
-  static make(): i64 {
-    return 1
-  }
-}
-
-function main() {}
-// error: static methods in generic classes are not supported yet
 // case: generic_class_unending
 class Grow<T> {
   constructor(public value: T) {}

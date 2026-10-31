@@ -1,6 +1,6 @@
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, fits, generatorElement, keyOf, promiseElement, refType, replaced, shapeKey, show, type ClassType, type FunctionType, type InterfaceType, type Type } from "./typing.ts";
+import { field, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -12,12 +12,17 @@ export type Members = {
   typeParamsOf(f: Body): Type[];
   // A function declared at the top level, or lifted there, by its name.
   bodyNamed(name: string): Body | undefined;
+  typing: Typing;
+  // The pairs of a type and an interface being checked, each taken as satisfied while it is.
+  assuming: Set<string>;
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or
 // undefined when it can: as many type parameters, bounded alike, and the same signature with
 // them standing for the type's.
 export function familyMismatch(f: Body, family: FunctionType, members: Members, at: Span): string | undefined {
+  const { typing } = members;
+  const { show, replaced, fits } = typing;
   const g = family.generic!;
   const own = (f.typeParams ?? []).filter((p) => !isLifetime(p));
   if (own.length !== g.names.length) return `it has ${own.length} type parameter${own.length === 1 ? "" : "s"}, where '${show(family)}' has ${g.names.length}`;
@@ -26,9 +31,9 @@ export function familyMismatch(f: Body, family: FunctionType, members: Members, 
   if (f.throws) return `it can throw, which '${show(family)}' doesn't say`;
   const given = members.returnOf(f, at);
   const swap = byName([...written, given], own.map((p) => p.name), g.own);
-  if (members.typeParamsOf(f).some((p, i) => !sameBounds(p, g.own[i]!))) return "its type parameters' bounds differ";
+  if (members.typeParamsOf(f).some((p, i) => !sameBounds(typing, p, g.own[i]!))) return "its type parameters' bounds differ";
   const params = written.map((p) => replaced(p, swap));
-  const wrong = params.findIndex((p, i) => !same(p, family.params[i]!));
+  const wrong = params.findIndex((p, i) => !same(typing, p, family.params[i]!));
   if (wrong >= 0) return `its parameter ${wrong + 1} is '${show(params[wrong]!)}', where '${show(family)}' passes '${show(family.params[wrong]!)}'`;
   if (!fits(replaced(given, swap), family.returns)) return `it returns '${show(replaced(given, swap))}', where '${show(family)}' returns '${show(family.returns)}'`;
   return undefined;
@@ -51,7 +56,7 @@ function byName(types: Type[], names: string[], to: Type[]): Map<Type, Type> {
 }
 
 // Whether two type parameters standing for each other have the same bound.
-function sameBounds(a: Type, b: Type): boolean {
+function sameBounds({ keyOf }: Typing, a: Type, b: Type): boolean {
   const bound = (t: Type) => (typeof t !== "string" && t.kind === "param" ? t.bound : undefined);
   const [x, y] = [bound(a), bound(b)];
   return x === y || (x !== undefined && y !== undefined && keyOf(x) === keyOf(y));
@@ -62,6 +67,7 @@ function sameBounds(a: Type, b: Type): boolean {
 // and a public method taking exactly its parameter types and returning a fitting type for
 // each of its methods. `implements` is never needed.
 export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
+  const { assuming, typing: { keyOf } } = members;
   // An interface can name itself, as a builder's methods return the builder, so a pair already
   // being checked is taken as satisfied rather than checked again forever.
   const key = `${keyOf(type)} ${keyOf(trait)}`;
@@ -74,8 +80,6 @@ export function unsatisfied(type: Type, trait: InterfaceType, members: Members, 
   }
 }
 
-const assuming = new Set<string>();
-
 // Two parameter types are one when they differ only in a reference's lifetime, which each
 // method names for itself, or in how an optional field is spelled.
 // A function-typed parameter of a generic method is its implicit type parameter, bounded by the
@@ -84,17 +88,20 @@ function implicitBound(t: Type): Type {
   return typeof t !== "string" && t.kind === "param" && t.bound?.kind === "function" ? t.bound : t;
 }
 
-function same(a: Type, b: Type): boolean {
+function same(typing: Typing, a: Type, b: Type): boolean {
+  const { shapeKey, refType } = typing;
   [a, b] = [implicitBound(a), implicitBound(b)];
   // Function types, which each signature makes anew, are the same when their parts are.
   if (typeof a !== "string" && typeof b !== "string" && a.kind === "function" && b.kind === "function") {
-    return a.params.length === b.params.length && a.params.every((p, i) => same(p, b.params[i]!)) && same(a.returns, b.returns) && a.generic?.names.length === b.generic?.names.length;
+    return a.params.length === b.params.length && a.params.every((p, i) => same(typing, p, b.params[i]!)) && same(typing, a.returns, b.returns) && a.generic?.names.length === b.generic?.names.length;
   }
   const plain = (t: Type) => shapeKey(typeof t !== "string" && t.kind === "ref" ? refType(t.to, t.mutable) : t);
   return plain(a) === plain(b);
 }
 
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
+  const { typing } = members;
+  const { fits, show, promiseElement, generatorElement, replaced } = typing;
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
     typeof expected !== "string" && expected.kind === "interface" ? unsatisfied(actual, expected, members, at) === undefined : fits(actual, expected);
@@ -135,10 +142,10 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       if (m.generic || found.generic) {
         if (found.generic?.names.length !== m.generic?.names.length) return `types of method '${m.name}' are incompatible`;
         swap = byName([...found.params, found.returns], found.generic!.names, m.generic!.own);
-        if (found.generic!.own.some((p, i) => !sameBounds(p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
+        if (found.generic!.own.some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
       }
       const params = found.params.map((p) => replaced(p, swap));
-      if (params.some((p, i) => !same(p, m.params[i]!)) || params.length !== m.params.length || !returns(replaced(found.returns, swap), m.returns)) {
+      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(replaced(found.returns, swap), m.returns)) {
         return `types of method '${m.name}' are incompatible`;
       }
       continue;
@@ -157,11 +164,11 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       const own = (method.typeParams ?? []).filter((p) => !isLifetime(p));
       if (own.length !== m.generic.names.length) return `method '${m.name}' must be generic with ${m.generic.names.length} type parameter${m.generic.names.length === 1 ? "" : "s"}, as '${trait.name}' declares it`;
       swap = byName([...written, given], own.map((p) => p.name), m.generic.own);
-      if (members.typeParamsOf(method).some((p, i) => !sameBounds(p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${trait.name}''s`;
+      if (members.typeParamsOf(method).some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${trait.name}''s`;
     }
     const params = written.map((p) => replaced(p, swap));
     const result = replaced(given, swap);
-    if (params.length !== m.params.length || params.some((p, i) => !same(p, m.params[i]!)) || !returns(result, m.returns)) {
+    if (params.length !== m.params.length || params.some((p, i) => !same(typing, p, m.params[i]!)) || !returns(result, m.returns)) {
       return `types of method '${m.name}' are incompatible`;
     }
     // An interface method's reference borrows from its receiver, so one borrowing from a

@@ -1,4 +1,5 @@
 import type { CompileError } from "./diag.ts";
+import type { RustClass } from "./rust.ts";
 
 // The checker's types. Object types are interned, so two types are structurally identical,
 // the same fields with the same types in any order, exactly when they are the same object.
@@ -25,7 +26,8 @@ export type ObjectType = { kind: "object"; fields: Field[]; tuple?: true; match?
 // A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
-export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] } };
+// `rust`: the Rust type a class a Rust module declares stands for.
+export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass };
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
@@ -35,7 +37,8 @@ export type ClassType = { kind: "class"; name: string; fields: Field[]; base?: C
 // A generic method, `map<U>(f: (x: T) => U): U`, keeps its type parameters' names and the node it
 // was written as, as a generic function type does, each call resolving it.
 // `optional`: which parameters are written with `?`, kept for JS, which tells left out from null.
-export type Method = { name: string; params: Type[]; returns: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
+// `throws`: what a stored callable's call may throw.
+export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceType = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 
@@ -90,7 +93,8 @@ export type MapType = { kind: "map"; key: Type; value: Type; set: boolean; field
 // closure made in a generic body's definition check is never compiled, so it isn't concrete.
 // A generic function used as a value, `generic` naming it, is a closure capturing nothing whose
 // calls each instantiate that function, as calls of it by name do.
-export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
+// `throws` is what a call of it may throw; an async arrow's error is its future's instead.
+export type ClosureType = { kind: "closure"; name: string; params: Type[]; returns: Type; throws?: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -99,20 +103,20 @@ export type ClosureType = { kind: "closure"; name: string; params: Type[]; retur
 // The type parameters around it, `scope`, are those it was written among; `own` are its type
 // parameters' placeholders, in order, for comparing it with another.
 export type Family = { names: string[]; node: unknown; scope: Map<string, Type>; own: Type[] };
-export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; fields: Field[]; generic?: Family };
+export type FunctionType = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; throws?: Type; fields: Field[]; generic?: Family };
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
 
 // The sized numbers. `isize` and `usize` are 64 bits on every target Fish supports.
-export type Integer = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize";
+export type Integer = "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize";
 export type Numeric = Integer | "f32" | "f64";
 
 export const INTEGERS: Record<Integer, { bits: number; signed: boolean }> = {
   i8: { bits: 8, signed: true }, i16: { bits: 16, signed: true }, i32: { bits: 32, signed: true },
-  i64: { bits: 64, signed: true }, isize: { bits: 64, signed: true },
+  i64: { bits: 64, signed: true }, i128: { bits: 128, signed: true }, isize: { bits: 64, signed: true },
   u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
-  u64: { bits: 64, signed: false }, usize: { bits: 64, signed: false },
+  u64: { bits: 64, signed: false }, u128: { bits: 128, signed: false }, usize: { bits: 64, signed: false },
 };
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
@@ -121,44 +125,6 @@ export const isInteger = (t: Type): t is Integer => typeof t === "string" && t i
 // values are strings, so it is a checker type only, which `lower` makes `string`.
 export type PatternType = { kind: "pattern"; quasis: string[]; holes: Hole[]; fields: Field[] };
 export type Hole = "string" | Numeric;
-
-const patterns = new Map<string, PatternType>();
-export function patternType(quasis: string[], holes: Hole[]): Type {
-  // `${string}` alone is every string.
-  if (holes.length === 1 && holes[0] === "string" && quasis.every((q) => q === "")) return "string";
-  const key = JSON.stringify([quasis, holes]);
-  let t = patterns.get(key);
-  if (!t) {
-    t = { kind: "pattern", quasis, holes, fields: [] };
-    patterns.set(key, t);
-    keys.set(t, `pattern ${key}`);
-  }
-  return t;
-}
-
-// Whether a pattern is anywhere in `t`, where lowering it to `string` would lose what it asks.
-export function holdsPattern(t: Type): boolean {
-  if (typeof t === "string") return false;
-  let found = patterned.get(t);
-  if (found === undefined) {
-    patterned.set(t, false);
-    const parts = t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
-      : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete]
-      : t.kind === "interior" || t.kind === "shared" || t.kind === "block" ? [t.of] : t.kind === "handle" ? [t.gives, ...(t.throws ? [t.throws] : [])]
-      : t.kind === "variant" ? [...t.args, ...t.fields.map((f) => f.type)] : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns]
-      : t.kind === "future" ? [t.gives] : t.kind === "generator" ? [t.yields] : t.kind === "dyn" ? t.of.methods.flatMap((m) => [...m.params, m.returns]) : [];
-    found = t.kind === "pattern" || parts.some(holdsPattern);
-    patterned.set(t, found);
-  }
-  return found;
-}
-const patterned = new WeakMap<Exclude<Type, string>, boolean>();
-
-// Whether two types are one once lowered, except where `to` holds a pattern that lowering
-// would make a plain string: then fitting decides, part by part.
-export function sameLowered(from: Type, to: Type): boolean {
-  return lower(from) === lower(to) && (!holdsPattern(to) || holdsPattern(from) && shapeKey(from) === shapeKey(to));
-}
 
 // The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
 // text up to the next piece's first occurrence (one character before another hole), the last
@@ -210,6 +176,13 @@ export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
 // Whether a type is an Option: a union one of whose members is the empty value.
 export const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
 
+// The reference a `Ref<T> | null` holds when it isn't empty.
+export function optionRef(t: Type | undefined): RefType | undefined {
+  if (!t || !isOption(t) || t.members.length !== 2) return undefined;
+  const ref = t.members.find((m) => m !== "null")!;
+  return typeof ref !== "string" && ref.kind === "ref" ? ref : undefined;
+}
+
 // The values an integer type holds.
 export function range(t: Integer): [bigint, bigint] {
   const { bits, signed } = INTEGERS[t];
@@ -220,200 +193,27 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
 // they hold, a Lock as its lock word, then what it holds.
 export type InteriorType = { kind: "interior"; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
 
-const interiors = new Map<string, InteriorType>();
-
-export function interiorType(which: InteriorType["which"], of: Type): InteriorType {
-  const key = `${which} ${keyOf(of)}`;
-  let t = interiors.get(key);
-  if (!t) {
-    t = { kind: "interior", which, of, fields: [] };
-    interiors.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
 // `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
 // every clone is the same value, read and changed from any thread.
 export type SharedType = { kind: "shared"; of: Type; fields: Field[] };
 
-const shareds = new Map<string, SharedType>();
-
-export function sharedType(of: Type): SharedType {
-  const key = `shared ${keyOf(of)}`;
-  let t = shareds.get(key);
-  if (!t) {
-    t = { kind: "shared", of, fields: [] };
-    shareds.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
 // `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
 // of what that type does: drop it, clone it, and each of I's members.
-export type DynType = { kind: "dyn"; of: InterfaceType; fields: Field[] };
-
-const dyns = new Map<InterfaceType, DynType>();
-
-export function dynType(of: InterfaceType): DynType {
-  let t = dyns.get(of);
-  if (!t) {
-    t = { kind: "dyn", of, fields: [] };
-    dyns.set(of, t);
-    keys.set(t, `dyn ${keyOf(of)}`);
-  }
-  return t;
-}
-
-// A stored callable: a written function type in a field, an element, an annotated variable or
-// a return is a Dyn of an interface with one method, `call`, which a closure satisfies by its
-// signature. One per function type as written, so messages show its own parameter names;
-// those with the same types convert freely (`sameCallable`).
-const callables = new Map<string, InterfaceType>();
-export const callableOf = new WeakMap<InterfaceType, FunctionType>();
-
-// Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
-// booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
-// copied across, and opaque JS values.
-export function uncrossable(t: Type, within = new Set<Type>()): string | undefined {
-  // An empty array's element type, `never`, holds no value to cross.
-  if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return undefined;
-  if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
-  // A type holding itself has no JS form yet, as converting it would never end.
-  if (within.has(t)) return "a type holding itself has no JS form yet";
-  within.add(t);
-  const why = crossing(t, (u) => uncrossable(u, within));
-  within.delete(t);
-  return why;
-}
-
-function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | undefined): string | undefined {
-  // A callback or a stored Promise crosses on its own, as JS keeps it, not inside another value.
-  const kept = (u: Type) => typeof u !== "string" && u.kind === "dyn" && keptByJs(u);
-  switch (t.kind) {
-    case "literal":
-      return undefined;
-    case "param":
-      if (t.bound?.kind === "function") return "functions crossing between Fish and JS aren't supported yet";
-      return t.concrete === undefined ? "a type parameter's value isn't known here" : uncrossable(t.concrete);
-    case "union":
-      if (t.members.some(kept)) return "a callback or a Promise in a union, as an optional parameter holds one, isn't supported yet";
-      return t.members.map(uncrossable).find((w) => w !== undefined);
-    case "array":
-    case "fixed":
-      if (holdsPart(t.element, kept)) return "a callback or a Promise inside an array isn't supported yet; give it on its own";
-      return uncrossable(t.element);
-    case "object":
-      if ((t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).some((u) => holdsPart(u, kept))) return "a callback or a Promise inside an object isn't supported yet; give it on its own";
-      return (t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).map(uncrossable).find((w) => w !== undefined);
-    case "block":
-      return t.which === "JsValue" ? undefined : `a '${t.which}' is Fish's own`;
-    case "function":
-    case "closure":
-      return "functions crossing between Fish and JS aren't supported yet";
-    case "future":
-    case "handle":
-      if (t.kind === "future" && leafOf.get(t)?.method === "jsAwait") return t.gives === "void" ? undefined : uncrossable(t.gives);
-      return "Promises crossing between Fish and JS aren't supported yet";
-    case "interface":
-    case "dyn":
-      // A callback crosses as a JS function when what it takes and gives do.
-      if (t.kind === "dyn" && callableOf.has(t.of)) {
-        const fn = callableOf.get(t.of)!;
-        // What JS gives a callback is read into Fish, which has no reading of a JS function or
-        // promise as a Fish one.
-        if (fn.params.some((p) => holdsPart(p, (u) => kept(u) || (typeof u !== "string" && (u.kind === "function" || (u.kind === "interface" && promiseElement(u) !== undefined)))))) {
-          return "a callback that is given a function or a Promise isn't supported yet";
-        }
-        return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
-      }
-      {
-        // A Fish future given to JS is a promise of what it gives.
-        const promised = promiseElement(t.kind === "dyn" ? t.of : t);
-        if (promised === undefined) return "Fish has no JS form for it";
-        return t.kind === "dyn" ? (promised === "void" ? undefined : uncrossable(promised)) : "Promises crossing between Fish and JS aren't supported yet";
-      }
-    default:
-      return "Fish has no JS form for it";
-  }
-}
-
-// The members of a package's shapes Fish can't type, each with why: refused only where used.
-export const jsUntyped = new WeakMap<InterfaceType, Map<string, CompileError>>();
-// The refusals of members held aside that are optional, which a value may leave out.
-export const jsOptional = new WeakSet<CompileError>();
-// The same for a package's function a program imports but doesn't call.
-export const jsUncalled = new WeakMap<object, CompileError>();
-
-// The prelude's JsError, what awaiting a JS promise that rejects throws, once the prelude is read.
-let jsError: Type | undefined;
-export function setJsError(t: Type | undefined) {
-  jsError = t;
-}
-
-// What a declared type is when JS gives it: an object, as a handle of its shape, inside unions,
-// arrays and tuples too, and a promise as a Fish future of what it fulfills with.
-export function jsView(t: Type): Type {
-  if (typeof t === "string") return t;
-  const promised = promiseElement(t.kind === "dyn" ? t.of : t);
-  if (promised !== undefined && jsError !== undefined) return leafFuture("jsAwait", promised === "void" ? "void" : jsView(promised), jsError);
-  if (t.kind === "object" && !t.tuple) return blockType("JsValue", t);
-  if (t.kind === "object") return retuple(t, jsView);
-  if (t.kind === "union") return unionType(t.members.map(jsView));
-  if (t.kind === "array") return arrayType(jsView(t.element));
-  return t;
-}
+// A stored callable written with other parameter names is its own DynType, `shown` as written,
+// for the same interface and key, which `lower` gives.
+export type DynType = { kind: "dyn"; of: InterfaceType; fields: Field[]; shown?: string };
 
 // The shape a JS handle's declaration gives it, when it has one.
 export function jsShape(t: Type): InterfaceType | ObjectType | undefined {
   if (typeof t === "string" || t.kind !== "block" || t.which !== "JsValue" || typeof t.of === "string") return undefined;
   return t.of.kind === "interface" || t.of.kind === "object" ? t.of : undefined;
-}
-
-// What the timer task runs: each timer's callback, wrapped as an async function.
-export const timerCallback = (): DynType => callableType(functionType([], [], promiseInterface("void")));
-
-export function callableType(fn: FunctionType): DynType {
-  // In an instance, what its type parameters stand for decides the layout.
-  const [params, returns] = [fn.params.map(lower), lower(fn.returns)];
-  const key = `${fn.name} ${params.map(keyOf).join(", ")} => ${keyOf(returns)}`;
-  let i = callables.get(key);
-  if (!i) {
-    i = interfaceType(fn.name);
-    i.methods.push({ name: "call", params, returns });
-    callables.set(key, i);
-    callableOf.set(i, { ...fn, params, returns });
-  }
-  return dynType(i);
-}
-
-// Whether two stored callables take and give the same types, so either holds the other's value.
-export function sameCallable(a: Type, b: Type): boolean {
-  const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
-  return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns);
-}
-
-// A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside
-// arrays too.
-export function stored(t: Type): Type {
-  if (typeof t === "string") return t;
-  // A generic function type, like an interface, describes a value without being one.
-  if (t.kind === "function" && t.generic) return t;
-  if (t.kind === "function") return callableType(t);
-  // A `Promise<T>` stored holds a future, boxed.
-  if (t.kind === "interface" && promised.has(t)) return dynType(t);
-  if (t.kind === "array") return arrayType(stored(t.element));
-  if (t.kind === "fixed") return fixedType(stored(t.element), t.size);
-  if (t.kind === "map") return mapType(t.key, stored(t.value), t.set);
-  return t;
 }
 
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
@@ -423,79 +223,10 @@ export function stored(t: Type): Type {
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
 export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
 
-const blocks = new Map<string, BlockType>();
-
 // A JsValue a program holds without knowing its type, not a package's handle of a known shape.
 export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue" && t.of === "void";
 // The same, or a reference to one.
 export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.kind === "ref" ? t.to : t);
-
-// Whether a value crosses between Fish and JS converted on the way: a string, a number, a
-// boolean, empty, a literal, a JS value or handle, and unions, arrays, tuples and objects of them.
-// A Fish type holding itself has no JS form yet, as converting it would never end: `within` is
-// the types the walk is inside.
-export function jsConverts(t: Type, within = new Set<Type>()): boolean {
-  // An empty array's element type, `never`, holds no value to convert.
-  if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return true;
-  if (typeof t === "string" || within.has(t)) return false;
-  if (t.kind === "block") return t.which === "JsValue";
-  if (t.kind === "dyn" && callableOf.has(t.of)) {
-    const fn = callableOf.get(t.of)!;
-    return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].every((u) => jsConverts(u, within));
-  }
-  if (t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of) === "void" || jsConverts(promiseElement(t.of)!, within);
-  if (t.kind === "future") return leafOf.get(t)?.method === "jsAwait" && (t.gives === "void" || jsConverts(t.gives, within));
-  const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
-    : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
-  if (parts === undefined) return false;
-  within.add(t);
-  const all = parts.every((u) => jsConverts(u, within));
-  within.delete(t);
-  return all;
-}
-
-// A value JS keeps once it is given: a stored callable or a stored Promise, or what is stored as
-// one, a closure, a function or a future. Given to JS, it is handed over.
-export function keptByJs(t: Type): boolean {
-  if (typeof t === "string") return false;
-  if (t.kind === "dyn") return callableOf.has(t.of) || promiseElement(t.of) !== undefined;
-  return t.kind === "closure" || t.kind === "function" || t.kind === "future" || t.kind === "handle";
-}
-
-// What a package's parameter takes: a function type is a callback that JS may keep, so a stored
-// callable, owning what it uses; a `Promise<T>` is a stored one, as the task settling the JS
-// promise owns it; an object type is a handle of that shape, which a Fish value of it meets by
-// being made a new JS object.
-export function jsTakes(t: Type): Type {
-  if (typeof t === "string") return t;
-  if (t.kind === "union") return unionType(t.members.map(jsTakes));
-  if (t.kind === "function" || (t.kind === "interface" && promiseElement(t) !== undefined)) return stored(t);
-  return jsView(t);
-}
-
-// What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to
-// `read`: one kind of value, read out of JS, or several, which leave it the JsValue.
-export function jsRead(declared: Type, read: Type | undefined): "one" | "several" | undefined {
-  if (read === undefined) return undefined;
-  const held = typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
-  const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
-  if (!members.some(isPlainJs)) return undefined;
-  const kinds = (u: Type) => (u === "string" || u === "f64" || u === "boolean") && !members.includes(u);
-  const reads = (typeof read !== "string" && read.kind === "union" ? read.members : [read]).filter(kinds);
-  if (reads.length === 0) return undefined;
-  return reads.length === 1 && kinds(read) ? "one" : "several";
-}
-
-export function blockType(which: BlockType["which"], of: Type = "void"): BlockType {
-  const key = `${which} ${keyOf(of)}`;
-  let t = blocks.get(key);
-  if (!t) {
-    t = { kind: "block", which, of, fields: [] };
-    blocks.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
 // the runtime: each frame holds its state, a count on the block (or a sleep's deadline), and for
@@ -503,43 +234,6 @@ export function blockType(which: BlockType["which"], of: Type = "void"): BlockTy
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
 export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait";
-const leaves = new Map<string, FutureType>();
-export const leafOf = new WeakMap<FutureType, { method: Leaf; of: Type; signal: boolean }>();
-
-// Each leaf's frame after its state: what it waits on, then what it carries.
-const LEAF_FRAMES: Record<Leaf, (of: Type) => Field[]> = {
-  sleep: () => [{ name: "deadline", type: "i64" }],
-  acquire: () => [{ name: "block", type: blockType("Semaphore") }],
-  send: (of) => [{ name: "block", type: blockType("Channel", of) }, { name: "value", type: of }],
-  receive: (of) => [{ name: "block", type: blockType("Channel", of) }],
-  bind: () => [{ name: "host", type: "string" }, { name: "port", type: "i64" }],
-  connect: () => [{ name: "socket", type: blockType("TcpStream") }, { name: "host", type: "string" }, { name: "port", type: "i64" }],
-  accept: () => [{ name: "block", type: blockType("TcpListener") }],
-  read: () => [{ name: "block", type: blockType("TcpStream") }, { name: "max", type: "i64" }],
-  write: () => [{ name: "block", type: blockType("TcpStream") }, { name: "bytes", type: arrayType("u8") }, { name: "written", type: "i64" }],
-  readFile: () => [{ name: "path", type: "string" }, { name: "job", type: blockType("FileJob") }],
-  writeFile: () => [{ name: "path", type: "string" }, { name: "bytes", type: arrayType("u8") }, { name: "job", type: blockType("FileJob") }],
-  timerNext: () => [],
-  // A JS promise, and whether the task already waits for it to settle.
-  jsAwait: () => [{ name: "promise", type: blockType("JsValue") }, { name: "waiting", type: "i32" }],
-};
-
-// A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
-// count and waiting flag end its frame.
-export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false): FutureType {
-  const key = `${method} ${keyOf(of)} ${throws ? keyOf(throws) : ""} ${signal}`;
-  let t = leaves.get(key);
-  if (!t) {
-    const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
-    if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
-    const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
-      : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of : "void";
-    t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
-    leaves.set(key, t);
-    leafOf.set(t, { method, of, signal });
-  }
-  return t;
-}
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
@@ -547,42 +241,11 @@ export function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false
 // the TaskPanic `panic` rather than panicking its awaiter.
 export type HandleType = { kind: "handle"; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
 
-const handles = new Map<string, HandleType>();
-
-export function handleType(gives: Type, throws: Type | undefined): HandleType {
-  const key = `handle ${keyOf(gives)} ${throws ? keyOf(throws) : ""}`;
-  let t = handles.get(key);
-  if (!t) {
-    t = { kind: "handle", gives, throws, fields: [] };
-    handles.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-// What `handle.join()` gives: the task's handle, awaited as throwing a TaskPanic too.
-export function joinedType(base: HandleType, panic: Type): HandleType {
-  const key = `joined ${keyOf(base)} ${keyOf(panic)}`;
-  let t = handles.get(key);
-  if (!t) {
-    t = { kind: "handle", gives: base.gives, throws: base.throws ? unionType([base.throws, panic]) : panic, fields: [], joined: { base, panic } };
-    handles.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
 // An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
 // its parameters, which say what it borrows, and the frame its state lives in, as a
 // generator's. Polled where it lives and never moved after its first poll. One per async
 // instance, so `===` is nominal identity; it has no properties.
 export type FutureType = { kind: "future"; name: string; gives: Type; throws?: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
-
-export function futureType(name: string, concrete: boolean): FutureType {
-  const t: FutureType = { kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete };
-  keys.set(t, `future ${declared++}`);
-  return t;
-}
 
 // `sleep(ms)`'s future: its state, then the delay, then the deadline the runtime sets.
 export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
@@ -595,98 +258,10 @@ export const SLEEP: FutureType = { kind: "future", name: "sleep", gives: "void",
 // values and a flag per future instead. `aggregate` is the AggregateError an `any` throws when
 // every future fails.
 export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: number; end: number } };
-export const combinedOf = new WeakMap<FutureType, Combined>();
-
-// What a future in a combined one gives, null for nothing, and what it throws.
-function givenBy(f: FutureType | HandleType | DynType): Type {
-  const gives = f.kind === "dyn" ? promiseElement(f.of)! : f.gives;
-  return gives === "void" ? "null" : gives;
-}
 const thrownBy = (f: FutureType | HandleType | DynType): Type | undefined => (f.kind === "dyn" ? undefined : f.throws);
-
-// An `allSettled` outcome, as JavaScript gives it: fulfilled with the value, or, for a future that
-// can throw, rejected with what it threw.
-export function settledType(gives: Type, thrown: Type | undefined): Type {
-  const { fulfilled, rejected } = settledParts(gives, thrown);
-  return rejected ? unionType([fulfilled, rejected]) : fulfilled;
-}
-
-export function settledParts(gives: Type, thrown: Type | undefined): { fulfilled: ObjectType; rejected?: ObjectType } {
-  const fulfilled = objectType([{ name: "status", type: literalType("fulfilled") }, { name: "value", type: gives }]);
-  return { fulfilled, rejected: thrown ? objectType([{ name: "status", type: literalType("rejected") }, { name: "reason", type: thrown }]) : undefined };
-}
-
-export function combinedFuture(combined: Combined): FutureType {
-  const { kind } = combined;
-  const make = (gives: Type, throws: Type | undefined, frame: Field[]) => {
-    const params = combined.futures.flatMap((f) => (f.kind === "future" ? f.params : []));
-    const t: FutureType = { kind: "future", name: `Promise.${kind}`, gives, throws, fields: [], params, frame, concrete: true };
-    keys.set(t, `future ${declared++}`);
-    combinedOf.set(t, combined);
-    return t;
-  };
-  if (combined.array) {
-    const given = givenBy(combined.array.element as DynType);
-    const kept = kind === "allSettled" ? settledType(given, undefined) : given;
-    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "futures", type: combined.array }, { name: "values", type: arrayType(kept) }, { name: "flags", type: arrayType("u8") }];
-    return make(kind === "all" || kind === "allSettled" ? arrayType(kept) : given, kind === "any" ? combined.aggregate : undefined, frame);
-  }
-  // Each future's slot keeps its value, its outcome for `allSettled`, or its error for `any`.
-  const kept = combined.futures.map((f) => (kind === "allSettled" ? settledType(givenBy(f), thrownBy(f)) : kind === "any" ? (thrownBy(f) ?? "null") : givenBy(f)));
-  const frame: Field[] = [{ name: "state", type: "i32" }];
-  combined.futures.forEach((f, i) => frame.push({ name: `future${i}`, type: f }, { name: `value${i}`, type: kept[i]! }, { name: `done${i}`, type: "i32" }));
-  const thrown = combined.futures.flatMap((f) => (thrownBy(f) ? [thrownBy(f)!] : []));
-  if (kind === "all") return make(tupleType(kept), thrown.length > 0 ? unionType(thrown) : undefined, frame);
-  if (kind === "allSettled") return make(tupleType(kept), undefined, frame);
-  const gives = unionType(combined.futures.map(givenBy));
-  if (kind === "race") return make(gives, thrown.length > 0 ? unionType(thrown) : undefined, frame);
-  return make(gives, combined.aggregate, frame);
-}
 
 // `yieldNow()`'s future, which is pending once, then done.
 export const YIELD_NOW: FutureType = { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
-
-const promises = new Map<string, InterfaceType>();
-const promised = new WeakMap<InterfaceType, Type>();
-
-// `Promise<T>`: any future giving a `T` once awaited, as TypeScript's type of an async result is.
-export function promiseInterface(t: Type): InterfaceType {
-  let found = promises.get(keyOf(t));
-  if (!found) {
-    found = interfaceType(`Promise<${show(t)}>`);
-    promises.set(keyOf(t), found);
-    promised.set(found, t);
-  }
-  return found;
-}
-
-// The boxed future a Dyn's async method gives: a `Promise<T>` that borrows the Dyn's value, so
-// it holds a reference, which keeps it from outliving the Dyn or crossing threads.
-const lent = new Map<string, InterfaceType>();
-export const borrowing = new WeakSet<InterfaceType>();
-
-export function lentPromise(t: Type): DynType {
-  let found = lent.get(keyOf(t));
-  if (!found) {
-    found = interfaceType(`Promise<${show(t)}>`);
-    lent.set(keyOf(t), found);
-    promised.set(found, t);
-    borrowing.add(found);
-  }
-  return dynType(found);
-}
-
-// Whether copies of a Dyn share its one value, as Rust's `Arc<dyn Trait>` does: so they may when
-// nothing through its interface changes or takes over the value. A boxed future never does,
-// since polling changes it.
-export function sharesDyn(t: DynType): boolean {
-  return !promised.has(t.of) && t.of.methods.every((m) => !m.mutable && !m.owned);
-}
-
-// What a `Promise<T>` gives, when the interface is one.
-export function promiseElement(t: Type): Type | undefined {
-  return typeof t !== "string" && t.kind === "interface" ? promised.get(t) : undefined;
-}
 
 // A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
 // only inside `unsafe`. It copies like a number and owns nothing.
@@ -702,19 +277,6 @@ export type RegexType = { kind: "regex"; source: string; pattern: string; flags:
 // instance knows its regex; elsewhere it holds one whose pattern isn't known there.
 export const ANY_REGEX: RegexType = { kind: "regex", source: "", pattern: "", flags: "", captures: [], fields: [], any: true };
 
-const regexes = new Map<string, RegexType>();
-
-export function regexType(pattern: string, flags: string, captures: RegexType["captures"], source = pattern): RegexType {
-  const key = `regex ${flags} ${pattern}`;
-  let t = regexes.get(key);
-  if (!t) {
-    t = { kind: "regex", source, pattern, flags, captures, fields: [] };
-    regexes.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
 // Where a type leads back to itself, as `next` does in `type Node = { next: Node | null }`: a
 // pointer to a block holding `of`, the type it stands for, which is set once that is made. It
 // is that type everywhere but in its layout, and every walk over types stops at it.
@@ -722,58 +284,10 @@ export function regexType(pattern: string, flags: string, captures: RegexType["c
 // they stand for.
 export type RecursiveType = { kind: "recursive"; name: string; args: Type[]; of: Type; fields: Field[] };
 
-// One per alias instance a program's types lead back to; the checker keeps them by instance.
-export function recursiveType(name: string, args: Type[]): RecursiveType {
-  const t: RecursiveType = { kind: "recursive", name, args, of: "never", fields: [] };
-  keys.set(t, `recursive ${declared++}`);
-  return t;
-}
-
-// The recursive type standing for a class or an enum instance, made once for it, so the one
-// made for another instance is found from the instance.
-const heldBlocks = new WeakMap<Exclude<Type, string>, RecursiveType>();
-export function blockFor(t: ClassType | UnionType, args: Type[]): RecursiveType {
-  let back = heldBlocks.get(t);
-  if (!back) {
-    heldBlocks.set(t, back = recursiveType(show(t), args));
-    standsFor(back, t);
-  }
-  return back;
-}
-export function holdsBlock(t: UnionType, back: RecursiveType) {
-  heldBlocks.set(t, back);
-}
-
-// The same recursive type made with other type arguments, which only the checker can make.
-let instanceRecursive = (t: RecursiveType, _args: Type[]): RecursiveType => t;
-export function lowersRecursive(f: typeof instanceRecursive) {
-  instanceRecursive = f;
-}
-
-// A recursive type for other type arguments: a class's or an enum's is found from its instance,
-// `of` made with them, which makes the instance without reading its fields; an alias's is
-// remade by the checker.
-function remade(t: RecursiveType, of: () => Type, args: Type[]): RecursiveType {
-  const kind = typeof t.of !== "string" ? t.of.kind : undefined;
-  if (kind === "class" || (kind === "union" && heldBlocks.get(t.of as UnionType) === t)) {
-    const made = of();
-    return typeof made !== "string" && (made.kind === "class" || made.kind === "union") ? blockFor(made, args) : t;
-  }
-  return instanceRecursive(t, args);
-}
-
-// Whether a value of `type` lent where a type parameter is wanted is a part of a value whose type
-// holds itself, the parameter standing for that type: each instance checks it again.
-export function partOfItself(type: Type, to: Type): boolean {
-  if (typeof to === "string" || to.kind !== "param" || to.concrete || to.bound === undefined || lower(type) !== lower(to.bound)) return false;
-  const bound = to.bound;
-  return ties.has(bound) || holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
-}
-
 // The part of a type that keeps `===` from comparing its values, or undefined when every part
 // compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
 // class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
-export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
+export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen: Set<Type> = new Set<Type>()): Type | undefined {
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
   const part = (u: Type) => unequal(u, eq, seen);
@@ -811,7 +325,7 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
 // The part of a type that `console.log` can't print as Node's util.inspect would, or undefined:
 // every value but functions, handles and other runtime objects prints, a type parameter in each
 // instance once it is concrete.
-export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined {
+export function uninspectable(t: Type, seen: Set<Type> = new Set<Type>()): Type | undefined {
   if (typeof t === "string") return t === "void" ? t : undefined;
   if (seen.has(t)) return undefined;
   seen.add(t);
@@ -849,238 +363,13 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
   }
 }
 
-// The part of a type that keeps `JSON.stringify` and `JSON.parse` from taking its values, or
-// undefined when every part is Json: booleans, numbers, strings and literals, and objects,
-// tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
-// `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
-export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
-  if (typeof t === "string") return t === "void" || t === "never" ? t : undefined;
-  if (seen.has(t)) return undefined;
-  seen.add(t);
-  const part = (u: Type) => unjson(u, json, seen);
-  const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
-  switch (t.kind) {
-    case "literal":
-    case "pattern":
-      return undefined;
-    case "ref":
-      return part(t.to);
-    case "recursive":
-      return part(t.of);
-    case "param":
-      return t.concrete ? part(t.concrete) : undefined;
-    case "union":
-      return first(t.members);
-    case "array":
-    case "fixed":
-      return part(t.element);
-    case "object":
-      return t.match ? t : first(t.fields.map((f) => f.type));
-    case "map":
-      return t.set || lower(t.key) !== "string" ? t : part(t.value);
-    case "class":
-      return json(t) ? first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]) : t;
-    case "variant":
-      if (!json(t)) return t;
-      return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
-    default:
-      return t;
-  }
-}
-
 // The type a recursive type stands for, or the type itself.
 export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
-
-// What reading a place of `t` gives: a recursive type, or a union's recursive members, as the
-// types they stand for, held in a value of their own rather than in a block.
-export function unfolded(t: Type): Type {
-  if (typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "recursive")) return unionType(t.members.map(unfold), t.name);
-  return unfold(t);
-}
-
-const pointers = new Map<string, PointerType>();
-
-export function pointerType(to: Type, mutable: boolean): PointerType {
-  const key = `${mutable ? "mutptr" : "ptr"} ${keyOf(to)}`;
-  let t = pointers.get(key);
-  if (!t) {
-    t = { kind: "pointer", to, mutable, fields: [] };
-    pointers.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
 
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
 // empty. One per generator instance, so `===` is nominal identity.
 export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
-
-const interned = new Map<string, ObjectType>();
-const literals = new Map<string, LiteralType>();
-const unions = new Map<string, UnionType>();
-const keys = new Map<Exclude<Type, string>, string>();
-let declared = 0;
-
-// The type tables as the compiler's modules left them once loaded, before any compile: the types
-// their tables of built-in signatures hold.
-let loaded: { declared: number; tables: [Map<unknown, unknown>, [unknown, unknown][]][] } | undefined;
-
-// Starts a compile's types from the state every compile starts from. Keys number types in the
-// order they are declared and order unions' members, so a compile numbering on from an earlier
-// one's would lay its unions out differently; and the tables, keyed by those numbers, would
-// otherwise grow in a process that compiles many times.
-export function resetTypes() {
-  const tables: Map<unknown, unknown>[] = [patterns, interiors, shareds, dyns, callables, blocks, leaves, handles, promises, lent, regexes, pointers, interned, literals, unions, keys, generators, genericValues, refs, fixeds, arrays, maps, variants, wrappers];
-  if (loaded === undefined) {
-    loaded = { declared, tables: tables.map((table) => [table, [...table]]) };
-    return;
-  }
-  declared = loaded.declared;
-  for (const [table, entries] of loaded.tables) {
-    table.clear();
-    for (const [k, v] of entries) table.set(k, v);
-  }
-}
-
-// A class's key is unique to its declaration, since two programs may reuse a class name.
-export function classType(name: string, generic?: ClassType["generic"]): ClassType {
-  const t: ClassType = { kind: "class", name, fields: [], generic };
-  keys.set(t, `class ${declared++}`);
-  return t;
-}
-
-export function interfaceType(name: string): InterfaceType {
-  const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
-  keys.set(t, `interface ${declared++}`);
-  return t;
-}
-
-export function generatorType(name: string, concrete: boolean): GeneratorType {
-  const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete };
-  keys.set(t, `generator ${declared++}`);
-  return t;
-}
-
-// What `next()` gives: the next value, or that the generator has finished.
-export function nextResult(t: Type): Type {
-  return unionType([objectType([{ name: "done", type: literalType(false) }, { name: "value", type: t }]), objectType([{ name: "done", type: literalType(true) }])]);
-}
-
-const generators = new Map<string, InterfaceType>();
-const elements = new WeakMap<InterfaceType, Type>();
-
-// `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
-export function generatorInterface(t: Type): InterfaceType {
-  let found = generators.get(keyOf(t));
-  if (!found) {
-    found = interfaceType(`Generator<${show(t)}>`);
-    found.methods.push({ name: "next", params: [], returns: nextResult(t) });
-    generators.set(keyOf(t), found);
-    elements.set(found, t);
-  }
-  return found;
-}
-
-// What a generator, or a type parameter standing for one or bounded by `Generator<T>`, yields.
-export function yieldsOf(t: Type): Type | undefined {
-  if (typeof t === "string") return undefined;
-  if (t.kind === "generator") return t.yields;
-  if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete) : t.bound && generatorElement(t.bound);
-  return generatorElement(t);
-}
-
-// What a `Generator<T>` yields, when the interface is one.
-export function generatorElement(t: Type): Type | undefined {
-  return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;
-}
-
-export function functionType(names: string[], params: Type[], returns: Type): FunctionType {
-  const t: FunctionType = { kind: "function", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, names, params, returns, fields: [] };
-  keys.set(t, `function ${declared++}`);
-  return t;
-}
-
-export function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean): ClosureType {
-  const t: ClosureType = { kind: "closure", name: `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}`, params, returns, fields, once, concrete };
-  keys.set(t, `closure ${declared++}`);
-  return t;
-}
-
-const genericValues = new Map<string, ClosureType>();
-
-// The one type of a generic function used as a value, by the function's name.
-export function genericFunctionType(name: string, shown: string): ClosureType {
-  let t = genericValues.get(name);
-  if (!t) {
-    t = { kind: "closure", name: shown, params: [], returns: "void", fields: [], concrete: true, generic: name };
-    keys.set(t, `generic function ${name}`);
-    genericValues.set(name, t);
-  }
-  return t;
-}
-
-export function literalType(value: string | bigint | boolean, owner?: LiteralType["owner"]): LiteralType {
-  const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member} ${owner.id}` : ""}`;
-  let t = literals.get(key);
-  if (!t) {
-    t = { kind: "literal", value, fields: [], owner };
-    literals.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-// A literal standing for a comptime value that isn't a string, number or boolean, such as a
-// tag's strings: interned by `key`, and never equal to an ordinary literal.
-export function standInLiteral(key: string): LiteralType {
-  const at = `stand-in ${key}`;
-  let t = literals.get(at);
-  if (!t) {
-    t = { kind: "literal", value: key, fields: [] };
-    literals.set(at, t);
-    keys.set(t, at);
-  }
-  return t;
-}
-
-// Members are flattened, deduplicated and kept in one order, so equal unions are one type,
-// and a literal whose base type is also a member adds nothing. A single member is itself.
-// An enum's union carries the enum's name, for messages.
-export function unionType(parts: Type[], name?: string): Type {
-  let flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
-  // Regexes of different patterns are one \`RegExp\`, as every regex is a pointer to a program.
-  if (new Set(flat.filter((p) => typeof p !== "string" && p.kind === "regex")).size > 1) flat = flat.map((p) => (typeof p !== "string" && p.kind === "regex" ? ANY_REGEX : p));
-  // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
-  // as whichever sorts first.
-  const seen = new Set<string>();
-  const members = [...new Set(flat)]
-    .filter((t) => typeof t === "string" || (t.kind !== "literal" || !flat.includes(baseOf(t)!)) && (t.kind !== "pattern" || !flat.includes("string")))
-    .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
-    .filter((t) => {
-      const shape = shapeKey(t);
-      return !seen.has(shape) && seen.add(shape) !== undefined;
-    });
-  if (members.length === 1) return members[0]!;
-  const key = `union ${members.map(keyOf).join("|")}`;
-  let t = unions.get(key);
-  if (!t) {
-    t = { kind: "union", members, fields: [], name };
-    unions.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-// The members of `union` a value of `type` can go into: the one it is, or else every one it
-// fits. The checker allows exactly one.
-export function membersFor(type: Type, union: UnionType): Type[] {
-  if (union.members.includes(type)) return [type];
-  const fitting = union.members.filter((m) => fits(type, m));
-  // A JS value goes into the union's JS value, whichever declared shape each has.
-  const js = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue";
-  return fitting.length > 0 || !js(type) ? fitting : union.members.filter(js);
-}
 
 // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
 // argument or a property, since the place may later hold another member.
@@ -1101,114 +390,6 @@ export function widenLet(t: Type): Type {
 export function baseOf(t: LiteralType): "i64" | "boolean" | "string" {
   return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : "string";
 }
-
-export function typeParameter(name: string, bound: Bound | undefined): ParamType {
-  const t: ParamType = { kind: "param", name, bound, fields: bound?.fields ?? [] };
-  keys.set(t, `param ${declared++}`);
-  return t;
-}
-
-export function refType(to: Type, mutable: boolean, life?: string): RefType {
-  const key = `${mutable ? "mut" : "ref"} ${keyOf(to)}${life ? ` ${life}` : ""}`;
-  let t = refs.get(key);
-  if (!t) {
-    t = { kind: "ref", to, mutable, fields: [], life };
-    refs.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-const refs = new Map<string, RefType>();
-
-export function fixedType(element: Type, size: number): FixedType {
-  const key = `fixed ${size} ${keyOf(element)}`;
-  let t = fixeds.get(key);
-  if (!t) {
-    t = { kind: "fixed", element, size, fields: [] };
-    fixeds.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-const fixeds = new Map<string, FixedType>();
-
-export function arrayType(element: Type): ArrayType {
-  const key = `[${keyOf(element)}]`;
-  let t = arrays.get(key);
-  if (!t) {
-    t = { kind: "array", element, fields: [] };
-    arrays.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-const arrays = new Map<string, ArrayType>();
-
-// Sets the type a recursive type stands for. An array is on the heap already, so where the
-// type reaches itself through one, that array holds the type itself rather than a block, and is
-// the array `Tree[]` means wherever it is written. The type then holds itself, a loop the walks
-// over types stop at by the recursive type kept for it.
-export function standsFor(back: RecursiveType, of: Type) {
-  back.of = of;
-  // A Map that leads back holds the type inline too, as an array does, so a Map written with
-  // the type is the one the type holds.
-  if (typeof of !== "string" && of.kind !== "map") {
-    for (const map of [...maps.values()]) {
-      if (map.value !== back) continue;
-      map.value = of;
-      maps.set(`${map.set ? "Set" : "Map"}<${keyOf(map.key)},${keyOf(of)}>`, map);
-      ties.set(of, back);
-    }
-  }
-  const array = arrays.get(`[${keyOf(back)}]`);
-  // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
-  // elements stay blocks.
-  if (!array || typeof of === "string" || of.kind === "array") return;
-  array.element = of;
-  arrays.set(`[${keyOf(of)}]`, array);
-  ties.set(of, back);
-  // Its members stay as they are too, so one narrowed to is still a member of it.
-  if (of.kind === "union") for (const m of of.members) if (typeof m !== "string" && m.kind === "object") members.set(m, back);
-}
-
-// The type holding itself that each member of its union belongs to.
-const members = new WeakMap<Exclude<Type, string>, RecursiveType>();
-
-const ties = new WeakMap<Exclude<Type, string>, RecursiveType>();
-
-// The recursive type a type holding itself through an array was made with.
-export const tiedBy = (t: Type): RecursiveType | undefined => (typeof t === "string" ? undefined : ties.get(t));
-
-export function mapType(key: Type, value: Type, set = false): MapType {
-  const id = `${set ? "Set" : "Map"}<${keyOf(key)},${keyOf(value)}>`;
-  let t = maps.get(id);
-  if (!t) {
-    t = { kind: "map", key, value, set, fields: [] };
-    maps.set(id, t);
-    keys.set(t, id);
-  }
-  return t;
-}
-
-const maps = new Map<string, MapType>();
-
-// The variant `member` of an enum declaration (by its unique id) with these type arguments.
-export function variantType(enumName: string, id: number, member: string, args: Type[], payload: Type[]): VariantType {
-  const key = `variant ${id} ${member} <${args.map(keyOf).join(",")}>`;
-  let t = variants.get(key);
-  if (!t) {
-    const shown = args.length > 0 ? `${enumName}<${args.map(show).join(", ")}>` : enumName;
-    t = { kind: "variant", name: `${shown}.${member}`, member, enum: enumName, fields: payload.map((type, i) => ({ name: String(i), type })), args };
-    variants.set(key, t);
-    // A short key of its own, so an enum nested in itself doesn't double its key each level.
-    keys.set(t, `variant#${variants.size}`);
-  }
-  return t;
-}
-
-const variants = new Map<string, VariantType>();
 
 // Primitives, literals, references, and unions of nothing else are copied; objects,
 // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
@@ -1234,7 +415,7 @@ export function isCopy(t: Type): boolean {
 }
 
 // Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
-export function holdsMut(t: Type, seen = new Set<Type>()): boolean {
+export function holdsMut(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
   if (typeof t === "string" || seen.has(t)) return false;
   seen.add(t);
   const inner = (u: Type) => holdsMut(u, seen);
@@ -1250,29 +431,9 @@ export function holdsMut(t: Type, seen = new Set<Type>()): boolean {
   return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => inner(f.type));
 }
 
-// Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid. A
-// class met again inside itself adds nothing; one that contains itself is refused elsewhere.
-export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
-  if (typeof t === "string" || seen.has(t)) return false;
-  seen.add(t);
-  const holds = (u: Type) => holdsRef(u, seen);
-  if (t.kind === "ref" || (t.kind === "dyn" && borrowing.has(t.of))) return true;
-  // A type parameter holds references when what it stands for, or its bound, does.
-  if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
-  if (t.kind === "union") return t.members.some(holds);
-  if (t.kind === "recursive") return holds(t.of);
-  if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
-  if (t.kind === "map") return holds(t.value);
-  if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
-  if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
-  // A generator borrows what its parameters do; its frame's own references point into itself.
-  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holds(f.type));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holds(f.type));
-}
-
 // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
 // reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
-export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen = new Set<Type>()): boolean {
+export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen: Set<Type> = new Set<Type>()): boolean {
   const holds = (u: Type) => holdsPart(u, found, throughRefs, seen);
   if (found(t)) return true;
   if (typeof t === "string") return false;
@@ -1296,11 +457,6 @@ export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) =>
 
 export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
 
-// The signatures of callbacks that run while a lock is held, so their bodies can't await; and
-// of those changing a shared value, whose interior-mutable parts others borrow unlocked.
-export const lockCallbacks = new WeakSet<FunctionType>();
-export const sharedCallbacks = new WeakSet<FunctionType>();
-
 // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
 // shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
 // such fields without its lock.
@@ -1313,188 +469,13 @@ export function holdsInterior(t: Type): InteriorType | undefined {
   return found;
 }
 
-// A type parameter as an instance sees it: standing for `concrete`, which has no type
-// parameter in it.
-export function wrapped(name: string, bound: Bound | undefined, concrete: Type): ParamType {
-  const key = `param ${name} ${bound ? keyOf(bound) : ""} as ${keyOf(concrete)}`;
-  let t = wrappers.get(key);
-  if (!t) {
-    t = { kind: "param", name, bound, fields: bound?.fields ?? [], concrete };
-    wrappers.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-const wrappers = new Map<string, ParamType>();
-
-// A type with each instance's type parameter replaced by the concrete type it stands for. A
-// generic class made from one becomes the class made from what it stands for.
-export function lower(t: Type): Type {
-  // A generic interface made from type parameters is the one made from what they stand for.
-  if (typeof t !== "string" && t.kind === "interface" && t.generic?.args.some((a) => lower(a) !== a)) return instanceInterface(t, t.generic.args.map(lower));
-  if (typeof t !== "string" && t.kind === "dyn" && t.of.generic?.args.some((a) => lower(a) !== a)) return dynType(lower(t.of) as InterfaceType);
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn" || t.kind === "regex") return t;
-  if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
-  if (t.kind === "pattern") return "string";
-  if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
-  if (t.kind === "handle") return t.joined ? joinedType(lower(t.joined.base) as HandleType, t.joined.panic) : handleType(lower(t.gives), t.throws && lower(t.throws));
-  if (t.kind === "interior") return interiorType(t.which, lower(t.of));
-  if (t.kind === "shared") return sharedType(lower(t.of));
-  if (t.kind === "block") return blockType(t.which, lower(t.of));
-  if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
-  if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? remade(t, () => lower(t.of), t.args.map(lower)) : t;
-  // A type holding itself through an array is remade from its type arguments.
-  const tied = ties.get(t);
-  if (tied && heldBlocks.get(t) !== tied) return tied.args.some((a) => lower(a) !== a) ? instanceRecursive(tied, tied.args.map(lower)).of : t;
-  const loop = members.get(t);
-  if (loop && !loop.args.some((a) => lower(a) !== a)) return t;
-  let found = lowered.get(t);
-  if (!found) {
-    if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
-    else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
-    else if (t.kind === "array") found = arrayType(lower(t.element));
-    else if (t.kind === "fixed") found = fixedType(lower(t.element), t.size);
-    else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
-    else if (t.kind === "object" && t.match) found = t;
-    else if (t.kind === "object" && t.tuple) found = retuple(t, lower);
-    else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
-    lowered.set(t, found);
-  }
-  return found;
-}
-
-const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType | FixedType | VariantType, Type>();
-
-// A type with some of its parts swapped for others, looking inside objects and unions.
-export function replaced(t: Type, swap: Map<Type, Type>): Type {
-  const found = swap.get(t);
-  if (found) return found;
-  if (typeof t !== "string" && t.kind === "class") {
-    const args = t.generic?.args.map((a) => replaced(a, swap));
-    return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
-  }
-  if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
-  if (typeof t !== "string" && t.kind === "interface" && t.generic) {
-    const args = t.generic.args.map((a) => replaced(a, swap));
-    return args.some((a, i) => a !== t.generic!.args[i]) ? instanceInterface(t, args) : t;
-  }
-  if (typeof t !== "string" && t.kind === "function") {
-    const params = t.params.map((p) => replaced(p, swap));
-    const returns = replaced(t.returns, swap);
-    if (!params.some((p, i) => p !== t.params[i]) && returns === t.returns) return t;
-    const made = functionType(t.names, params, returns);
-    // A generic one stays generic, the types around it it was written among replaced too.
-    if (t.generic) {
-      made.name = `<${t.generic.names.join(", ")}>${made.name}`;
-      made.generic = { ...t.generic, scope: new Map([...t.generic.scope].map(([n, x]) => [n, replaced(x, swap)])) };
-    }
-    return made;
-  }
-  // A stored callable is remade from the function type it was written as.
-  const fn = typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined;
-  if (fn) {
-    const made = replaced(fn, swap);
-    return made === fn ? t : callableType(made as FunctionType);
-  }
-  if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
-  if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
-  if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), replaced(t.value, swap), t.set);
-  if (typeof t !== "string" && t.kind === "variant") {
-    const args = t.args.map((a) => replaced(a, swap));
-    return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
-  }
-  const tied = typeof t !== "string" ? ties.get(t) : undefined;
-  if (tied && heldBlocks.get(t as UnionType) !== tied) {
-    const args = tied.args.map((a) => replaced(a, swap));
-    return args.some((a, i) => a !== tied.args[i]) ? instanceRecursive(tied, args).of : t;
-  }
-  if (typeof t !== "string" && t.kind === "recursive") {
-    const args = t.args.map((a) => replaced(a, swap));
-    return args.some((a, i) => a !== t.args[i]) ? remade(t, () => replaced(t.of, swap), args) : t;
-  }
-  if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
-  if (t.kind === "object" && t.match) return t;
-  if (t.kind === "object" && t.tuple) return retuple(t, (e) => replaced(e, swap));
-  return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
-}
-
-// The class a generic class's type arguments make, which only the checker can declare.
-let instanceClass = (c: ClassType, _args: Type[]): ClassType => c;
-export function lowersClasses(f: typeof instanceClass) {
-  instanceClass = f;
-}
-
-// The same variant of a generic enum made with other type arguments, which only the checker
-// can make.
-let instanceVariant = (v: VariantType, _args: Type[]): VariantType => v;
-let instanceInterface = (t: InterfaceType, _args: Type[]): InterfaceType => t;
-export function lowersInterfaces(f: typeof instanceInterface) {
-  instanceInterface = f;
-}
-export function lowersVariants(f: typeof instanceVariant) {
-  instanceVariant = f;
-}
-
 // A short name for what `description` describes, the same in every program that has it: six
 // base-36 digits of its hash.
 export const digest = (description: string): string => Bun.hash(description).toString(36).slice(-6);
 
-// A string that is the same exactly when two types are, for keying instances.
-export function keyOf(t: Type): string {
-  return typeof t === "string" ? t : `{${keys.get(t)}}`;
-}
-
-// `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
-export function tupleType(elements: Type[], required = elements.length, rest?: Type): ObjectType {
-  const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${keyOf(rest)}`}`;
-  let t = interned.get(key);
-  if (!t) {
-    const fields: Field[] = elements.map((type, i) => ({ name: String(i), type }));
-    if (rest !== undefined) fields.push({ name: "...", type: arrayType(rest) });
-    t = { kind: "object", fields: objectType(fields).fields, tuple: true };
-    if (required < elements.length) t.required = required;
-    if (rest !== undefined) t.rest = rest;
-    interned.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
-
-// The same tuple shape over elements mapped by `f`.
-export const retuple = (t: ObjectType, f: (e: Type) => Type): ObjectType => tupleType(elementsOf(t).map(f), t.required, t.rest === undefined ? undefined : f(t.rest));
-
 // A tuple's element types, in order.
 export function elementsOf(t: ObjectType): Type[] {
   return t.fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
-}
-
-// What `re.exec(s)` gives when it matches: the whole match and each capture, a capture that
-// may not take part being `string | null`, then where the match starts, the string matched, and,
-// when the pattern names groups, an object of them.
-export function matchType(t: RegexType): ObjectType {
-  const key = `match ${keys.get(t)}`;
-  let found = interned.get(key);
-  if (!found) {
-    const maybe = unionType(["string", "null"]);
-    const names = [...new Set(t.captures.flatMap((c) => (c.name === undefined ? [] : [c.name])))];
-    // A name shared by groups in different alternatives holds whichever took part.
-    const named = names.map((name) => {
-      const groups = t.captures.filter((c) => c.name === name);
-      return { name, type: groups.length === 1 && !groups[0]!.optional ? "string" as Type : maybe };
-    });
-    const fields: Field[] = [
-      { name: "0", type: "string" },
-      ...t.captures.map((c, i) => ({ name: String(i + 1), type: c.optional ? maybe : "string" as Type })),
-      { name: "index", type: "i64" },
-      { name: "input", type: "string" },
-      ...(named.length > 0 ? [{ name: "groups", type: objectType(named) as Type }] : []),
-    ];
-    found = { kind: "object", fields: objectType(fields).fields, tuple: true, match: true };
-    interned.set(key, found);
-    keys.set(found, key);
-  }
-  return found;
 }
 
 // Why a generic function type can't be held where it is: as `where` it would be boxed, and a box
@@ -1504,19 +485,6 @@ export function familyHeld(where: string): string {
 }
 
 export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
-
-export function objectType(fields: Field[]): ObjectType {
-  const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
-  const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? `?${f.optional}` : ""}:${keyOf(f.type)}`).join(",");
-  let t = interned.get(key);
-  if (!t) {
-    t = { kind: "object", fields: sorted };
-    interned.set(key, t);
-    keys.set(t, key);
-  }
-  return t;
-}
 
 // A field of an object, or of an instance or the bases it embeds.
 export function field(t: Exclude<Type, string>, name: string): Field | undefined {
@@ -1532,41 +500,6 @@ export function fieldPath(t: ObjectType | ClassType, name: string): number[] {
   return [0, ...fieldPath((t as ClassType).base!, name)];
 }
 
-// A key that is the same exactly when two types' values have one shape: like `keyOf`, but
-// blind to which fields are marked optional, so `{ a?: T }` and `{ a: T | null }` share one.
-export function shapeKey(t: Type): string {
-  if (typeof t === "string") return t;
-  if (ties.has(t)) return keyOf(t);
-  let found = shapeKeys.get(t);
-  if (found === undefined) {
-    if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}${t.required === undefined ? "" : `?${t.required}`}${t.rest === undefined ? "" : `...${shapeKey(t.rest)}`}]`;
-    else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
-    else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
-    else if (t.kind === "fixed") found = `FixedArray<${shapeKey(t.element)},${t.size}>`;
-    else if (t.kind === "map") found = t.set ? `Set<${shapeKey(t.key)}>` : `Map<${shapeKey(t.key)},${shapeKey(t.value)}>`;
-    else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
-    else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;
-    // A type parameter standing for a concrete type has that type's shape.
-    else if (t.kind === "param" && t.concrete) return shapeKey(t.concrete);
-    else if (t.kind === "class" && t.generic) found = `${t.generic.name}<${t.generic.args.map(shapeKey).join(",")}>`;
-    else found = keyOf(t);
-    shapeKeys.set(t, found);
-  }
-  return found;
-}
-const shapeKeys = new WeakMap<Exclude<Type, string>, string>();
-
-// A type without the empty value an optional field adds.
-export function withoutNull(t: Type): Type {
-  return typeof t !== "string" && t.kind === "union" ? unionType(t.members.filter((m) => m !== "null")) : t;
-}
-
-// A field written `name?: T`: its type holds the empty value, and it remembers whether `?` added it.
-export function optionalField(name: string, written: Type): Field {
-  const held = written === "null" || (typeof written !== "string" && written.kind === "union" && written.members.includes("null"));
-  return { name, type: held ? written : unionType([written, "null"]), optional: held ? "held" : "added" };
-}
-
 // Every field of an instance: its bases' first, then its own.
 export function allFields(t: ClassType): Field[] {
   return [...(t.base ? allFields(t.base) : []), ...t.fields];
@@ -1577,161 +510,1284 @@ export function derives(t: ClassType, base: ClassType): boolean {
   return t.base !== undefined && (t.base === base || derives(t.base, base));
 }
 
-// Whether a value of `from` fits where `to` is declared: the same type, or an object or
-// instance with at least the fields of the object type `to`, each fitting in turn.
-const assumed = new Set<string>();
+// One program's types: the tables its types are interned in, so `===` is identity within it, and
+// the operations over them. Each compilation makes its own, so no type of one meets another's.
+export function newTyping() {
+  // Function types whose error is a type parameter the call hasn't decided: an arrow given as one
+  // infers what it throws, which then decides that parameter.
+  const openThrows = new WeakSet<FunctionType>();
 
-export function fits(from: Type, to: Type): boolean {
-  // A string literal fits a pattern it matches; a pattern is a string. Both are strings once
-  // lowered, so this comes first.
-  const target = typeof to !== "string" && to.kind === "param" && to.concrete ? to.concrete : to;
-  if (from !== target && typeof target !== "string" && target.kind === "pattern") {
-    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, target));
-    return typeof from !== "string" && from.kind === "literal" && typeof from.value === "string" && !from.owner && textFits(from.value, target);
+  const patterns = new Map<string, PatternType>();
+  function patternType(quasis: string[], holes: Hole[]): Type {
+    // `${string}` alone is every string.
+    if (holes.length === 1 && holes[0] === "string" && quasis.every((q) => q === "")) return "string";
+    const key = JSON.stringify([quasis, holes]);
+    let t = patterns.get(key);
+    if (!t) {
+      t = { kind: "pattern", quasis, holes, fields: [] };
+      patterns.set(key, t);
+      keys.set(t, `pattern ${key}`);
+    }
+    return t;
   }
-  // In an instance, a type parameter and the concrete type it stands for are one value.
-  if (from === to || sameLowered(from, to) || from === "never" || sameCallable(from, to)) return true;
-  // So does a value of a type parameter fit as what it stands for, a literal as its base type.
-  if (typeof from !== "string" && from.kind === "param" && from.concrete !== undefined && fits(from.concrete, to)) return true;
-  // A future fits the `Promise<T>` describing it, as an async function's result.
-  if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
-  // A reference reads the value where it lives, so it fits only a reference to the same type;
-  // a mutable one also lends itself as shared. Lifetimes are checked on their own.
-  // A reference into a recursive type's block is one to the type it stands for.
-  if (typeof to !== "string" && to.kind === "ref") {
-    return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(unfold(from.to)) === lower(to.to);
+
+  // Whether a pattern is anywhere in `t`, where lowering it to `string` would lose what it asks.
+  function holdsPattern(t: Type): boolean {
+    if (typeof t === "string") return false;
+    let found = patterned.get(t);
+    if (found === undefined) {
+      patterned.set(t, false);
+      const parts = t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "ref" || t.kind === "pointer" ? [t.to]
+        : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? []) : t.kind === "param" && t.concrete ? [t.concrete]
+        : t.kind === "interior" || t.kind === "shared" || t.kind === "block" ? [t.of] : t.kind === "handle" ? [t.gives, ...(t.throws ? [t.throws] : [])]
+        : t.kind === "variant" ? [...t.args, ...t.fields.map((f) => f.type)] : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns]
+        : t.kind === "future" ? [t.gives] : t.kind === "generator" ? [t.yields] : t.kind === "dyn" ? t.of.methods.flatMap((m) => [...m.params, m.returns]) : [];
+      found = t.kind === "pattern" || parts.some(holdsPattern);
+      patterned.set(t, found);
+    }
+    return found;
   }
-  // Any regex is a \`RegExp\`; all of them are the same pointer to a program.
-  if (to === ANY_REGEX) return typeof from !== "string" && (from.kind === "regex" || (from.kind === "param" && from.bound?.kind === "regex"));
-  // A `MutPtr<T>` may be used as a `Ptr<T>`, as Rust's `*mut T` coerces to `*const T`.
-  if (typeof to !== "string" && to.kind === "pointer") {
-    return typeof from !== "string" && from.kind === "pointer" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
+  const patterned = new WeakMap<Exclude<Type, string>, boolean>();
+
+  // Whether two types are one once lowered, except where `to` holds a pattern that lowering
+  // would make a plain string: then fitting decides, part by part.
+  function sameLowered(from: Type, to: Type): boolean {
+    return lower(from) === lower(to) && (!holdsPattern(to) || holdsPattern(from) && shapeKey(from) === shapeKey(to));
   }
-  // A recursive type is the type it stands for. Its type holds it again, so a pair being
-  // compared is taken to fit while its parts are.
-  // A union holding the recursive type itself takes it as it is.
-  const held = typeof to !== "string" && to.kind === "union" && to.members.includes(from);
-  if (!held && ((typeof from !== "string" && from.kind === "recursive") || (typeof to !== "string" && to.kind === "recursive"))) {
-    const pair = `${keyOf(from)} ${keyOf(to)}`;
-    if (assumed.has(pair)) return true;
-    assumed.add(pair);
-    try {
-      return fits(unfold(from), unfold(to));
-    } finally {
-      assumed.delete(pair);
+
+  const interiors = new Map<string, InteriorType>();
+
+  function interiorType(which: InteriorType["which"], of: Type): InteriorType {
+    const key = `${which} ${keyOf(of)}`;
+    let t = interiors.get(key);
+    if (!t) {
+      t = { kind: "interior", which, of, fields: [] };
+      interiors.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const shareds = new Map<string, SharedType>();
+
+  function sharedType(of: Type): SharedType {
+    const key = `shared ${keyOf(of)}`;
+    let t = shareds.get(key);
+    if (!t) {
+      t = { kind: "shared", of, fields: [] };
+      shareds.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const dyns = new Map<InterfaceType, DynType>();
+
+  function dynType(of: InterfaceType): DynType {
+    let t = dyns.get(of);
+    if (!t) {
+      t = { kind: "dyn", of, fields: [] };
+      dyns.set(of, t);
+      keys.set(t, `dyn ${keyOf(of)}`);
+    }
+    return t;
+  }
+
+  // A stored callable: a written function type in a field, an element, an annotated variable or
+  // a return is a Dyn of an interface with one method, `call`, which a closure satisfies by its
+  // signature. One per signature, parameter names aside; each spelling is shown as written.
+  const callables = new Map<string, InterfaceType>();
+  const spellings = new Map<string, DynType>();
+  const callableOf = new WeakMap<InterfaceType, FunctionType>();
+
+  // Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
+  // booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
+  // copied across, and opaque JS values.
+  function uncrossable(t: Type, within: Set<Type> = new Set<Type>()): string | undefined {
+    // An empty array's element type, `never`, holds no value to cross.
+    if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return undefined;
+    if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
+    // A type holding itself has no JS form yet, as converting it would never end.
+    if (within.has(t)) return "a type holding itself has no JS form yet";
+    within.add(t);
+    const why = crossing(t, (u) => uncrossable(u, within));
+    within.delete(t);
+    return why;
+  }
+
+  function crossing(t: Exclude<Type, string>, uncrossable: (t: Type) => string | undefined): string | undefined {
+    // A callback or a stored Promise crosses on its own, as JS keeps it, not inside another value.
+    const kept = (u: Type) => typeof u !== "string" && u.kind === "dyn" && keptByJs(u);
+    switch (t.kind) {
+      case "literal":
+        return undefined;
+      case "param":
+        if (t.bound?.kind === "function") return "functions crossing between Fish and JS aren't supported yet";
+        return t.concrete === undefined ? "a type parameter's value isn't known here" : uncrossable(t.concrete);
+      case "union":
+        if (t.members.some(kept)) return "a callback or a Promise in a union, as an optional parameter holds one, isn't supported yet";
+        return t.members.map(uncrossable).find((w) => w !== undefined);
+      case "array":
+      case "fixed":
+        if (holdsPart(t.element, kept)) return "a callback or a Promise inside an array isn't supported yet; give it on its own";
+        return uncrossable(t.element);
+      case "object":
+        if ((t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).some((u) => holdsPart(u, kept))) return "a callback or a Promise inside an object isn't supported yet; give it on its own";
+        return (t.tuple ? elementsOf(t) : t.fields.map((f) => f.type)).map(uncrossable).find((w) => w !== undefined);
+      case "block":
+        return t.which === "JsValue" ? undefined : `a '${t.which}' is Fish's own`;
+      case "function":
+      case "closure":
+        return "functions crossing between Fish and JS aren't supported yet";
+      case "future":
+      case "handle":
+        if (t.kind === "future" && leafOf.get(t)?.method === "jsAwait") return t.gives === "void" ? undefined : uncrossable(t.gives);
+        return "Promises crossing between Fish and JS aren't supported yet";
+      case "interface":
+      case "dyn":
+        // A callback crosses as a JS function when what it takes and gives do.
+        if (t.kind === "dyn" && callableOf.has(t.of)) {
+          const fn = callableOf.get(t.of)!;
+          // What JS gives a callback is read into Fish, which has no reading of a JS function or
+          // promise as a Fish one.
+          if (fn.params.some((p) => holdsPart(p, (u) => kept(u) || (typeof u !== "string" && (u.kind === "function" || (u.kind === "interface" && promiseElement(u) !== undefined)))))) {
+            return "a callback that is given a function or a Promise isn't supported yet";
+          }
+          if (fn.throws) return "a callback that throws isn't supported yet; catch inside it";
+          return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].map(uncrossable).find((w) => w !== undefined);
+        }
+        {
+          // A Fish future given to JS is a promise of what it gives.
+          const promised = promiseElement(t.kind === "dyn" ? t.of : t);
+          if (promised === undefined) return "Fish has no JS form for it";
+          return t.kind === "dyn" ? (promised === "void" ? undefined : uncrossable(promised)) : "Promises crossing between Fish and JS aren't supported yet";
+        }
+      default:
+        return "Fish has no JS form for it";
     }
   }
-  if (typeof to !== "string" && to.kind === "union") {
+
+  // The members of a package's shapes Fish can't type, each with why: refused only where used.
+  const jsUntyped = new WeakMap<InterfaceType, Map<string, CompileError>>();
+  // The refusals of members held aside that are optional, which a value may leave out.
+  const jsOptional = new WeakSet<CompileError>();
+  // The same for a package's function a program imports but doesn't call.
+  const jsUncalled = new WeakMap<object, CompileError>();
+
+  // The prelude's JsError, what awaiting a JS promise that rejects throws, once the prelude is read.
+  let jsError: Type | undefined;
+  function setJsError(t: Type | undefined) {
+    jsError = t;
+  }
+
+  // What a declared type is when JS gives it: an object, as a handle of its shape, inside unions,
+  // arrays and tuples too, and a promise as a Fish future of what it fulfills with.
+  function jsView(t: Type): Type {
+    if (typeof t === "string") return t;
+    const promised = promiseElement(t.kind === "dyn" ? t.of : t);
+    if (promised !== undefined && jsError !== undefined) return leafFuture("jsAwait", promised === "void" ? "void" : jsView(promised), jsError);
+    if (t.kind === "object" && !t.tuple) return blockType("JsValue", t);
+    if (t.kind === "object") return retuple(t, jsView);
+    if (t.kind === "union") return unionType(t.members.map(jsView));
+    if (t.kind === "array") return arrayType(jsView(t.element));
+    return t;
+  }
+
+  // What the timer task runs: each timer's callback, wrapped as an async function.
+  const timerCallback = (): DynType => callableType(functionType([], [], promiseInterface("void")));
+
+  function callableType(fn: FunctionType): DynType {
+    // In an instance, what its type parameters stand for decides the layout.
+    const [params, returns, throws] = [fn.params.map(lower), lower(fn.returns), fn.throws && lower(fn.throws)];
+    // Keyed by types alone, as parameter names don't make another function type, so
+    // `Box<(n: i64) => i64>` and `Box<(m: i64) => i64>` are one class; the first spelling met is shown.
+    const key = `${params.map(keyOf).join(", ")} => ${keyOf(returns)}${throws ? ` throws ${keyOf(throws)}` : ""}`;
+    let i = callables.get(key);
+    if (!i) {
+      i = interfaceType(fn.name);
+      i.methods.push({ name: "call", params, returns, ...(throws && { throws }) });
+      callables.set(key, i);
+      callableOf.set(i, { ...fn, params, returns, throws });
+    }
+    if (fn.name === i.name) return dynType(i);
+    let spelled = spellings.get(`${key} ${fn.name}`);
+    if (!spelled) {
+      spelled = { kind: "dyn", of: i, fields: [], shown: fn.name };
+      keys.set(spelled, keys.get(dynType(i))!);
+      spellings.set(`${key} ${fn.name}`, spelled);
+    }
+    return spelled;
+  }
+
+  // Whether two stored callables take and give the same types, so either holds the other's value.
+  function sameCallable(a: Type, b: Type): boolean {
+    const [f, g] = [a, b].map((t) => (typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined));
+    return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && lower(f.returns) === lower(g.returns)
+      && (f.throws && lower(f.throws)) === (g.throws && lower(g.throws));
+  }
+
+  // A function type, or a `Promise<T>`, where a value is stored becomes its boxed form, inside
+  // arrays too.
+  function stored(t: Type): Type {
+    if (typeof t === "string") return t;
+    // A generic function type, like an interface, describes a value without being one.
+    if (t.kind === "function" && t.generic) return t;
+    if (t.kind === "function") return callableType(t);
+    // A `Promise<T>` stored holds a future, boxed.
+    if (t.kind === "interface" && promised.has(t)) return dynType(t);
+    if (t.kind === "array") return arrayType(stored(t.element));
+    if (t.kind === "fixed") return fixedType(stored(t.element), t.size);
+    if (t.kind === "map") return mapType(t.key, stored(t.value), t.set);
+    return t;
+  }
+
+  // A type argument holds its values, so a function type or a closure's type given as one is a
+  // stored callable, as Rust's `Box<dyn Fn>` is.
+  function heldArgument(t: Type): Type {
+    if (typeof t === "string" || (t.kind !== "function" && t.kind !== "closure") || t.generic) return t;
+    if (t.kind === "function") return callableType(t);
+    // An async closure gives a Promise, as a written `() => Promise<T>` does. One whose future
+    // throws has no written form yet, so it stays as it is, for its holder to refuse.
+    const future = typeof t.returns !== "string" && t.returns.kind === "future" ? t.returns : undefined;
+    if (future?.throws) return t;
+    // What it gives widens as a `let` would, so `() => "a"` and `() => "b"` meet as `() => string`.
+    const returns = future ? promiseInterface(future.gives) : widenLet(t.returns);
+    const fn = functionType(t.params.map((_, i) => `p${i}`), t.params, returns, t.throws);
+    // Shown as the closure was written, with its own parameter names, when that is still its type.
+    return callableType(returns === t.returns ? { ...fn, name: t.name } : fn);
+  }
+
+  const blocks = new Map<string, BlockType>();
+
+  // Whether a value crosses between Fish and JS converted on the way: a string, a number, a
+  // boolean, empty, a literal, a JS value or handle, and unions, arrays, tuples and objects of them.
+  // A Fish type holding itself has no JS form yet, as converting it would never end: `within` is
+  // the types the walk is inside.
+  function jsConverts(t: Type, within: Set<Type> = new Set<Type>()): boolean {
+    // An empty array's element type, `never`, holds no value to convert.
+    if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return true;
+    if (typeof t === "string" || within.has(t)) return false;
+    if (t.kind === "block") return t.which === "JsValue";
+    if (t.kind === "dyn" && callableOf.has(t.of)) {
+      const fn = callableOf.get(t.of)!;
+      if (fn.throws) return false;
+      return [...fn.params, ...(fn.returns === "void" ? [] : [fn.returns])].every((u) => jsConverts(u, within));
+    }
+    if (t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of) === "void" || jsConverts(promiseElement(t.of)!, within);
+    if (t.kind === "future") return leafOf.get(t)?.method === "jsAwait" && (t.gives === "void" || jsConverts(t.gives, within));
+    const parts = t.kind === "ref" ? [t.to] : t.kind === "param" ? (t.concrete === undefined ? undefined : [t.concrete])
+      : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "literal" ? [] : undefined;
+    if (parts === undefined) return false;
+    within.add(t);
+    const all = parts.every((u) => jsConverts(u, within));
+    within.delete(t);
+    return all;
+  }
+
+  // A value JS keeps once it is given: a stored callable or a stored Promise, or what is stored as
+  // one, a closure, a function or a future. Given to JS, it is handed over.
+  function keptByJs(t: Type): boolean {
+    if (typeof t === "string") return false;
+    if (t.kind === "dyn") return callableOf.has(t.of) || promiseElement(t.of) !== undefined;
+    return t.kind === "closure" || t.kind === "function" || t.kind === "future" || t.kind === "handle";
+  }
+
+  // What a package's parameter takes: a function type is a callback that JS may keep, so a stored
+  // callable, owning what it uses; a `Promise<T>` is a stored one, as the task settling the JS
+  // promise owns it; an object type is a handle of that shape, which a Fish value of it meets by
+  // being made a new JS object.
+  function jsTakes(t: Type): Type {
+    if (typeof t === "string") return t;
+    if (t.kind === "union") return unionType(t.members.map(jsTakes));
+    if (t.kind === "function" || (t.kind === "interface" && promiseElement(t) !== undefined)) return stored(t);
+    return jsView(t);
+  }
+
+  // What a variable of type `declared` holding a JsValue reads as where `typeof` narrowed it to
+  // `read`: one kind of value, read out of JS, or several, which leave it the JsValue.
+  function jsRead(declared: Type, read: Type | undefined): "one" | "several" | undefined {
+    if (read === undefined) return undefined;
+    const held = typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
+    const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
+    if (!members.some(isPlainJs)) return undefined;
+    const kinds = (u: Type) => (u === "string" || u === "f64" || u === "boolean") && !members.includes(u);
+    const reads = (typeof read !== "string" && read.kind === "union" ? read.members : [read]).filter(kinds);
+    if (reads.length === 0) return undefined;
+    return reads.length === 1 && kinds(read) ? "one" : "several";
+  }
+
+  function blockType(which: BlockType["which"], of: Type = "void"): BlockType {
+    const key = `${which} ${keyOf(of)}`;
+    let t = blocks.get(key);
+    if (!t) {
+      t = { kind: "block", which, of, fields: [] };
+      blocks.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+  const leaves = new Map<string, FutureType>();
+  const leafOf = new WeakMap<FutureType, { method: Leaf; of: Type; signal: boolean }>();
+
+  // Each leaf's frame after its state: what it waits on, then what it carries.
+  const LEAF_FRAMES: Record<Leaf, (of: Type) => Field[]> = {
+    sleep: () => [{ name: "deadline", type: "i64" }],
+    acquire: () => [{ name: "block", type: blockType("Semaphore") }],
+    send: (of) => [{ name: "block", type: blockType("Channel", of) }, { name: "value", type: of }],
+    receive: (of) => [{ name: "block", type: blockType("Channel", of) }],
+    bind: () => [{ name: "host", type: "string" }, { name: "port", type: "i64" }],
+    connect: () => [{ name: "socket", type: blockType("TcpStream") }, { name: "host", type: "string" }, { name: "port", type: "i64" }],
+    accept: () => [{ name: "block", type: blockType("TcpListener") }],
+    read: () => [{ name: "block", type: blockType("TcpStream") }, { name: "max", type: "i64" }],
+    write: () => [{ name: "block", type: blockType("TcpStream") }, { name: "bytes", type: arrayType("u8") }, { name: "written", type: "i64" }],
+    readFile: () => [{ name: "path", type: "string" }, { name: "job", type: blockType("FileJob") }],
+    writeFile: () => [{ name: "path", type: "string" }, { name: "bytes", type: arrayType("u8") }, { name: "job", type: blockType("FileJob") }],
+    timerNext: () => [],
+    // A JS promise, and whether the task already waits for it to settle.
+    jsAwait: () => [{ name: "promise", type: blockType("JsValue") }, { name: "waiting", type: "i32" }],
+  };
+
+  // A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
+  // count and waiting flag end its frame.
+  function leafFuture(method: Leaf, of: Type, throws?: Type, signal = false): FutureType {
+    const key = `${method} ${keyOf(of)} ${throws ? keyOf(throws) : ""} ${signal}`;
+    let t = leaves.get(key);
+    if (!t) {
+      const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
+      if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
+      const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
+        : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of : "void";
+      t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
+      leaves.set(key, t);
+      leafOf.set(t, { method, of, signal });
+    }
+    return t;
+  }
+
+  const handles = new Map<string, HandleType>();
+
+  function handleType(gives: Type, throws: Type | undefined): HandleType {
+    const key = `handle ${keyOf(gives)} ${throws ? keyOf(throws) : ""}`;
+    let t = handles.get(key);
+    if (!t) {
+      t = { kind: "handle", gives, throws, fields: [] };
+      handles.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // What `handle.join()` gives: the task's handle, awaited as throwing a TaskPanic too.
+  function joinedType(base: HandleType, panic: Type): HandleType {
+    const key = `joined ${keyOf(base)} ${keyOf(panic)}`;
+    let t = handles.get(key);
+    if (!t) {
+      t = { kind: "handle", gives: base.gives, throws: base.throws ? unionType([base.throws, panic]) : panic, fields: [], joined: { base, panic } };
+      handles.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  function futureType(name: string, concrete: boolean): FutureType {
+    const t: FutureType = { kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete };
+    keys.set(t, `future ${declared++}`);
+    return t;
+  }
+  const combinedOf = new WeakMap<FutureType, Combined>();
+
+  // What a future in a combined one gives, null for nothing, and what it throws.
+  function givenBy(f: FutureType | HandleType | DynType): Type {
+    const gives = f.kind === "dyn" ? promiseElement(f.of)! : f.gives;
+    return gives === "void" ? "null" : gives;
+  }
+
+  // An `allSettled` outcome, as JavaScript gives it: fulfilled with the value, or, for a future that
+  // can throw, rejected with what it threw.
+  function settledType(gives: Type, thrown: Type | undefined): Type {
+    const { fulfilled, rejected } = settledParts(gives, thrown);
+    return rejected ? unionType([fulfilled, rejected]) : fulfilled;
+  }
+
+  function settledParts(gives: Type, thrown: Type | undefined): { fulfilled: ObjectType; rejected?: ObjectType } {
+    const fulfilled = objectType([{ name: "status", type: literalType("fulfilled") }, { name: "value", type: gives }]);
+    return { fulfilled, rejected: thrown ? objectType([{ name: "status", type: literalType("rejected") }, { name: "reason", type: thrown }]) : undefined };
+  }
+
+  function combinedFuture(combined: Combined): FutureType {
+    const { kind } = combined;
+    const make = (gives: Type, throws: Type | undefined, frame: Field[]) => {
+      const params = combined.futures.flatMap((f) => (f.kind === "future" ? f.params : []));
+      const t: FutureType = { kind: "future", name: `Promise.${kind}`, gives, throws, fields: [], params, frame, concrete: true };
+      keys.set(t, `future ${declared++}`);
+      combinedOf.set(t, combined);
+      return t;
+    };
+    if (combined.array) {
+      const given = givenBy(combined.array.element as DynType);
+      const kept = kind === "allSettled" ? settledType(given, undefined) : given;
+      const frame: Field[] = [{ name: "state", type: "i32" }, { name: "futures", type: combined.array }, { name: "values", type: arrayType(kept) }, { name: "flags", type: arrayType("u8") }];
+      return make(kind === "all" || kind === "allSettled" ? arrayType(kept) : given, kind === "any" ? combined.aggregate : undefined, frame);
+    }
+    // Each future's slot keeps its value, its outcome for `allSettled`, or its error for `any`.
+    const kept = combined.futures.map((f) => (kind === "allSettled" ? settledType(givenBy(f), thrownBy(f)) : kind === "any" ? (thrownBy(f) ?? "null") : givenBy(f)));
+    const frame: Field[] = [{ name: "state", type: "i32" }];
+    combined.futures.forEach((f, i) => frame.push({ name: `future${i}`, type: f }, { name: `value${i}`, type: kept[i]! }, { name: `done${i}`, type: "i32" }));
+    const thrown = combined.futures.flatMap((f) => (thrownBy(f) ? [thrownBy(f)!] : []));
+    if (kind === "all") return make(tupleType(kept), thrown.length > 0 ? unionType(thrown) : undefined, frame);
+    if (kind === "allSettled") return make(tupleType(kept), undefined, frame);
+    const gives = unionType(combined.futures.map(givenBy));
+    if (kind === "race") return make(gives, thrown.length > 0 ? unionType(thrown) : undefined, frame);
+    return make(gives, combined.aggregate, frame);
+  }
+
+  const promises = new Map<string, InterfaceType>();
+  const promised = new WeakMap<InterfaceType, Type>();
+
+  // `Promise<T>`: any future giving a `T` once awaited, as TypeScript's type of an async result is.
+  function promiseInterface(t: Type): InterfaceType {
+    let found = promises.get(keyOf(t));
+    if (!found) {
+      found = interfaceType(`Promise<${show(t)}>`);
+      promises.set(keyOf(t), found);
+      promised.set(found, t);
+    }
+    return found;
+  }
+
+  // The boxed future a Dyn's async method gives: a `Promise<T>` that borrows the Dyn's value, so
+  // it holds a reference, which keeps it from outliving the Dyn or crossing threads.
+  const lent = new Map<string, InterfaceType>();
+  const borrowing = new WeakSet<InterfaceType>();
+
+  function lentPromise(t: Type): DynType {
+    let found = lent.get(keyOf(t));
+    if (!found) {
+      found = interfaceType(`Promise<${show(t)}>`);
+      lent.set(keyOf(t), found);
+      promised.set(found, t);
+      borrowing.add(found);
+    }
+    return dynType(found);
+  }
+
+  // Whether copies of a Dyn share its one value, as Rust's `Arc<dyn Trait>` does: so they may when
+  // nothing through its interface changes or takes over the value. A boxed future never does,
+  // since polling changes it.
+  function sharesDyn(t: DynType): boolean {
+    return !promised.has(t.of) && t.of.methods.every((m) => !m.mutable && !m.owned);
+  }
+
+  // What a `Promise<T>` gives, when the interface is one.
+  function promiseElement(t: Type): Type | undefined {
+    return typeof t !== "string" && t.kind === "interface" ? promised.get(t) : undefined;
+  }
+
+  const regexes = new Map<string, RegexType>();
+
+  function regexType(pattern: string, flags: string, captures: RegexType["captures"], source: string = pattern): RegexType {
+    const key = `regex ${flags} ${pattern}`;
+    let t = regexes.get(key);
+    if (!t) {
+      t = { kind: "regex", source, pattern, flags, captures, fields: [] };
+      regexes.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // One per alias instance a program's types lead back to; the checker keeps them by instance.
+  function recursiveType(name: string, args: Type[]): RecursiveType {
+    const t: RecursiveType = { kind: "recursive", name, args, of: "never", fields: [] };
+    keys.set(t, `recursive ${declared++}`);
+    return t;
+  }
+
+  // The recursive type standing for a class or an enum instance, made once for it, so the one
+  // made for another instance is found from the instance.
+  const heldBlocks = new WeakMap<Exclude<Type, string>, RecursiveType>();
+  function blockFor(t: ClassType | UnionType, args: Type[]): RecursiveType {
+    let back = heldBlocks.get(t);
+    if (!back) {
+      heldBlocks.set(t, back = recursiveType(show(t), args));
+      standsFor(back, t);
+    }
+    return back;
+  }
+  function holdsBlock(t: UnionType, back: RecursiveType) {
+    heldBlocks.set(t, back);
+  }
+
+  // The same recursive type made with other type arguments, which only the checker can make.
+  let instanceRecursive = (t: RecursiveType, _args: Type[]): RecursiveType => t;
+  function lowersRecursive(f: typeof instanceRecursive) {
+    instanceRecursive = f;
+  }
+
+  // A recursive type for other type arguments: a class's or an enum's is found from its instance,
+  // `of` made with them, which makes the instance without reading its fields; an alias's is
+  // remade by the checker.
+  function remade(t: RecursiveType, of: () => Type, args: Type[]): RecursiveType {
+    const kind = typeof t.of !== "string" ? t.of.kind : undefined;
+    if (kind === "class" || (kind === "union" && heldBlocks.get(t.of as UnionType) === t)) {
+      const made = of();
+      return typeof made !== "string" && (made.kind === "class" || made.kind === "union") ? blockFor(made, args) : t;
+    }
+    return instanceRecursive(t, args);
+  }
+
+  // Whether a value of `type` lent where a type parameter is wanted is a part of a value whose type
+  // holds itself, the parameter standing for that type: each instance checks it again.
+  function partOfItself(type: Type, to: Type): boolean {
+    if (typeof to === "string" || to.kind !== "param" || to.concrete || to.bound === undefined || lower(type) !== lower(to.bound)) return false;
+    const bound = to.bound;
+    return ties.has(bound) || holdsPart(bound, (u) => typeof u !== "string" && u.kind === "recursive" && u.of === lower(type));
+  }
+
+  // The part of a type that keeps `JSON.stringify` and `JSON.parse` from taking its values, or
+  // undefined when every part is Json: booleans, numbers, strings and literals, and objects,
+  // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
+  // `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
+  function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen: Set<Type> = new Set<Type>()): Type | undefined {
+    // JavaScript throws for a bigint, which JSON has no number for.
+    if (typeof t === "string") return t === "void" || t === "never" || t === "bigint" ? t : undefined;
+    if (seen.has(t)) return undefined;
+    seen.add(t);
+    const part = (u: Type) => unjson(u, json, seen);
+    const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
+    switch (t.kind) {
+      case "literal":
+      case "pattern":
+        return undefined;
+      case "ref":
+        return part(t.to);
+      case "recursive":
+        return part(t.of);
+      case "param":
+        return t.concrete ? part(t.concrete) : undefined;
+      case "union":
+        return first(t.members);
+      case "array":
+      case "fixed":
+        return part(t.element);
+      case "object":
+        return t.match ? t : first(t.fields.map((f) => f.type));
+      case "map":
+        return t.set || lower(t.key) !== "string" ? t : part(t.value);
+      case "class":
+        return json(t) ? first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]) : t;
+      case "variant":
+        if (!json(t)) return t;
+        return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
+      default:
+        return t;
+    }
+  }
+
+  // What reading a place of `t` gives: a recursive type, or a union's recursive members, as the
+  // types they stand for, held in a value of their own rather than in a block.
+  function unfolded(t: Type): Type {
+    if (typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "recursive")) return unionType(t.members.map(unfold), t.name);
+    return unfold(t);
+  }
+
+  const pointers = new Map<string, PointerType>();
+
+  function pointerType(to: Type, mutable: boolean): PointerType {
+    const key = `${mutable ? "mutptr" : "ptr"} ${keyOf(to)}`;
+    let t = pointers.get(key);
+    if (!t) {
+      t = { kind: "pointer", to, mutable, fields: [] };
+      pointers.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const interned = new Map<string, ObjectType>();
+  const literals = new Map<string, LiteralType>();
+  const unions = new Map<string, UnionType>();
+  const keys = new Map<Exclude<Type, string>, string>();
+  let declared = 0;
+
+  // A class's key is unique to its declaration, since two programs may reuse a class name.
+  function classType(name: string, generic?: ClassType["generic"]): ClassType {
+    const t: ClassType = { kind: "class", name, fields: [], generic };
+    keys.set(t, `class ${declared++}`);
+    return t;
+  }
+
+  function interfaceType(name: string): InterfaceType {
+    const t: InterfaceType = { kind: "interface", name, fields: [], methods: [] };
+    keys.set(t, `interface ${declared++}`);
+    return t;
+  }
+
+  function generatorType(name: string, concrete: boolean): GeneratorType {
+    const t: GeneratorType = { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete };
+    keys.set(t, `generator ${declared++}`);
+    return t;
+  }
+
+  // What `next()` gives: the next value, or that the generator has finished.
+  function nextResult(t: Type): Type {
+    return unionType([objectType([{ name: "done", type: literalType(false) }, { name: "value", type: t }]), objectType([{ name: "done", type: literalType(true) }])]);
+  }
+
+  const generators = new Map<string, InterfaceType>();
+  const elements = new WeakMap<InterfaceType, Type>();
+
+  // `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
+  function generatorInterface(t: Type): InterfaceType {
+    let found = generators.get(keyOf(t));
+    if (!found) {
+      found = interfaceType(`Generator<${show(t)}>`);
+      found.methods.push({ name: "next", params: [], returns: nextResult(t) });
+      generators.set(keyOf(t), found);
+      elements.set(found, t);
+    }
+    return found;
+  }
+
+  // What a generator, or a type parameter standing for one or bounded by `Generator<T>`, yields.
+  function yieldsOf(t: Type): Type | undefined {
+    if (typeof t === "string") return undefined;
+    if (t.kind === "generator") return t.yields;
+    if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete) : t.bound && generatorElement(t.bound);
+    return generatorElement(t);
+  }
+
+  // What a `Generator<T>` yields, when the interface is one.
+  function generatorElement(t: Type): Type | undefined {
+    return typeof t !== "string" && t.kind === "interface" ? elements.get(t) : undefined;
+  }
+
+  function functionType(names: string[], params: Type[], returns: Type, throws?: Type): FunctionType {
+    const t: FunctionType = { kind: "function", name: signatureName(names, params, returns, throws), names, params, returns, ...(throws && { throws }), fields: [] };
+    keys.set(t, `function ${declared++}`);
+    return t;
+  }
+
+  const signatureName = (names: string[], params: Type[], returns: Type, throws: Type | undefined) =>
+    `(${params.map((p, i) => `${names[i]}: ${show(p)}`).join(", ")}) => ${show(returns)}${throws ? ` throws ${show(throws)}` : ""}`;
+
+  function closureType(names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean, throws?: Type): ClosureType {
+    const t: ClosureType = { kind: "closure", name: signatureName(names, params, returns, throws), params, returns, ...(throws && { throws }), fields, once, concrete };
+    keys.set(t, `closure ${declared++}`);
+    return t;
+  }
+
+  const genericValues = new Map<string, ClosureType>();
+
+  // The one type of a generic function used as a value, by the function's name.
+  function genericFunctionType(name: string, shown: string): ClosureType {
+    let t = genericValues.get(name);
+    if (!t) {
+      t = { kind: "closure", name: shown, params: [], returns: "void", fields: [], concrete: true, generic: name };
+      keys.set(t, `generic function ${name}`);
+      genericValues.set(name, t);
+    }
+    return t;
+  }
+
+  function literalType(value: string | bigint | boolean, owner?: LiteralType["owner"]): LiteralType {
+    const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member} ${owner.id}` : ""}`;
+    let t = literals.get(key);
+    if (!t) {
+      t = { kind: "literal", value, fields: [], owner };
+      literals.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // A literal standing for a comptime value that isn't a string, number or boolean, such as a
+  // tag's strings: interned by `key`, and never equal to an ordinary literal.
+  function standInLiteral(key: string): LiteralType {
+    const at = `stand-in ${key}`;
+    let t = literals.get(at);
+    if (!t) {
+      t = { kind: "literal", value: key, fields: [] };
+      literals.set(at, t);
+      keys.set(t, at);
+    }
+    return t;
+  }
+
+  // Members are flattened, deduplicated and kept in one order, so equal unions are one type,
+  // and a literal whose base type is also a member adds nothing. A single member is itself.
+  // An enum's union carries the enum's name, for messages.
+  function unionType(parts: Type[], name?: string): Type {
+    let flat = parts.flatMap((p) => (typeof p !== "string" && p.kind === "union" ? p.members : [p])).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
+    // Regexes of different patterns are one \`RegExp\`, as every regex is a pointer to a program.
+    if (new Set(flat.filter((p) => typeof p !== "string" && p.kind === "regex")).size > 1) flat = flat.map((p) => (typeof p !== "string" && p.kind === "regex" ? ANY_REGEX : p));
+    // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
+    // as whichever sorts first.
+    const seen = new Set<string>();
+    const members = [...new Set(flat)]
+      .filter((t) => typeof t === "string" || (t.kind !== "literal" || !flat.includes(baseOf(t)!)) && (t.kind !== "pattern" || !flat.includes("string")))
+      .toSorted((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0))
+      .filter((t) => {
+        const shape = shapeKey(t);
+        return !seen.has(shape) && seen.add(shape) !== undefined;
+      });
+    if (members.length === 1) return members[0]!;
+    const key = `union ${members.map(keyOf).join("|")}`;
+    let t = unions.get(key);
+    if (!t) {
+      t = { kind: "union", members, fields: [], name };
+      unions.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // The members of `union` a value of `type` can go into: the one it is, or else every one it
+  // fits. The checker allows exactly one.
+  function membersFor(type: Type, union: UnionType): Type[] {
+    if (union.members.includes(type)) return [type];
+    const fitting = union.members.filter((m) => fits(type, m));
+    // A JS value goes into the union's JS value, whichever declared shape each has.
+    const js = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue";
+    return fitting.length > 0 || !js(type) ? fitting : union.members.filter(js);
+  }
+
+  function typeParameter(name: string, bound: Bound | undefined): ParamType {
+    const t: ParamType = { kind: "param", name, bound, fields: bound?.fields ?? [] };
+    keys.set(t, `param ${declared++}`);
+    return t;
+  }
+
+  function refType(to: Type, mutable: boolean, life?: string): RefType {
+    const key = `${mutable ? "mut" : "ref"} ${keyOf(to)}${life ? ` ${life}` : ""}`;
+    let t = refs.get(key);
+    if (!t) {
+      t = { kind: "ref", to, mutable, fields: [], life };
+      refs.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const refs = new Map<string, RefType>();
+
+  function fixedType(element: Type, size: number): FixedType {
+    const key = `fixed ${size} ${keyOf(element)}`;
+    let t = fixeds.get(key);
+    if (!t) {
+      t = { kind: "fixed", element, size, fields: [] };
+      fixeds.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+  const fixeds = new Map<string, FixedType>();
+
+  function arrayType(element: Type): ArrayType {
+    const key = `[${keyOf(element)}]`;
+    let t = arrays.get(key);
+    if (!t) {
+      t = { kind: "array", element, fields: [] };
+      arrays.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const arrays = new Map<string, ArrayType>();
+
+  // Sets the type a recursive type stands for. An array is on the heap already, so where the
+  // type reaches itself through one, that array holds the type itself rather than a block, and is
+  // the array `Tree[]` means wherever it is written. The type then holds itself, a loop the walks
+  // over types stop at by the recursive type kept for it.
+  function standsFor(back: RecursiveType, of: Type) {
+    back.of = of;
+    // A Map that leads back holds the type inline too, as an array does, so a Map written with
+    // the type is the one the type holds.
+    if (typeof of !== "string" && of.kind !== "map") {
+      for (const map of [...maps.values()]) {
+        if (map.value !== back) continue;
+        map.value = of;
+        maps.set(`${map.set ? "Set" : "Map"}<${keyOf(map.key)},${keyOf(of)}>`, map);
+        ties.set(of, back);
+      }
+    }
+    const array = arrays.get(`[${keyOf(back)}]`);
+    // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
+    // elements stay blocks.
+    if (!array || typeof of === "string" || of.kind === "array") return;
+    array.element = of;
+    arrays.set(`[${keyOf(of)}]`, array);
+    ties.set(of, back);
+    // Its members stay as they are too, so one narrowed to is still a member of it.
+    if (of.kind === "union") for (const m of of.members) if (typeof m !== "string" && m.kind === "object") members.set(m, back);
+  }
+
+  // The type holding itself that each member of its union belongs to.
+  const members = new WeakMap<Exclude<Type, string>, RecursiveType>();
+
+  const ties = new WeakMap<Exclude<Type, string>, RecursiveType>();
+
+  // The recursive type a type holding itself through an array was made with.
+  const tiedBy = (t: Type): RecursiveType | undefined => (typeof t === "string" ? undefined : ties.get(t));
+
+  function mapType(key: Type, value: Type, set = false): MapType {
+    const id = `${set ? "Set" : "Map"}<${keyOf(key)},${keyOf(value)}>`;
+    let t = maps.get(id);
+    if (!t) {
+      t = { kind: "map", key, value, set, fields: [] };
+      maps.set(id, t);
+      keys.set(t, id);
+    }
+    return t;
+  }
+
+  const maps = new Map<string, MapType>();
+
+  // The variant `member` of an enum declaration (by its unique id) with these type arguments.
+  function variantType(enumName: string, id: number, member: string, args: Type[], payload: Type[]): VariantType {
+    const key = `variant ${id} ${member} <${args.map(keyOf).join(",")}>`;
+    let t = variants.get(key);
+    if (!t) {
+      const shown = args.length > 0 ? `${enumName}<${args.map(show).join(", ")}>` : enumName;
+      t = { kind: "variant", name: `${shown}.${member}`, member, enum: enumName, fields: payload.map((type, i) => ({ name: String(i), type })), args };
+      variants.set(key, t);
+      // A short key of its own, so an enum nested in itself doesn't double its key each level.
+      keys.set(t, `variant#${variants.size}`);
+    }
+    return t;
+  }
+
+  const variants = new Map<string, VariantType>();
+
+  // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid. A
+  // class met again inside itself adds nothing; one that contains itself is refused elsewhere.
+  function holdsRef(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
+    if (typeof t === "string" || seen.has(t)) return false;
+    seen.add(t);
+    const holds = (u: Type) => holdsRef(u, seen);
+    if (t.kind === "ref" || (t.kind === "dyn" && borrowing.has(t.of))) return true;
+    // A type parameter holds references when what it stands for, or its bound, does.
+    if (t.kind === "param") return t.concrete ? holds(t.concrete) : t.bound !== undefined && holds(t.bound);
+    if (t.kind === "union") return t.members.some(holds);
+    if (t.kind === "recursive") return holds(t.of);
+    if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
+    if (t.kind === "map") return holds(t.value);
+    if (t.kind === "variant") return t.fields.some((f) => holds(f.type));
+    if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
+    // A generator borrows what its parameters do; its frame's own references point into itself.
+    if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => holds(f.type));
+    return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => holds(f.type));
+  }
+
+  // The signatures of callbacks that run while a lock is held, so their bodies can't await; and
+  // of those changing a shared value, whose interior-mutable parts others borrow unlocked.
+  const lockCallbacks = new WeakSet<FunctionType>();
+  const sharedCallbacks = new WeakSet<FunctionType>();
+
+  // A type parameter as an instance sees it: standing for `concrete`, which has no type
+  // parameter in it.
+  function wrapped(name: string, bound: Bound | undefined, concrete: Type): ParamType {
+    const key = `param ${name} ${bound ? keyOf(bound) : ""} as ${keyOf(concrete)}`;
+    let t = wrappers.get(key);
+    if (!t) {
+      t = { kind: "param", name, bound, fields: bound?.fields ?? [], concrete };
+      wrappers.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  const wrappers = new Map<string, ParamType>();
+
+  // A type with each instance's type parameter replaced by the concrete type it stands for. A
+  // generic class made from one becomes the class made from what it stands for.
+  function lower(t: Type): Type {
+    // A generic interface made from type parameters is the one made from what they stand for.
+    if (typeof t !== "string" && t.kind === "interface" && t.generic?.args.some((a) => lower(a) !== a)) return instanceInterface(t, t.generic.args.map(lower));
+    if (typeof t !== "string" && t.kind === "dyn" && t.of.generic?.args.some((a) => lower(a) !== a)) return dynType(lower(t.of) as InterfaceType);
+    if (typeof t !== "string" && t.kind === "dyn" && t.shown !== undefined) return dynType(t.of);
+    if (typeof t === "string" || t.kind === "literal" || t.kind === "interface" || t.kind === "closure" || t.kind === "function" || t.kind === "generator" || t.kind === "future" || t.kind === "dyn" || t.kind === "regex") return t;
+    if (t.kind === "param") return t.concrete ? lower(t.concrete) : t;
+    if (t.kind === "pattern") return "string";
+    if (t.kind === "pointer") return pointerType(lower(t.to), t.mutable);
+    if (t.kind === "handle") return t.joined ? joinedType(lower(t.joined.base) as HandleType, t.joined.panic) : handleType(lower(t.gives), t.throws && lower(t.throws));
+    if (t.kind === "interior") return interiorType(t.which, lower(t.of));
+    if (t.kind === "shared") return sharedType(lower(t.of));
+    if (t.kind === "block") return blockType(t.which, lower(t.of));
+    if (t.kind === "map") return mapType(lower(t.key), lower(t.value), t.set);
+    if (t.kind === "recursive") return t.args.some((a) => lower(a) !== a) ? remade(t, () => lower(t.of), t.args.map(lower)) : t;
+    // A type holding itself through an array is remade from its type arguments.
+    const tied = ties.get(t);
+    if (tied && heldBlocks.get(t) !== tied) return tied.args.some((a) => lower(a) !== a) ? instanceRecursive(tied, tied.args.map(lower)).of : t;
+    const loop = members.get(t);
+    if (loop && !loop.args.some((a) => lower(a) !== a)) return t;
+    let found = lowered.get(t);
+    if (!found) {
+      if (t.kind === "class") found = t.generic?.args.some((a) => lower(a) !== a) ? instanceClass(t, t.generic.args.map(lower)) : t;
+      else if (t.kind === "ref") found = refType(lower(t.to), t.mutable, t.life);
+      else if (t.kind === "array") found = arrayType(lower(t.element));
+      else if (t.kind === "fixed") found = fixedType(lower(t.element), t.size);
+      else if (t.kind === "variant") found = t.args.some((a) => lower(a) !== a) ? instanceVariant(t, t.args.map(lower)) : t;
+      else if (t.kind === "object" && t.match) found = t;
+      else if (t.kind === "object" && t.tuple) found = retuple(t, lower);
+      else found = t.kind === "union" ? unionType(t.members.map(lower), t.name) : objectType(t.fields.map(({ optional: _, ...f }) => ({ ...f, type: lower(f.type) })));
+      lowered.set(t, found);
+    }
+    return found;
+  }
+
+  const lowered = new WeakMap<ObjectType | UnionType | ClassType | RefType | ArrayType | FixedType | VariantType, Type>();
+
+  // A type with some of its parts swapped for others, looking inside objects and unions.
+  function replaced(t: Type, swap: Map<Type, Type>): Type {
+    const found = swap.get(t);
+    if (found) return found;
+    if (typeof t !== "string" && t.kind === "class") {
+      const args = t.generic?.args.map((a) => heldArgument(replaced(a, swap)));
+      return args && args.some((a, i) => a !== t.generic!.args[i]) ? instanceClass(t, args) : t;
+    }
+    if (typeof t !== "string" && t.kind === "ref") return refType(replaced(t.to, swap), t.mutable, t.life);
+    if (typeof t !== "string" && t.kind === "interface" && t.generic) {
+      const args = t.generic.args.map((a) => heldArgument(replaced(a, swap)));
+      return args.some((a, i) => a !== t.generic!.args[i]) ? instanceInterface(t, args) : t;
+    }
+    if (typeof t !== "string" && t.kind === "function") {
+      const params = t.params.map((p) => replaced(p, swap));
+      const returns = replaced(t.returns, swap);
+      const throws = t.throws && replaced(t.throws, swap);
+      if (!params.some((p, i) => p !== t.params[i]) && returns === t.returns && throws === t.throws) return t;
+      const made = functionType(t.names, params, returns, throws);
+      // A generic one stays generic, the types around it it was written among replaced too.
+      if (t.generic) {
+        made.name = `<${t.generic.names.join(", ")}>${made.name}`;
+        made.generic = { ...t.generic, scope: new Map([...t.generic.scope].map(([n, x]) => [n, replaced(x, swap)])) };
+      }
+      return made;
+    }
+    // A stored callable is remade from the function type it was written as.
+    const fn = typeof t !== "string" && t.kind === "dyn" ? callableOf.get(t.of) : undefined;
+    if (fn) {
+      const made = replaced(fn, swap);
+      return made === fn ? t : callableType(made as FunctionType);
+    }
+    if (typeof t !== "string" && t.kind === "array") return arrayType(replaced(t.element, swap));
+    if (typeof t !== "string" && t.kind === "fixed") return fixedType(replaced(t.element, swap), t.size);
+    if (typeof t !== "string" && t.kind === "map") return mapType(replaced(t.key, swap), heldArgument(replaced(t.value, swap)), t.set);
+    // What a lock, a shared value or a channel holds is a type argument, boxed as one.
+    if (typeof t !== "string" && (t.kind === "interior" || t.kind === "shared" || (t.kind === "block" && t.which === "Channel"))) {
+      const of = heldArgument(replaced(t.of, swap));
+      if (of === t.of) return t;
+      return t.kind === "interior" ? interiorType(t.which, of) : t.kind === "shared" ? sharedType(of) : blockType("Channel", of);
+    }
+    if (typeof t !== "string" && t.kind === "variant") {
+      const args = t.args.map((a) => heldArgument(replaced(a, swap)));
+      return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
+    }
+    const tied = typeof t !== "string" ? ties.get(t) : undefined;
+    if (tied && heldBlocks.get(t as UnionType) !== tied) {
+      const args = tied.args.map((a) => replaced(a, swap));
+      return args.some((a, i) => a !== tied.args[i]) ? instanceRecursive(tied, args).of : t;
+    }
+    if (typeof t !== "string" && t.kind === "recursive") {
+      const args = t.args.map((a) => replaced(a, swap));
+      return args.some((a, i) => a !== t.args[i]) ? remade(t, () => replaced(t.of, swap), args) : t;
+    }
+    if (typeof t === "string" || (t.kind !== "object" && t.kind !== "union")) return t;
+    if (t.kind === "object" && t.match) return t;
+    if (t.kind === "object" && t.tuple) return retuple(t, (e) => replaced(e, swap));
+    return t.kind === "union" ? unionType(t.members.map((m) => replaced(m, swap)), t.name) : objectType(t.fields.map((f) => ({ ...f, type: replaced(f.type, swap) })));
+  }
+
+  // The class a generic class's type arguments make, which only the checker can declare.
+  let instanceClass = (c: ClassType, _args: Type[]): ClassType => c;
+  function lowersClasses(f: typeof instanceClass) {
+    instanceClass = f;
+  }
+
+  // The same variant of a generic enum made with other type arguments, which only the checker
+  // can make.
+  let instanceVariant = (v: VariantType, _args: Type[]): VariantType => v;
+  let instanceInterface = (t: InterfaceType, _args: Type[]): InterfaceType => t;
+  function lowersInterfaces(f: typeof instanceInterface) {
+    instanceInterface = f;
+  }
+  function lowersVariants(f: typeof instanceVariant) {
+    instanceVariant = f;
+  }
+
+  // A string that is the same exactly when two types are, for keying instances.
+  function keyOf(t: Type): string {
+    return typeof t === "string" ? t : `{${keys.get(t)}}`;
+  }
+
+  // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
+  function tupleType(elements: Type[], required: number = elements.length, rest?: Type): ObjectType {
+    const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${keyOf(rest)}`}`;
+    let t = interned.get(key);
+    if (!t) {
+      const fields: Field[] = elements.map((type, i) => ({ name: String(i), type }));
+      if (rest !== undefined) fields.push({ name: "...", type: arrayType(rest) });
+      t = { kind: "object", fields: objectType(fields).fields, tuple: true };
+      if (required < elements.length) t.required = required;
+      if (rest !== undefined) t.rest = rest;
+      interned.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // The same tuple shape over elements mapped by `f`.
+  const retuple = (t: ObjectType, f: (e: Type) => Type): ObjectType => tupleType(elementsOf(t).map(f), t.required, t.rest === undefined ? undefined : f(t.rest));
+
+  // What `re.exec(s)` gives when it matches: the whole match and each capture, a capture that
+  // may not take part being `string | null`, then where the match starts, the string matched, and,
+  // when the pattern names groups, an object of them.
+  function matchType(t: RegexType): ObjectType {
+    const key = `match ${keys.get(t)}`;
+    let found = interned.get(key);
+    if (!found) {
+      const maybe = unionType(["string", "null"]);
+      const names = [...new Set(t.captures.flatMap((c) => (c.name === undefined ? [] : [c.name])))];
+      // A name shared by groups in different alternatives holds whichever took part.
+      const named = names.map((name) => {
+        const groups = t.captures.filter((c) => c.name === name);
+        return { name, type: groups.length === 1 && !groups[0]!.optional ? "string" as Type : maybe };
+      });
+      const fields: Field[] = [
+        { name: "0", type: "string" },
+        ...t.captures.map((c, i) => ({ name: String(i + 1), type: c.optional ? maybe : "string" as Type })),
+        { name: "index", type: "i64" },
+        { name: "input", type: "string" },
+        ...(named.length > 0 ? [{ name: "groups", type: objectType(named) as Type }] : []),
+      ];
+      found = { kind: "object", fields: objectType(fields).fields, tuple: true, match: true };
+      interned.set(key, found);
+      keys.set(found, key);
+    }
+    return found;
+  }
+
+  function objectType(fields: Field[]): ObjectType {
+    const sorted = fields.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // A nested key is braced, so `{ a: { x }; y }` and `{ a: { x; y } }` get different keys.
+    const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? `?${f.optional}` : ""}:${keyOf(f.type)}`).join(",");
+    let t = interned.get(key);
+    if (!t) {
+      t = { kind: "object", fields: sorted };
+      interned.set(key, t);
+      keys.set(t, key);
+    }
+    return t;
+  }
+
+  // A key that is the same exactly when two types' values have one shape: like `keyOf`, but
+  // blind to which fields are marked optional, so `{ a?: T }` and `{ a: T | null }` share one.
+  function shapeKey(t: Type): string {
+    if (typeof t === "string") return t;
+    if (ties.has(t)) return keyOf(t);
+    let found = shapeKeys.get(t);
+    if (found === undefined) {
+      if (t.kind === "object" && t.tuple) found = `[${elementsOf(t).map(shapeKey).join(",")}${t.required === undefined ? "" : `?${t.required}`}${t.rest === undefined ? "" : `...${shapeKey(t.rest)}`}]`;
+      else if (t.kind === "object") found = `{${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${shapeKey(f.type)}`).join(",")}}`;
+      else if (t.kind === "array") found = `${shapeKey(t.element)}[]`;
+      else if (t.kind === "fixed") found = `FixedArray<${shapeKey(t.element)},${t.size}>`;
+      else if (t.kind === "map") found = t.set ? `Set<${shapeKey(t.key)}>` : `Map<${shapeKey(t.key)},${shapeKey(t.value)}>`;
+      else if (t.kind === "union") found = `(${t.members.map(shapeKey).join("|")})`;
+      else if (t.kind === "ref") found = `${t.mutable ? "mut" : "ref"} ${shapeKey(t.to)}${t.life ? ` ${t.life}` : ""}`;
+      // A type parameter standing for a concrete type has that type's shape.
+      else if (t.kind === "param" && t.concrete) return shapeKey(t.concrete);
+      else if (t.kind === "class" && t.generic) found = `${t.generic.name}<${t.generic.args.map(shapeKey).join(",")}>`;
+      else found = keyOf(t);
+      shapeKeys.set(t, found);
+    }
+    return found;
+  }
+  const shapeKeys = new WeakMap<Exclude<Type, string>, string>();
+
+  // A type without the empty value an optional field adds.
+  function withoutNull(t: Type): Type {
+    return typeof t !== "string" && t.kind === "union" ? unionType(t.members.filter((m) => m !== "null")) : t;
+  }
+
+  // A field written `name?: T`: its type holds the empty value, and it remembers whether `?` added it.
+  function optionalField(name: string, written: Type): Field {
+    const held = written === "null" || (typeof written !== "string" && written.kind === "union" && written.members.includes("null"));
+    return { name, type: held ? written : unionType([written, "null"]), optional: held ? "held" : "added" };
+  }
+
+  // Whether a value of `from` fits where `to` is declared: the same type, or an object or
+  // instance with at least the fields of the object type `to`, each fitting in turn.
+  const assumed = new Set<string>();
+
+  function fits(from: Type, to: Type): boolean {
+    // A string literal fits a pattern it matches; a pattern is a string. Both are strings once
+    // lowered, so this comes first.
+    const target = typeof to !== "string" && to.kind === "param" && to.concrete ? to.concrete : to;
+    if (from !== target && typeof target !== "string" && target.kind === "pattern") {
+      if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, target));
+      return typeof from !== "string" && from.kind === "literal" && typeof from.value === "string" && !from.owner && textFits(from.value, target);
+    }
+    // In an instance, a type parameter and the concrete type it stands for are one value.
+    if (from === to || sameLowered(from, to) || from === "never" || sameCallable(from, to)) return true;
+    // So does a value of a type parameter fit as what it stands for, a literal as its base type.
+    if (typeof from !== "string" && from.kind === "param" && from.concrete !== undefined && fits(from.concrete, to)) return true;
+    // A future fits the `Promise<T>` describing it, as an async function's result.
+    if (typeof to !== "string" && to.kind === "interface" && promised.has(to) && typeof from !== "string" && from.kind === "future") return !from.throws && lower(from.gives) === lower(promised.get(to)!);
+    // A reference reads the value where it lives, so it fits only a reference to the same type;
+    // a mutable one also lends itself as shared. Lifetimes are checked on their own.
+    // A reference into a recursive type's block is one to the type it stands for.
+    if (typeof to !== "string" && to.kind === "ref") {
+      return typeof from !== "string" && from.kind === "ref" && (from.mutable || !to.mutable) && lower(unfold(from.to)) === lower(to.to);
+    }
+    // Any regex is a \`RegExp\`; all of them are the same pointer to a program.
+    if (to === ANY_REGEX) return typeof from !== "string" && (from.kind === "regex" || (from.kind === "param" && from.bound?.kind === "regex"));
+    // A `MutPtr<T>` may be used as a `Ptr<T>`, as Rust's `*mut T` coerces to `*const T`.
+    if (typeof to !== "string" && to.kind === "pointer") {
+      return typeof from !== "string" && from.kind === "pointer" && (from.mutable || !to.mutable) && lower(from.to) === lower(to.to);
+    }
+    // A recursive type is the type it stands for. Its type holds it again, so a pair being
+    // compared is taken to fit while its parts are.
+    // A union holding the recursive type itself takes it as it is.
+    const held = typeof to !== "string" && to.kind === "union" && to.members.includes(from);
+    if (!held && ((typeof from !== "string" && from.kind === "recursive") || (typeof to !== "string" && to.kind === "recursive"))) {
+      const pair = `${keyOf(from)} ${keyOf(to)}`;
+      if (assumed.has(pair)) return true;
+      assumed.add(pair);
+      try {
+        return fits(unfold(from), unfold(to));
+      } finally {
+        assumed.delete(pair);
+      }
+    }
+    if (typeof to !== "string" && to.kind === "union") {
+      if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
+      return to.members.some((m) => fits(from, m));
+    }
+    // A union fits where every member it may hold does, as an enum fits an i64.
     if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
-    return to.members.some((m) => fits(from, m));
+    if (typeof from !== "string" && from.kind === "pattern") return to === "string";
+    if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
+    // A closure fits a function type taking the same parameters, or the first of them, and
+    // returning what it returns, or anything when it returns nothing.
+    // A parameter of a function type fits through its signature.
+    if (typeof to !== "string" && to.kind === "function") {
+      const given = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
+      // A stored callable fits by the function type it was written as.
+      const callable = typeof given !== "string" && given.kind === "dyn" && callableOf.has(given.of);
+      const sig = callable ? callableOf.get(given.of)! : given;
+      // A stored callable's call passes all its parameters, so it takes exactly as many.
+      if (callable && typeof sig !== "string" && sig.kind === "function" && sig.params.length !== to.params.length) return false;
+      // What it throws fits what the type throws, and one throwing nothing fits any.
+      const throws = typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") ? sig.throws : undefined;
+      const caught = throws === undefined || (to.throws !== undefined && fits(throws, to.throws));
+      return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
+        && sig.params.every((p, i) => lower(p) === lower(to.params[i]!) || sameCallable(p, to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns)) && caught;
+    }
+    if (typeof from !== "string" && from.kind === "ref") return false;
+    // A tuple fits only a tuple of its length, element by element.
+    if (isTuple(from) || isTuple(to)) {
+      const [a, b] = [from as ObjectType, to as ObjectType];
+      // A tuple fits one of its shape, giving at least the elements that one requires.
+      const shaped = isTuple(from) && isTuple(to) && a.fields.length === b.fields.length && (a.rest === undefined) === (b.rest === undefined);
+      return shaped && (a.required ?? a.fields.length) >= (b.required ?? b.fields.length) && b.fields.every((f) => fits(field(a, f.name)!.type, f.type));
+    }
+    // An interface is satisfied by members, which only the checker can look up.
+    if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
+    // A type parameter fits through its bound's fields, as any instance of it would.
+    // A value may leave out a field whose type is an Option.
+    return to.fields.every((f) => {
+      const found = field(from, f.name);
+      if (!found) return isOption(f.type);
+      return (found.access ?? "public") === "public" && fits(found.type, f.type);
+    });
   }
-  // A union fits where every member it may hold does, as an enum fits an i64.
-  if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => fits(m, to));
-  if (typeof from !== "string" && from.kind === "pattern") return to === "string";
-  if (typeof from !== "string" && from.kind === "literal") return baseOf(from) === to;
-  // A closure fits a function type taking the same parameters, or the first of them, and
-  // returning what it returns, or anything when it returns nothing.
-  // A parameter of a function type fits through its signature.
-  if (typeof to !== "string" && to.kind === "function") {
-    const given = typeof from !== "string" && from.kind === "param" && from.bound?.kind === "function" ? from.concrete ?? from.bound : from;
-    // A stored callable fits by the function type it was written as.
-    const callable = typeof given !== "string" && given.kind === "dyn" && callableOf.has(given.of);
-    const sig = callable ? callableOf.get(given.of)! : given;
-    // A stored callable's call passes all its parameters, so it takes exactly as many.
-    if (callable && typeof sig !== "string" && sig.kind === "function" && sig.params.length !== to.params.length) return false;
-    return typeof sig !== "string" && (sig.kind === "closure" || sig.kind === "function") && sig.params.length <= to.params.length
-      && sig.params.every((p, i) => lower(p) === lower(to.params[i]!) || sameCallable(p, to.params[i]!)) && (to.returns === "void" || fits(sig.returns, to.returns));
+
+  // A field, by its path, that a value of `from` holds read-only but `to` lets be written: lent
+  // mutably as a `to`, it could be changed. A readonly field only fits a writable one by copy.
+  function unlocks(from: Type, to: Type, path = ""): string | undefined {
+    from = lower(from);
+    if (typeof from === "string" || typeof to === "string" || (to.kind !== "object" && to.kind !== "interface")) return undefined;
+    for (const f of to.fields) {
+      const found = field(from, f.name);
+      if (!found) continue;
+      if (found.readonly && !f.readonly) return `${path}${f.name}`;
+      const deeper = unlocks(found.type, f.type, `${path}${f.name}.`);
+      if (deeper) return deeper;
+    }
+    return undefined;
   }
-  if (typeof from !== "string" && from.kind === "ref") return false;
-  // A tuple fits only a tuple of its length, element by element.
-  if (isTuple(from) || isTuple(to)) {
-    const [a, b] = [from as ObjectType, to as ObjectType];
-    // A tuple fits one of its shape, giving at least the elements that one requires.
-    const shaped = isTuple(from) && isTuple(to) && a.fields.length === b.fields.length && (a.rest === undefined) === (b.rest === undefined);
-    return shaped && (a.required ?? a.fields.length) >= (b.required ?? b.fields.length) && b.fields.every((f) => fits(field(a, f.name)!.type, f.type));
+
+  // The instance each closure, future and generator type is made for: what tells it apart from
+  // others of its signature, which show alike.
+  const madeFor = new WeakMap<Exclude<Type, string>, string>();
+  let describing = false;
+
+  // `show`, but with closures, futures and generators anywhere in the type named by the instance
+  // each is made for, for naming what is generated for a type the same way in every program.
+  function described(t: Type): string {
+    const was = describing;
+    describing = true;
+    try {
+      return show(t);
+    } finally {
+      describing = was;
+    }
   }
-  // An interface is satisfied by members, which only the checker can look up.
-  if (typeof from === "string" || typeof to === "string" || to.kind !== "object" || from.kind === "interface") return false;
-  // A type parameter fits through its bound's fields, as any instance of it would.
-  // A value may leave out a field whose type is an Option.
-  return to.fields.every((f) => {
-    const found = field(from, f.name);
-    if (!found) return isOption(f.type);
-    return (found.access ?? "public") === "public" && fits(found.type, f.type);
-  });
+
+  // How a type reads in a diagnostic, as TypeScript would print it.
+  function show(t: Type): string {
+    if (t === "f64") return "number";
+    if (typeof t === "string") return t;
+    if (describing && madeFor.has(t)) return madeFor.get(t)!;
+    // A type holding itself is shown by its name.
+    const tied = ties.get(t);
+    if (tied) return describing ? `part of ${tied.name}` : tied.name;
+    if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
+    if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
+    if (t.kind === "pattern") {
+      const text = (q: string) => q.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("${", "\\${");
+      return `\`${t.quasis.map((q, i) => (i === 0 ? text(q) : `\${${show(t.holes[i - 1]!)}}${text(q)}`)).join("")}\``;
+    }
+    if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
+    if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
+    if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;
+    if (t.kind === "regex") return "RegExp";
+    if (t.kind === "array") {
+      const e = t.element;
+      const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure" || (e.kind === "dyn" && callableOf.has(e.of)));
+      return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
+    }
+    if (t.kind === "fixed") return `FixedArray<${show(t.element)}, ${t.size}>`;
+    if (t.kind === "map") return t.set ? `Set<${show(t.key)}>` : `Map<${show(t.key)}, ${show(t.value)}>`;
+    if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
+    if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}${describing ? ` ${t.name}(${t.frame.map((f) => show(f.type)).join(", ")})` : ""}`;
+    if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
+    if (t.kind === "shared") return `shared<${show(t.of)}>`;
+    // A JS handle shows the shape its declaration gives it.
+    // A package's shape is shown by the name the package gives it, not the one linking gave it.
+    if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
+    if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.shown ?? t.of.name : `Dyn<${t.of.name}>`;
+    if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
+    if (t.kind === "handle") return `${t.joined ? "Promise" : "JoinHandle"}<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
+    if (t.kind !== "object") return t.name;
+    if (t.match && !describing) return "RegExpExecArray";
+    if (t.tuple && !t.match) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
+    if (t.fields.length === 0) return "{}";
+    const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
+    return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional && f.optional !== "undefined" ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
+  }
+
+  return {
+    openThrows, patternType, holdsPattern, sameLowered, interiorType, sharedType, dynType, callableOf, uncrossable, jsUntyped, jsOptional, jsUncalled,
+    setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
+    leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
+    promiseElement, regexType, recursiveType, blockFor, holdsBlock, lowersRecursive, partOfItself, unjson, unfolded, pointerType, classType,
+    interfaceType, generatorType, nextResult, generatorInterface, yieldsOf, generatorElement, functionType, closureType, genericFunctionType,
+    literalType, standInLiteral, unionType, membersFor, typeParameter, refType, fixedType, arrayType, standsFor, tiedBy, mapType, variantType,
+    holdsRef, lockCallbacks, sharedCallbacks, wrapped, lower, replaced, lowersClasses, lowersInterfaces, lowersVariants, keyOf, tupleType, retuple,
+    matchType, objectType, shapeKey, withoutNull, optionalField, fits, unlocks, madeFor, described, show,
+  };
 }
 
-// A field, by its path, that a value of `from` holds read-only but `to` lets be written: lent
-// mutably as a `to`, it could be changed. A readonly field only fits a writable one by copy.
-export function unlocks(from: Type, to: Type, path = ""): string | undefined {
-  from = lower(from);
-  if (typeof from === "string" || typeof to === "string" || (to.kind !== "object" && to.kind !== "interface")) return undefined;
-  for (const f of to.fields) {
-    const found = field(from, f.name);
-    if (!found) continue;
-    if (found.readonly && !f.readonly) return `${path}${f.name}`;
-    const deeper = unlocks(found.type, f.type, `${path}${f.name}.`);
-    if (deeper) return deeper;
-  }
-  return undefined;
-}
-
-// The instance each closure, future and generator type is made for: what tells it apart from
-// others of its signature, which show alike.
-export const madeFor = new WeakMap<Exclude<Type, string>, string>();
-let describing = false;
-
-// `show`, but with closures, futures and generators anywhere in the type named by the instance
-// each is made for, for naming what is generated for a type the same way in every program.
-export function described(t: Type): string {
-  const was = describing;
-  describing = true;
-  try {
-    return show(t);
-  } finally {
-    describing = was;
-  }
-}
-
-// How a type reads in a diagnostic, as TypeScript would print it.
-export function show(t: Type): string {
-  if (t === "f64") return "number";
-  if (typeof t === "string") return t;
-  if (describing && madeFor.has(t)) return madeFor.get(t)!;
-  // A type holding itself is shown by its name.
-  const tied = ties.get(t);
-  if (tied) return describing ? `part of ${tied.name}` : tied.name;
-  if (t.kind === "literal" && t.owner) return `${t.owner.enum}.${t.owner.member}`;
-  if (t.kind === "literal") return typeof t.value === "string" ? JSON.stringify(t.value) : String(t.value);
-  if (t.kind === "pattern") {
-    const text = (q: string) => q.replaceAll("\\", "\\\\").replaceAll("`", "\\`").replaceAll("${", "\\${");
-    return `\`${t.quasis.map((q, i) => (i === 0 ? text(q) : `\${${show(t.holes[i - 1]!)}}${text(q)}`)).join("")}\``;
-  }
-  if (t.kind === "union") return t.name ?? t.members.map(show).join(" | ");
-  if (t.kind === "ref") return `${t.mutable ? "Mut" : "Ref"}<${show(t.to)}>`;
-  if (t.kind === "pointer") return `${t.mutable ? "MutPtr" : "Ptr"}<${show(t.to)}>`;
-  if (t.kind === "regex") return "RegExp";
-  if (t.kind === "array") {
-    const e = t.element;
-    const wrap = typeof e !== "string" && ((e.kind === "union" && !e.name) || e.kind === "function" || e.kind === "closure" || (e.kind === "dyn" && callableOf.has(e.of)));
-    return wrap ? `(${show(e)})[]` : `${show(e)}[]`;
-  }
-  if (t.kind === "fixed") return `FixedArray<${show(t.element)}, ${t.size}>`;
-  if (t.kind === "map") return t.set ? `Set<${show(t.key)}>` : `Map<${show(t.key)}, ${show(t.value)}>`;
-  if (t.kind === "generator") return `Generator<${show(t.yields)}>`;
-  if (t.kind === "future") return `Promise<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}${describing ? ` ${t.name}(${t.frame.map((f) => show(f.type)).join(", ")})` : ""}`;
-  if (t.kind === "interior") return `${t.which}<${show(t.of)}>`;
-  if (t.kind === "shared") return `shared<${show(t.of)}>`;
-  // A JS handle shows the shape its declaration gives it.
-  // A package's shape is shown by the name the package gives it, not the one linking gave it.
-  if (t.kind === "block") return t.which === "Channel" ? `Channel<${show(t.of)}>` : t.which === "JsValue" && t.of !== "void" ? show(t.of).replace(/-fsh\d+/g, "") : t.which;
-  if (t.kind === "dyn") return !describing && (callableOf.has(t.of) || promised.has(t.of)) ? t.of.name : `Dyn<${t.of.name}>`;
-  if (t.kind === "recursive" && describing) return `recursive ${t.name}`;
-  if (t.kind === "handle") return `${t.joined ? "Promise" : "JoinHandle"}<${show(t.gives)}>${t.throws ? ` throws ${show(t.throws)}` : ""}`;
-  if (t.kind !== "object") return t.name;
-  if (t.match && !describing) return "RegExpExecArray";
-  if (t.tuple && !t.match) return `[${[...elementsOf(t).map((e, i) => (i < (t.required ?? Infinity) ? show(e) : `${show(withoutNull(e))}?`)), ...(t.rest === undefined ? [] : [`...${show(arrayType(t.rest))}`])].join(", ")}]`;
-  if (t.fields.length === 0) return "{}";
-  const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
-  return `{ ${t.fields.map((f) => `${f.readonly ? "readonly " : ""}${name(f.name)}${f.optional && f.optional !== "undefined" ? "?" : ""}: ${show(f.optional === "added" ? withoutNull(f.type) : f.type)}`).join("; ")} }`;
-}
+export type Typing = ReturnType<typeof newTyping>;

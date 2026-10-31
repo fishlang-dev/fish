@@ -1,25 +1,27 @@
-import { checkOverrides, declareClass, extend, inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
-import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
-import { CompileError } from "./diag.ts";
-import { declarations, warnings } from "./warnings.ts";
+import { declareClass, extend, inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { crossingOf, rustClassOf } from "./rust.ts";
+import { newTables, type Compilation, type Tables } from "./compilation.ts";
+import { CompileError, named } from "./diag.ts";
+import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
-import { FILE_SPAN, fileNames } from "./modules.ts";
+import { FILE_SPAN } from "./modules.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
+import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, type Ids } from "./nodes.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
-import { declareEnum, resetEnums, type EnumInfo } from "./enums.ts";
+import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, infersAliases, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
-import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { lowerDefaults, writtenName } from "./defaults.ts";
+import { ANY_REGEX, allFields, holdsPart, isPlainJs, elementsOf, isTuple, type ObjectType, field, interiorMutable, YIELD_NOW, type FutureType, optionRef, isCopy, type Field, type GeneratorType, widenLet, isInteger, isNumeric, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { lowerOverloads } from "./overloads.ts";
@@ -27,7 +29,7 @@ import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { asserts, jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { expressions, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -39,14 +41,18 @@ type Func = Declared & { body: Stmt[] };
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
+// A checked program: the functions to compile, the tables its check filled in, and the
+// compilation it was checked in.
 // `warnings`: what the build reports without failing, in source order.
-export type Checked = { instances: Instance[]; warnings: CompileError[] };
+export type Checked = { instances: Instance[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
 export type Instance = {
   body: Body;
   symbol: string;
+  // The tables of the check that made it.
+  tables: Tables;
   // What a generic body's type parameters stand for in this instance. An instance holding a
   // type parameter is the definition check, which is never compiled.
   bindings: Map<string, Type>;
@@ -56,38 +62,38 @@ export type Instance = {
   // Its return type, written or inferred.
   returns: Type;
   // Every value expression's type.
-  types: Map<Expr, Type>;
+  types: NodeMap<Expr, Type>;
   // Each `JSON.stringify` argument's type before lowering, which keeps how fields were spelled.
-  spelled?: Map<Expr, Type>;
+  spelled?: NodeMap<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
   // after shadowing.
-  locals: Map<Expr | Stmt | Param | ObjectProp, Local>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
   // The function each call of a user function or method runs, and the getter each read of
   // an accessor runs.
-  calls: Map<Expr, Instance>;
+  calls: NodeMap<Expr, Instance>;
   // The setter each assignment to an accessor runs.
-  setters: Map<Expr, Instance>;
+  setters: NodeMap<Expr, Instance>;
   // Each expression whose value meets a narrower declared type, and the type it is copied
   // down to.
-  coercions: Map<Expr, Type>;
+  coercions: NodeMap<Expr, Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
-  jumps: Map<Stmt, Stmt>;
+  jumps: NodeMap<Stmt, Stmt>;
   // The arguments, or the receiver, each call returning a reference borrows from.
-  borrowsFrom: Map<Expr, Expr[]>;
+  borrowsFrom: NodeMap<Expr, Expr[]>;
   // The error type a `throws` clause declares.
   throws?: Type;
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   // An error the function's type doesn't take is first wrapped by a class's static `from`.
-  raises: Map<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
+  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
   // The type of what each `try` catches.
-  caught: Map<Stmt, Type>;
+  caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty.
-  consumes: Set<Expr | ObjectProp>;
+  consumes: NodeSet<Expr | ObjectProp>;
   // What each match pattern tests, and the type of the value it meets.
-  patterns: Map<Pattern, PatternInfo>;
+  patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
-  copiesOut: Set<Expr>;
+  copiesOut: NodeSet<Expr>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -99,10 +105,13 @@ export type Instance = {
   // Each call or use as a value of a nested function by name, the function, and this body's
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
-  envs?: Map<Expr, { of: Instance; env: Local[] }>;
+  envs?: NodeMap<Expr, { of: Instance; env: Local[] }>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
-  made?: Map<Expr, { of: Instance; env: Local[] }[]>;
+  made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
+  // Each call of a type predicate that narrows its argument: the predicate's type, and whether
+  // its true and its false answers narrow, which codegen checks against the argument's tag.
+  predicates?: NodeMap<Expr, { index: number; type: Type; yes: boolean; no: boolean }>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -112,7 +121,7 @@ export type Instance = {
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: Map<Local, number>; loops: Map<Stmt, number>; awaits: Map<Expr, number> };
+  frame?: { locals: Map<Local, number>; loops: NodeMap<Stmt, number>; awaits: NodeMap<Expr, number> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -161,7 +170,7 @@ function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
 }
 
 // Every name written in a piece of syntax.
-function identifiers(node: unknown, found = new Set<string>()): Set<string> {
+function identifiers(node: unknown, found: Set<string> = new Set<string>()): Set<string> {
   if (Array.isArray(node)) for (const x of node) identifiers(x, found);
   else if (node && typeof node === "object") {
     const n = node as { kind?: string; name?: unknown };
@@ -189,6 +198,7 @@ function patternText(p: Pattern): string {
 // array's layout that owns nothing, so dropping the frame leaves the array to its owner, and
 // moving the generator doesn't leave a pointer to the frame behind.
 function iterated(instance: Instance, e: Expr): Type {
+  const { refType, objectType } = instance.tables.typing;
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
   // A fixed array it borrows is kept as a pointer to where it lives.
   if (typeof type !== "string" && type.kind === "fixed" && plainPlace(instance, e)) return refType(type, false);
@@ -230,22 +240,23 @@ export function isAwait(e: Expr): e is Extract<Expr, { kind: "unary" }> {
 // in order, every other variable, then each `for...of` loop's array or generator and its
 // position. A closure's loops are its own.
 // An async method's object as its future holds it.
-function receiverField(self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
+function receiverField({ refType }: Typing, self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
   return { name: "this", type: laid(self.owned ? self.type : refType(self.type, self.mutable)) };
 }
 
 // A closure, future or generator type, marked as made for `instance`.
 function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instance: Instance): T {
-  madeFor.set(t, `${t.kind} of ${instance.symbol}`);
+  instance.tables.typing.madeFor.set(t, `${t.kind} of ${instance.symbol}`);
   return t;
 }
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
+  const { typing } = instance.tables;
   const fields: Field[] = [{ name: "state", type: "i32" }];
   const locals = new Map<Local, number>();
-  const loops = new Map<Stmt, number>();
+  const loops = new NodeMap<Stmt, number>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
-  const awaits = new Map<Expr, number>();
+  const awaits = new NodeMap<Expr, number>();
   const add = (l: Local) => {
     if (locals.has(l)) return;
     locals.set(l, fields.length);
@@ -254,7 +265,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   // An async arrow's frame holds what it captured, first, and an async method's its object.
   if (instance.body.closure) fields.push({ name: "env", type: "void" });
   const self = instance.body.self;
-  if (self && !self.constructor) fields.push(receiverField(self, (t) => (instance.concrete ? lower(t) : t)));
+  if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   // A local generic function's name holds nothing.
   [...new Set(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
@@ -294,31 +305,9 @@ const RUNTIME_NAMES = new Set([
   ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
 ]);
 
-// The names a loop's pattern binds, made as declarations of the parts; a generic body checked
-// again for another instance meets them already made.
-const loopParts = new WeakSet<Declarator>();
-// The arrows nested function declarations became, with their names; they lend what they capture
-// per call.
-export const nestedFunctions = new WeakMap<Expr, string>();
-// The bindings nested function declarations make, and closures' captures of them.
-const nestedBindings = new WeakSet<Local>();
-// The generic functions written inside bodies, each lifted to a function of its own, by the
-// statement that declared it, or the generic arrow written as a value.
-const liftedFunctions = new WeakMap<Stmt | Expr, { name: string; fn: Func }>();
-let lifts = 0;
-let destructures = 0;
-// Every name a class or object literal gives a getter, so a destructuring source reading one
-// runs it once.
-let getterNames = new Set<string>();
-// The fresh variable a destructuring assignment's literal part goes into, by the target whose
-// type it takes; and the defaults it adds, which an Option's absence takes and anything else
-// never needs.
-const destructuredParts = new WeakMap<Stmt, Expr>();
-export const unusedDefaults = new WeakSet<Expr>();
-
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
 // an async one, its timers firing once it returns.
-function timersRunAsync(written: Stmt[]) {
+function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMains"]) {
   const top = written.map((s) => (s.kind === "function" ? s : (s as { declaration?: Stmt }).declaration)).filter((s): s is Func => s?.kind === "function");
   const main = top.find((f) => f.name === "main");
   if (!main || main.async) return;
@@ -328,13 +317,12 @@ function timersRunAsync(written: Stmt[]) {
   main.async = true;
   timerMains.add(main);
   const returns = main.returnType;
-  if (returns?.kind === "ref" && returns.name === "void") main.returnType = { kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end };
+  if (returns?.kind === "ref" && returns.name === "void") main.returnType = { id: nextId(ids), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end };
 }
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
-const timerMains = new WeakSet<Func>();
 
 // Whether a piece of syntax holds a node `found` picks out.
-export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen = new Set<unknown>()): boolean {
+export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => holdsNode(x, found, seen));
@@ -359,12 +347,10 @@ function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[
 }
 
 // A generic arrow held by a const, as the function declaration it amounts to.
-function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
-  const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
-  return { kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, body, start: at.start, end: at.end } as Func;
+function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
+  const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ id: nextId(ids), kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
+  return { id: nextId(ids), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, body, start: at.start, end: at.end } as Func;
 }
-// A nested function's calls of itself, which run with the calling closure's own captures.
-export const selfCalls = new WeakSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index", "staticBlock"]);
@@ -383,14 +369,29 @@ function macroShape(f: Func) {
 
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
-export function check(written: Stmt[], library = false, macros = false, module = false): Checked {
-  const files = fileNames.get(written);
-  resetTypes();
-  resetEnums();
-  lifts = 0;
-  destructures = 0;
-  jsUses.length = 0;
-  jsClasses.clear();
+// An error it throws names local declarations as they were written.
+export function check(compilation: Compilation, written: Stmt[], library = false, macros = false, module = false): Checked {
+  try {
+    const checked = checkAll(compilation, written, library, macros, module);
+    for (const w of checked.warnings) named(w, compilation.names);
+    return checked;
+  } catch (e) {
+    throw e instanceof CompileError ? named(e, compilation.names) : e;
+  }
+}
+
+function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
+  const { counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
+  const tables = newTables(compilation);
+  const { typing } = tables;
+  const {
+    fits, lowersVariants, lowersInterfaces, lowersClasses, promiseInterface, functionType, typeParameter, literalType, setJsError, jsUncalled, jsConverts, holdsRef,
+    lower, show, blockType, jsTakes, uncrossable, jsView, replaced, stored, generatorType, generatorElement, futureType, promiseElement, lockCallbacks,
+    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, tupleType,
+  } = typing;
+  const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
+  const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations } = tables;
+  const files = compilation.fileNames.get(written);
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
@@ -400,19 +401,18 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
-  written = lowerOverloads(written);
-  written = [...written, ...hoistLocals(written)];
-  getterNames = new Set();
+  written = lowerOverloads(ids, written);
+  written = [...written, ...hoistLocals(compilation, written)];
   holdsNode(written, (n) => {
     if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") getterNames.add((n as { name: string }).name);
     if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") getterNames.add((n as { key: string }).key);
     return false;
   });
-  lowerDefaults(written);
-  if (!library) timersRunAsync(written);
-  const program = [...stdFor(written), ...written];
+  lowerDefaults(tables, written);
+  if (!library) timersRunAsync(ids, written, timerMains);
+  const program = [...stdFor(compilation, written), ...written];
   const funcs: Func[] = [];
-  const aliases = new Map<string, TypeAlias>();
+  const { aliases } = tables;
   const classes = new Map<string, ClassInfo>();
   // Generic classes, declared again for each set of type arguments they are used with.
   const templates = new Map<string, ClassNode & { name: string }>();
@@ -425,7 +425,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
     if (e.kind === "enum") {
       typeName(e.name, e, aliases, classes, templates, interfaces, enums);
-      enums.set(e.name, declareEnum(e, (owner, member, init) => enumMemberValue(owner, member, init)));
+      enums.set(e.name, declareEnum(compilation, e, (owner, member, init) => enumMemberValue(owner, member, init)));
       continue;
     }
     if (s.kind === "typeAlias") {
@@ -441,20 +441,20 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (s.kind === "class" && s.name !== undefined) {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
       // A class's lifetimes are checked and erased, never instanced, so they are set aside.
-      const node = { ...s, name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
+      const node = { ...s, id: nextId(ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
-      else classes.set(s.name, declareClass(node));
+      else classes.set(s.name, declareClass(tables, node));
       const rust = rustClassNodes.get(s);
-      if (rust) rustClasses.set(classes.get(s.name)!.type, rust);
+      if (rust) classes.get(s.name)!.type.rust = rust;
       // A Rust type declaring no constructor is never made with `new`, so its handle needs no
       // assigning in the empty one it is given.
       if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
       // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
       const declared = classes.get(s.name);
       for (const f of declared?.staticFields.values() ?? []) {
-        const giving: Stmt = { kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
-        funcs.push(Object.assign({ kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
+        const giving: Stmt = { id: nextId(ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
+        funcs.push(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
       }
       continue;
     }
@@ -462,14 +462,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
       const rest = s.body.params.find((p) => p.rest);
       if (rest) throw unsupported("variadic C functions", rest);
-      funcs.push(Object.assign({ ...s.body, body: [] }, { foreign: true }));
+      funcs.push(Object.assign({ ...s.body, id: nextId(ids), body: [] }, { foreign: true }));
       continue;
     }
     // `export function f() {}` is an ordinary function, and in a library a C function too; an
     // exported macro is for other files.
     if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
       if (s.body.macro) macroShape(s.body);
-      funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body }, { exported: true }));
+      funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(ids) }, { exported: true }));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -485,16 +485,16 @@ export function check(written: Stmt[], library = false, macros = false, module =
         if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
         // A generic arrow is a family of functions, so it is declared as a generic function is.
         if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
-          funcs.push(arrowFunction(d.target.name, d.init, d));
+          funcs.push(arrowFunction(ids, d.target.name, d.init, d));
           continue;
         }
-        const giving: Stmt = { kind: "return", value: d.init, start: d.init.start, end: d.init.end };
-        funcs.push(Object.assign({ ...made, name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
+        const giving: Stmt = { id: nextId(ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
+        funcs.push(Object.assign({ ...made, id: nextId(ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
       }
       continue;
     }
     if (s.kind === "comptime") {
-      funcs.push(Object.assign({ ...made, name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
+      funcs.push(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
       continue;
     }
     if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
@@ -502,11 +502,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     const rust = rustNames.get(s);
     if (rust) {
-      funcs.push(Object.assign({ ...s, body: [] }, { foreign: true, rust }));
+      funcs.push(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust }));
       continue;
     }
     if (s.js) {
-      const body = { ...s, body: [] };
+      const body = { ...s, id: nextId(ids), body: [] };
       jsBodies.set(s, body);
       funcs.push(body);
       continue;
@@ -556,18 +556,19 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const scope = scopeOf(definition(b));
       return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
     },
+    typing,
+    assuming: new Set(),
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
-    classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
-    classNames: (at) => reached(classes.keys(), at),
+    classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
   });
   classes.forEach(register);
-  const { classNamed, construct, start, define } = genericClasses({
-    classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+  const { classNamed, construct, start, define, definedClass } = genericClasses({
+    tables, classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  infersAliases((name) => aliases.get(name));
-  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
+  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(tables, aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)),
     (at) => reached([...aliases.keys(), ...classes.keys(), ...templates.keys(), ...interfaces.keys(), ...enums.keys()], at));
@@ -582,7 +583,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
-  comptimeChecks((i) => {
+  comptimeChecks(tables, (i) => {
     if (inProgress.has(i)) return false;
     checkBody(i);
     return true;
@@ -591,12 +592,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const views = new Map<Instance, Type>();
   // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
   // infers it, and the variables still open to that in the pass being checked.
-  const demands = new Map<Stmt, Integer>();
+  const demands = new NodeMap<Stmt, Integer>();
   const candidates = new Map<Local, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
-    resolveType, paramType, withScope, members, checking: () => checking,
+    tables, resolveType, paramType, withScope, members, checking: () => checking,
     signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
@@ -624,8 +625,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
 
   // A computed enum member's value: its initializer, run while compiling as a top-level const is.
   function enumMemberValue(owner: string, member: string, init: Expr): Value {
-    const giving: Stmt = { kind: "return", value: init, start: init.start, end: init.end };
-    const f: Func = Object.assign({ kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const });
+    const giving: Stmt = { id: nextId(ids), kind: "return", value: init, start: init.start, end: init.end };
+    const f: Func = Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const });
     const instance = definition(f);
     checkBody(instance);
     return untagged(comptimeBody(instance));
@@ -661,13 +662,13 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const returns = returnOf(def, at);
       result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
     }
-    const open = openParam(result, true);
+    const open = openParam(typing, result, true);
     if (open) {
       const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
       const param = f.params[i]?.pattern;
       throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
     }
-    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(p) : "_")), declaredParams(f), result);
+    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(tables, p) : "_")), declaredParams(f), result);
   }
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
@@ -692,22 +693,32 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (typeof tag !== "string" && tag?.kind === "literal") return tag;
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
-    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(v.items as string[]);
+    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(tables, v.items as string[]);
     throw new CompileError("a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
   }
   // A generic definition's placeholder for each comptime argument, one per argument.
-  const placeholders = new WeakMap<Expr, Type>();
+  const placeholders = new WeakNodeMap<Expr, Type>();
   // The targets some `break` leaves, and the loops some `continue` repeats.
-  const broken = new Set<Stmt>();
-  const continued = new Set<Stmt>();
+  const broken = new NodeSet<Stmt>();
+  const continued = new NodeSet<Stmt>();
   const inProgress = new Set<Instance>();
-  let nextId = 0;
+  let nextLocal = 0;
   // Every closure's instance, and the instance each closure type calls.
   const closures: Instance[] = [];
   const closureBodies = new Map<ClosureType, Instance>();
 
+  // A generic class's constructor parameters, its base's when it declares no constructor.
+  function templateParams(name: string, seen: Set<string> = new Set<string>()): Param[] | undefined {
+    const t = templates.get(name);
+    if (!t || seen.has(name)) return undefined;
+    const ctor = t.members.find((m) => m.kind === "constructor");
+    if (ctor) return ctor.params;
+    const named = t.extends?.kind === "instantiation" ? t.extends.expr : t.extends;
+    if (named?.kind !== "ident") return undefined;
+    return templateParams(named.name, seen.add(name)) ?? classes.get(named.name)?.constructor.params;
+  }
+
   classes.forEach((c) => link(c, new Set()));
-  classes.forEach(checkOverrides);
   setJsError(classes.get("JsError")?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
@@ -771,7 +782,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     return base !== undefined && inherited(base, "methods", method(b)) !== undefined;
   };
   const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
-  return { instances: compiledInstances, warnings: warnings(compiledInstances, required) };
+  return { instances: compiledInstances, tables, compilation, warnings: warnings(tables, compiledInstances, required) };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -847,7 +858,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const f = instance.body;
     const returns = returnOf(instance, at);
     if (!holdsRef(returns)) return [];
-    const origins = isRef(returns) ? originsOf(f, paramTypes(instance), returns) : heldOrigins(f);
+    const ref = isRef(returns) ? returns : optionRef(returns);
+    const origins = ref ? originsOf(f, paramTypes(instance), ref) : heldOrigins(f);
     if (!origins) return [...args.filter(lends), ...(receiver ? [receiver] : [])];
     return origins.flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
   }
@@ -888,7 +900,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const stringified = e.kind === "call" && jsonCalls.get(e) === "stringify" ? e.args[0] : undefined;
       for (const x of [...(stringified ? [stringified] : []), ...(printed.has(e) ? [e] : [])]) {
         const type = instance.coercions.get(x) ?? instance.types.get(x);
-        if (type) (instance.spelled ??= new Map()).set(x, type);
+        if (type) (instance.spelled ??= new NodeMap()).set(x, type);
       }
     }
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lower(t)));
@@ -899,9 +911,10 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const object = typeof held !== "string" && held?.kind === "ref" ? held.to : held;
       if (typeof object !== "string" && object?.kind === "class" && !field(object, e.name)) throw unsupported("pipes over a field a getter provides", e);
     }
-    instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(info)));
+    instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(tables.typing, info)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
+    instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
@@ -1074,7 +1087,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
 
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
-  function resultOf(instance: Instance, at: Span): Type {
+  function resultOf(instance: Instance, at: Span & Id): Type {
     // Checking the callee may instantiate from this call again, so its site is read first.
     const site = siteOf(at);
     const returns = returnOf(instance, at);
@@ -1146,6 +1159,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     delete instance.throws;
     delete instance.envs;
     delete instance.made;
+    delete instance.predicates;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
@@ -1196,7 +1210,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (trait || family) declared = undefined;
     let inferred: Type | undefined;
     // The awaits written where the state machine can stop at them.
-    const awaitable = new Set<Expr>();
+    const awaitable = new NodeSet<Expr>();
     // How many statements with a `finally` enclose the code being checked: a generator dropped
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
@@ -1231,7 +1245,16 @@ export function check(written: Stmt[], library = false, macros = false, module =
     const depths = new Map<Local, number>();
     // Bindings declared directly in a switch case body whose checking has finished.
     const caseOnly = new Set<Local>();
-    const proves = (e: Expr) => guard(e, types, locals as Map<Expr, Local>, narrowable);
+    // A call of a function whose result is `x is T` narrows its argument for x to T.
+    const predicate = (call: Extract<Expr, { kind: "call" }>) => {
+      const target = calls.get(call);
+      const p = target?.body.returnType;
+      if (!target || p?.kind !== "predicate" || !p.type) return undefined;
+      const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
+      const type = withScope(target.bindings, () => resolveType(p.type!));
+      return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
+    };
+    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -1248,18 +1271,18 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // In a member of a generic class's instance, `this` is the class made from the type
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = f.self?.type.generic;
-    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
+    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
     const enclosing = f.closure && selfOf(f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
-      templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
+      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
+      templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
-      envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
+      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
       self,
@@ -1346,8 +1369,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // A call leaves out only the last parameters, so none may be required after an optional one.
     const late = f.params.find((p, i) => !p.optional && !p.rest && f.params.slice(0, i).some((q) => q.optional));
     if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
-    // What the function may throw: any value's type.
-    const errorType = f.throws && resolveType(f.throws);
+    // What the function may throw: any value's type. An arrow with none written takes it from the
+    // function type it is given as, as it does its parameters' types, or else from what its body
+    // can throw; a nested function declares its own.
+    const contextual = f.closure && !f.throws && f.closure.self === undefined && !f.async && f.closure.expected && !openThrows.has(f.closure.expected) ? f.closure.expected : undefined;
+    const inferring = f.closure !== undefined && !f.throws && f.closure.self === undefined && !contextual ? [] as [Expr | Stmt, Type][] : undefined;
+    let errorType = f.throws ? resolveType(f.throws) : contextual?.throws;
     if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
@@ -1368,6 +1395,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
       return after;
     });
     finish();
+    // An inferred error is every one the body lets out, widened as a `let` is.
+    if (inferring && inferring.length > 0) {
+      errorType = unionType(inferring.map(([, t]) => widenLet(t)));
+      for (const [at, from] of inferring) instance.raises.set(at, { from, to: errorType });
+      instance.throws = errorType;
+    }
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
@@ -1391,7 +1424,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       future.throws = errorType && laid(errorType);
       future.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
       // An async method's future holds its object: borrowed, or owned under `Own<this>`.
-      const self = f.self && !f.self.constructor ? receiverField(f.self, laid) : undefined;
+      const self = f.self && !f.self.constructor ? receiverField(typing, f.self, laid) : undefined;
       if (self) future.params.unshift(self);
     }
     const type = generator ?? future ?? gives;
@@ -1399,7 +1432,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (!f.closure) lifetimes(f);
     // A returned value holding references may point into any parameter, or `this`.
     const everything: Origin[] = [...f.params.map((_, i) => i), ...(f.self && !f.self.owned ? ["this" as const] : [])];
-    const origins = isRef(type) ? originsOf(f, params, type) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
+    const ref = isRef(type) ? type : optionRef(type);
+    const origins = ref ? originsOf(f, params, ref) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
     if (gives !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
@@ -1452,6 +1486,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       });
       selfCalls.add(e);
       calls.set(e, instance);
+      if (errorType) raise(e, errorType, `'${name}'`);
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
 
@@ -1477,10 +1512,10 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // later part reads, as in '({ a: o.b, b: o.a } = o)'.
       const reads: Stmt[] = [];
       const writes: Stmt[] = [];
-      const fresh = () => `destructured ${destructures++}`;
-      const ident = (name: string, at: Span): Expr => ({ kind: "ident", name, start: at.start, end: at.end });
+      const fresh = () => `destructured ${counts.destructures++}`;
+      const ident = (name: string, at: Span): Expr => ({ id: nextId(ids), kind: "ident", name, start: at.start, end: at.end });
       const declare = (target: Pattern, init: Expr, at: Span, typedAs?: Expr): Stmt => {
-        const s: Stmt = { kind: "let", keyword: "const", declarations: [{ target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
+        const s: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
         if (typedAs) destructuredParts.set(s, typedAs);
         return s;
       };
@@ -1488,11 +1523,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // Writes what `part` reads to a target, its default taken when the part is an empty Option.
       const write = (p: Pattern, part: Expr) => {
         if (p.kind === "default") {
-          const or: Expr = { kind: "binary", op: "??", left: part, right: p.value, start: p.start, end: p.end };
+          const or: Expr = { id: nextId(ids), kind: "binary", op: "??", left: part, right: p.value, start: p.start, end: p.end };
           unusedDefaults.add(or);
           return write(p.target, or);
         }
-        if (p.kind === "ident" || p.kind === "expr") return void writes.push({ kind: "expr", expr: { kind: "assign", op: "=", target: targetOf(p)!, value: part, start: p.start, end: p.end }, start: p.start, end: p.end });
+        if (p.kind === "ident" || p.kind === "expr") return void writes.push({ id: nextId(ids), kind: "expr", expr: { id: nextId(ids), kind: "assign", op: "=", target: targetOf(p)!, value: part, start: p.start, end: p.end }, start: p.start, end: p.end });
         // A nested pattern takes apart what the part holds, from its fresh variable.
         from(p, part);
       };
@@ -1510,7 +1545,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
             // A nested literal for a nested pattern is taken apart in turn.
             if (inner && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q.kind !== "default") return { nested: x };
             const name = fresh();
-            reads.push(declare({ kind: "ident", name, start: x.start, end: x.end }, x, x, q && targetOf(q)));
+            reads.push(declare({ id: nextId(ids), kind: "ident", name, start: x.start, end: x.end }, x, x, q && targetOf(q)));
             return { read: ident(name, x) };
           });
           p.elements.forEach((q, i) => {
@@ -1521,7 +1556,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
             if (q.kind !== "default") throw new CompileError(`the array on the right has no element at index ${i} for this target`, q.start, q.end);
             write(q.target, q.value);
           });
-          if (p.rest) write(p.rest, { kind: "array", elements: parts.slice(p.elements.length).map((x) => x.read!), start: value.start, end: value.end });
+          if (p.rest) write(p.rest, { id: nextId(ids), kind: "array", elements: parts.slice(p.elements.length).map((x) => x.read!), start: value.start, end: value.end });
           return;
         }
         if (p.kind === "object" && !p.rest && value.kind === "object" && value.props.every((x) => x.kind === "property" && typeof x.key === "string") && p.props.every((x) => typeof x.key === "string")) {
@@ -1529,7 +1564,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
             const prop = x as Extract<ObjectProp, { kind: "property" }>;
             const name = fresh();
             const q = p.props.find((y) => y.key === prop.key)?.value;
-            reads.push(declare({ kind: "ident", name, start: prop.start, end: prop.end }, prop.value, prop, q && targetOf(q)));
+            reads.push(declare({ id: nextId(ids), kind: "ident", name, start: prop.start, end: prop.end }, prop.value, prop, q && targetOf(q)));
             return [prop.key as string, ident(name, prop)];
           }));
           for (const prop of p.props) {
@@ -1543,7 +1578,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
         let whole = value;
         if (!place(value)) {
           const name = fresh();
-          reads.push(declare({ kind: "ident", name, start: value.start, end: value.end }, value, value));
+          reads.push(declare({ id: nextId(ids), kind: "ident", name, start: value.start, end: value.end }, value, value));
           whole = ident(name, value);
         }
         // Each top-level piece is read by a declaration naming only it, nested patterns down to
@@ -1556,24 +1591,24 @@ export function check(written: Stmt[], library = false, macros = false, module =
           if (q.kind === "default" && (q.target.kind === "ident" || q.target.kind === "expr")) {
             const name = fresh();
             leaves.push([q, name]);
-            return { kind: "default", target: { kind: "ident", name, ...at }, value: { kind: "null", ...at }, ...at };
+            return { id: nextId(ids), kind: "default", target: { id: nextId(ids), kind: "ident", name, ...at }, value: { id: nextId(ids), kind: "null", ...at }, ...at };
           }
           if (q.kind === "ident" || q.kind === "expr") {
             const name = fresh();
             leaves.push([q, name]);
-            return { kind: "ident", name, ...at };
+            return { id: nextId(ids), kind: "ident", name, ...at };
           }
-          if (q.kind === "array") return { ...q, elements: q.elements.map((x) => x && shape(x)), rest: q.rest && shape(q.rest) };
-          if (q.kind === "object") return { ...q, props: q.props.map((x) => ({ ...x, value: shape(x.value) })), rest: q.rest && shape(q.rest) };
+          if (q.kind === "array") return { ...q, id: nextId(ids), elements: q.elements.map((x) => x && shape(x)), rest: q.rest && shape(q.rest) };
+          if (q.kind === "object") return { ...q, id: nextId(ids), props: q.props.map((x) => ({ ...x, id: nextId(ids), value: shape(x.value) })), rest: q.rest && shape(q.rest) };
           throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
         };
         if (p.kind === "array") {
-          p.elements.forEach((q, i) => q && reads.push(declare({ kind: "array", elements: [...Array<undefined>(i).fill(undefined), shape(q)], rest: undefined, ...span }, whole, q)));
-          if (p.rest) reads.push(declare({ kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: shape(p.rest), ...span }, whole, p.rest));
+          p.elements.forEach((q, i) => q && reads.push(declare({ id: nextId(ids), kind: "array", elements: [...Array<undefined>(i).fill(undefined), shape(q)], rest: undefined, ...span }, whole, q)));
+          if (p.rest) reads.push(declare({ id: nextId(ids), kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: shape(p.rest), ...span }, whole, p.rest));
         } else if (p.rest) {
           // An object's rest is read with every property it leaves out, in one declaration.
           reads.push(declare(shape(p), whole, p));
-        } else for (const prop of p.props) reads.push(declare({ kind: "object", props: [{ ...prop, value: shape(prop.value) }], rest: undefined, ...span }, whole, prop.value));
+        } else for (const prop of p.props) reads.push(declare({ id: nextId(ids), kind: "object", props: [{ ...prop, id: nextId(ids), value: shape(prop.value) }], rest: undefined, ...span }, whole, prop.value));
         for (const [q, name] of leaves) write(q, ident(name, q));
       };
       from(e.pattern, e.value);
@@ -1589,7 +1624,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (target.kind === "member" && target.object.kind === "this" && f.self) return allFields(f.self.type as ClassType).find((x) => x.name === target.name)?.type;
       // A target with only a setter can't be read for its type; its part keeps its own.
       try {
-        const t = value(structuredClone(target));
+        const t = value(renumber(structuredClone(target), () => nextId(ids)));
         return typeof t !== "string" && t.kind === "ref" ? undefined : t;
       } catch (err) {
         if (err instanceof CompileError) return undefined;
@@ -1607,13 +1642,13 @@ export function check(written: Stmt[], library = false, macros = false, module =
           continue;
         }
         if (s.kind === "let" && s.declarations.length > 1) {
-          list.splice(i, 1, ...s.declarations.map((d, n): Stmt => ({ ...s, declarations: [d], start: n === 0 ? s.start : d.start, end: d.end })));
+          list.splice(i, 1, ...s.declarations.map((d, n): Stmt => ({ ...s, id: nextId(ids), declarations: [d], start: n === 0 ? s.start : d.start, end: d.end })));
           continue;
         }
         let loop = s;
         while (loop.kind === "labeled") loop = loop.body;
         if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
-          list[i] = { kind: "block", body: [loop.init, s], start: s.start, end: s.end };
+          list[i] = { id: nextId(ids), kind: "block", body: [loop.init, s], start: s.start, end: s.end };
           loop.init = undefined;
         }
       }
@@ -1621,7 +1656,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
 
     // Checks a list of statements in order. What an `if` that leaves early proves holds for
     // the statements after it.
-    function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
+    function statements(list: Stmt[], each: (s: Stmt, check: (s: Stmt) => Facts | undefined) => Facts | undefined = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
       separate(list);
       hoist(list);
       const before = facts.length;
@@ -1656,31 +1691,31 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // the order the path reads them.
       const hoisted: Stmt[] = [];
       if (inPlace) {
-        const indexes = new Map<Expr, string>();
+        const indexes = new NodeMap<Expr, string>();
         for (let e = init; e.kind === "member" || e.kind === "index"; e = e.object) {
           if (e.kind !== "index" || e.index.kind === "int") continue;
           const name = `index ${e.index.start}`;
           indexes.set(e, name);
           const at = { start: e.index.start, end: e.index.end };
           // An index into an array or a string is a `usize`, which gives a literal sum its type.
-          const usize: TypeNode = { kind: "ref", name: "usize", args: [], ...at };
-          hoisted.unshift({ kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name, ...at }, type: usize, init: e.index, ...at }], ...at });
+          const usize: TypeNode = { id: nextId(ids), kind: "ref", name: "usize", args: [], ...at };
+          hoisted.unshift({ id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type: usize, init: e.index, ...at }], ...at });
         }
         const copy = (e: Expr, at: Span): Expr => {
-          if (e.kind === "member") return { ...e, object: copy(e.object, at), start: at.start, end: at.end };
-          if (e.kind !== "index") return { ...e, start: at.start, end: at.end };
+          if (e.kind === "member") return { ...e, id: nextId(ids), object: copy(e.object, at), start: at.start, end: at.end };
+          if (e.kind !== "index") return { ...e, id: nextId(ids), start: at.start, end: at.end };
           const name = indexes.get(e);
-          const index: Expr = name ? { kind: "ident", name, start: e.index.start, end: e.index.end } : { ...e.index };
-          return { ...e, object: copy(e.object, at), index, start: at.start, end: at.end };
+          const index: Expr = name ? { id: nextId(ids), kind: "ident", name, start: e.index.start, end: e.index.end } : { ...e.index, id: nextId(ids) };
+          return { ...e, id: nextId(ids), object: copy(e.object, at), index, start: at.start, end: at.end };
         };
         from = (at) => copy(init, at);
         Object.assign(s, { kind: "empty" });
       } else {
         const held = patternText(pattern);
-        Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+        Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
         statement(s);
         type = locals.get(s)!.type;
-        from = (at) => ({ kind: "ident", name: held, start: at.start, end: at.end });
+        from = (at) => ({ id: nextId(ids), kind: "ident", name: held, start: at.start, end: at.end });
       }
       const destructuring: Type = type!;
       // A top-level const is read where it lives rather than lent.
@@ -1696,7 +1731,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const part = (target: Pattern, read: Expr, t: Type) => {
         if (target.kind !== "default") return parts.push([target, read, t]);
         const empty = t === "null" || (typeof t !== "string" && t.kind === "union" && t.members.includes("null"));
-        parts.push([target.target, empty ? { kind: "binary", op: "??", left: read, right: target.value, start: target.start, end: target.end } : read, t]);
+        parts.push([target.target, empty ? { id: nextId(ids), kind: "binary", op: "??", left: read, right: target.value, start: target.start, end: target.end } : read, t]);
       };
       if (pattern.kind === "object") {
         if (typeof whole === "string" || (whole.kind !== "object" && whole.kind !== "class")) {
@@ -1708,13 +1743,13 @@ export function check(written: Stmt[], library = false, macros = false, module =
           const f = field(whole, p.key);
           if (!f) throw new CompileError(`property '${p.key}' does not exist on type '${show(whole)}'`, p.start, p.end);
           taken.add(p.key);
-          part(p.value, { kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, f.type);
+          part(p.value, { id: nextId(ids), kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, f.type);
         }
         // The rest is an object of the fields the pattern didn't name, taken over.
         if (pattern.rest) {
           const fields = whole.kind === "class" ? allFields(whole) : whole.fields;
-          const props = fields.filter((f) => !taken.has(f.name) && (f.access ?? "public") === "public").map((f): ObjectProp => ({ kind: "property", key: f.name, value: { kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
-          parts.push([pattern.rest, { kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
+          const props = fields.filter((f) => !taken.has(f.name) && (f.access ?? "public") === "public").map((f): ObjectProp => ({ id: nextId(ids), kind: "property", key: f.name, value: { id: nextId(ids), kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
+          parts.push([pattern.rest, { id: nextId(ids), kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
         }
       } else if (isTuple(whole)) {
         const elements = elementsOf(whole as ObjectType);
@@ -1732,18 +1767,18 @@ export function check(written: Stmt[], library = false, macros = false, module =
           if (i >= elements.length && p.kind === "default") {
             // Read with `.at(i)`, a value that doesn't copy would be copied where `t[i]` moves it.
             if (!isCopy(many!)) throw new CompileError(`a default past a tuple's fixed elements would take a '${show(many!)}' out of the tuple's rest when it is there, leaving a hole; destructure without the default, or index it and clone`, p.start, p.end);
-            const array: Expr = { kind: "member", object: from(p), name: "...", optional: false, ...at };
+            const array: Expr = { id: nextId(ids), kind: "member", object: from(p), name: "...", optional: false, ...at };
             restStarts.set(array, elements.length);
-            const read: Expr = { kind: "call", callee: { kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
+            const read: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ id: nextId(ids), kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
             return part(p, read, unionType([many!, "null"]));
           }
-          part(p, { kind: "index", object: from(p), index: { kind: "int", value: BigInt(i), ...at }, optional: false, ...at }, elements[i] ?? many!);
+          part(p, { id: nextId(ids), kind: "index", object: from(p), index: { id: nextId(ids), kind: "int", value: BigInt(i), ...at }, optional: false, ...at }, elements[i] ?? many!);
         });
         if (pattern.rest) {
           const at = { start: pattern.rest.start, end: pattern.rest.end };
-          const array: Expr = { kind: "member", object: from(pattern.rest), name: "...", optional: false, ...at };
+          const array: Expr = { id: nextId(ids), kind: "member", object: from(pattern.rest), name: "...", optional: false, ...at };
           restStarts.set(array, elements.length);
-          const taken: Expr = later === 0 ? array : { kind: "call", callee: { kind: "member", object: array, name: "slice", optional: false, ...at }, args: [{ kind: "int", value: BigInt(later), ...at }], typeArgs: [], optional: false, ...at };
+          const taken: Expr = later === 0 ? array : { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: array, name: "slice", optional: false, ...at }, args: [{ id: nextId(ids), kind: "int", value: BigInt(later), ...at }], typeArgs: [], optional: false, ...at };
           part(pattern.rest, taken, arrayType(many!));
         }
       } else if (typeof whole !== "string" && whole.kind === "array") {
@@ -1752,26 +1787,26 @@ export function check(written: Stmt[], library = false, macros = false, module =
         pattern.elements.forEach((p, i) => {
           if (!p) return;
           const at = { start: p.start, end: p.end };
-          const index: Expr = { kind: "int", value: BigInt(i), ...at };
+          const index: Expr = { id: nextId(ids), kind: "int", value: BigInt(i), ...at };
           // With a default, a missing element is the default rather than a panic.
           const read: Expr = p.kind === "default"
-            ? { kind: "binary", op: "??", left: { kind: "call", callee: { kind: "member", object: from(p), name: "at", optional: false, ...at }, args: [index], typeArgs: [], optional: false, ...at }, right: p.value, ...at }
-            : { kind: "index", object: from(p), index, optional: false, ...at };
+            ? { id: nextId(ids), kind: "binary", op: "??", left: { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: from(p), name: "at", optional: false, ...at }, args: [index], typeArgs: [], optional: false, ...at }, right: p.value, ...at }
+            : { id: nextId(ids), kind: "index", object: from(p), index, optional: false, ...at };
           parts.push([p.kind === "default" ? p.target : p, read, whole.element]);
         });
         if (pattern.rest) {
           const at = { start: pattern.rest.start, end: pattern.rest.end };
-          const slice: Expr = { kind: "call", callee: { kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
+          const slice: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ id: nextId(ids), kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
           parts.push([pattern.rest, slice, whole]);
         }
       } else throw new CompileError(`'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(destructuring)}'`, pattern.start, pattern.end);
       const lets: Stmt[] = parts.map(([target, init]): Stmt => {
         const at = { start: target.start, end: target.end };
-        const declarator: Declarator = { target, type: undefined, init, ...at };
+        const declarator: Declarator = { id: nextId(ids), target, type: undefined, init, ...at };
         // A part of a borrowed value is borrowed too, as a loop's pattern's parts are; an array's
         // parts copy.
         if (borrowed && target.kind === "ident" && (init.kind === "member" || (init.kind === "index" && isTuple(whole)))) loopParts.add(declarator);
-        return { kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
+        return { id: nextId(ids), kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
       });
       // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
       if (prologues.has(s)) for (const l of [...hoisted, ...lets]) prologues.add(l);
@@ -1791,23 +1826,23 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const parts: [Extract<Pattern, { kind: "ident" }>, (from: Expr) => Expr][] = pattern.kind === "array"
         ? pattern.elements.flatMap((p, i) => {
           const n = named(p);
-          return n ? [[n, (from: Expr): Expr => ({ kind: "index", object: from, index: { kind: "int", value: BigInt(i), start: n.start, end: n.end }, optional: false, start: n.start, end: n.end })]] : [];
+          return n ? [[n, (from: Expr): Expr => ({ id: nextId(ids), kind: "index", object: from, index: { id: nextId(ids), kind: "int", value: BigInt(i), start: n.start, end: n.end }, optional: false, start: n.start, end: n.end })]] : [];
         })
         : pattern.props.map((p) => {
           if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
           const key = p.key;
-          return [named(p.value)!, (from: Expr): Expr => ({ kind: "member", object: from, name: key, optional: false, start: p.start, end: p.end })];
+          return [named(p.value)!, (from: Expr): Expr => ({ id: nextId(ids), kind: "member", object: from, name: key, optional: false, start: p.start, end: p.end })];
         });
       const held = pattern.kind === "array" ? `[${pattern.elements.map((p) => (p?.kind === "ident" ? p.name : "")).join(", ")}]` : `{ ${parts.map(([n]) => n.name).join(", ")} }`;
       const lets: Stmt[] = parts.map(([n, part]) => {
         const at = { start: n.start, end: n.end };
-        const declarator: Declarator = { target: n, type: undefined, init: part({ kind: "ident", name: held, ...at }), ...at };
+        const declarator: Declarator = { id: nextId(ids), target: n, type: undefined, init: part({ id: nextId(ids), kind: "ident", name: held, ...at }), ...at };
         loopParts.add(declarator);
-        return { kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
+        return { id: nextId(ids), kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
       });
-      Object.assign(d, { target: { kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+      Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
       // The loop's own body is a block inside the parts' scope, so it may declare their names.
-      const body: Stmt = { kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
+      const body: Stmt = { id: nextId(ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
       s.body = [...lets, body];
     }
 
@@ -1872,13 +1907,13 @@ export function check(written: Stmt[], library = false, macros = false, module =
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body: Body = {
-        name: f.name, params: e.params, returnType: e.returnType, start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
-        body: value ? [{ kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
+        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e) },
+        body: value ? [{ id: nextId(ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
-        body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+        tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(), copiesOut: new Set(),
+        types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
       inner.captures = new Map();
       inner.captureUses = new Map();
@@ -1899,7 +1934,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
             if (of.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
             return mine;
           });
-          (instance.made ??= new Map()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
+          (instance.made ??= new NodeMap()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
         }
       }
       // A nested function runs whenever it is called, so it can't take over what it uses.
@@ -1933,7 +1968,20 @@ export function check(written: Stmt[], library = false, macros = false, module =
         type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
-      const type = madeBy(closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete), inner);
+      // An async arrow's call only makes its future, which carries what it throws.
+      const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
+      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
+      // One throwing what the function type it is given as doesn't take can't be given as it.
+      if (expected && throws && e.throws && !openThrows.has(expected) && !(expected.throws && fits(throws, expected.throws))) {
+        const takes = expected.throws ? `which throws '${show(expected.throws)}'` : "which throws nothing";
+        throw new CompileError(`this closure throws '${show(throws)}', but it is given as '${show(expected)}', ${takes}; catch it inside the closure with try/catch`, e.throws.start, e.throws.end);
+      }
+      // An async one's future throws, which a function type giving a Promise can't say yet.
+      const failing = inner.future?.throws;
+      if (expected && failing && !openThrows.has(expected) && promiseElement(expected.returns) !== undefined) {
+        const at = e.throws ?? [...inner.raises.keys()][0] ?? e;
+        throw new CompileError(`this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+      }
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {
@@ -1980,9 +2028,9 @@ export function check(written: Stmt[], library = false, macros = false, module =
           // `yield* g` gives each value `g` gives, as `for (const % of g) yield %;` does.
           if (s.expr.kind === "yield" && s.expr.delegate && generator && s.expr.value) {
             const { value, start, end } = s.expr;
-            const topic = { kind: "ident" as const, name: "%", start, end };
-            const each: Stmt = { kind: "let", keyword: "const", declarations: [{ target: topic, type: undefined, init: undefined, start, end }], start, end };
-            const body: Stmt[] = [{ kind: "expr", expr: { kind: "yield", value: { ...topic }, delegate: false, start, end }, start, end }];
+            const topic = { id: nextId(ids), kind: "ident" as const, name: "%", start, end };
+            const each: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: topic, type: undefined, init: undefined, start, end }], start, end };
+            const body: Stmt[] = [{ id: nextId(ids), kind: "expr", expr: { id: nextId(ids), kind: "yield", value: { ...topic, id: nextId(ids) }, delegate: false, start, end }, start, end }];
             Object.assign(s, { kind: "forOf", await: false, left: each, right: value, body });
             delete (s as { expr?: unknown }).expr;
             return statement(s);
@@ -2024,7 +2072,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           const d = s.declarations[0]!;
-          if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return lift(s, d.target.name, arrowFunction(d.target.name, d.init, d));
+          if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return lift(s, d.target.name, arrowFunction(ids, d.target.name, d.init, d));
           if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
@@ -2079,12 +2127,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
           if (s.generator) throw unsupported("nested generator functions", s);
           if (s.macro) throw unsupported("nested macros", s);
           const at = { start: s.start, end: s.end };
-          const arrow: Expr = { kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, body: s.body, ...at };
+          const arrow: Expr = { id: nextId(ids), kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, ...(s.throws && { throws: s.throws }), body: s.body, ...at };
           nestedFunctions.set(arrow, s.name);
-          Object.assign(s, { kind: "let", keyword: "const", declarations: [{ target: { kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
+          Object.assign(s, { kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
           // The body is the arrow's now; left here too, walks over the statement would find it twice,
           // as an async function's frame did, taking the function's loops and awaits for its own.
-          for (const key of ["body", "params", "returnType", "typeParams"] as const) delete (s as Partial<Func>)[key];
+          for (const key of ["body", "params", "returnType", "throws", "typeParams"] as const) delete (s as Partial<Func>)[key];
           return statement(s);
         }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
@@ -2222,8 +2270,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
               if (test && test !== type && !comparable(type, test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              const tested: Facts = c.test ? proves({ kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
-              const reaching: Facts = falling ? either(falling, tested) : tested;
+              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
+              const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
               for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
@@ -2413,7 +2461,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const scope = scopes[scopes.length - 1]!;
       // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
       if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
-      const local = { name, type, mutable, param, id: nextId++ };
+      const local = { name, type, mutable, param, id: nextLocal++ };
       depths.set(local, scopes.length);
       scope.set(name, local);
       locals.set(node, local);
@@ -2467,8 +2515,8 @@ export function check(written: Stmt[], library = false, macros = false, module =
     // A generic arrow written as a value is a generic function of its own, as one a const holds
     // is, and the arrow becomes its name.
     function liftArrow(e: Extract<Expr, { kind: "arrow" }>) {
-      const fn = lifted(e, "", arrowFunction("", e, e), "this arrow");
-      for (const key of Object.keys(e)) if (key !== "start" && key !== "end") delete (e as Record<string, unknown>)[key];
+      const fn = lifted(e, "", arrowFunction(ids, "", e, e), "this arrow");
+      for (const key of Object.keys(e)) if (key !== "start" && key !== "end" && key !== "id") delete (e as Record<string, unknown>)[key];
       Object.assign(e, { kind: "ident", name: fn.name });
     }
 
@@ -2490,7 +2538,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       if (typed) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
       let lifted = liftedFunctions.get(key);
       if (!lifted) {
-        lifted = { name, fn: { ...fn, name: `${f.name}.${name || "arrow"}#${lifts++}` } };
+        lifted = { name, fn: { ...fn, id: nextId(ids), name: `${f.name}.${name || "arrow"}#${counts.lifts++}` } };
         // Its calls of itself call what it was lifted to.
         const symbol = lifted.fn.name;
         holdsNode(fn.body, (n) => {
@@ -2543,7 +2591,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     function thrown(at: Expr | Stmt, thrownValue: Expr) {
       const type = value(thrownValue);
       const into = errorType && handlers.length === 0 && (fits(type, errorType) || adapt(thrownValue, errorType));
-      if (into) coerce(thrownValue, type, errorType!, `type '${show(type)}' can't be thrown here: '${f.name}' throws '${show(errorType)}'`);
+      if (into) coerce(thrownValue, type, errorType!, `type '${show(type)}' can't be thrown here: ${who()} throws '${show(errorType!)}'`);
       raise(at, into ? errorType! : types.get(thrownValue)!, "'throw'");
     }
 
@@ -2556,10 +2604,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
       if (f.comptime || comptimeDepth > 0) return;
       if (built) throw new CompileError("a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
-      if (f.closure) throw unsupported("closures that throw", at);
+      if (inferring) return void inferring.push([at, type]);
+      if (!errorType && contextual) {
+        const does = "kind" in at && at.kind === "throw" ? `this closure throws '${show(widenLet(type))}'` : `${what} can throw '${show(widenLet(type))}'`;
+        throw new CompileError(`${does}, but the closure is given as '${show(contextual)}', which throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+      }
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
-        throw new CompileError(`'${f.name}' must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
+        throw new CompileError(`${who()} must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
       }
       if (fits(type, errorType)) return void instance.raises.set(at, { from: type, to: errorType });
       // An error the declared type doesn't take may be wrapped by a class of it that
@@ -2570,7 +2622,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${classes[0]!.name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
-        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that '${f.name}' throws; ${hint}`, at.start, at.end);
+        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that ${who()} throws; ${hint}`, at.start, at.end);
       }
       if (wrappers.length > 1) {
         throw new CompileError(`${does}, which ${wrappers.map((w) => `'${w.wrapper.name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
@@ -2578,9 +2630,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
       instance.raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
     }
 
+    // Who throws, in messages: the function, or the closure or nested function it is in.
+    function who(): string {
+      return f.closure?.self !== undefined ? `'${f.closure.self}'` : f.closure ? "this closure" : `'${f.name}'`;
+    }
+
     function noteThis(e: Expr) {
       if (!captures || [...captures.values()].includes("this")) return;
-      const alias: Local = { name: "this", type: self!.type, mutable: false, param: false, id: nextId++ };
+      const alias: Local = { name: "this", type: self!.type, mutable: false, param: false, id: nextLocal++ };
       captures.set(alias, "this");
       instance.captureUses!.set(alias, e);
       outer!.noteThis(e);
@@ -2605,7 +2662,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     function capture(from: Local, at?: Expr | ObjectProp): Local {
       let alias = [...captures!].find(([, l]) => l === from)?.[0];
       if (!alias) {
-        alias = { name: from.name, type: from.type, mutable: false, param: false, id: nextId++ };
+        alias = { name: from.name, type: from.type, mutable: false, param: false, id: nextLocal++ };
         depths.set(alias, 0);
         captures!.set(alias, from);
         if (nestedBindings.has(from)) nestedBindings.add(alias);

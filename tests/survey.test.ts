@@ -280,8 +280,8 @@ test("unread files are left out of the steps but not the shares, and the self cu
 });
 
 test("imports wait on other files or Node built-ins by how they are written, and npm packages run", () => {
-  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import cp from \"node:child_process\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "Process spawning"]]);
+  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import dgram from \"node:dgram\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "UDP sockets"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Bun's own modules"], ["Path aliases"], ["Namespace imports"]]);
@@ -476,28 +476,28 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
 
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
-    "a.ts": "import { spawn } from \"node:child_process\";\nimport { createHash } from \"crypto\";\n",
+    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
-    "c.ts": "import vm from \"vm\";\nimport cp = require(\"child_process\");\n",
-    "plan.md": "- [ ] 1. **Process spawning**\n- [ ] 2. **Hashing**\n",
+    "c.ts": "import vm from \"vm\";\nimport d = require(\"dgram\");\n",
+    "plan.md": "- [ ] 1. **UDP sockets**\n- [ ] 2. **Hashing**\n",
   }, (dir) => {
     // `timers/promises` is std's sleep, so b.ts waits on nothing.
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Hashing", "Process spawning"], [], ["Node built-ins", "Process spawning"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Hashing", "UDP sockets"], [], ["Node built-ins", "UDP sockets"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
-      ["Process spawning", ["nodeBuiltins"], { item: "1", done: false }],
+      ["UDP sockets", ["nodeBuiltins"], { item: "1", done: false }],
       // Each frees one 2-line file, so the tie goes by name.
       ["Hashing", ["nodeBuiltins"], { item: "2", done: false }],
       ["Node built-ins", ["nodeBuiltins"], null],
     ]);
-    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["child_process", "crypto", "timers/promises"]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["dgram", "crypto", "timers/promises"]);
   });
   project({
-    "a.ts": "export * from \"zlib\";\nexport { spawn } from \"node:child_process\";\n",
+    "a.ts": "export * from \"zlib\";\nexport { createSocket } from \"node:dgram\";\n",
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Process spawning", "Response compression"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "UDP sockets"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
   // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
@@ -514,22 +514,32 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
   });
 });
 
+test("child_process's sync calls are std's, and spawn still waits", () => {
+  project({
+    "a.ts": "import { spawnSync, execFileSync, execSync } from \"node:child_process\";\n",
+    "b.ts": "import { spawn } from \"child_process\";\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
+    expect(survey(dir).builtins).toEqual([{ module: "child_process", files: 1, equivalent: { name: "child_process, for spawnSync, execFileSync and execSync", planned: false } }]);
+  });
+});
+
 test("the report lists each Node built-in with its files and what replaces it", () => {
   project({
-    "a.ts": "import { spawn } from \"node:child_process\";\nimport { createHash } from \"crypto\";\n",
-    "b.ts": "import cp from \"node:child_process\";\nimport http from \"node:http\";\n",
+    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
+    "b.ts": "import dgram from \"node:dgram\";\nimport http from \"node:http\";\n",
     "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\n",
   }, (dir) => {
     const r = survey(dir);
     expect(r.builtins).toEqual([
-      { module: "child_process", files: 2, equivalent: { name: "Process spawning", planned: true } },
+      { module: "dgram", files: 2, equivalent: { name: "UDP sockets", planned: true } },
       { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
       { module: "http", files: 1, equivalent: { name: "HTTP client", planned: true } },
       { module: "net", files: 1, equivalent: { name: "TcpListener and TcpStream", planned: false } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
-    expect(text).toContain("  child_process       2 files  planned: Process spawning");
+    expect(text).toContain("  dgram               2 files  planned: UDP sockets");
     expect(text).toContain("  http                1 file   planned: HTTP client");
     expect(text).toContain("  vm                  1 file   nothing planned");
     expect(text).toContain("  net                 1 file   in std: TcpListener and TcpStream");

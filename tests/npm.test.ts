@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // What stops a program that type-checks with a package's declarations: a form that can't run
 // yet, or a package with no JS to bundle, as these fixtures have only declarations.
@@ -20,7 +23,7 @@ function stops(files: Record<string, string>): string {
     }
     const entry = join(dir, "main.fsh");
     try {
-      compile(files["main.fsh"]!, entry);
+      compile(session, files["main.fsh"]!, entry);
     } catch (e) {
       return formatError(e as never, "main.fsh", files["main.fsh"]!).replaceAll(dir + "/", "");
     }
@@ -192,4 +195,9 @@ test("a Fish class whose type refers to itself through an array is refused, not 
     "node_modules/p/index.d.ts": "export interface L { items: L[]; v: string }\nexport declare function takeL(l: L): void;\n",
     "main.fsh": "import { takeL } from \"p\";\nclass K { v: string = \"a\"; items: K[] = []; }\nfunction main() { takeL(new K()); takeL({ v: \"a\", items: [{ v: \"b\", items: [] }] }); }\n",
   }))).toBe("argument of type 'K' is not assignable to parameter of type 'L': property 'items' is a 'K[]', not a 'L[]'");
+});
+
+test("a package's JSDoc @throws tags don't make its functions throw in Fish", () => {
+  const D = "/** @throws {TypeError} when s is empty */\nexport declare function up(s: string): string;\n/**\n * @throws INVALID_PARAM\n */\nexport declare function down(s: string): string;\n";
+  expect(stops({ "node_modules/t/index.d.ts": D, "main.fsh": "import { up, down } from \"t\";\nfunction main() {\n  const a: string = up(\"a\");\n  const b: string = down(\"B\");\n}\n" })).toMatch(TYPE_CHECKED);
 });

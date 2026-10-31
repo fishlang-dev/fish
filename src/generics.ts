@@ -1,11 +1,13 @@
 import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
+import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
-import { paramName } from "./resolve.ts";
-import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { paramName, unboxedClosure } from "./resolve.ts";
+import { digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { NodeMap, NodeSet } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -13,7 +15,7 @@ import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutN
 // A bound must be an interface or an object type. Classes are nominal and embed rather than
 // subclass, so a class bound could only ever mean that one class. In an instance, each
 // parameter also holds the concrete type `concrete` gives it.
-export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
+export function placeholders({ show, wrapped, typeParameter }: Typing, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
   const scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError(`'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
@@ -33,38 +35,30 @@ export function placeholders(params: TypeParam[], resolve: (t: TypeNode, scope: 
 
 // A generic class's placeholders, one set shared by its definition check and its members,
 // since each new set would name another instance of the class.
-function classPlaceholders(params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
+function classPlaceholders({ typing, classScopes }: Tables, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
   let found = classScopes.get(params);
-  if (!found) classScopes.set(params, found = placeholders(params, resolve));
+  if (!found) classScopes.set(params, found = placeholders(typing, params, resolve));
   return found;
 }
-
-const classScopes = new WeakMap<TypeParam[], Map<string, Type>>();
 
 // A body's type parameters, leaving out its lifetimes.
 export function typeParamsOf(f: Body): TypeParam[] {
   return (f.typeParams ?? []).filter((p) => !isLifetime(p));
 }
 
-// Binds the type parameters `node` names by matching it against an argument's type.
-// The program's type aliases, which inference looks through; set by the checker.
-let aliasNamed: (name: string) => TypeAlias | undefined = () => undefined;
-export function infersAliases(f: typeof aliasNamed) {
-  aliasNamed = f;
-}
-// The aliases being looked through, so one that holds itself is looked into once.
-const expanding = new Set<string>();
-
-export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
+// Binds the type parameters `node` names by matching it against an argument's type, looking
+// through the check's type aliases.
+export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
+  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType } } = tables;
   arg = unfold(arg);
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
-  const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? aliasNamed(node.name) : undefined;
+  const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? aliases.get(node.name) : undefined;
   if (node.kind === "ref" && alias && alias.typeParams.length === node.args.length && !expanding.has(alias.name)) {
     const given = new Map(alias.typeParams.map((p, i) => [p.name, node.args[i]!]));
     expanding.add(alias.name);
     try {
-      return infer(substituted(alias.type, given), arg, names, bindings, at);
+      return infer(tables, substituted(alias.type, given), arg, names, bindings, at);
     } finally {
       expanding.delete(alias.name);
     }
@@ -72,6 +66,13 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
     arg = widenEnum(arg);
     const earlier = bindings.get(node.name);
+    // A closure meeting T already decided as the stored callable it fits is boxed into it, as one
+    // given first is boxed where the body holds T in a type argument.
+    if (earlier && sameCallable(earlier, heldArgument(arg))) return;
+    if (earlier && sameCallable(heldArgument(earlier), arg)) {
+      bindings.set(node.name, arg);
+      return;
+    }
     // A literal and its base type, as a string literal and a callback taking a string give,
     // agree on the base type, as TypeScript widens them.
     if (earlier && earlier !== arg && widenLet(earlier) === widenLet(arg)) {
@@ -86,85 +87,86 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   }
   // `Ref<T>` against a value or a reference borrows a T.
   if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length >= 1 && !names.has(node.name)) {
-    infer(node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
+    infer(tables, node.args[0]!, typeof arg !== "string" && arg.kind === "ref" ? arg.to : arg, names, bindings, at);
     return;
   }
   // A function type against a closure binds through its parameters and what it gives.
   if (node.kind === "function" && typeof arg !== "string" && arg.kind === "closure") {
-    node.params.forEach((p, i) => p.type && arg.params[i] !== undefined && infer(p.type, arg.params[i]!, names, bindings, at));
-    if (arg.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(node.returns, arg.returns, names, bindings, at);
+    node.params.forEach((p, i) => p.type && arg.params[i] !== undefined && infer(tables, p.type, arg.params[i]!, names, bindings, at));
+    if (arg.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(tables, node.returns, arg.returns, names, bindings, at);
+    if (node.throws && arg.throws) infer(tables, node.throws, arg.throws, names, bindings, at);
     return;
   }
   // `Ptr<T>` against a raw pointer points at a T.
   if (node.kind === "ref" && (node.name === "Ptr" || node.name === "MutPtr") && node.args.length === 1 && !names.has(node.name)) {
-    if (typeof arg !== "string" && arg.kind === "pointer") infer(node.args[0]!, arg.to, names, bindings, at);
+    if (typeof arg !== "string" && arg.kind === "pointer") infer(tables, node.args[0]!, arg.to, names, bindings, at);
     return;
   }
   // `Lock<T>` against a Lock holds a T.
   if (node.kind === "ref" && (node.name === "Atomic" || node.name === "Lock" || node.name === "Cell") && node.args.length === 1 && !names.has(node.name)) {
-    if (typeof arg !== "string" && arg.kind === "interior" && arg.which === node.name) infer(node.args[0]!, arg.of, names, bindings, at);
+    if (typeof arg !== "string" && arg.kind === "interior" && arg.which === node.name) infer(tables, node.args[0]!, arg.of, names, bindings, at);
     return;
   }
   if (node.kind === "ref" && node.name === "Channel" && node.args.length === 1 && !names.has(node.name)) {
-    if (typeof arg !== "string" && arg.kind === "block" && arg.which === "Channel") infer(node.args[0]!, arg.of, names, bindings, at);
+    if (typeof arg !== "string" && arg.kind === "block" && arg.which === "Channel") infer(tables, node.args[0]!, arg.of, names, bindings, at);
     return;
   }
   // `Map<K, V>` and `Set<T>` against one match their key and value types.
   if (node.kind === "ref" && (node.name === "Map" || node.name === "Set") && !names.has(node.name)) {
     if (typeof arg !== "string" && arg.kind === "map" && arg.set === (node.name === "Set")) {
-      if (node.args[0]) infer(node.args[0], arg.key, names, bindings, at);
-      if (node.args[1]) infer(node.args[1], arg.value, names, bindings, at);
+      if (node.args[0]) infer(tables, node.args[0], arg.key, names, bindings, at);
+      if (node.args[1]) infer(tables, node.args[1], arg.value, names, bindings, at);
     }
     return;
   }
   if (node.kind === "ref" && node.name === "shared" && node.args.length === 1 && !names.has(node.name)) {
-    if (typeof arg !== "string" && arg.kind === "shared") infer(node.args[0]!, arg.of, names, bindings, at);
+    if (typeof arg !== "string" && arg.kind === "shared") infer(tables, node.args[0]!, arg.of, names, bindings, at);
     return;
   }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && typeof arg !== "string" && arg.kind === "class" && arg.generic?.name === node.name) {
-    node.args.forEach((n, i) => arg.generic!.args[i] && infer(n, arg.generic!.args[i]!, names, bindings, at));
+    node.args.forEach((n, i) => arg.generic!.args[i] && infer(tables, n, arg.generic!.args[i]!, names, bindings, at));
     return;
   }
   // `Dyn<I>` against a Dyn matches the interface it holds.
   if (node.kind === "ref" && node.name === "Dyn" && node.args.length === 1 && !names.has("Dyn") && typeof arg !== "string" && arg.kind === "dyn") {
-    infer(node.args[0]!, arg.of, names, bindings, at);
+    infer(tables, node.args[0]!, arg.of, names, bindings, at);
     return;
   }
   // So does a generic interface, given as one or held by a Dyn of one.
   const trait = typeof arg !== "string" && arg.kind === "dyn" ? arg.of : arg;
   if (node.kind === "ref" && typeof trait !== "string" && trait.kind === "interface" && trait.generic?.name === node.name) {
-    node.args.forEach((n, i) => trait.generic!.args[i] && infer(n, trait.generic!.args[i]!, names, bindings, at));
+    node.args.forEach((n, i) => trait.generic!.args[i] && infer(tables, n, trait.generic!.args[i]!, names, bindings, at));
     return;
   }
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
-  if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(node.args[0]!, yieldsOf(arg)!, names, bindings, at);
+  if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(tables, node.args[0]!, yieldsOf(arg)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
-  if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
+  if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(tables, node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
   // An optional element matches what it holds when there, and a rest element the tuple's array.
   const fixed = node.kind === "tuple" ? node.elements.filter((n) => !n.rest) : [];
   if (node.kind === "tuple" && isTuple(arg) && elementsOf(arg as ObjectType).length === fixed.length && (fixed.length < node.elements.length) === ((arg as ObjectType).rest !== undefined)) {
     const elements = elementsOf(arg as ObjectType);
     // An optional element left out says nothing about its type.
-    fixed.forEach((n, i) => (n.optional && elements[i] === "null") || infer(n.type, n.optional ? withoutNull(elements[i]!) : elements[i]!, names, bindings, at));
+    fixed.forEach((n, i) => (n.optional && elements[i] === "null") || infer(tables, n.type, n.optional ? withoutNull(elements[i]!) : elements[i]!, names, bindings, at));
     const rest = node.elements.find((n) => n.rest);
-    if (rest) infer(rest.type, arrayType((arg as ObjectType).rest!), names, bindings, at);
+    if (rest) infer(tables, rest.type, arrayType((arg as ObjectType).rest!), names, bindings, at);
     return;
   }
   // `T[]` and `Array<T>` against an array match its element type.
   const element = node.kind === "array" ? node.element : node.kind === "ref" && node.name === "Array" && node.args.length === 1 ? node.args[0] : undefined;
   // An empty literal's `never` elements say nothing about the element type.
   if (element && typeof arg !== "string" && arg.kind === "array") {
-    if (arg.element !== "never") infer(element, arg.element, names, bindings, at);
+    if (arg.element !== "never") infer(tables, element, arg.element, names, bindings, at);
     return;
   }
   if (node.kind !== "object" || typeof arg === "string") return;
   for (const m of node.members) {
     if (m.kind !== "property" || typeof m.name !== "string" || !m.type) continue;
     const found = field(arg, m.name);
-    if (found) infer(m.type, found.type, names, bindings, at);
+    if (found) infer(tables, m.type, found.type, names, bindings, at);
   }
 }
 
@@ -184,50 +186,63 @@ function substituted(node: TypeNode, given: Map<string, TypeNode>): TypeNode {
 // A type argument must satisfy its parameter's bound: an interface by shape, an object type
 // by fitting it.
 export function checkBound(type: Type, bound: Type, members: Members, at: Span) {
+  const { fits, show } = members.typing;
   const reason = typeof bound !== "string" && bound.kind === "interface" ? unsatisfied(type, bound, members, at)
     : fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
   throw new CompileError(`type '${show(type)}' does not satisfy the constraint '${show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
-// Whether each variant is concrete, kept as an object type's answer is.
-const concreteVariants = new WeakMap<VariantType, boolean>();
-
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
 // fields come from its type arguments and base, so those decide it, and an object type's
 // answer is kept, since its fields never change: walking nested types afresh at every level
-// would take time exponential in their depth.
-export function concrete(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
-  // An interface describes values without being one, so only a definition check holds one.
-  if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
-  if (t.kind === "class") return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
-  // A type holding itself through an array is as concrete as the type arguments it was made with.
-  const tied = tiedBy(t);
-  if (tied) return tied.args.every(concrete);
-  if (t.kind === "union") return t.members.every(concrete);
-  if (t.kind === "ref" || t.kind === "pointer") return concrete(t.to);
-  if (t.kind === "handle") return concrete(t.gives) && (!t.throws || concrete(t.throws));
-  if (t.kind === "interior" || t.kind === "shared" || t.kind === "block") return concrete(t.of);
-  if (t.kind === "dyn" || t.kind === "regex") return true;
-  if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
-  if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
-  if (t.kind === "map") return concrete(t.key) && concrete(t.value);
-  if (t.kind === "recursive") return t.args.every(concrete);
-  if (t.kind === "variant") {
-    let known = concreteVariants.get(t);
-    if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));
+// would take time exponential in their depth. Each variant's answer is kept too.
+function concreteness({ tiedBy }: Typing): (t: Type) => boolean {
+  const concreteVariants = new WeakMap<VariantType, boolean>();
+  const concreteObjects = new WeakMap<ObjectType, boolean>();
+  const visiting = new Set<ClassType>();
+  return concrete;
+
+  function concrete(t: Type): boolean {
+    if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
+    // An interface describes values without being one, so only a definition check holds one.
+    if (t.kind === "param" || t.kind === "interface" || t.kind === "function") return false;
+    if (t.kind === "class") {
+      // A class may name itself in its base's type arguments, as `N extends Base<N>` does.
+      if (visiting.has(t)) return true;
+      visiting.add(t);
+      try {
+        return (t.generic?.args.every(concrete) ?? true) && (!t.base || concrete(t.base));
+      } finally {
+        visiting.delete(t);
+      }
+    }
+    // A type holding itself through an array is as concrete as the type arguments it was made with.
+    const tied = tiedBy(t);
+    if (tied) return tied.args.every(concrete);
+    if (t.kind === "union") return t.members.every(concrete);
+    if (t.kind === "ref" || t.kind === "pointer") return concrete(t.to);
+    if (t.kind === "handle") return concrete(t.gives) && (!t.throws || concrete(t.throws));
+    if (t.kind === "interior" || t.kind === "shared" || t.kind === "block") return concrete(t.of);
+    if (t.kind === "dyn" || t.kind === "regex") return true;
+    if (t.kind === "closure" || t.kind === "generator" || t.kind === "future") return t.concrete;
+    if (t.kind === "array" || t.kind === "fixed") return concrete(t.element);
+    if (t.kind === "map") return concrete(t.key) && concrete(t.value);
+    if (t.kind === "recursive") return t.args.every(concrete);
+    if (t.kind === "variant") {
+      let known = concreteVariants.get(t);
+      if (known === undefined) concreteVariants.set(t, known = t.args.every(concrete) && t.fields.every((f) => concrete(f.type)));
+      return known;
+    }
+    let known = concreteObjects.get(t);
+    if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
     return known;
   }
-  let known = concreteObjects.get(t);
-  if (known === undefined) concreteObjects.set(t, known = t.fields.every((f) => concrete(f.type)));
-  return known;
 }
-
-const concreteObjects = new WeakMap<ObjectType, boolean>();
 
 // What instantiating needs from the checker.
 type Checker = {
+  tables: Tables;
   resolveType(t: TypeNode): Type;
   paramType(p: Param, property?: boolean): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
@@ -249,7 +264,10 @@ export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
 
-export function instancing({ resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
+export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
+  const { typing } = tables;
+  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
+  const concrete = concreteness(typing);
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
   const sharedPlaceholders = new Map<TypeParam[], Map<string, Type>>();
@@ -262,21 +280,31 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
-  const sites = new WeakMap<Span, Map<string, Type>>();
-  return { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf, constructs };
+  const sites = new NodeMap<Span & Id, Map<string, Type>>();
+  return { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span & Id) => sites.get(at), returnTypeOf, constructs };
 
   // The type an arrow given as a generic body's argument is checked against: its parameter's
   // function type, with the type parameters the other arguments, or the written type
   // arguments, have decided. What it gives decides the rest, through \`infer\`.
   function callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: number, at: Span): FunctionType | undefined {
     const written = f.params[i]?.type;
-    if (written?.kind !== "function" || !generic(f)) return undefined;
     const params = typeParamsOf(f);
+    // A parameter written as a type parameter given a function type, by the call as in
+    // `id<(x: i64) => i64>((x) => x * 2)` or by its class's instance, types the arrow as that function.
+    if (written?.kind === "ref" && written.args.length === 0) {
+      const k = params.findIndex((p) => p.name === written.name);
+      const given = k < 0 ? f.scope?.get(written.name) : typeArgs.length === params.length ? resolveType(typeArgs[k]!) : undefined;
+      if (typeof given !== "string" && given?.kind === "dyn") return callableOf.get(given.of);
+      if (typeof given === "string" || given?.kind !== "function") return undefined;
+      if (given.generic) throw unsupported("generic function types as type arguments", at);
+      return given;
+    }
+    if (written?.kind !== "function" || !generic(f)) return undefined;
     const bindings = new Map<string, Type>();
     if (typeArgs.length === params.length) params.forEach((p, k) => bindings.set(p.name, resolveType(typeArgs[k]!)));
     else {
       const names = new Set(params.map((p) => p.name));
-      f.params.forEach((p, k) => p.type && argTypes[k] !== undefined && k !== i && infer(p.type, argTypes[k]!, names, bindings, at));
+      f.params.forEach((p, k) => p.type && argTypes[k] !== undefined && k !== i && infer(tables, p.type, argTypes[k]!, names, bindings, at));
     }
     // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
     // instance has it, so a callable the arrow is given fits the instance's own.
@@ -288,8 +316,13 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const undecided = [...explicitPlaceholders(f)].filter(([n]) => !bindings.has(n)).map(([, p]) => p);
     if (t.params.some((p) => holdsPart(p, (u) => undecided.includes(u), true))) return undefined;
     // What it gives is left open while it names a type parameter the call hasn't decided.
-    const open = holdsPart(t.returns, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined, true);
-    return functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns);
+    const undecidedIn = (u: Type) => holdsPart(u, (v) => typeof v !== "string" && v.kind === "param" && v.concrete === undefined, true);
+    const open = undecidedIn(t.returns);
+    // So is what it throws, which the arrow then infers.
+    const openError = t.throws !== undefined && undecidedIn(t.throws);
+    const made = functionType(written.params.map((p, k) => (p.pattern.kind === "ident" ? p.pattern.name : `p${k}`)), t.params, open ? "void" : t.returns, openError ? undefined : t.throws);
+    if (openError) openThrows.add(made);
+    return made;
   }
 
   // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.
@@ -304,6 +337,19 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   }
   function writtenReturn(f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
+    // `x is T` is a boolean that tells a caller's condition what x is.
+    if (f.returnType.kind === "predicate") {
+      const p = f.returnType;
+      if (p.asserts) throw unsupported("assertion signatures", p);
+      if (p.name === "this") throw unsupported("'this' type predicates", p);
+      const param = f.params.find((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
+      if (!param) throw new CompileError(`a type predicate names one of the function's parameters, and '${p.name}' isn't one`, p.start, p.end);
+      const [narrowed, declared] = withScope(scope, () => [p.type && resolveType(p.type), param.type && resolveType(param.type)]);
+      // A predicate on a borrowed parameter says what the value it points to is.
+      const held = declared && typeof declared !== "string" && declared.kind === "ref" ? declared.to : declared;
+      if (narrowed && held && !fits(narrowed, held)) throw new CompileError(`a type predicate's type must be assignable to its parameter's type, and '${show(narrowed)}' isn't a '${show(held)}'`, p.type!.start, p.type!.end);
+      return "boolean";
+    }
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
     // as an async function's own result, which its `Promise<T>` describes.
     const written = withScope(scope, () => resolveType(f.returnType!));
@@ -360,7 +406,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   }
 
   // A member of a generic class's instance runs with the class's type arguments in scope.
-  function instanceOf(f: Body, bindings = f.scope ?? new Map<string, Type>()): Instance {
+  function instanceOf(f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
     let byKey = instances.get(f);
     if (!byKey) instances.set(f, byKey = new Map());
@@ -371,9 +417,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       found = {
-        body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
+        tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(), copiesOut: new Set(),
+        types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
       byKey.set(key, found);
       pending.push(found);
@@ -383,7 +429,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
 
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
-  function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance {
+  function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
@@ -397,15 +443,15 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     }
     const bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
-      params.forEach((p, i) => bindings.set(p.name, resolveType(typeArgs[i]!)));
+      params.forEach((p, i) => bindings.set(p.name, heldArgument(resolveType(typeArgs[i]!))));
     } else {
       const names = new Set(params.map((p) => p.name));
-      f.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+      f.params.forEach((p, i) => p.type && argTypes[i] && infer(tables, p.type, argTypes[i]!, names, bindings, at));
       // `G extends Generator<U>` decides `U` from what `G`'s generator yields.
       for (const p of params) {
         const c = p.constraint;
-        const yields = bindings.has(p.name) ? yieldsOf(bindings.get(p.name)!) : undefined;
-        if (c?.kind === "ref" && c.name === "Generator" && c.args.length === 1 && yields !== undefined) infer(c.args[0]!, yields, names, bindings, at);
+        const yields = bindings.has(p.name) ? typing.yieldsOf(bindings.get(p.name)!) : undefined;
+        if (c?.kind === "ref" && c.name === "Generator" && c.args.length === 1 && yields !== undefined) infer(tables, c.args[0]!, yields, names, bindings, at);
       }
     }
     for (const p of params) {
@@ -414,7 +460,10 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       if (typeof type !== "string" && type.kind === "interface") {
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
-      if (typeof type !== "string" && type.kind === "function") throw unsupported("function types as type arguments", at);
+      if (typeof type !== "string" && type.kind === "function" && type.generic) throw unsupported("generic function types as type arguments", at);
+      // A closure inferred for T is the closure's own type, compiled for it, unless the body holds
+      // T in a type argument, which holds the boxed callable, as a written function type is.
+      if (typeof type !== "string" && (type.kind === "closure" || type.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
     withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
@@ -437,7 +486,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     // decided, so the argument is checked against what they stand for.
     // So does a function type's, and the class's own parameters stand for what this class
     // instance gives them.
-    const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
+    const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const decided = new Map([
       ...[...explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])),
       ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
@@ -490,7 +539,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
 
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
   // body sees.
-  function paramTypes(instance: Instance, scope = instance.bindings): Type[] {
+  function paramTypes(instance: Instance, scope: Map<string, Type> = instance.bindings): Type[] {
     const f = instance.body;
     const implicit = implicitOf(f);
     return signing(f, () => withScope(scope, () => f.params.map((p, i) =>
@@ -505,7 +554,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && concrete(instance.bindings.get(n)!));
     const stands = (name: string) => instance.bindings.get(name)!;
     const outer = classParams(f);
-    const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
+    const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(typing, outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
+    // A constructor taking its base's parameters also holds the base's type arguments.
+    for (const [name, t] of f.scope ?? []) if (!scope.has(name)) scope.set(name, t);
     const names = [...typeParamsOf(f).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
     // A function-typed parameter of a class's member is seen in terms of the class's parameters
     // as this body holds them, even while the parameter itself is still open.
@@ -516,7 +567,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       for (const [i, bound] of implicitOf(f)) if (bound.kind === "function" && instance.bindings.has(`#${i}`)) scope.set(`#${i}`, wrapped(show(bound), sameParams(f, i, bound, scope), stands(`#${i}`)));
       return scope;
     }
-    for (const [name, t] of placeholders(typeParamsOf(f), (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
+    for (const [name, t] of placeholders(typing, typeParamsOf(f), (t, s) => withScope(new Map([...scope, ...s]), () => resolveType(t)), stands)) scope.set(name, t);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, wrapped(show(bound), sameParams(f, i, bound, scope), stands(`#${i}`)));
     return scope;
   }
@@ -546,7 +597,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode(p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
       made = shared ? sharedPlaceholders.get(f.typeParams!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
-      if (!made) made = placeholders(own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
+      if (!made) made = placeholders(typing, own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
       if (shared) sharedPlaceholders.set(f.typeParams!, made);
       explicit.set(f, made);
     }
@@ -563,7 +614,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     implicits.set(f, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
-    const outer = classPlaceholders(classParams(f), (t, s) => withScope(s, () => resolveType(t)));
+    const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
     const borrows = new Map<number, RefType>();
     lent.set(f, borrows);
@@ -675,6 +726,7 @@ function repeats(f: Body, name: string): boolean {
 
 // What generic classes need from the checker.
 type ClassChecker = {
+  tables: Tables;
   classes: Map<string, ClassInfo>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
@@ -684,16 +736,31 @@ type ClassChecker = {
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
 };
 
+// Whether a body's signature or code writes its type parameter `name` inside a type argument, as
+// in `Box<T>`, `Lock<T>` or `T[]`; a reference, a pointer or an Option to T doesn't hold one.
+function heldInArgument(f: Body, name: string): boolean {
+  const isT = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && n.name === name && (n as { args: unknown[] }).args.length === 0;
+  return holdsNode([f.params.map((p) => p.type), f.returnType, f.body], (n) => {
+    const t = n as TypeNode;
+    if (t.kind === "array") return holdsNode(t.element, isT);
+    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && holdsNode(t.args, isT);
+  });
+}
+
 // Generic classes: each set of type arguments declares the class again, on first use.
-export function genericClasses({ classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
+export function genericClasses({ tables, classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
+  const { typing } = tables;
+  const { heldArgument, keyOf, shapeKey, show } = typing;
   // Where each instance was first used, and each template's instances by their arguments.
   const uses = new Map<ClassInfo, Span>();
-  const instancesOf = new Map<ClassNode, Map<string, ClassInfo>>();
-  const shapesOf = new Map<ClassNode, Set<string>>();
+  const instancesOf = new NodeMap<ClassNode, Map<string, ClassInfo>>();
+  const shapesOf = new NodeMap<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   let ready = false;
-  return { classNamed, construct, start, define };
+  // Each generic class as its definition is checked, which holds the statics every instance shares.
+  const defined = new Map<string, ClassInfo>();
+  return { classNamed, construct, start, define, definedClass: (name: string) => defined.get(name) };
 
   function start() {
     ready = true;
@@ -703,7 +770,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
   function define() {
-    templates.forEach((t) => classInstance(t, [...classPlaceholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
+    templates.forEach((t) => defined.set(t.name, classInstance(t, [...classPlaceholders(tables, t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t)));
   }
 
   function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {
@@ -716,7 +783,10 @@ export function genericClasses({ classes, templates, register, layout, members, 
 
   // The class a generic class's type arguments make, declared on first use, checked for its
   // bounds, and named like `Box<i64>`.
-  function classInstance(template: ClassNode & { name: string }, args: Type[], at: Span): ClassInfo {
+  function classInstance(template: ClassNode & { name: string }, given: Type[], at: Span): ClassInfo {
+    if (given.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure") && a.generic)) throw unsupported("generic function types as type arguments", at);
+    given.forEach((a) => unboxedClosure(typing, a, at));
+    const args = given.map(heldArgument);
     const params = template.typeParams;
     if (args.length !== params.length) {
       throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
@@ -732,9 +802,8 @@ export function genericClasses({ classes, templates, register, layout, members, 
     const shape = args.map(shapeKey).join(",");
     if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
-    if (args.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure"))) throw unsupported("functions as type arguments of classes", at);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
-    const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
+    const c = declareClass(tables, template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);
     shapes.add(shape);
     register(c);
@@ -758,15 +827,28 @@ export function genericClasses({ classes, templates, register, layout, members, 
     const template = templates.get(name);
     if (!template) return c;
     if (typeArgs.length > 0) return classInstance(template, typeArgs.map(resolveType), at);
-    const ctor = template.members.find((m) => m.kind === "constructor");
-    const names = new Set(template.typeParams.map((p) => p.name));
-    const bindings = new Map<string, Type>();
-    ctor?.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+    const bindings = inferred(template, argTypes, at);
     const args = template.typeParams.map((p) => {
       const type = bindings.get(p.name);
       if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       return type;
     });
     return classInstance(template, args, at);
+  }
+
+  // A class with no constructor of its own takes its base's parameters, so its type arguments
+  // are inferred through the base's, as its `extends` clause passes them on.
+  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen: NodeSet<ClassNode> = new NodeSet<ClassNode>()): Map<string, Type> {
+    const names = new Set(template.typeParams.map((p) => p.name));
+    const bindings = new Map<string, Type>();
+    const ctor = template.members.find((m) => m.kind === "constructor");
+    if (ctor) ctor.params.forEach((p, i) => p.type && argTypes[i] && infer(tables, p.type, argTypes[i]!, names, bindings, at));
+    const base = template.extends?.kind === "instantiation" && template.extends.expr.kind === "ident" ? templates.get(template.extends.expr.name) : undefined;
+    if (!ctor && base && !seen.has(base) && template.extends?.kind === "instantiation") {
+      const given = inferred(base, argTypes, at, seen.add(template));
+      const passed = template.extends.typeArgs;
+      base.typeParams.forEach((p, i) => given.has(p.name) && passed[i] && infer(tables, passed[i]!, given.get(p.name)!, names, bindings, at));
+    }
+    return bindings;
   }
 }

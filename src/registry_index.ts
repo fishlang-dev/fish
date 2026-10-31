@@ -120,7 +120,7 @@ export class Unresolved extends Error {
   }
 }
 
-export function resolveVersions(index: Index, roots: Map<string, Request[]>, locked = new Map<string, string>()): Map<string, IndexEntry> {
+export function resolveVersions(index: Index, roots: Map<string, Request[]>, locked: Map<string, string> = new Map<string, string>()): Map<string, IndexEntry> {
   let chosen = new Map<string, IndexEntry>();
   const read = new Map<string, IndexEntry[]>();
   const versionsOf = (name: string) => {

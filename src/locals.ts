@@ -1,5 +1,6 @@
-import { CompileError, LOCAL_NAMES } from "./diag.ts";
+import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { nextId, NodeMap, NodeSet, type Ids } from "./nodes.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -17,13 +18,14 @@ const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "se
 // The fields of a statement that hold statement lists, each a scope of its own.
 const LISTS = ["body", "then", "else", "block", "handler", "finalizer"];
 
-// `captured`, when given, is told of each local class or enum using a variable around it, which
-// is otherwise an error.
-export function hoistLocals(program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
+// Each name made is noted in `names`, and each node made numbered from `ids`. `captured`, when
+// given, is told of each local class or enum using a variable around it, which is otherwise an
+// error.
+export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
   const hoisted: Stmt[] = [];
   let count = 0;
 
-  const visit = (node: unknown, ctx: Context | undefined, seen = new Set<unknown>()) => {
+  const visit = (node: unknown, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
     if (!node || typeof node !== "object" || seen.has(node)) return;
     seen.add(node);
     if (Array.isArray(node)) return node.forEach((x) => visit(x, ctx, seen));
@@ -65,7 +67,7 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
       const name = local.name;
       // Its name holds no '.', which would read as an enum's member.
       const mangled = `${name}@${count++}`;
-      LOCAL_NAMES.add(mangled);
+      names.local.add(mangled);
       const params = uses.get(local)!;
       if (local.kind === "class" || local.kind === "enum") {
         const own = declaredWithin(local);
@@ -81,16 +83,16 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
       if (params.length > 0 && local.kind === "enum" && !Array.isArray((local as { typeParams?: unknown }).typeParams)) {
         throw new CompileError(`the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
       }
-      const args: TypeNode[] = params.map((p) => ({ kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
+      const args: TypeNode[] = params.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
       const own = local.typeParams?.length ?? 0;
-      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p })), ...(local.typeParams ?? [])] });
+      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId(ids) })), ...(local.typeParams ?? [])] });
       return { name, mangled, args, own, values: local.kind === "class" || local.kind === "enum" };
     });
     for (const r of renames) for (const s of stmts) rename(s, r);
     for (const s of stmts) visit(s, ctx);
     for (const local of locals) {
       hoisted.push(local);
-      stmts[stmts.indexOf(local)] = { kind: "empty", start: local.start, end: local.end };
+      stmts[stmts.indexOf(local)] = { id: nextId(ids), kind: "empty", start: local.start, end: local.end };
     }
   };
 
@@ -100,8 +102,8 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
 
 // The outer type parameters each local uses, itself or through a local it names, in the order
 // the body declares them.
-function generics(locals: Local[], typeParams: TypeParam[]): Map<Local, TypeParam[]> {
-  const used = new Map(locals.map((l) => [l, new Set(typeParams.filter((p) => refersTo(l, p.name) && !(l.typeParams ?? []).some((q) => q.name === p.name)))]));
+function generics(locals: Local[], typeParams: TypeParam[]): NodeMap<Local, TypeParam[]> {
+  const used = new NodeMap(locals.map((l) => [l, new NodeSet(typeParams.filter((p) => refersTo(l, p.name) && !(l.typeParams ?? []).some((q) => q.name === p.name)))]));
   for (let grew = true; grew; ) {
     grew = false;
     for (const l of locals) {
@@ -115,7 +117,7 @@ function generics(locals: Local[], typeParams: TypeParam[]): Map<Local, TypePara
       }
     }
   }
-  return new Map(locals.map((l) => [l, typeParams.filter((p) => used.get(l)!.has(p))]));
+  return new NodeMap(locals.map((l) => [l, typeParams.filter((p) => used.get(l)!.has(p))]));
 }
 
 function what(local: Local): string {
@@ -156,7 +158,7 @@ function declares(s: Stmt, r: Rename): boolean {
 
 // Every use of the name under `node`, as a type or, for a class or enum, a value, made a use of
 // the hoisted name, the outer type parameters given first among its type arguments.
-function rename(node: unknown, r: Rename, seen = new Set<unknown>()) {
+function rename(node: unknown, r: Rename, seen: Set<unknown> = new Set<unknown>()) {
   if (!node || typeof node !== "object" || seen.has(node)) return;
   seen.add(node);
   if (Array.isArray(node)) {
@@ -185,7 +187,7 @@ function rename(node: unknown, r: Rename, seen = new Set<unknown>()) {
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.
-function mentions(node: unknown, name: string, seen = new Set<unknown>()): boolean {
+function mentions(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => mentions(x, name, seen));
@@ -206,7 +208,7 @@ function runsUse(node: unknown, name: string): boolean {
   return Object.values(n).some((v) => runsUse(v, name));
 }
 
-function refersTo(node: unknown, name: string, seen = new Set<unknown>()): boolean {
+function refersTo(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => refersTo(x, name, seen));
@@ -216,7 +218,7 @@ function refersTo(node: unknown, name: string, seen = new Set<unknown>()): boole
 }
 
 // The value names a declaration reads.
-function namesUsed(node: unknown, found = new Set<string>(), seen = new Set<unknown>()): Set<string> {
+function namesUsed(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
   if (!node || typeof node !== "object" || seen.has(node)) return found;
   seen.add(node);
   if (Array.isArray(node)) {
@@ -230,7 +232,7 @@ function namesUsed(node: unknown, found = new Set<string>(), seen = new Set<unkn
 }
 
 // The names declared inside a declaration: its methods' parameters and locals.
-function declaredWithin(node: unknown, found = new Set<string>(), seen = new Set<unknown>()): Set<string> {
+function declaredWithin(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
   if (!node || typeof node !== "object" || seen.has(node)) return found;
   seen.add(node);
   if (Array.isArray(node)) {

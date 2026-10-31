@@ -1,6 +1,8 @@
+import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { EnumMember, Expr, Span, TypeParam } from "./parser.ts";
-import { literalType, unionType, type LiteralType, type Type, type VariantType } from "./typing.ts";
+import { nextId, type Ids } from "./nodes.ts";
+import type { LiteralType, Type, VariantType } from "./typing.ts";
 
 // A C-like enum: named integer or string values, numbered on from the last integer as in
 // TypeScript. Each member is a literal that knows its enum, so a plain literal never becomes
@@ -19,15 +21,17 @@ type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; 
 // What an initializer that isn't a literal is worth, computed while compiling.
 export type Evaluate = (enumName: string, member: string, init: Expr) => unknown;
 
-export function declareEnum(node: EnumNode, evaluate: Evaluate): EnumInfo {
-  if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node);
+// Each enum's id tells enums of one name apart: their members are literals of the same values.
+export function declareEnum(compilation: Compilation, node: EnumNode, evaluate: Evaluate): EnumInfo {
+  const { counts } = compilation;
+  if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node, counts.enums++);
   const seen = new Set<string>();
   for (const m of node.members) {
     if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
     seen.add(m.name);
   }
-  const id = enums++;
-  if (node.members.every((m) => !m.init || literal(m.init) !== undefined)) return settle(node, id, new Map(), evaluate);
+  const id = counts.enums++;
+  if (node.members.every((m) => !m.init || literal(m.init) !== undefined)) return settle(compilation, node, id, new Map(), evaluate);
   // A computed member may read another enum's, declared later perhaps, so the enum is settled
   // when it is first read.
   let settled: EnumInfo | undefined;
@@ -35,13 +39,13 @@ export function declareEnum(node: EnumNode, evaluate: Evaluate): EnumInfo {
   const info = () => {
     if (settled) return settled;
     if (members) {
-      const [start, end] = innermost(node);
+      const [start, end] = innermost(compilation, node);
       throw new CompileError(`enum '${node.name}' is used while its members are being computed; give its members values that don't depend on the enum itself`, start, end);
     }
-    members = new Unsettled(node, seen);
+    members = new Unsettled(compilation, node, seen);
     // A failed settle starts again from nothing, since the checker may retry the pass that read it.
     try {
-      return (settled = settle(node, id, members, evaluate));
+      return (settled = settle(compilation, node, id, members, evaluate));
     } finally {
       if (!settled) members = undefined;
     }
@@ -55,10 +59,12 @@ export function declareEnum(node: EnumNode, evaluate: Evaluate): EnumInfo {
 // The members of an enum being settled: reading one not yet computed means a value depending on
 // itself, or on a member declared after it.
 class Unsettled extends Map<string, LiteralType> {
+  readonly compilation: Compilation;
   readonly node: EnumNode;
   readonly names: Set<string>;
-  constructor(node: EnumNode, names: Set<string>) {
+  constructor(compilation: Compilation, node: EnumNode, names: Set<string>) {
     super();
+    this.compilation = compilation;
     this.node = node;
     this.names = names;
   }
@@ -72,20 +78,20 @@ class Unsettled extends Map<string, LiteralType> {
   }
   ready(name: string) {
     if (!this.names.has(name) || super.has(name)) return;
-    const [start, end, member] = innermost(this.node);
+    const [start, end, member] = innermost(this.compilation, this.node);
     throw new CompileError(`enum member '${member}' uses '${this.node.name}.${name}', which isn't computed yet; an initializer can only use members declared before it, and no value can depend on itself`, start, end);
   }
 }
 
-// The initializers being computed, innermost last, as the span and name an error points at.
-const computing: [number, number, string][] = [];
-const innermost = (node: EnumNode): [number, number, string] => computing.at(-1) ?? [node.start, node.end, node.name];
+// The innermost initializer being computed, as the span and name an error points at.
+const innermost = ({ enumInits }: Compilation, node: EnumNode): [number, number, string] => enumInits.at(-1) ?? [node.start, node.end, node.name];
 
-function settle(node: EnumNode, id: number, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
+function settle(compilation: Compilation, node: EnumNode, id: number, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
+  const { literalType, unionType } = compilation.typing;
   let next: bigint | undefined = 0n;
   for (const m of node.members) {
     let value: bigint | string | undefined = m.init ? literal(m.init) : next;
-    if (m.init && value === undefined) value = computed(node, m, m.init, evaluate);
+    if (m.init && value === undefined) value = computed(compilation, node, m, m.init, evaluate);
     if (value === undefined) throw new CompileError(`enum member '${m.name}' must have an initializer`, m.start, m.end);
     if (typeof value === "bigint" && (value > I64_MAX || value < -I64_MAX - 1n)) {
       throw new CompileError(`enum member '${m.name}' is ${value}, which does not fit in i64`, m.start, m.end);
@@ -100,14 +106,14 @@ function settle(node: EnumNode, id: number, members: Map<string, LiteralType>, e
 
 // A computed initializer's value, where a bare name of one of the enum's members means that
 // member, as in TypeScript.
-function computed(node: EnumNode, m: EnumMember, init: Expr, evaluate: Evaluate): bigint | string {
+function computed({ enumInits, ids }: Compilation, node: EnumNode, m: EnumMember, init: Expr, evaluate: Evaluate): bigint | string {
   const names = new Set(node.members.map((x) => x.name));
-  computing.push([init.start, init.end, m.name]);
+  enumInits.push([init.start, init.end, m.name]);
   let value: unknown;
   try {
-    value = evaluate(node.name, m.name, qualified(init, node.name, names) as Expr);
+    value = evaluate(node.name, m.name, qualified(ids, init, node.name, names) as Expr);
   } finally {
-    computing.pop();
+    enumInits.pop();
   }
   if (typeof value === "bigint" || typeof value === "string") return value;
   if (typeof value === "number") throw new CompileError(`enum member '${m.name}' is ${value}, a float; a numeric enum holds i64 values, so give it an integer`, init.start, init.end);
@@ -115,23 +121,26 @@ function computed(node: EnumNode, m: EnumMember, init: Expr, evaluate: Evaluate)
 }
 
 // A copy of an initializer with the enum's own bare member names qualified. Functions inside
-// it bind their own names, and the parsed tree is never changed, since it may be cached.
-function qualified(node: unknown, enumName: string, names: Set<string>): unknown {
-  if (Array.isArray(node)) return node.map((n) => qualified(n, enumName, names));
+// it bind their own names, and the parsed tree is never changed, since it may be cached. Each
+// node copied gets an id of its own.
+function qualified(ids: Ids, node: unknown, enumName: string, names: Set<string>): unknown {
+  if (Array.isArray(node)) return node.map((n) => qualified(ids, n, enumName, names));
   if (node === null || typeof node !== "object") return node;
-  const n = node as { kind?: unknown; name?: unknown } & Span;
+  const n = node as { kind?: unknown; name?: unknown; id?: unknown } & Span;
   if (n.kind === "ident" && typeof n.name === "string" && names.has(n.name)) {
-    return { kind: "member", object: { kind: "ident", name: enumName, start: n.start, end: n.end }, name: n.name, optional: false, start: n.start, end: n.end };
+    return { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "ident", name: enumName, start: n.start, end: n.end }, name: n.name, optional: false, start: n.start, end: n.end };
   }
   if (n.kind === "shorthand" && typeof n.name === "string" && names.has(n.name)) {
-    return { kind: "property", key: n.name, value: qualified({ kind: "ident", name: n.name, start: n.start, end: n.end }, enumName, names), start: n.start, end: n.end };
+    return { id: nextId(ids), kind: "property", key: n.name, value: qualified(ids, { id: nextId(ids), kind: "ident", name: n.name, start: n.start, end: n.end }, enumName, names), start: n.start, end: n.end };
   }
   if (n.kind === "arrow" || n.kind === "function" || n.kind === "class") return node;
-  return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, k === "key" ? v : qualified(v, enumName, names)]));
+  const copy = Object.fromEntries(Object.entries(node).map(([k, v]) => [k, k === "key" ? v : qualified(ids, v, enumName, names)]));
+  if (typeof n.id === "number") copy.id = nextId(ids);
+  return copy;
 }
 
 // An enum either names values or holds data, never both, so each member means one thing.
-function dataEnum(node: EnumNode): EnumInfo {
+function dataEnum(node: EnumNode, id: number): EnumInfo {
   const seen = new Set<string>();
   for (const m of node.members) {
     if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
@@ -140,18 +149,10 @@ function dataEnum(node: EnumNode): EnumInfo {
   }
   const params = node.typeParams.map((p) => p.name);
   const derives = node.derives ?? [];
-  return { type: "never", members: new Map(), data: { name: node.name, id: enums++, params, members: node.members, instances: new Map(), at: node, eq: derives.includes("Eq"), json: derives.includes("Json") } };
+  return { type: "never", members: new Map(), data: { name: node.name, id, params, members: node.members, instances: new Map(), at: node, eq: derives.includes("Eq"), json: derives.includes("Json") } };
 }
 
 const I64_MAX = (1n << 63n) - 1n;
-
-// Tells enums of one name apart, since literal types are shared within a compile.
-let enums = 0;
-
-// Numbers a compile's enums from the start, as its types are.
-export function resetEnums() {
-  enums = 0;
-}
 
 // A literal initializer's value, which needs no comptime run.
 function literal(e: Expr): bigint | string | undefined {

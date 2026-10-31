@@ -1,6 +1,6 @@
-import { llvm, type Slots } from "./layout.ts";
+import { layoutOf, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
-import { INTEGERS, show, type Integer, type Type } from "./typing.ts";
+import { INTEGERS, type Integer, type Type } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the C runtime. A panic is the runtime's
 // `fsh_rt_panic`, which prints its message, then aborts or unwinds, as the build chose.
@@ -11,6 +11,8 @@ export const RUNTIME = [
   "declare void @exit(i32) noreturn",
   "declare void @abort() noreturn",
   "declare ptr @fsh_rt_format_f64(double, ptr)",
+  "declare ptr @fsh_rt_format_i128(i128, ptr)",
+  "declare ptr @fsh_rt_format_u128(i128, ptr)",
   "declare ptr @fsh_rt_format_f32(float, ptr)",
   "declare void @fsh_rt_str_retain(ptr)",
   "declare void @fsh_rt_str_release(ptr)",
@@ -33,6 +35,7 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_fs_realpath(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_fs_mkdtemp(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_fs_rm(ptr, i32, i32, ptr)",
+  "declare i32 @fsh_rt_spawn_sync(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_str_from_units(ptr, i64)",
   "declare ptr @fsh_rt_str_from_points(ptr, i64, ptr)",
   "declare ptr @fsh_rt_str_at_or_null(ptr, i64)",
@@ -194,11 +197,34 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_run(ptr, ptr, ptr, ptr, i64, i64, ptr)",
   "declare ptr @fsh_rt_str_from_cstring(ptr)",
   "declare ptr @fsh_rt_str_from_u64(i64)",
+  "declare ptr @fsh_rt_str_from_i128(i128)",
+  "declare void @fsh_rt_big_retain(ptr)",
+  "declare void @fsh_rt_big_release(ptr)",
+  "declare ptr @fsh_rt_big_from_u128(i128, i32)",
+  "declare ptr @fsh_rt_big_from_i128(i128)",
+  "declare i32 @fsh_rt_big_compare(ptr, ptr)",
+  "declare i1 @fsh_rt_big_equal(ptr, ptr)",
+  "declare ptr @fsh_rt_big_add(ptr, ptr)",
+  "declare ptr @fsh_rt_big_sub(ptr, ptr)",
+  "declare ptr @fsh_rt_big_mul(ptr, ptr)",
+  "declare ptr @fsh_rt_big_div(ptr, ptr, i32, ptr)",
+  "declare ptr @fsh_rt_big_neg(ptr)",
+  "declare ptr @fsh_rt_big_pow(ptr, ptr, ptr)",
+  "declare ptr @fsh_rt_big_shift(ptr, ptr, i32, ptr)",
+  "declare ptr @fsh_rt_big_bitwise(ptr, ptr, i32)",
+  "declare ptr @fsh_rt_big_not(ptr)",
+  "declare ptr @fsh_rt_big_text(ptr, i64)",
+  "declare ptr @fsh_rt_big_to_string(ptr, i64, ptr)",
+  "declare i128 @fsh_rt_big_low(ptr)",
+  "declare double @fsh_rt_big_f64(ptr)",
+  "declare ptr @fsh_rt_str_from_u128(i128)",
   "declare ptr @fsh_rt_str_from_f64(double)",
   "declare ptr @fsh_rt_str_from_f32(float)",
   "declare ptr @fsh_rt_json_new()",
   "declare void @fsh_rt_json_raw(ptr, ptr, i64)",
   "declare void @fsh_rt_json_i64(ptr, i64)",
+  "declare void @fsh_rt_json_i128(ptr, i128)",
+  "declare void @fsh_rt_json_u128(ptr, i128)",
   "declare void @fsh_rt_json_u64(ptr, i64)",
   "declare void @fsh_rt_json_f64(ptr, double, i32)",
   "declare void @fsh_rt_json_string(ptr, ptr)",
@@ -229,6 +255,9 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_json_end(ptr)",
   "declare ptr @fsh_rt_insp_text(ptr)",
   "declare ptr @fsh_rt_insp_i64(i64)",
+  "declare ptr @fsh_rt_insp_i128(i128)",
+  "declare ptr @fsh_rt_insp_bigint(ptr)",
+  "declare ptr @fsh_rt_insp_u128(i128)",
   "declare ptr @fsh_rt_insp_u64(i64)",
   "declare ptr @fsh_rt_insp_f64(double, i32)",
   "declare ptr @fsh_rt_insp_string(ptr)",
@@ -246,6 +275,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_text_add(ptr, ptr)",
   "declare void @fsh_rt_text_raw(ptr, ptr)",
   "declare void @fsh_rt_text_i64(ptr, i64)",
+  "declare void @fsh_rt_text_i128(ptr, i128)",
+  "declare void @fsh_rt_text_u128(ptr, i128)",
   "declare void @fsh_rt_text_u64(ptr, i64)",
   "declare void @fsh_rt_text_f64(ptr, double)",
   "declare void @fsh_rt_text_f32(ptr, float)",
@@ -276,7 +307,9 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
 // Writes text and values, joined by spaces and ending in a newline, to stdout (1) or stderr (2).
 // A value of a type with no printed form, like an object, prints as its type's name.
 export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
-  const { emit, temp, label, startBlock, cString } = b;
+  const { emit, temp, label, startBlock, cString, typing } = b;
+  const { show } = typing;
+  const llvm = layoutOf(typing);
   let format = "";
   let values: string[] = [];
   emit(`call void @fsh_rt_print_begin(i32 ${stream})`);
@@ -303,6 +336,14 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       // Written by the runtime, since its bytes may hold anything printf would read as format.
       flush();
       emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${v})`);
+    } else if (type === "bigint") {
+      // Written as console.log writes one, with its 'n'.
+      flush();
+      const digits = temp();
+      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${digits})`);
+      emit(`call void @fsh_rt_str_release(ptr ${digits})`);
+      format += "n";
     } else if (type === "never") {
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
@@ -335,8 +376,16 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       format += "%s";
       values.push(`, ptr ${text}`);
     } else {
-      // Every integer prints as a 64-bit one, extended by its signedness.
+      // Every integer prints as a 64-bit one, extended by its signedness, but for the 128-bit
+      // ones, which the runtime writes.
       const { bits, signed } = INTEGERS[type as Integer];
+      if (bits === 128) {
+        const text = temp();
+        emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${b.alloca("[41 x i8]")})`);
+        format += "%s";
+        values.push(`, ptr ${text}`);
+        return;
+      }
       let wide = v;
       if (bits < 64) {
         wide = temp();

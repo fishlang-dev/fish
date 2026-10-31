@@ -3,9 +3,10 @@ import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { asserts, clocks, equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
+import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, lower, range, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import type { Tables } from "./compilation.ts";
+import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -91,32 +92,21 @@ type Interpreter = ReturnType<typeof interpreter>;
 
 // The value of `comptime expr`, written in `instance`.
 export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  return guarded(site, (run) => run.expr(seeded(instance), site.expr));
+  return guarded(instance.tables, site, (run) => run.expr(seeded(instance), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
 export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
-  guarded(site, (run) => run.block(seeded(instance), site.body));
+  guarded(instance.tables, site, (run) => run.block(seeded(instance), site.body));
 }
 
 // A comptime parameter's argument at a call written in `instance`.
 export function comptimeArgument(instance: Instance, arg: Expr): Value {
-  return guarded(arg, (run) => run.expr(seeded(instance), arg));
+  return guarded(instance.tables, arg, (run) => run.expr(seeded(instance), arg));
 }
 
-// The value an instance's comptime parameter was given, from the literal type it is keyed by.
-// A comptime string array's binding: a literal type standing for exactly that array, so equal
-// arrays share an instance. It is never the interned literal of an ordinary string, which a
-// string parameter may be given with the same text.
-// The bindings each quote made while a macro runs, for a quote it is spliced into; the names it
-// left free, for that quote to bind; and the spans of the quotes its nodes came from, the only
-// nodes those names are renamed in, never the program's own, spliced in as input.
-const scopes = new WeakMap<object, Map<string, string>>();
-const frees = new WeakMap<object, Free>();
-const quotedSpans = new WeakMap<object, Set<string>>();
-
 // Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
-function renameQuoted(v: Value, from: string, to: string) {
+function renameQuoted({ quotedSpans }: Tables, v: Value, from: string, to: string) {
   const spans = quotedSpans.get(untagged(v) as object) ?? new Set<string>();
   const visit = (x: Value) => {
     const u = untagged(x);
@@ -138,7 +128,7 @@ function renameQuoted(v: Value, from: string, to: string) {
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
 export function comptimeCall(instance: Instance, args: Value[], site: Span): Value {
-  return guarded(site, (run) => run.call(instance, args, undefined, site));
+  return guarded(instance.tables, site, (run) => run.call(instance, args, undefined, site));
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
@@ -157,18 +147,20 @@ export const astValues = (splice: (i: number, into: Type) => Value, holes: Value
   none: null,
 });
 
-const stringArrays = new Map<LiteralType, string[]>();
-
-export function stringsType(items: string[]): LiteralType {
-  const t = standInLiteral(`strings ${JSON.stringify(items)}`);
+// A comptime string array's binding: a literal type standing for exactly that array, so equal
+// arrays share an instance. It is never the interned literal of an ordinary string, which a
+// string parameter may be given with the same text.
+export function stringsType({ typing, stringArrays }: Tables, items: string[]): LiteralType {
+  const t = typing.standInLiteral(`strings ${JSON.stringify(items)}`);
   stringArrays.set(t, items);
   return t;
 }
 
+// The value an instance's comptime parameter was given, from the literal type it is keyed by.
 export function comptimeParameter(instance: Instance, p: Param): Value {
   const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
   if (typeof t === "string" || t?.kind !== "literal") return undefined;
-  const strings = stringArrays.get(t);
+  const strings = instance.tables.stringArrays.get(t);
   if (strings) return { kind: "array", items: [...strings] };
   // An enum's member keeps which enum it is, as members of two enums may share a value.
   return t.owner ? { kind: "member", type: t, value: t.value } : t.value;
@@ -192,30 +184,24 @@ function known(instance: Instance): Map<number, Value> {
 
 // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
 // function the checker hasn't reached yet.
-let ensureChecked: (instance: Instance) => boolean = () => true;
-
-export function comptimeChecks(check: (instance: Instance) => boolean) {
-  ensureChecked = check;
+export function comptimeChecks(tables: Tables, check: (instance: Instance) => boolean) {
+  tables.ensureChecked = check;
 }
-
-// Each top-level const's value, once computed, and those being computed, which a const reading
-// itself would meet.
-const constants = new WeakMap<Instance, Value>();
-const computing = new Set<Instance>();
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 export function comptimeBody(instance: Instance): Value {
+  const { constants } = instance.tables;
   if (constants.has(instance)) return constants.get(instance);
-  const v = guarded(instance.body, (run) => run.constant(instance, instance.body));
+  const v = guarded(instance.tables, instance.body, (run) => run.constant(instance, instance.body));
   constants.set(instance, v);
   return v;
 }
 
 // Runs comptime code; a panic, a refusal or an error it didn't catch is a compile error at the
 // comptime site, noting where inside it happened.
-function guarded(site: Span, go: (run: Interpreter) => Value): Value {
+function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): Value {
   try {
-    return go(interpreter());
+    return go(interpreter(tables));
   } catch (e) {
     let stop = e;
     if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false);
@@ -231,7 +217,9 @@ function guarded(site: Span, go: (run: Interpreter) => Value): Value {
 
 const constName = (c: Instance) => c.body.name.slice("const ".length);
 
-function interpreter() {
+function interpreter(tables: Tables) {
+  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls } = tables;
+  const { show, lower } = typing;
   let steps = 0;
   let depth = 0;
   return { expr, block, constant, call };
@@ -259,8 +247,8 @@ function interpreter() {
   // How consts reading each other in a ring do it, naming their files when they are in several.
   function cycle(ring: Instance[]): string {
     if (ring.length < 2) return "";
-    const files = new Set(ring.map((c) => fileAt(c.body.start)));
-    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${files.size > 1 ? ` in '${fileAt(c.body.start)}'` : ""}`);
+    const ringFiles = new Set(ring.map((c) => fileAt(files, c.body.start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, c.body.start)}'` : ""}`);
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
@@ -303,7 +291,7 @@ function interpreter() {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(callee.body.name) && fileAt(callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
+      if (RANDOM.has(callee.body.name) && fileAt(files, callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
@@ -383,7 +371,7 @@ function interpreter() {
       case "switch": {
         const v = expr(f, s.discriminant);
         const subject = f.instance.types.get(s.discriminant);
-        let at = s.cases.findIndex((c) => c.test !== undefined && equal(v, subject, expr(f, c.test), f.instance.types.get(c.test)));
+        let at = s.cases.findIndex((c) => c.test !== undefined && equal(typing, v, subject, expr(f, c.test), f.instance.types.get(c.test)));
         if (at < 0) at = s.cases.findIndex((c) => c.test === undefined);
         if (at < 0) return;
         try {
@@ -477,7 +465,7 @@ function interpreter() {
     const v = isPlace(value) ? value.get() : value;
     const to = deref(target);
     if (typeof v === "bigint" && to !== undefined && isFloat(to)) return fit(Number(v), to);
-    return retag(v, deref(own), to);
+    return retag(typing, v, deref(own), to);
   }
 
   function raw(f: Frame, e: Expr): Value | typeof SHORT {
@@ -487,6 +475,8 @@ function interpreter() {
         return isFloat(type) ? fit(Number(e.value), type) : BigInt(e.value);
       case "float":
         return fit(e.value, type as "f32" | "f64");
+      case "bigint":
+        return e.value;
       // A regex is its compiled program, which comptime only hands on; its flags and pattern
       // stand for it, as \`flags/pattern\`.
       case "regex":
@@ -501,7 +491,7 @@ function interpreter() {
       case "tagged": {
         const types = quotes.get(e);
         if (!types) return unsupported("this tagged template", e);
-        const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
+        const q = quoted(tables, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.
@@ -513,13 +503,13 @@ function interpreter() {
           if (inner) {
             for (const [name, spelling] of inner) {
               const to = scope.get(name);
-              if (to) renameQuoted(v, spelling, to);
+              if (to) renameQuoted(tables, v, spelling, to);
               else free.set(name, spelling);
             }
           }
-          return retag(v, holes[i]!.type, into);
+          return retag(typing, v, holes[i]!.type, into);
         };
-        const made = built<Value>(q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
+        const made = built<Value>(tables, q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
         if (made && typeof made === "object") {
           scopes.set(untagged(made) as object, scope);
           frees.set(untagged(made) as object, free);
@@ -566,6 +556,8 @@ function interpreter() {
       }
       case "as":
         return convert(unwrap(expr(f, e.expr)), type, e);
+      case "satisfies":
+        return expr(f, e.expr);
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
         if ((e as Narrowing).narrows) {
@@ -573,8 +565,8 @@ function interpreter() {
           const held = expr(f, e.expr);
           if (from === to) return held;
           const kept = typeof to !== "string" && to.kind === "union" ? to.members : [to];
-          if (!kept.includes(memberType(held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
-          return retag(held, from, to);
+          if (!kept.includes(memberType(typing, held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
+          return retag(typing, held, from, to);
         }
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
@@ -696,7 +688,7 @@ function interpreter() {
       if (held === null && (callee.optional || e.optional)) return SHORT;
       if (integerCalls.has(e)) return integerValue(callee.name, held as bigint, e.args[0] ? (unwrap(expr(f, e.args[0])) as bigint) : 0n, lower(typeOf(f, callee.object)) as Integer, type, e);
       if (typeof held === "string") return stringMethod(callee.name, held, e.args.map((a) => unwrap(expr(f, a))), e);
-      if (callee.name === "clone") return cloned(held);
+      if (callee.name === "clone") return cloned(tables, held);
       if (held && typeof held === "object" && held.kind === "array") {
         if (callee.name === "push") return void held.items.push(expr(f, e.args[0]!));
         if (callee.name === "pop") return held.items.length > 0 ? held.items.pop()! : null;
@@ -781,10 +773,16 @@ function interpreter() {
 
   function unary(f: Frame, e: Extract<Expr, { kind: "unary" }>): Value {
     if (e.op === "await") refuse("'await'", e);
-    const v = unwrap(expr(f, e.operand));
+    const held = expr(f, e.operand);
+    const v = unwrap(held);
     const type = typeOf(f, e);
     if (e.op === "!") return !v;
-    if (e.op === "typeof") return typeofValue(v);
+    if (e.op === "typeof") {
+      const from = typeOf(f, e.operand);
+      const member = typeof from !== "string" && from.kind === "union" ? memberOf(typing, held, from) : from;
+      return member === "bigint" ? "bigint" : typeofValue(v);
+    }
+    if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
     if (e.op === "-") return typeof v === "number" ? fit(-v, type as "f32" | "f64") : checked(-(v as bigint), type as Integer, "negate", e);
     if (e.op === "~") return wrap(~(v as bigint), type as Integer);
     return unsupported(`'${e.op}'`, e);
@@ -804,9 +802,9 @@ function interpreter() {
     const [a, b] = [expr(f, e.left), expr(f, e.right)];
     switch (e.op) {
       case "===":
-        return equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
+        return equal(typing, a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
       case "!==":
-        return !equal(a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
+        return !equal(typing, a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), byEquals(e));
       case "<":
         return (unwrap(a) as number) < (unwrap(b) as number);
       case "<=":
@@ -949,6 +947,26 @@ function interpreter() {
   }
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
+  // A bigint's operators as JavaScript has them, panicking where it throws a RangeError.
+  function bigNumeric(op: string, a: bigint, b: bigint, at: Span): Value {
+    if ((op === "/" || op === "%") && b === 0n) panic("Division by zero", at);
+    if (op === "**" && b < 0n) panic("Exponent must be non-negative", at);
+    switch (op) {
+      case "+": return a + b;
+      case "-": return a - b;
+      case "*": return a * b;
+      case "/": return a / b;
+      case "%": return a % b;
+      case "**": return a ** b;
+      case "&": return a & b;
+      case "|": return a | b;
+      case "^": return a ^ b;
+      case "<<": return a << b;
+      case ">>": return a >> b;
+    }
+    return unsupported(`'${op}' on 'bigint'`, at);
+  }
+
   function numeric(op: string, a: bigint | number, b: bigint | number, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
@@ -956,6 +974,7 @@ function interpreter() {
       if (v === undefined) return unsupported(`'${op}' on floats`, at);
       return fit(v, type as "f32" | "f64");
     }
+    if (type === "bigint") return bigNumeric(op, a as bigint, b as bigint, at);
     if (!isInteger(type)) return unsupported(`'${op}' on '${show(type)}'`, at);
     const { bits, signed } = INTEGERS[type];
     switch (op) {
@@ -1115,7 +1134,7 @@ function mutable(t: Type | undefined): boolean {
 // A value of type `from` as one of type `to`: entering a union it is tagged with the member its
 // type is, and a union's fields and elements are tagged the same way, so each is baked as the
 // member the program would hold.
-function retag(value: Value, from: Type | undefined, to: Type | undefined): Value {
+function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | undefined): Value {
   // A `Mut` held in a field stays the place it points at.
   if (isPlace(value)) return value;
   if (to === undefined || from === to) return typeof to !== "string" && to?.kind === "union" ? value : unwrap(value);
@@ -1124,27 +1143,27 @@ function retag(value: Value, from: Type | undefined, to: Type | undefined): Valu
     if (tag !== undefined && to.members.includes(tag)) return value;
     const v = unwrap(value);
     const own = tag ?? from;
-    const member = own !== undefined && to.members.includes(own) ? own : own !== undefined && typeof own !== "string" && own.kind === "union" ? memberOf(v, own) : own !== undefined ? (membersFor(own, to)[0] ?? memberOf(v, to)) : memberOf(v, to);
-    return { kind: "member", type: member, value: retag(v, own, member) };
+    const member = own !== undefined && to.members.includes(own) ? own : own !== undefined && typeof own !== "string" && own.kind === "union" ? memberOf(typing, v, own) : own !== undefined ? (typing.membersFor(own, to)[0] ?? memberOf(typing, v, to)) : memberOf(typing, v, to);
+    return { kind: "member", type: member, value: retag(typing, v, own, member) };
   }
   const v = unwrap(value);
   if (v && typeof v === "object" && v.kind === "record" && typeof to !== "string" && (to.kind === "object" || to.kind === "class")) {
     // A field the value leaves out is an optional one, which is empty.
-    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(v.fields.get(f.name), field(v.type, f.name)?.type, f.type) : retag(null, "null", f.type));
+    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
   }
   if (v && typeof v === "object" && v.kind === "array" && typeof to !== "string" && to.kind === "array") {
     const element = typeof from !== "string" && from?.kind === "array" ? from.element : undefined;
-    v.items = v.items.map((x) => retag(x, element, to.element));
+    v.items = v.items.map((x) => retag(typing, x, element, to.element));
   }
   return v;
 }
 
 // Which member of its union a value is: its tag, or else the type it is written as, a literal
 // standing for its base type.
-function memberType(v: Value, t: Type | undefined): Type | undefined {
-  if (v && typeof v === "object" && v.kind === "member") return memberType(v.value, v.type);
+function memberType(typing: Typing, v: Value, t: Type | undefined): Type | undefined {
+  if (v && typeof v === "object" && v.kind === "member") return memberType(typing, v.value, v.type);
   const own = deref(t);
-  if (typeof own !== "string" && own?.kind === "union") return memberOf(v, own);
+  if (typeof own !== "string" && own?.kind === "union") return memberOf(typing, v, own);
   if (typeof own !== "string" && own?.kind === "literal") return baseOf(own) ?? own;
   return own;
 }
@@ -1154,8 +1173,8 @@ function memberType(v: Value, t: Type | undefined): Type | undefined {
 // A class instance's comparison through its `equals`, or nothing for other records.
 type Equals = (a: Record, b: Record) => boolean | undefined;
 
-function equal(a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, eq?: Equals): boolean {
-  const [ma, mb] = [memberType(a, ta), memberType(b, tb)];
+function equal(typing: Typing, a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, eq?: Equals): boolean {
+  const [ma, mb] = [memberType(typing, a, ta), memberType(typing, b, tb)];
   // A literal stands for its base type: members of two enums that share a value are equal, as
   // they are at run time.
   const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (baseOf(t) ?? t) : t);
@@ -1204,13 +1223,15 @@ function typeofValue(v: Value): string {
 }
 
 // A copy owning all its parts, as `.clone()` makes.
-function cloned(v: Value): Value {
+function cloned(tables: Tables, v: Value): Value {
+  const { quoteScopes: scopes, quoteFrees: frees, quotedSpans } = tables;
+  const copied = (x: Value) => cloned(tables, x);
   if (!v || typeof v !== "object" || v.kind === "interior") return v;
-  if (v.kind === "place") return cloned(v.get());
-  if (v.kind === "member") return { kind: "member", type: v.type, value: cloned(v.value) };
-  if (v.kind === "array") return { kind: "array", items: v.items.map(cloned) };
-  if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(cloned) };
-  const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, cloned(x)])) };
+  if (v.kind === "place") return copied(v.get());
+  if (v.kind === "member") return { kind: "member", type: v.type, value: copied(v.value) };
+  if (v.kind === "array") return { kind: "array", items: v.items.map(copied) };
+  if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(copied) };
+  const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, copied(x)])) };
   // A clone of a quote's value keeps its bindings and free names for a quote it is spliced into.
   const scope = scopes.get(v);
   if (scope) scopes.set(copy, scope);
@@ -1276,7 +1297,7 @@ function shortestF32(v: number): string {
 
 // The member of a union a value is when nothing says: its own type for an aggregate, the
 // literal member with its value, or the member of its kind.
-export function memberOf(value: Value, union: UnionType): Type {
+export function memberOf(typing: Typing, value: Value, union: UnionType): Type {
   const m = union.members;
   if (value && typeof value === "object" && value.kind === "member" && m.includes(value.type)) return value.type;
   const v = unwrap(value);
@@ -1284,12 +1305,12 @@ export function memberOf(value: Value, union: UnionType): Type {
   if (v && typeof v === "object") {
     if (v.kind === "array") return m.find((t) => typeof t !== "string" && t.kind === "array")!;
     if (v.kind === "interior") return m.find((t) => typeof t !== "string" && t.kind === "interior")!;
-    if (v.kind === "member" || v.kind === "place") return memberOf(unwrap(v), union);
-    return m.find((t) => t === v.type) ?? m.find((t) => fits(v.type, t))!;
+    if (v.kind === "member" || v.kind === "place") return memberOf(typing, unwrap(v), union);
+    return m.find((t) => t === v.type) ?? m.find((t) => typing.fits(v.type, t))!;
   }
   const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);
   if (literal) return literal;
-  if (typeof v === "bigint") return m.find(isInteger)!;
+  if (typeof v === "bigint") return m.find(isInteger) ?? "bigint";
   if (typeof v === "number") return m.find(isFloat)!;
   if (typeof v === "string") return "string";
   return "boolean";

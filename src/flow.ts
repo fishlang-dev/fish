@@ -1,8 +1,9 @@
 import type { Expr, Stmt } from "./parser.ts";
+import { NodeSet } from "./nodes.ts";
 
 // Whether control never reaches the end of these statements. A loop whose condition is
 // always true never finishes unless a `break` leaves it.
-export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<Stmt>): boolean {
+export function alwaysReturns(stmts: Stmt[], broken: NodeSet<Stmt>, continued: NodeSet<Stmt>): boolean {
   return stmts.some((s) => {
     switch (s.kind) {
       case "return":
@@ -38,7 +39,7 @@ export function alwaysReturns(stmts: Stmt[], broken: Set<Stmt>, continued: Set<S
 const isTrue = (e: Expr) => e.kind === "bool" && e.value;
 
 // The names any assignment, `++` or `--` in these statements writes to.
-export function assignedNames(node: unknown, names = new Set<string>()): Set<string> {
+export function assignedNames(node: unknown, names: Set<string> = new Set<string>()): Set<string> {
   if (typeof node !== "object" || node === null) return names;
   if (Array.isArray(node)) {
     node.forEach((n) => assignedNames(n, names));

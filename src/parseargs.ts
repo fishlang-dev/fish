@@ -1,3 +1,4 @@
+import { nextId, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import { parseExpression, type Expr, type ObjectProp, type Span } from "./parser.ts";
 
@@ -9,7 +10,7 @@ const OPTION_KEYS = ["type", "short", "multiple", "default"];
 // The arguments std's parseArgs takes in place of a call's config literal: the arguments to
 // read, the options as specs, the two settings Fish reads, and a builder of the values typed as
 // @types/node types them, a field per option, optional unless it has a default.
-export function parseArgsArgs(e: Call): Expr[] {
+export function parseArgsArgs(ids: Ids, e: Call): Expr[] {
   if (e.args.length > 1) throw new CompileError("'parseArgs' takes one config object", e.args[1]!.start, e.args.at(-1)!.end);
   const config = e.args[0];
   if (config !== undefined && config.kind !== "object") throw literalOnly(config, "its config");
@@ -17,7 +18,7 @@ export function parseArgsArgs(e: Call): Expr[] {
   for (const p of config?.props ?? []) {
     const key = keyOf(p, "its config");
     if (!SETTINGS.includes(key)) throw new CompileError(`'${key}' isn't a parseArgs setting; they are ${SETTINGS.join(", ")}`, p.start, p.end);
-    settings.set(key, p.kind === "shorthand" ? { kind: "ident", name: p.name, start: p.start, end: p.end } : (p as Extract<ObjectProp, { kind: "property" }>).value);
+    settings.set(key, p.kind === "shorthand" ? { id: nextId(ids), kind: "ident", name: p.name, start: p.start, end: p.end } : (p as Extract<ObjectProp, { kind: "property" }>).value);
   }
   const flag = (name: string, fallback: boolean): boolean => {
     const v = settings.get(name);
@@ -68,15 +69,15 @@ export function parseArgsArgs(e: Call): Expr[] {
     if (fallback) defaults.push(fallback);
     reads.push(`${key}: p.${read}${fallback ? `Or(${i}, fsh_default_${defaults.length - 1})` : `(${i})`}`);
   });
-  const built = parseExpression(`[[${specs.join(", ")}], (p): { ${fields.join("; ")} } => ({ ${reads.join(", ")} })]`) as Extract<Expr, { kind: "array" }>;
+  const built = parseExpression(`[[${specs.join(", ")}], (p): { ${fields.join("; ")} } => ({ ${reads.join(", ")} })]`, ids) as Extract<Expr, { kind: "array" }>;
   respan(built, e);
   const [list, builder] = built.elements as [Expr, Expr];
   // The builder's parameter takes a name a program can't write, so a default naming its own
   // `p` reads the program's.
   renamed(builder, "p", "parsed-args");
   placed(builder, defaults);
-  const bool = (value: boolean): Expr => ({ kind: "bool", value, start: e.start, end: e.end });
-  return [settings.get("args") ?? { kind: "null", start: e.start, end: e.end }, list, bool(flag("allowPositionals", false)), bool(flag("allowNegative", false)), builder];
+  const bool = (value: boolean): Expr => ({ id: nextId(ids), kind: "bool", value, start: e.start, end: e.end });
+  return [settings.get("args") ?? { id: nextId(ids), kind: "null", start: e.start, end: e.end }, list, bool(flag("allowPositionals", false)), bool(flag("allowNegative", false)), builder];
 }
 
 // A literal default that isn't what the option gives; anything else is checked as a value.
@@ -100,7 +101,7 @@ function keyOf(p: ObjectProp, within: string): string {
 }
 
 // Generated nodes take the call's span, so a message about one points at the call.
-function respan(v: unknown, at: Span, seen = new Set<unknown>()) {
+function respan(v: unknown, at: Span, seen: Set<unknown> = new Set<unknown>()) {
   if (typeof v !== "object" || v === null || seen.has(v)) return;
   seen.add(v);
   const node = v as Record<string, unknown>;

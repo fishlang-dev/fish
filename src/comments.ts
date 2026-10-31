@@ -45,7 +45,7 @@ const bodyFields = new Set(["body", "then", "else", "block", "handler", "finaliz
 
 export function attach(program: Stmt[], comments: Comment[], src: string): Attachment {
   const commentStarts = new Map(comments.map((c) => [c.end, c.start]));
-  const ctx: Ctx = { src, comments, commentAt: new Map(comments.map((c) => [c.start, c.end])), commentStarts, blocks: new Map(), children: new Map() };
+  const ctx: Ctx = { src, comments, commentAt: new Map(comments.map((c) => [c.start, c.end])), commentStarts, blocks: new Map(), children: new Map(), next: new Map() };
   const root: Block = { kind: "$block", body: program, start: 0, end: src.length };
   ctx.blocks.set(program, root);
   const byNode = new Map<object, Placed[]>();
@@ -155,6 +155,8 @@ type Ctx = {
   commentStarts: Map<number, number>;
   blocks: Map<unknown[], Block>;
   children: Map<object, Node[]>;
+  // The next character past whitespace and comments, by where the search starts.
+  next: Map<number, string>;
 };
 
 type Decorated = { enclosingNode: Node | undefined; precedingNode: Node | undefined; followingNode: Node | undefined; ancestors: Node[] };
@@ -360,16 +362,14 @@ export function isPreviousLineEmpty(src: string, at: number): boolean {
   return src[i] === "\n";
 }
 
-// The next character past whitespace and comments, remembered per comment end for the source in
-// hand, so each comment in a long run is skipped once rather than once per comment before it.
-let nextMemo = { src: "", next: new Map<number, string>() };
-function nextCharacter(src: string, at: number): string {
-  if (nextMemo.src !== src) nextMemo = { src, next: new Map() };
+// The next character past whitespace and comments, remembered per comment end in `ctx`, so each
+// comment in a long run is skipped once rather than once per comment before it.
+function nextCharacter({ src, next }: Ctx, at: number): string {
   const path: number[] = [];
   let i = at;
   let found: string | undefined;
   for (;;) {
-    found = nextMemo.next.get(i);
+    found = next.get(i);
     if (found !== undefined) break;
     path.push(i);
     while (i < src.length && /\s/.test(src[i]!)) i++;
@@ -383,7 +383,7 @@ function nextCharacter(src: string, at: number): string {
       break;
     }
   }
-  for (const p of path) nextMemo.next.set(p, found);
+  for (const p of path) next.set(p, found);
   return found;
 }
 
@@ -426,7 +426,7 @@ function bodyOf(c: Context, owner: Node, key: string): Node | undefined {
 function handleIf(c: Context): boolean {
   const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src } = c;
   if (e?.kind !== "if" || !f) return false;
-  if (nextCharacter(src, comment.end) === ")") {
+  if (nextCharacter(c.ctx, comment.end) === ")") {
     if (p) c.add(p, comment, "trailing");
     else c.add(e, comment, "dangling");
     return true;
@@ -448,9 +448,9 @@ function handleIf(c: Context): boolean {
 }
 
 function handleWhile(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src } = c;
+  const { enclosingNode: e, precedingNode: p, followingNode: f, comment } = c;
   if (e?.kind !== "while" || !f) return false;
-  if (nextCharacter(src, comment.end) === ")") {
+  if (nextCharacter(c.ctx, comment.end) === ")") {
     if (p) c.add(p, comment, "trailing");
     else c.add(e, comment, "dangling");
     return true;
@@ -473,8 +473,8 @@ function handleArmBody(c: Context): boolean {
 
 // In a `match` with no arms, a comment dangles inside its braces.
 function handleEmptyMatch(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src } = c;
-  if (e?.kind === "match" && (e.arms as unknown[]).length === 0 && !f && p === e.subject && nextCharacter(src, comment.end) === "}") {
+  const { enclosingNode: e, precedingNode: p, followingNode: f, comment } = c;
+  if (e?.kind === "match" && (e.arms as unknown[]).length === 0 && !f && p === e.subject && nextCharacter(c.ctx, comment.end) === "}") {
     c.add(e, comment, "dangling");
     return true;
   }
@@ -482,8 +482,8 @@ function handleEmptyMatch(c: Context): boolean {
 }
 
 function handleEmptySwitch(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src } = c;
-  if (e?.kind === "switch" && (e.cases as unknown[]).length === 0 && !f && p === e.discriminant && nextCharacter(src, comment.end) === "}") {
+  const { enclosingNode: e, precedingNode: p, followingNode: f, comment } = c;
+  if (e?.kind === "switch" && (e.cases as unknown[]).length === 0 && !f && p === e.discriminant && nextCharacter(c.ctx, comment.end) === "}") {
     c.add(e, comment, "dangling");
     return true;
   }
@@ -557,9 +557,9 @@ function handleClass(c: Context): boolean {
 const isClassMember = (n: Node | undefined) => n !== undefined && isMember(n) && n.kind !== undefined;
 
 function handleMember(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src, placement } = c;
+  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, placement } = c;
   if (isClassMember(e) && !f && placement === "remaining") {
-    c.add(nextCharacter(src, comment.end) === "(" && p ? p : e!, comment, "trailing");
+    c.add(nextCharacter(c.ctx, comment.end) === "(" && p ? p : e!, comment, "trailing");
     return true;
   }
   if (isClassMember(e) && p && (e!.decorators as Node[]).includes(p) && (!isBlockComment(comment) || placement === "ownLine")) {
@@ -707,8 +707,8 @@ function handleConditional(c: Context): boolean {
 
 // A comment before a parameter list's `)` trails the last parameter.
 function handleLastParameter(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, comment, src } = c;
-  if (p && isFunctionLike(e) && (e!.params as unknown[]).includes(p) && nextCharacter(src, comment.end) === ")") {
+  const { enclosingNode: e, precedingNode: p, comment } = c;
+  if (p && isFunctionLike(e) && (e!.params as unknown[]).includes(p) && nextCharacter(c.ctx, comment.end) === ")") {
     c.add(p, comment, "trailing");
     return true;
   }
@@ -920,17 +920,17 @@ function handlePropertySignatureUnion(c: Context): boolean {
 
 // `f /* c */ (` in a function trails what comes before the `(`.
 function handleBeforeParams(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, comment, src } = c;
-  if (nextCharacter(src, comment.end) !== "(" || !p || !((e?.kind === "function" && "body" in e) || isClassMember(e) || (e?.kind === "method" && "body" in e))) return false;
+  const { enclosingNode: e, precedingNode: p, comment } = c;
+  if (nextCharacter(c.ctx, comment.end) !== "(" || !p || !((e?.kind === "function" && "body" in e) || isClassMember(e) || (e?.kind === "method" && "body" in e))) return false;
   c.add(p, comment, "trailing");
   return true;
 }
 
 // A comment before a bodiless signature's `;` trails the signature.
 function handleSignatureEnd(c: Context): boolean {
-  const { enclosingNode: e, precedingNode: p, followingNode: f, comment, src } = c;
+  const { enclosingNode: e, precedingNode: p, followingNode: f, comment } = c;
   const signature = (e?.kind === "method" && "returns" in e) || (e?.kind === "function" && "macro" in e && e.body === undefined) || (isClassMember(e) && e!.body === undefined);
-  if (f || !signature || (p && p === (e!.returns ?? e!.returnType)) || nextCharacter(src, comment.end) !== ";") return false;
+  if (f || !signature || (p && p === (e!.returns ?? e!.returnType)) || nextCharacter(c.ctx, comment.end) !== ";") return false;
   c.add(e!, comment, "trailing");
   return true;
 }

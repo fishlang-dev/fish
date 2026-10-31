@@ -2,8 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { newSession } from "../src/compilation.ts";
 import { buildAsync } from "../src/main.ts";
-import { compile, parsePattern, RegexSyntaxError } from "../src/regex.ts";
+import { compile, parsePattern, RegexSyntaxError, type RegexTables } from "../src/regex.ts";
+
+const session = newSession();
+const tables: RegexTables = { properties: new Map(), folds: new Map() };
 
 // The pattern parser accepts exactly what the engine running the compiler accepts, over
 // patterns put together from pieces that exercise the grammar's corners, with a fixed seed.
@@ -33,7 +37,7 @@ test("regex syntax is accepted and refused as JavaScript does", () => {
     }
     let fish = true;
     try {
-      parsePattern(p, f);
+      parsePattern(p, f, tables);
     } catch (e) {
       if (!(e instanceof RegexSyntaxError)) throw e;
       fish = false;
@@ -63,7 +67,7 @@ function corpus(count: number): { p: string; f: string; s: string }[] {
     const f = MATCH_FLAGS[random(MATCH_FLAGS.length)]!;
     try {
       new RegExp(p, f);
-      compile(parsePattern(p, f));
+      compile(parsePattern(p, f, tables), tables);
     } catch {
       continue;
     }
@@ -79,7 +83,7 @@ test("regex test agrees with JavaScript", async () => {
   const dir = mkdtempSync(join(tmpdir(), "fishc-regex-"));
   const file = join(dir, "corpus.fsh");
   writeFileSync(file, `function main() {\n${cases.map((c) => `  console.log(/${c.p}/${c.f}.test(${JSON.stringify(c.s)}));`).join("\n")}\n}\n`);
-  await buildAsync(file, join(dir, "corpus"), false, "unwind", []);
+  await buildAsync(session, file, join(dir, "corpus"), false, "unwind", []);
   const run = Bun.spawnSync([join(dir, "corpus")], { env: { ...process.env, FISH_LEAKS: "1" } });
   const got = run.stdout.toString().replace(/\n$/, "").split("\n");
   const wrong = cases.flatMap((c, i) => (String(new RegExp(c.p, c.f).test(c.s)) === got[i] ? [] : [`/${c.p}/${c.f}.test(${JSON.stringify(c.s)}) gave ${got[i]}`]));
@@ -92,11 +96,11 @@ test("regex exec agrees with JavaScript", async () => {
   const dir = mkdtempSync(join(tmpdir(), "fishc-regex-"));
   const file = join(dir, "exec.fsh");
   const lines = cases.map((c, i) => {
-    const parts = parsePattern(c.p, c.f).captures.map((g, k) => (g.optional ? `, m${i}[${k + 1}] ?? "-"` : `, m${i}[${k + 1}]`)).join("");
+    const parts = parsePattern(c.p, c.f, tables).captures.map((g, k) => (g.optional ? `, m${i}[${k + 1}] ?? "-"` : `, m${i}[${k + 1}]`)).join("");
     return `  const m${i} = /${c.p}/${c.f}.exec(${JSON.stringify(c.s)});\n  if (m${i} === null) console.log("null"); else console.log(m${i}.index, m${i}[0]${parts});`;
   });
   writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
-  await buildAsync(file, join(dir, "exec"), false, "unwind", []);
+  await buildAsync(session, file, join(dir, "exec"), false, "unwind", []);
   const run = Bun.spawnSync([join(dir, "exec")], { env: { ...process.env, FISH_LEAKS: "1" } });
   const got = run.stdout.toString().replace(/\n$/, "").split("\n");
   const wrong = cases.flatMap((c, i) => {
@@ -114,14 +118,14 @@ test("string methods taking a regex agree with JavaScript", async () => {
   const file = join(dir, "methods.fsh");
   const lines = cases.map((c, i) => {
     const s = JSON.stringify(c.s);
-    const optional = parsePattern(c.p, c.f).captures.some((g) => g.optional);
+    const optional = parsePattern(c.p, c.f, tables).captures.some((g) => g.optional);
     const split = optional ? `${s}.split(/${c.p}/${c.f}).map((x) => x ?? "-").join("|")` : `${s}.split(/${c.p}/${c.f}).join("|")`;
     const all = `(${s}.match(/${c.p}/g${c.f}) ?? ["none"]).join("|")`;
     return `  let each${i} = "";\n  for (const m of ${s}.matchAll(/${c.p}/g${c.f})) each${i} += m.index + ":" + m[0] + ";";\n` +
       `  console.log(${s}.search(/${c.p}/${c.f}), ${split}, ${all}, each${i}, ${s}.replace(/${c.p}/g${c.f}, "<$&|$1|$\`>"), ${s}.replace(/${c.p}/${c.f}, (m) => "[" + m + "]"));`;
   });
   writeFileSync(file, `function main() {\n${lines.join("\n")}\n}\n`);
-  await buildAsync(file, join(dir, "methods"), false, "unwind", []);
+  await buildAsync(session, file, join(dir, "methods"), false, "unwind", []);
   const run = Bun.spawnSync([join(dir, "methods")], { env: { ...process.env, FISH_LEAKS: "1" } });
   const got = run.stdout.toString().replace(/\n$/, "").split("\n");
   const wrong = cases.flatMap((c, i) => {

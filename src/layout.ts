@@ -1,32 +1,35 @@
 import type { Builder } from "./arithmetic.ts";
-import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
+import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import type { Tables } from "./compilation.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
 
 const PRIMITIVES: Record<Exclude<Type, object>, string> = {
-  i8: "i8", i16: "i16", i32: "i32", i64: "i64", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", usize: "i64",
-  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr",
+  i8: "i8", i16: "i16", i32: "i32", i64: "i64", i128: "i128", isize: "i64", u8: "i8", u16: "i16", u32: "i32", u64: "i64", u128: "i128", usize: "i64",
+  f32: "float", f64: "double", boolean: "i1", void: "void", null: "{}", never: "{}", string: "ptr", bigint: "ptr",
 };
 
 // An object is a literal struct of its fields, in their sorted order. An instance is a
 // literal struct of the base it embeds, if any, then its own fields in declaration order. A
 // union is its member's index, then enough 64-bit words for its largest member.
-export function llvm(t: Type): string {
-  if (typeof t === "string") return PRIMITIVES[t];
-  // A Rust type's handle is the pointer to its boxed value, the one field its class has.
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive" || rustClassOf(t)) return "ptr";
-  if (t.kind === "array") return ARRAY;
-  if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
-  if (t.kind === "dyn") return DYN;
-  if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
-  // Atomic instructions need whole bytes, so an atomic boolean is a byte.
-  if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
-  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
-  return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
+export function layoutOf({ lower }: Typing): (t: Type) => string {
+  return function llvm(t: Type): string {
+    if (typeof t === "string") return PRIMITIVES[t];
+    // A Rust type's handle is the pointer to its boxed value, the one field its class has.
+    if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive" || rustClassOf(t)) return "ptr";
+    if (t.kind === "array") return ARRAY;
+    if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
+    if (t.kind === "dyn") return DYN;
+    if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
+    // Atomic instructions need whole bytes, so an atomic boolean is a byte.
+    if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
+    const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
+    return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
+  };
 }
 
 function words(t: UnionType): number {
@@ -55,7 +58,7 @@ function size(t: Type): [number, number] {
   if (t === "f64") return [8, 8];
   if (t === "boolean") return [1, 1];
   if (t === "null" || t === "never") return [0, 1];
-  if (t === "string") return [8, 8];
+  if (t === "string" || t === "bigint") return [8, 8];
   if (typeof t === "string") return [0, 1];
   if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
@@ -72,14 +75,17 @@ function size(t: Type): [number, number] {
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
 // `deep` compares two values of one type holding objects, arrays or instances, part by part.
 // `inspect` gives the string `console.log` prints for a value laid out as Node lays one out.
-export type Slots = Builder & { alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
+// `typing` holds the program's types.
+export type Slots = Builder & { typing: Typing; alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
 
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(t.kind);
 
-export function conversions(b: Slots) {
-  const { emit, temp, label, startBlock, alloca, deep } = b;
-  return { convert, test, equals, unionField, holds, eachMember };
+export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
+  const { emit, temp, label, startBlock, alloca, deep, typing } = b;
+  const { membersFor } = typing;
+  const llvm = layoutOf(typing);
+  return { convert, test, equals, unionField, holds, holdsWhere, eachMember };
 
   // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with
   // x a union, to a check of x's tag, and of its payload when v isn't a literal. Undefined for
@@ -147,6 +153,11 @@ export function conversions(b: Slots) {
     if (base(aType) === base(bType) && compound(aType) && deep) return deep(a, b, aType);
     if (base(aType) !== base(bType) || typeof base(aType) !== "string") return "false";
     if (base(aType) === "null") return "true";
+    if (base(aType) === "bigint") {
+      const same = temp();
+      emit(`${same} = call i1 @fsh_rt_big_equal(ptr ${a}, ptr ${b})`);
+      return same;
+    }
     if (base(aType) === "string") {
       const order = temp();
       emit(`${order} = call i32 @fsh_rt_str_compare(ptr ${convert(a, aType, "string")}, ptr ${convert(b, bType, "string")})`);
@@ -281,7 +292,8 @@ export function conversions(b: Slots) {
     if (typeof from !== "string" && from.kind === "array" && typeof to !== "string" && to.kind === "array" && (from.element === "never" || (js(from.element) && js(to.element)))) return v;
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
-    if (typeof from !== "string" && from.kind === "ref") {
+    // A reference going into a `Ref<T> | null` is its pointer, as the payload.
+    if (typeof from !== "string" && from.kind === "ref" && !optionRef(to)) {
       if (typeof to !== "string" && to.kind === "ref") return lend(v, from.to, to.to);
       const loaded = temp();
       emit(`${loaded} = load ${llvm(from.to)}, ptr ${v}`);
@@ -354,7 +366,8 @@ export function conversions(b: Slots) {
     if (typeof member === "string" || member.kind !== "literal") {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(to)}, ptr ${slot}, i32 0, i32 1`);
-      emit(`store ${llvm(member)} ${value}, ptr ${at}`);
+      // The payload is i64 words, aligned to 8 however wide a member is.
+      emit(`store ${llvm(member)} ${value}, ptr ${at}, align 8`);
     }
     const result = temp();
     emit(`${result} = load ${llvm(to)}, ptr ${slot}`);
@@ -369,7 +382,7 @@ export function conversions(b: Slots) {
     const at = temp();
     emit(`${at} = getelementptr ${llvm(from)}, ptr ${slot}, i32 0, i32 1`);
     const result = temp();
-    emit(`${result} = load ${llvm(to)}, ptr ${at}`);
+    emit(`${result} = load ${llvm(to)}, ptr ${at}, align 8`);
     return result;
   }
 
