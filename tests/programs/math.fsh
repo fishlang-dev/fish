@@ -132,10 +132,42 @@ function main() {
   console.log(Math.max(n, f));
 }
 // case: math_random
-// error: 'Math.random' is not supported yet; it will come from the OS's secure random source
+// expect: true true true true
+// Values are in [0, 1), spread evenly: the mean of 10000 is within 0.02 of 0.5, and a tenth of
+// them land in each tenth of the range give or take a fifth.
 function main() {
-  console.log(Math.random());
+  let inRange = true;
+  let sum = 0.0;
+  let buckets: i64[] = new Array(10).fill(0);
+  for (let i = 0; i < 10000; i++) {
+    const x = Math.random();
+    if (x < 0 || x >= 1) inRange = false;
+    sum += x;
+    buckets[Math.floor(x * 10) as i64 as usize] += 1;
+  }
+  const mean = sum / 10000;
+  console.log(inRange, mean > 0.48 && mean < 0.52, buckets.every((b) => b > 800 && b < 1200), Math.random() !== Math.random());
 }
+// case: math_random_threads
+// expect: true
+// Tasks, which may run on other threads, draw values of their own.
+async function draw(): Promise<f64> { return Math.random(); }
+async function main() {
+  const a = spawn(draw());
+  const b = spawn(draw());
+  const x = await a;
+  const y = await b;
+  console.log(x !== y);
+}
+// case: math_random_args
+// error: 'Math.random' takes no arguments
+function main() {
+  console.log(Math.random(1));
+}
+// case: math_random_comptime
+// error: 'Math.random' can't run while compiling; its value would be fixed into the program
+function seed(): f64 { return Math.random(); }
+function main() { console.log(comptime seed()); }
 // case: math_unknown
 // error: 'Math' has no 'clz32' in Fish yet
 function main() {

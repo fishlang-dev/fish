@@ -2726,6 +2726,42 @@ export function availableParallelism(): i64 {
   return unsafe { fsh_rt_os_parallelism() };
 }
 `,
+  // Web Crypto's random functions, and Node's randomBytes, from the OS's secure random source. A
+  // u8[] stands in for Uint8Array and Buffer.
+  crypto: String.raw`
+declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
+
+// Fills the array in place and gives it back. Web Crypto fills at most 65536 bytes a call.
+export function getRandomValues(array: Mut<u8[]>): Mut<u8[]> {
+  const n = array.length;
+  assert(n <= 65536, "QuotaExceededError: getRandomValues fills at most 65536 bytes a call, not " + String(n) + "; fill a larger array in pieces");
+  if (n > 0) unsafe { fsh_rt_random_fill(mutPtrOf(array[0]), n) };
+  return array;
+}
+
+export function randomBytes(size: i64): u8[] {
+  assert(size >= 0, "randomBytes takes a size of 0 or more, not " + String(size));
+  let out: u8[] = new Array(size).fill(0 as u8);
+  if (size > 0) unsafe { fsh_rt_random_fill(mutPtrOf(out[0]), size as usize) };
+  return out;
+}
+
+// A version 4 UUID, RFC 9562's: 122 random bits, then the version and variant in lowercase hex.
+export function randomUUID(): string {
+  let b = randomBytes(16);
+  b[6] = (b[6] & 0x0F) | 0x40;
+  b[8] = (b[8] & 0x3F) | 0x80;
+  const digits = new TextEncoder().encode("0123456789abcdef");
+  let out: u8[] = [];
+  out.reserve(36);
+  for (let i: usize = 0; i < 16; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) out.push(45);
+    out.push(digits[(b[i] >> 4) as usize]);
+    out.push(digits[(b[i] & 15) as usize]);
+  }
+  return new TextDecoder().decode(out);
+}
+`,
   // The checker gives these their meaning, as each takes values of any type; a rest parameter
   // keeps them from being used as values.
   util: String.raw`

@@ -3,7 +3,7 @@ import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
+import { clocks, equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, lower, range, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
@@ -38,6 +38,9 @@ const LONGEST = 1 << 28;
 
 // What an optional link meeting an empty Option makes of the rest of its chain.
 const SHORT = { kind: "short" } as const;
+
+// std's crypto functions, which comptime refuses as it refuses Math.random.
+const RANDOM = new Set(["getRandomValues", "randomBytes", "randomUUID"]);
 
 // A panic, or a refusal, while compiling: where it happened, and what it says.
 class Stop {
@@ -266,6 +269,11 @@ function interpreter() {
     throw new Stop(`${what} can't run while compiling: comptime code only computes values`, at, false);
   }
 
+  // A source of randomness, whose one value comptime would bake into every run.
+  function random(what: string, at: Span): never {
+    throw new Stop(`${what} can't run while compiling; its value would be fixed into the program`, at, false);
+  }
+
   // Pure code the interpreter doesn't run yet.
   function unsupported(what: string, at: Span): never {
     throw new Stop(`${what} isn't supported in comptime code yet`, at, false);
@@ -291,6 +299,7 @@ function interpreter() {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
+      if (RANDOM.has(callee.body.name) && fileAt(callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
@@ -645,6 +654,7 @@ function interpreter() {
   function callExpr(f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
     const callee = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") refuse("printing", e);
+    if (clocks.get(e) === "Math.random") random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
     if (type !== undefined && typeof type !== "string" && type.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
       return { kind: "variant", type, args: e.args.map((a) => expr(f, a)) };

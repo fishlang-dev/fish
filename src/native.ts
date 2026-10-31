@@ -2278,6 +2278,36 @@ int64_t fsh_rt_date_now(void) {
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+// Fills count bytes from the OS's secure random source: arc4random_buf on macOS, which can't fail,
+// and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
+void fsh_rt_random_fill(uint8_t *at, int64_t count) {
+#ifdef __APPLE__
+  arc4random_buf(at, (size_t)count);
+#else
+  while (count > 0) {
+    ssize_t got = getrandom(at, (size_t)count, 0);
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      fsh_rt_panic("the OS's secure random source failed\n");
+    }
+    at += got;
+    count -= got;
+  }
+#endif
+}
+
+// Math.random(): 53 random bits as a double in [0, 1), from words each thread reads in bulk.
+static _Thread_local uint64_t fsh_random_words[64];
+static _Thread_local int32_t fsh_random_left = 0;
+
+double fsh_rt_math_random(void) {
+  if (fsh_random_left == 0) {
+    fsh_rt_random_fill((uint8_t *)fsh_random_words, sizeof fsh_random_words);
+    fsh_random_left = 64;
+  }
+  return (double)(fsh_random_words[--fsh_random_left] >> 11) * 0x1.0p-53;
+}
+
 // performance.now(): milliseconds, with fractions, since the program started, from a clock that
 // only goes forward.
 static struct timespec fsh_started;
