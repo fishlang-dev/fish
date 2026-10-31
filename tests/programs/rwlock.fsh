@@ -158,11 +158,12 @@ type Pair = { a: i64; b: i64 };
 type S = { rw: RwLock<Pair>; done: Atomic<boolean>; reads: Atomic<i64>; torn: Atomic<i64> };
 async function reader(s: shared<S>): Promise<void> {
   await yieldNow();
-  // Bounded, so a writer starved by overlapping reads shows as a wrong line, not a hang.
-  while (!s.done.load() && s.reads.load() < 2000000) {
+  // Reads long enough that two readers always overlap, so the count never reaches 0 on its own;
+  // bounded, so a starved writer shows as a wrong line, not a hang.
+  while (!s.done.load() && s.reads.load() < 200000) {
     const same = s.rw.read((p) => {
       let k = 0;
-      for (let i = 0; i < 200; i++) k = k + 1;
+      for (let i = 0; i < 20000; i++) k = k + 1;
       return p.a === p.b;
     });
     if (!same) s.torn.add(1);
@@ -190,5 +191,5 @@ async function main() {
     const h = hs.pop()!;
     await h;
   }
-  console.log(s.rw.read((p) => p.a + p.b), s.torn.load(), s.reads.load() < 2000000);
+  console.log(s.rw.read((p) => p.a + p.b), s.torn.load(), s.reads.load() < 200000);
 }
