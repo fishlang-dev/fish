@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, staticTarget } from "../src/target.ts";
+import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, runsOnMusl, staticTarget } from "../src/target.ts";
 
 const mac = "aarch64-apple-darwin";
 const linux = "x86_64-unknown-linux-gnu";
@@ -15,6 +15,12 @@ test("the host's triple", () => {
   expect(hostTriple("linux", "arm64", true)).toBe("aarch64-unknown-linux-musl");
   expect(hostTriple("win32", "x64")).toBeUndefined();
   expect(hostTriple("linux", "ia32")).toBeUndefined();
+});
+
+test("the host's libc is the running process's, whatever is on disk", () => {
+  expect(runsOnMusl({ glibcVersionRuntime: "2.41" })).toBe(false);
+  expect(runsOnMusl({})).toBe(true);
+  if (process.platform === "linux") expect(hostTriple()!.endsWith("-musl")).toBe(runsOnMusl());
 });
 
 test("no target, or the host's, builds as before", () => {

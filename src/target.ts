@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
@@ -17,12 +16,18 @@ const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux"
 const musl = (triple: string) => triple.endsWith("-musl");
 
 // The triple of the machine running fishc, if it is one of the targets.
-// A Linux host is musl's when musl's dynamic loader is where Alpine and other musl systems put it.
+// Whether the running process has musl as its libc. The process is asked rather than the disk: a
+// glibc system can have musl's loader installed beside its own. Node's report names the glibc
+// version a process runs on, and has none under musl.
+export function runsOnMusl(header: { glibcVersionRuntime?: string } = (process.report.getReport() as { header: { glibcVersionRuntime?: string } }).header): boolean {
+  return header.glibcVersionRuntime === undefined;
+}
+
 export function hostTriple(platform: string = process.platform, arch: string = process.arch, onMusl?: boolean): string | undefined {
   const cpu = arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : undefined;
   if (!cpu) return undefined;
   if (platform === "darwin") return `${cpu}-apple-darwin`;
-  if (platform === "linux") return `${cpu}-unknown-linux-${onMusl ?? existsSync(`/lib/ld-musl-${cpu}.so.1`) ? "musl" : "gnu"}`;
+  if (platform === "linux") return `${cpu}-unknown-linux-${onMusl ?? runsOnMusl() ? "musl" : "gnu"}`;
   return undefined;
 }
 
