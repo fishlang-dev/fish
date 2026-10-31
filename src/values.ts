@@ -4524,7 +4524,7 @@ export function expressions(ctx: Context) {
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [operand(e.left), operand(e.right)];
-          if (stringLike(left) || stringLike(right)) return join(e.left, left, e.right, right);
+          if (stringLike(left) || stringLike(right) || enumText(left) || enumText(right)) return join(e.left, left, e.right, right);
         }
         return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
@@ -4776,7 +4776,7 @@ export function expressions(ctx: Context) {
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
   function joined(e: Expr, type: Type, into: string) {
-    if (stringLike(type)) {
+    if (stringLike(type) || enumText(type)) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
@@ -5715,6 +5715,9 @@ export function expressions(ctx: Context) {
 
 // A string, or a string literal that isn't an enum's member.
 const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind === "pattern" || (t.kind === "literal" && typeof t.value === "string" && !t.owner)));
+
+// A string enum's member, or a union of them, which joins into a string as its value.
+const enumText = (t: Type): boolean => typeof t !== "string" && (t.kind === "union" ? t.members.every(enumText) : t.kind === "literal" && typeof t.value === "string" && t.owner !== undefined);
 
 // What a string's length, index and methods work on: text, or a union of string literals.
 export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));

@@ -2,7 +2,7 @@ import { checkOverrides, declareClass, extend, isLifetime, type Body, type Class
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
-import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
+import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 
@@ -415,9 +415,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // For each class declaring lifetimes, which of its type parameters are lifetimes.
   const slots = new Map<string, boolean[]>();
   for (const s of program) {
-    if (s.kind === "enum") {
-      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
-      enums.set(s.name, declareEnum(s));
+    // A `declare const enum` writes its values, so it is an enum like any other.
+    const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
+    if (e.kind === "enum") {
+      typeName(e.name, e, aliases, classes, templates, interfaces, enums);
+      enums.set(e.name, declareEnum(e, (owner, member, init) => enumMemberValue(owner, member, init)));
       continue;
     }
     if (s.kind === "typeAlias") {
@@ -602,6 +604,15 @@ export function check(written: Stmt[], library = false, macros = false, module =
   }
   const querying = new Set<string>();
 
+  // A computed enum member's value: its initializer, run while compiling as a top-level const is.
+  function enumMemberValue(owner: string, member: string, init: Expr): Value {
+    const giving: Stmt = { kind: "return", value: init, start: init.start, end: init.end };
+    const f: Func = Object.assign({ kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const });
+    const instance = definition(f);
+    checkBody(instance);
+    return untagged(comptimeBody(instance));
+  }
+
   // Whether a type written at `at` sits inside a body.
   function writtenIn(f: Body, at: Span): boolean {
     return at.start >= f.start && at.end <= f.end;
@@ -690,6 +701,9 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
+  // An enum with computed members is settled when first read; one nothing reads still reports
+  // a bad initializer.
+  for (const e of enums.values()) void e.members;
   funcs.forEach((f) => {
     try {
       checkBody(definition(f));
