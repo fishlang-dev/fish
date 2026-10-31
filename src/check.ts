@@ -440,6 +440,12 @@ export function check(written: Stmt[], library = false, macros = false, module =
       // A Rust type declaring no constructor is never made with `new`, so its handle needs no
       // assigning in the empty one it is given.
       if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
+      // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
+      const declared = classes.get(s.name);
+      for (const f of declared?.staticFields.values() ?? []) {
+        const giving: Stmt = { kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
+        funcs.push(Object.assign({ kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
+      }
       continue;
     }
     // `declare function f(...): T;` names a C function, called inside `unsafe`.

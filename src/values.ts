@@ -1,6 +1,6 @@
 import { fileAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
+import { inherited, isLifetime, upcasts, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
@@ -627,6 +627,7 @@ export function expressions(ctx: Context) {
   // Only a statement may call a function that returns nothing.
   function effect(e: Expr) {
     if (e.kind === "tagged" && !isQuote(e)) untag(e);
+    if (e.kind === "assign" || e.kind === "update") staticWrite(e);
     if (e.kind === "call") {
       const { type } = call(e);
       // A parse read only to check the text still makes its value, which is then dropped.
@@ -3734,6 +3735,72 @@ export function expressions(ctx: Context) {
     }
   }
 
+  // A class's static property, `C.x`: a `static readonly` field, the const `C.x`, or a static
+  // accessor, the static methods `get x` and `set x`. Reads and writes of one are rewritten in
+  // place into a read of that const or a call of those methods, forms the rest of the compiler knows.
+  type Static = { field?: FieldDecl; declaring: ClassInfo; getter?: Body; setter?: Body };
+  // The nearest class declaring `x` decides what it is, as in TypeScript: a class declaring only
+  // a setter hides its base's getter.
+  function staticProperty(e: Expr): Static | undefined {
+    if (e.kind !== "member" || e.optional || e.object.kind !== "ident" || lookup(e.object.name)) return undefined;
+    const c = classes.get(e.object.name);
+    return c && staticOf(c, e.name);
+  }
+
+  function staticOf(c: ClassInfo, name: string): Static | undefined {
+    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+      const field = b.staticFields.get(name);
+      if (field) return { field, declaring: b };
+      const getter = b.statics.get(`get ${name}`);
+      const setter = b.statics.get(`set ${name}`);
+      if (getter || setter) return { getter, setter, declaring: b };
+    }
+    return undefined;
+  }
+
+  function become(e: Expr, to: Expr) {
+    const at = { start: e.start, end: e.end };
+    for (const k of Object.keys(e)) delete (e as Record<string, unknown>)[k];
+    Object.assign(e, to, at);
+  }
+
+  function staticRead(e: Extract<Expr, { kind: "member" }>, found: Static): Expr {
+    const at = { start: e.start, end: e.end };
+    if (found.field) {
+      visible(found.field.access, found.declaring!.type, e.name, e);
+      return { kind: "ident", name: `${found.declaring!.type.name}.${e.name}`, ...at };
+    }
+    if (!found.getter) {
+      const hidden = found.declaring.base && staticOf(found.declaring.base, e.name)?.getter;
+      throw new CompileError(hidden ? `'${found.declaring.type.name}' declares only a setter for '${e.name}', which hides the getter of its base; declare a getter in '${found.declaring.type.name}' too` : `property '${e.name}' has a setter but no getter`, e.start, e.end);
+    }
+    visible(found.getter.access, found.declaring.type, e.name, e);
+    return staticCall(e, "get", []);
+  }
+
+  function staticCall(e: Extract<Expr, { kind: "member" }>, kind: "get" | "set", args: Expr[]): Expr {
+    const at = { start: e.start, end: e.end };
+    return { kind: "call", callee: { kind: "member", object: e.object, name: `${kind} ${e.name}`, optional: false, ...at }, typeArgs: [], args, optional: false, ...at };
+  }
+
+  // `C.x = v`, `C.x += v` and `C.x++` on a static setter call it with the value to store. Whether
+  // the write was rewritten.
+  function staticWrite(e: Extract<Expr, { kind: "assign" | "update" }>): boolean {
+    const target = e.kind === "assign" ? e.target : e.operand;
+    const found = staticProperty(target);
+    if (!found) return false;
+    const member = target as Extract<Expr, { kind: "member" }>;
+    if (!found.setter) throw new CompileError(`cannot assign to '${member.name}' because it is a read-only property`, member.start, member.end);
+    visible(found.setter.access, found.declaring.type, member.name, member);
+    const op = e.kind === "update" ? (e.op === "++" ? "+" : "-") : ASSIGNMENTS[e.op];
+    if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
+    const at = { start: e.start, end: e.end };
+    const right: Expr = e.kind === "update" ? { kind: "int", value: 1n, ...at } : e.value;
+    const given: Expr = op === "=" ? right : { kind: "binary", op, left: staticRead(member, found), right, ...at };
+    become(e, staticCall(member, "set", [given]));
+    return true;
+  }
+
   // The method a member call names: a static one on a class name, or an instance one, whose
   // receiver must be able to change when the method changes it.
   function method(callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
@@ -3741,6 +3808,8 @@ export function expressions(ctx: Context) {
     const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
     if (named) {
       const found = inherited(named, "statics", name);
+      const property = found ? undefined : staticOf(named, name);
+      if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${property.declaring.type.name}', not a method; read it as '${named.type.name}.${name}'`, callee.start, callee.end);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
       visible(found.access, found.owner!, name, callee);
       return found;
@@ -3951,6 +4020,11 @@ export function expressions(ctx: Context) {
           if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError(`'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
           maths.add(e);
           return "f64";
+        }
+        const property = staticProperty(e);
+        if (property) {
+          become(e, staticRead(e, property));
+          return typeOf(e);
         }
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !lookup(e.object.name) ? enums.get(e.object.name) : undefined;
@@ -4250,6 +4324,7 @@ export function expressions(ctx: Context) {
         return type;
       }
       case "assign": {
+        if (staticWrite(e)) throw new CompileError("a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
@@ -4275,6 +4350,7 @@ export function expressions(ctx: Context) {
         return target;
       }
       case "update": {
+        if (staticWrite(e)) throw new CompileError("a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const target = assignable(e.operand, true);
         if (!isNumeric(target)) throw new CompileError(`operator '${e.op}' cannot be applied to type '${show(target)}'`, e.start, e.end);
         return target;
