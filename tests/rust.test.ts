@@ -122,12 +122,12 @@ test("Rust declarations and imports are refused where they go wrong", () => {
     "src/rust.fsh": `declare module "rust:demo" {\n  export function s(x: Map<string, i64>): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n}\n`,
   });
-  expect(refused(unsupported)).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
+  expect(refused(unsupported)).toBe("rust.fsh:2:21: error[E1004]: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
   const returned = pkg({
     "src/rust.fsh": `declare module "rust:demo" {\n  export function s(): [i64, i64];\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {\n  s();\n}\n`,
   });
-  expect(refused(returned)).toBe("rust.fsh:2:24: error: the Rust function 's' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
+  expect(refused(returned)).toBe("rust.fsh:2:24: error[E1004]: the Rust function 's' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
   const path = pkg({
     "src/rust.fsh": `const name = "x";\ndeclare module "rust:demo" {\n  @rust(name) export function s(): i64;\n}\n`,
     "src/main.fsh": `import { s } from "rust:demo";\nfunction main() {}\n`,
@@ -271,7 +271,7 @@ test("declarations naming one Rust function share its shim function, and must ag
     "src/rust.fsh": `declare module "rust:demo" {\n  export function add(a: i64, b: i64): i64;\n  @rust("add") export function plus(a: i32, b: i32): i32;\n}\n`,
     "src/main.fsh": `import { add, plus } from "rust:demo";\n\nfunction main() {\n  console.log(add(1, 2), plus(3, 4));\n}\n`,
   });
-  expect(refused(differing)).toBe("rust.fsh:3:3: error: 'demo::add' is declared elsewhere as (i64, i64): i64; declare it with the same types");
+  expect(refused(differing)).toBe("rust.fsh:3:3: error[E1004]: 'demo::add' is declared elsewhere as (i64, i64): i64; declare it with the same types");
   // Each part of a path is told apart from the next, and two crates Rust reads as one are refused.
   expect(rustSymbol("a", "b__c")).not.toBe(rustSymbol("a__b", "c"));
   expect(refused(pkg({ "src/main.fsh": "function main() {}\n" }, `a-b = "1"\na_b = "1"`))).toContain("'a_b' and 'a-b' are the same crate in Rust");
@@ -383,7 +383,7 @@ test("a Rust type's constructor, statics and methods of each receiver are calls 
 });
 
 test("Rust handles move and borrow as Fish values do, and cross threads", () => {
-  expect(refused(handles(`function main() {\n  const c = new Counter(1);\n  consume(c);\n  console.log(c.get());\n}\n`))).toBe("src/main.fsh:5:15: error: 'c' was moved, so it can't be used here");
+  expect(refused(handles(`function main() {\n  const c = new Counter(1);\n  consume(c);\n  console.log(c.get());\n}\n`))).toBe("src/main.fsh:5:15: error[E0201]: 'c' was moved, so it can't be used here");
   expect(refused(handles(`function look(c: Ref<Counter>) {\n  c.add(1);\n}\nfunction main() {}\n`))).toBe("src/main.fsh:3:3: error: cannot call 'add' on 'c' because it is a shared reference ('Ref'), which only reads");
   const sent = handles(`async function run(c: Counter): Promise<i64> {\n  return c.get();\n}\nasync function main() {\n  const n = await spawn(run(new Counter(1)));\n  console.log(n);\n}\n`);
   const file = join(sent, "src", "main.fsh");
@@ -409,9 +409,9 @@ test("what a Rust handle can't do is refused where it is written", () => {
   expect(declared(`  @rust.local export class A {}`)).toBe("rust.fsh:2:4: error[E1004]: Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send");
   expect(declared(`  export class A {\n    @rust("a::b") get(): i64;\n  }`)).toBe(`rust.fsh:3:11: error[E1004]: a member's Rust name is one name, as in "with_value"`);
   const lent = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    peek(): Ref<A>;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
-  expect(refused(lent)).toBe("rust.fsh:4:13: error: the Rust function 'A.peek' can't give a 'Ref<A>': a borrow's lifetime can't cross from Rust yet; give the value itself");
+  expect(refused(lent)).toBe("rust.fsh:4:13: error[E1004]: the Rust function 'A.peek' can't give a 'Ref<A>': a borrow's lifetime can't cross from Rust yet; give the value itself");
   const text = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: i64 | string): i64;\n  }\n}\n`, "src/main.fsh": `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n` });
-  expect(refused(text)).toBe("rust.fsh:4:11: error: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
+  expect(refused(text)).toBe("rust.fsh:4:11: error[E1004]: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
 });
 
 test("a Rust type lives in Fish: made, called, lent, moved, cloned and dropped once", () => {
@@ -560,7 +560,7 @@ test("no class extends a Rust type", () => {
 
 test("a static and a method naming one Rust function are refused, and so is a Dyn of a Rust type", () => {
   const twice = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n    @rust("zero") again(): Counter;\n    static zero(): Counter;\n  }\n}\n`, "src/main.fsh": `import { Counter } from "rust:demo";\nfunction main() {}\n` });
-  expect(refused(twice)).toBe("rust.fsh:5:5: error: 'demo::Counter::zero' is declared elsewhere as (&self): Counter; declare it with the same types");
+  expect(refused(twice)).toBe("rust.fsh:5:5: error[E1004]: 'demo::Counter::zero' is declared elsewhere as (&self): Counter; declare it with the same types");
   expect(refused(handles(`interface Getter {\n  get(): i64;\n}\nfunction main() {\n  const d: Dyn<Getter> = new Counter(4);\n}\n`)))
     .toBe("src/main.fsh:6:26: error: a Rust 'Counter' can't become a 'Dyn<Getter>' yet; call its methods on it, or take it as a generic parameter");
 });
@@ -723,11 +723,11 @@ function main() {
 
 test("what can't cross the Rust boundary yet is refused at its type", () => {
   const declared = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  ${body}\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` }));
-  expect(declared("export function f(m: Map<string, i64>): i64;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
-  expect(declared("export function f(): [i64, i64];")).toBe("rust.fsh:2:24: error: the Rust function 'f' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
-  expect(declared("export function f(x: i64 | string): i64;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
-  expect(declared("export function f(): Ref<i64[]>;")).toBe("rust.fsh:2:24: error: the Rust function 'f' can't give a 'Ref<i64[]>': a borrow's lifetime can't cross from Rust yet; give the value itself");
-  expect(declared("export function f(x: Mut<i64[]>): void;")).toBe("rust.fsh:2:21: error: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
+  expect(declared("export function f(m: Map<string, i64>): i64;")).toBe("rust.fsh:2:21: error[E1004]: a Rust function can't take a 'Map<string, i64>': maps can't cross the Rust boundary yet");
+  expect(declared("export function f(): [i64, i64];")).toBe("rust.fsh:2:24: error[E1004]: the Rust function 'f' can't give a '[i64, i64]': tuples can't cross the Rust boundary yet");
+  expect(declared("export function f(x: i64 | string): i64;")).toBe("rust.fsh:2:21: error[E1004]: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported");
+  expect(declared("export function f(): Ref<i64[]>;")).toBe("rust.fsh:2:24: error[E1004]: the Rust function 'f' can't give a 'Ref<i64[]>': a borrow's lifetime can't cross from Rust yet; give the value itself");
+  expect(declared("export function f(x: Mut<i64[]>): void;")).toBe("rust.fsh:2:21: error[E1004]: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
 });
 
 const FALLIBLE = `declare module "rust:demo" {
@@ -806,11 +806,11 @@ function main() {
 
 test("a fallible Rust call needs a throws clause or a catch, and throws only Error or a Rust type", () => {
   expect(refused(pkg({ "src/rust.fsh": FALLIBLE, "src/main.fsh": `import { parse } from "rust:demo";\nfunction main() {\n  console.log(parse("1"));\n}\n` })))
-    .toBe("src/main.fsh:3:15: error: 'main' must declare 'throws Error' after its return type since 'parse' can throw 'Error', or catch it with try/catch");
+    .toBe("src/main.fsh:3:15: error[E0602]: 'main' must declare 'throws Error' after its return type since 'parse' can throw 'Error', or catch it with try/catch");
   expect(refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export function f(): i64 throws string;\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` })))
-    .toBe("rust.fsh:2:35: error: the Rust function 'f' throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a 'string'");
+    .toBe("rust.fsh:2:35: error[E1004]: the Rust function 'f' throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a 'string'");
   expect(refused(pkg({ "src/main.fsh": `class A {\n  n: i64 = 0;\n  constructor() throws Error {\n    throw new Error("no");\n  }\n}\nfunction main() {}\n` })))
-    .toBe("src/main.fsh:4:5: error: a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields");
+    .toBe("src/main.fsh:4:5: error[E0602]: a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields");
 });
 
 const VECTORS = `declare module "rust:demo" {
@@ -861,10 +861,10 @@ function main() {
 
 test("a slice of Rust values, an array of arrays and a mutable slice are refused at their types", () => {
   const declared = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n  }\n  ${body}\n}\n`, "src/main.fsh": `import { f } from "rust:demo";\nfunction main() {}\n` }));
-  expect(declared("export function f(xs: Ref<Counter[]>): i64;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'Ref<Counter[]>': a slice of Rust values can't be lent, since Fish holds each in its own box; pass the array, which moves them");
-  expect(declared("export function f(xs: i64[][]): i64;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'i64[][]': arrays of arrays can't cross the Rust boundary yet");
-  expect(declared("export function f(): string[][];")).toBe("rust.fsh:5:24: error: the Rust function 'f' can't give a 'string[][]': arrays of arrays can't cross the Rust boundary yet");
-  expect(declared("export function f(xs: Mut<i64[]>): void;")).toBe("rust.fsh:5:21: error: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
+  expect(declared("export function f(xs: Ref<Counter[]>): i64;")).toBe("rust.fsh:5:21: error[E1004]: a Rust function can't take a 'Ref<Counter[]>': a slice of Rust values can't be lent, since Fish holds each in its own box; pass the array, which moves them");
+  expect(declared("export function f(xs: i64[][]): i64;")).toBe("rust.fsh:5:21: error[E1004]: a Rust function can't take a 'i64[][]': arrays of arrays can't cross the Rust boundary yet");
+  expect(declared("export function f(): string[][];")).toBe("rust.fsh:5:24: error[E1004]: the Rust function 'f' can't give a 'string[][]': arrays of arrays can't cross the Rust boundary yet");
+  expect(declared("export function f(xs: Mut<i64[]>): void;")).toBe("rust.fsh:5:21: error[E1004]: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it");
 });
 
 const EDGES = `declare module "rust:demo" {
@@ -927,9 +927,9 @@ test("a returned array whose Rust elements aren't the declared ones is cargo's t
 test("declarations of one Rust function agree on what they throw, and a static and a constructor that agree share it", () => {
   const twice = (body: string) => refused(pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Oops {\n    code(): i64;\n  }\n${body}}\n`, "src/main.fsh": `import { a, b } from "rust:demo";\nfunction main() {}\n` }));
   expect(twice(`  @rust("fallible::check") export function a(n: i64): i64 throws Oops;\n  @rust("fallible::check") export function b(n: i64): i64;\n`))
-    .toBe("rust.fsh:6:3: error: 'demo::fallible::check' is declared elsewhere as (i64): i64 throws Oops; declare it with the same types");
+    .toBe("rust.fsh:6:3: error[E1004]: 'demo::fallible::check' is declared elsewhere as (i64): i64 throws Oops; declare it with the same types");
   expect(twice(`  @rust("fallible::parse") export function a(s: string): i64 throws Error;\n  @rust("fallible::parse") export function b(s: string): i64 throws Oops;\n`))
-    .toBe("rust.fsh:6:3: error: 'demo::fallible::parse' is declared elsewhere as (string): i64 throws Error; declare it with the same types");
+    .toBe("rust.fsh:6:3: error[E1004]: 'demo::fallible::parse' is declared elsewhere as (string): i64 throws Error; declare it with the same types");
   const dir = pkg({
     "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n    @rust("new") static make(start: i64): Counter;\n    get(): i64;\n  }\n}\n`,
     "src/main.fsh": `import { Counter } from "rust:demo";\nfunction main() {\n  console.log(new Counter(2).get(), Counter.make(3).get());\n}\n`,

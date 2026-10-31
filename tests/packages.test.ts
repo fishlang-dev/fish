@@ -330,7 +330,7 @@ test("a result no member of its declared union takes panics", () => {
 });
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
-  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a JS value isn't supported yet");
+  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error[E1005]: turning a Fish value into a JS value isn't supported yet");
   expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error[E1101]: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
 });
 
@@ -374,7 +374,7 @@ function main() {
 });
 
 test("a Fish type holding itself has no JS form yet", () => {
-  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("node_modules/esm/index.d.ts:26:34: error: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet");
+  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("node_modules/esm/index.d.ts:26:34: error[E1005]: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet");
 });
 
 test("a package's promises are awaited, a rejection thrown as a JsError, and a later settling wakes its task", () => {
@@ -405,7 +405,7 @@ async function main(): Promise<void> throws JsError {
 });
 
 test("awaiting a package's promise is a throw to catch or declare", () => {
-  expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error: 'main' must declare 'throws JsError'");
+  expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error[E0602]: 'main' must declare 'throws JsError'");
 });
 
 test("Fish callbacks are called by JS during a call and kept for later, and freed when JS drops them", () => {

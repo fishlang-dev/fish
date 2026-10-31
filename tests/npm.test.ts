@@ -70,7 +70,7 @@ test("a declaration Fish can't type is refused where it is declared, noting the 
     "node_modules/case/index.d.ts": "export declare function counts(m: Map<string, number>): void;\n",
     "main.fsh": "import { counts } from \"case\";\nfunction main() { counts(new Map<string, f64>()); }\n",
   });
-  expect(out).toContain("node_modules/case/index.d.ts:1:35: error: 'counts' from 'case' takes a 'Map<string, number>', which can't cross between Fish and JS yet: Fish has no JS form for it");
+  expect(out).toContain("node_modules/case/index.d.ts:1:35: error[E1005]: 'counts' from 'case' takes a 'Map<string, number>', which can't cross between Fish and JS yet: Fish has no JS form for it");
   expect(out).toContain("main.fsh:2:19: note: 'counts' is called here");
 });
 
@@ -134,7 +134,7 @@ export declare function f(s: string): string;
 export declare function format(d: number): string;
 export declare function format(d: string): string;
 `;
-const first = (out: string) => out.split("\n")[0]!.replace(/^.*error: /, "");
+const first = (out: string) => out.split("\n")[0]!.replace(/^.*error(\[\w+\])?: /, "");
 
 test("a Fish value made a JsValue stops the program, and an import not called builds", () => {
   expect(first(stops({ "node_modules/p/index.d.ts": P, "main.fsh": "function main() { const o: JsValue = 5; }\n" }))).toStartWith("turning a Fish value into a JS value isn't supported yet");

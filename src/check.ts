@@ -372,13 +372,13 @@ const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index"
 // A macro takes the declaration it is applied to, and no type parameters.
 function macroShape(f: Func) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
-  if (f.typeParams.length > 0) throw new CompileError(`a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
-  if (f.params.length === 0 || f.params.some((p) => p.rest)) throw new CompileError(`a macro takes the declaration it is applied to, then any arguments, ${shape}`, f.start, f.end);
+  if (f.typeParams.length > 0) throw new CompileError("E1103", `a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
+  if (f.params.length === 0 || f.params.some((p) => p.rest)) throw new CompileError("E1103", `a macro takes the declaration it is applied to, then any arguments, ${shape}`, f.start, f.end);
   const t = f.params[0]!.type;
   if (t?.kind !== "ref" || (t.name !== "Ast" && t.name !== "AstStmt") || t.args.length > 0) {
-    throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", f.params[0]!.start, f.params[0]!.end);
+    throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", f.params[0]!.start, f.params[0]!.end);
   }
-  if (!f.returnType) throw new CompileError(`a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
+  if (!f.returnType) throw new CompileError("E1103", `a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
 }
 
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
@@ -409,10 +409,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
-    if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
+    if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
     // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
     const member = n as { kind?: string; decorators?: Expr[]; modifiers?: unknown };
-    if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
+    if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
   written = lowerOverloads(ids, written);
@@ -496,8 +496,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (s.kind === "let" && s.keyword === "const") {
       for (const d of s.declarations) {
         if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
-        if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError(`'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
-        if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
+        if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError("E0407", `'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
+        if (!d.init) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
         // A generic arrow is a family of functions, so it is declared as a generic function is.
         if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
           funcs.push(arrowFunction(ids, d.target.name, d.init, d));
@@ -512,9 +512,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       funcs.push(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
       continue;
     }
-    if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
+    if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
     // Top-level code with side effects belongs in main(); the migration lint moves it there.
-    if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
+    if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
     const rust = rustNames.get(s);
     if (rust) {
       funcs.push(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust }));
@@ -526,7 +526,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       funcs.push(body);
       continue;
     }
-    if (!hasBody(s)) throw new CompileError(`'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
+    if (!hasBody(s)) throw new CompileError("E0410", `'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
     if (s.macro) macroShape(s);
     funcs.push(s);
   }
@@ -536,13 +536,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
     if (!tag && f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
       const strings = f.params[0]!;
-      throw new CompileError(`'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
+      throw new CompileError("E1107", `'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
     } else if (!tag && f.params[0]?.comptime && f.params.at(-1)?.rest) {
       const rest = f.params.at(-1)!;
-      throw new CompileError("a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
+      throw new CompileError("E1102", "a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
     }
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
-    if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
+    if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError("E0402", `'${named}' is already defined`, f.start, f.end);
     byName.set(f.name, f);
   }
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
@@ -556,7 +556,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   };
   const reached = (names: Iterable<string>, at: number) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
   const main = byName.get("main");
-  if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
+  if (!main && !library && !macros && !module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
 
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
   // which need each other, it reaches what is set up below lazily.
@@ -619,12 +619,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
   function valueTypeOf(name: string, at: Span, shadowed: boolean): Type {
-    if (shadowed) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
-    if (classes.has(name)) throw new CompileError(`'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
+    if (shadowed) throw new CompileError("E0801", `'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
+    if (classes.has(name)) throw new CompileError("E0801", `'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
     const constant = byName.get(`const ${name}`);
     const f = constant ?? byName.get(name);
-    if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
-    if (querying.has(name)) throw new CompileError(`'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
+    if (!f) throw new CompileError("E0114", `'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
+    if (querying.has(name)) throw new CompileError("E0113", `'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
     querying.add(name);
     try {
       if (!constant) return functionTypeOf(f, at);
@@ -654,7 +654,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
   function unlaid(name: string, at: Span) {
     const [mid] = laying;
-    if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
+    if (mid) throw new CompileError("E0114", `'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
   }
 
   // A function's type for `typeof`: a parameter typed with an object type, an interface or a
@@ -662,7 +662,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function functionTypeOf(f: Func, at: Span): Type {
     const explicit = f.typeParams.filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
     if (explicit.length > 0 || f.params.some((p) => p.comptime)) {
-      throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
+      throw new CompileError("E0801", `'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
     }
     if (f.generator) throw unsupported("generator functions in 'typeof' types", at);
     const def = definition(f);
@@ -680,7 +680,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (open) {
       const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
       const param = f.params[i]?.pattern;
-      throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
+      throw new CompileError("E0114", `'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
     }
     return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(tables, p) : "_")), declaredParams(f), result);
   }
@@ -708,7 +708,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
     if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(tables, v.items as string[]);
-    throw new CompileError("a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
+    throw new CompileError("E1102", "a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
   }
   // A generic definition's placeholder for each comptime argument, one per argument.
   const placeholders = new WeakNodeMap<Expr, Type>();
@@ -761,11 +761,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (unsettled.length > 0) settle(unsettled.shift()!);
     else checkBody(pending.shift()!);
   }
-  if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
+  if (main && main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", main.start, main.end);
   const started = main && instanceOf(main).returns;
-  if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
+  if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
-  if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
+  if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("E1003", "a library has nothing for C to call; mark functions with 'export'", 0, 0);
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
   const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
@@ -775,7 +775,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A package's const whose value has no JS form yet stops the program where it is read.
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
-  if (used) throw new CompileError("reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
+  if (used) throw new CompileError("E1005", "reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
   // A package's function called with a value, or giving one, that has no JS form.
   const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;
@@ -787,10 +787,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     };
     return x.args.some((a) => !jsConverts(given(a))) || (gives !== "void" && !jsConverts(gives));
   })));
-  if (unconverted) throw new CompileError("this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
+  if (unconverted) throw new CompileError("E1005", "this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
   // A value given to JS becomes a JS value as the call or write converts it.
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
-  if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
+  if (crossing) throw new CompileError("E1005", "turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
   // An interface's method may be any class's, as interfaces are met by shape.
   const signed = new Set([...interfaces.values()].flatMap((x) => x.members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : []))));
@@ -833,13 +833,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const found: Origin[] = f.params.flatMap((p, i) => (named(p.type).has(returns.life!) ? [i] : []));
       // A lifetime of the method's own class is the object's.
       if (f.owner && classLifetimes(f).has(returns.life)) found.push("this");
-      if (found.length === 0) throw new CompileError(`no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
+      if (found.length === 0) throw new CompileError("E0209", `no parameter is borrowed for lifetime '${returns.life}'; write 'Ref<T, ${returns.life}>' on the parameter the result points into`, at.start, at.end);
       return found;
     }
     if (f.self && !f.self.constructor && !f.self.owned) return ["this"];
     const refs = params.flatMap((p, i) => (holdsRef(p) ? [i] : []));
     if (refs.length === 1) return refs;
-    throw new CompileError(refs.length === 0
+    throw new CompileError("E0209", refs.length === 0
       ? "this function returns a reference but borrows nothing it could point into; return an owned value instead"
       : "this function returns a reference and takes several, so say which it points into: declare '<A extends Lifetime>' and write 'Ref<T, A>' on that parameter and the return type", at.start, at.end);
   }
@@ -892,7 +892,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const lives = node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args?.length === 2 ? [node.args[1]!]
         : node.kind === "ref" && slots.get(node.name!)?.length === node.args?.length ? node.args!.filter((_, i) => slots.get(node.name!)![i]) : [];
       for (const life of lives as (Span & { name: string })[]) {
-        if (!declared.has(life.name)) throw new CompileError(`cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
+        if (!declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
       }
       for (const v of Object.values(t)) if (v && typeof v === "object") visit(v);
     };
@@ -961,25 +961,25 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function exportable(instance: Instance) {
     const f = instance.body;
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || (typeof t !== "string" && t.kind === "pointer");
-    if (f.typeParams?.length) throw new CompileError("a library can't export a generic function to C, which has no generics; export one for each type", f.start, f.end);
-    if (f.generator) throw new CompileError("a library can't export a generator to C, which has no generators", f.start, f.end);
-    if (f.throws) throw new CompileError("a library can't export a function that throws to C, which has no exceptions; return a status instead", f.throws.start, f.throws.end);
+    if (f.typeParams?.length) throw new CompileError("E1003", "a library can't export a generic function to C, which has no generics; export one for each type", f.start, f.end);
+    if (f.generator) throw new CompileError("E1003", "a library can't export a generator to C, which has no generators", f.start, f.end);
+    if (f.throws) throw new CompileError("E1003", "a library can't export a function that throws to C, which has no exceptions; return a status instead", f.throws.start, f.throws.end);
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(f.name) || C_KEYWORDS.has(f.name)) {
-      throw new CompileError(`a library can't export '${f.name}' to C, which needs a name of ASCII letters, digits and underscores that isn't a C or C++ keyword`, f.start, f.end);
+      throw new CompileError("E1003", `a library can't export '${f.name}' to C, which needs a name of ASCII letters, digits and underscores that isn't a C or C++ keyword`, f.start, f.end);
     }
     // C reserves names starting with an underscore and a capital, or two underscores, for itself
     // and its runtime: the unwinder's `_Unwind_Resume` among them.
     if (f.name === "main" || f.name.startsWith("fsh_") || /^_[A-Z_]/.test(f.name) || RUNTIME_NAMES.has(f.name)) {
-      throw new CompileError(`a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
+      throw new CompileError("E1003", `a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
     }
     f.params.forEach((p) => {
-      if (defaulted.has(p)) throw new CompileError("an exported function's parameter can't have a default in a library, since C callers pass every argument", p.start, p.end);
+      if (defaulted.has(p)) throw new CompileError("E1003", "an exported function's parameter can't have a default in a library, since C callers pass every argument", p.start, p.end);
       const t = instance.locals.get(p)!.type;
-      if (!crosses(t)) throw new CompileError(`an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
+      if (!crosses(t)) throw new CompileError("E1003", `an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
     if (instance.returns !== "void" && !crosses(instance.returns)) {
       const at = f.returnType ?? f;
-      throw new CompileError(`an exported function can't return a '${show(instance.returns)}' in a library; C gives numbers, booleans and raw pointers`, at.start, at.end);
+      throw new CompileError("E1003", `an exported function can't return a '${show(instance.returns)}' in a library; C gives numbers, booleans and raw pointers`, at.start, at.end);
     }
   }
 
@@ -989,20 +989,20 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const f = instance.body;
     if (f.rust) return rustSignature(instance);
     if (f.typeParams?.length) throw unsupported("generic C functions", f);
-    if (f.generator) throw new CompileError("a C function can't be a generator; drop the '*'", f.start, f.end);
-    if (f.async) throw new CompileError("a C function can't be async; C calls return when they finish", f.start, f.end);
-    if (f.name === "main") throw new CompileError("'main' can't be a C function; it is where the program starts", f.start, f.end);
-    if (f.throws) throw new CompileError("a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
-    if (!f.returnType) throw new CompileError("a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
+    if (f.generator) throw new CompileError("E1002", "a C function can't be a generator; drop the '*'", f.start, f.end);
+    if (f.async) throw new CompileError("E1002", "a C function can't be async; C calls return when they finish", f.start, f.end);
+    if (f.name === "main") throw new CompileError("E1002", "'main' can't be a C function; it is where the program starts", f.start, f.end);
+    if (f.throws) throw new CompileError("E1002", "a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
+    if (!f.returnType) throw new CompileError("E1002", "a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || (typeof t !== "string" && t.kind === "pointer");
     const params = paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default) throw unsupported("rest, optional and default parameters on C functions", p);
-      if (!crosses(params[i]!)) throw new CompileError(`a C function's parameter can't be a '${show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
+      if (!crosses(params[i]!)) throw new CompileError("E1002", `a C function's parameter can't be a '${show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
     instance.signature = params;
     const returns = resolveType(f.returnType);
-    if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
+    if (returns !== "void" && !crosses(returns)) throw new CompileError("E1002", `a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     instance.returns = returns;
     done.add(instance);
   }
@@ -1013,20 +1013,20 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const what = `the Rust function '${f.name}'`;
     const constructor = f.self?.constructor === true;
     if (f.typeParams?.length) throw unsupported("generic Rust functions", f);
-    if (f.generator || f.async) throw new CompileError(`${what} can't be ${f.async ? "async" : "a generator"}; it returns when the Rust function does`, f.start, f.end);
+    if (f.generator || f.async) throw new CompileError("E1004", `${what} can't be ${f.async ? "async" : "a generator"}; it returns when the Rust function does`, f.start, f.end);
     // A Rust `Result`'s `Err` is thrown: as Fish's `Error`, made from its Display text, or as the
     // Rust type it is, declared as a class.
     if (f.throws) {
       const error = resolveType(f.throws);
       const isError = typeof error !== "string" && error.kind === "class" && error.name === "Error" && !error.generic;
-      if (!isError && !rustClassOf(error)) throw new CompileError(`${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${show(error)}'`, f.throws.start, f.throws.end);
+      if (!isError && !rustClassOf(error)) throw new CompileError("E1004", `${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${show(error)}'`, f.throws.start, f.throws.end);
       if (isError) classOf(error as ClassType);
       instance.throws = error;
     }
-    if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
+    if (!f.returnType && !constructor) throw new CompileError("E1004", `${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
     const refuse = (t: Type, giving: boolean, at: Span) => {
       const why = crossingOf(t, giving);
-      if (typeof why === "string") throw new CompileError(`${giving ? `${what} can't give` : "a Rust function can't take"} a '${show(t)}': ${why}`, at.start, at.end);
+      if (typeof why === "string") throw new CompileError("E1004", `${giving ? `${what} can't give` : "a Rust function can't take"} a '${show(t)}': ${why}`, at.start, at.end);
     };
     const params = paramTypes(instance, scopeOf(instance));
     f.params.forEach((p, i) => {
@@ -1043,7 +1043,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const self = f.self && !constructor ? [f.self.owned ? "self" : f.self.mutable ? "&mut self" : "&self"] : [];
     const types = `(${[...self, ...params.map(show)].join(", ")}): ${show(instance.returns)}${instance.throws ? ` throws ${show(instance.throws)}` : ""}`;
     const other = rustTypes.get(f.rust!.symbol);
-    if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
+    if (other !== undefined && other !== types) throw new CompileError("E1004", `'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
     rustTypes.set(f.rust!.symbol, types);
     done.add(instance);
   }
@@ -1069,7 +1069,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const named = `'${f.js!.name}' from '${f.js!.module}'`;
     // A declaration Fish can't type is refused where it is declared, noting the call that reached it.
     const at = jsCalledAt.get(f);
-    const refuse = (message: string, where: Span) => new CompileError(message, where.start, where.end, at && { message: `'${f.js!.name}' is called here`, start: at.start, end: at.end });
+    const refuse = (message: string, where: Span) => new CompileError("E1005", message, where.start, where.end, at && { message: `'${f.js!.name}' is called here`, start: at.start, end: at.end });
     // A generic one is checked for each set of type arguments it is called with, as what crosses
     // is known only then; its definition, never compiled, is typed only by each call.
     if (!instance.concrete) {
@@ -1101,7 +1101,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function incompatible(signature: Body, e: unknown): unknown {
     const prefix = "this overload signature is not compatible with its implementation";
     if (!(e instanceof CompileError) || e.start < signature.start || e.end > signature.end || e.message.startsWith(prefix)) return e;
-    return new CompileError(`${prefix}: ${e.message}`, e.start, e.end, e.note);
+    return new CompileError("E0507", `${prefix}: ${e.message}`, e.start, e.end, e.note);
   }
 
   // A call made inside an instance with one of its type parameters gets the type the definition
@@ -1137,16 +1137,16 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const wanted = returnOf(instanceOf(declared), declared);
         const at = c.fields.find((x) => x.name === name)!;
         // A field is read as it is, so it has the declared type exactly.
-        if (own.type !== wanted) throw new CompileError(`'${name}' must be a '${show(wanted)}', not a '${show(own.type)}', as '${b.type.name}' declares it abstract`, at.start, at.end);
+        if (own.type !== wanted) throw new CompileError("E0701", `'${name}' must be a '${show(wanted)}', not a '${show(own.type)}', as '${b.type.name}' declares it abstract`, at.start, at.end);
       }
     }
   }
 
   function implementsSignature(f: Body, declared: Body, b: ClassInfo) {
-    const why = (text: string) => new CompileError(`'${declared.name.slice(b.type.name.length + 1)}' ${text}, as '${b.type.name}' declares it abstract`, f.start, f.end);
+    const why = (text: string) => new CompileError("E0701", `'${declared.name.slice(b.type.name.length + 1)}' ${text}, as '${b.type.name}' declares it abstract`, f.start, f.end);
     const want = declaredParams(declared);
     const rest = f.params.find((p) => p.rest);
-    if (rest && !declared.params.some((p) => p.rest)) throw new CompileError(`'${f.name.slice(f.owner!.name.length + 1)}' can't gather its arguments into a rest parameter yet where '${b.type.name}' declares it abstract with separate ones`, rest.start, rest.end);
+    if (rest && !declared.params.some((p) => p.rest)) throw new CompileError("E0801", `'${f.name.slice(f.owner!.name.length + 1)}' can't gather its arguments into a rest parameter yet where '${b.type.name}' declares it abstract with separate ones`, rest.start, rest.end);
     // A generic implementation is the instance its type parameters take from the declaration's.
     const names = new Set(typeParamsOf(f).map((p) => p.name));
     const bindings = new Map<string, Type>();
@@ -1184,9 +1184,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const declared = returnTypeOf(f, instance.bindings);
     if (declared && !describes(declared)) return declared;
     if (inProgress.has(instance)) {
-      if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
-      if (f.async) throw new CompileError(`an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
-      throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
+      if (f.generator) throw new CompileError("E0113", `a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
+      if (f.async) throw new CompileError("E0113", `an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
+      throw new CompileError("E0104", `'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     checkBody(instance);
     return instance.returns;
@@ -1245,8 +1245,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
     // function's or a generator's state, or given to an accessor, has no instance per value.
     const fixedParam = f.params.find((p) => p.comptime);
-    if (fixedParam && f.foreign && !f.rust) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
-    if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
+    if (fixedParam && f.foreign && !f.rust) throw new CompileError("E1002", "a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
+    if (fixedParam && f.accessor) throw new CompileError("E1102", "an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
     if (f.abstract) {
       instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
@@ -1255,7 +1255,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
-    if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
+    if (fixedParam && f.exported) throw new CompileError("E1003", "an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
     inProgress.add(instance);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     // A closure returns the number type the function type it meets returns, so its literals
@@ -1270,7 +1270,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // What `next(x)` sends, which a `yield` whose value is used gives.
     const sends = generator && declared ? generatorSends(declared) : undefined;
     if (generator && sends !== undefined) generator.sends = instance.concrete ? lower(sends) : sends;
-    if (generator && declared && !yielded) throw new CompileError(`${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
+    if (generator && declared && !yielded) throw new CompileError("E0606", `${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
     // An async function's declared `Promise<T>` says what it gives once awaited; its `return`s
@@ -1278,7 +1278,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const future = f.async && !f.generator ? (instance.future ??= madeBy(futureType(f.name, instance.concrete), instance)) : undefined;
     if (future && declared) {
       const gives = promiseElement(declared);
-      if (gives === undefined) throw new CompileError("an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
+      if (gives === undefined) throw new CompileError("E0305", "an async function's return type is 'Promise<T>', the type of what it gives once awaited", f.returnType!.start, f.returnType!.end);
       declared = gives;
     }
     // A function returning an interface returns its one concrete type, which must satisfy it.
@@ -1385,7 +1385,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const target: Target = { stmt: arm, kind: "arm", wanted, gives: [] };
         within(target, () => statement(arm));
         if (wanted && !alwaysReturns(arm.body, broken, continued)) {
-          throw new CompileError("this arm can reach its end without giving a value; give one with 'return', as in an arrow's block", arm.end - 1, arm.end);
+          throw new CompileError("E0601", "this arm can reach its end without giving a value; give one with 'return', as in an arrow's block", arm.end - 1, arm.end);
         }
         return target.gives!;
       },
@@ -1451,14 +1451,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     // A call leaves out only the last parameters, so none may be required after an optional one.
     const late = f.params.find((p, i) => !p.optional && !p.rest && f.params.slice(0, i).some((q) => q.optional));
-    if (late) throw new CompileError("a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
+    if (late) throw new CompileError("E0408", "a required parameter can't follow an optional one; move it before them, or make it optional too", late.start, late.end);
     // What the function may throw: any value's type. An arrow with none written takes it from the
     // function type it is given as, as it does its parameters' types, or else from what its body
     // can throw; a nested function declares its own.
     const contextual = f.closure && !f.throws && f.closure.self === undefined && !f.async && f.closure.expected && !openThrows.has(f.closure.expected) ? f.closure.expected : undefined;
     const inferring = f.closure !== undefined && !f.throws && f.closure.self === undefined && !contextual ? [] as [Expr | Stmt, Type][] : undefined;
     let errorType = f.throws ? resolveType(f.throws) : contextual?.throws;
-    if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
+    if (errorType === "void") throw new CompileError("E0118", "a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
     // Advancing a generator runs its body, so that is what throws, not calling it.
@@ -1488,10 +1488,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     if (unset.size > 0) {
       const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
-      throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
+      throw new CompileError("E0703", `property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     if (generator) {
-      if (!yielded) throw new CompileError(`this generator never yields, so what it gives can't be told; declare it as '${generatorName}<T>'`, (f.returnType ?? f).start, (f.returnType ?? f).end);
+      if (!yielded) throw new CompileError("E0606", `this generator never yields, so what it gives can't be told; declare it as '${generatorName}<T>'`, (f.returnType ?? f).start, (f.returnType ?? f).end);
       const laid = (t: Type) => (instance.concrete ? lower(t) : t);
       generator.yields = laid(yielded);
       generator.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
@@ -1523,12 +1523,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const origins = ref ? originsOf(f, params, ref) : holdsRef(type) ? heldOrigins(f) ?? everything : [];
     if (gives !== "void" && !generator && !alwaysReturns(f.body, broken, continued)) {
       const at = f.returnType ?? f;
-      throw new CompileError("not all code paths return a value", at.start, at.end);
+      throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
     }
     checkMoves(f, instance, origins);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
-      throw new CompileError(`a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
+      throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
     }
     instance.returns = type;
     if (instance.concrete) lowerTables(instance);
@@ -1561,10 +1561,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const name = (e.callee as Extract<Expr, { kind: "ident" }>).name;
       // A name the body declares itself is that, not the function.
       if (f.closure?.self !== name || scopes.some((scope) => scope.has(name))) return undefined;
-      if (!f.returnType) throw new CompileError(`'${name}' calls itself, so its return type has to be written, as TypeScript requires, as in 'function ${name}(...): T'`, e.start, e.end);
+      if (!f.returnType) throw new CompileError("E0104", `'${name}' calls itself, so its return type has to be written, as TypeScript requires, as in 'function ${name}(...): T'`, e.start, e.end);
       if (f.async) throw unsupported("async nested functions that call themselves", e);
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
-      if (e.args.length < required || e.args.length > f.params.length) throw new CompileError(`expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
+      if (e.args.length < required || e.args.length > f.params.length) throw new CompileError("E0501", `expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
       e.args.forEach((a, i) => {
         const to = locals.get(f.params[i]!)!.type;
         expect(a, to);
@@ -1580,11 +1580,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
     // every use before that, as TypeScript's definite assignment does.
     function unassigned(s: Stmt, d: Declarator, name: string): undefined {
-      if (!d.type) throw new CompileError(`'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
+      if (!d.type) throw new CompileError("E0406", `'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
       const type = stored(resolveType(d.type));
-      if (lower(type) === "void") throw new CompileError(`'${name}' can't be of type 'void', which no value has`, d.start, d.end);
-      if (isInterface(type)) throw new CompileError(`'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
-      if (typeof type !== "string" && type.kind === "function" && type.generic) throw new CompileError(`'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
+      if (lower(type) === "void") throw new CompileError("E0118", `'${name}' can't be of type 'void', which no value has`, d.start, d.end);
+      if (isInterface(type)) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
+      if (typeof type !== "string" && type.kind === "function" && type.generic) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
       declare(name, type, true, false, s);
       return undefined;
     }
@@ -1623,7 +1623,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A chain reading a getter isn't one: its getter runs once, into a fresh variable.
       const place = (v: Expr): boolean => v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && !getterNames.has(v.name) && place(v.object));
       const from = (p: Pattern, value: Expr) => {
-        if (p.kind !== "array" && p.kind !== "object") throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
+        if (p.kind !== "array" && p.kind !== "object") throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
         // A literal is taken part by part, each part typed as its target.
         if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x?.kind === "spread" || x === undefined)) {
           const parts = (value.elements as Expr[]).map((x, i) => {
@@ -1640,7 +1640,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const part = parts[i];
             if (part?.nested) return from(q, part.nested);
             if (part?.read) return write(q, part.read);
-            if (q.kind !== "default") throw new CompileError(`the array on the right has no element at index ${i} for this target`, q.start, q.end);
+            if (q.kind !== "default") throw new CompileError("E0003", `the array on the right has no element at index ${i} for this target`, q.start, q.end);
             write(q.target, q.value);
           });
           if (p.rest) write(p.rest, { id: nextId(ids), kind: "array", elements: parts.slice(p.elements.length).map((x) => x.read!), start: value.start, end: value.end });
@@ -1658,7 +1658,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const part = parts.get(prop.key as string);
             if (part) write(prop.value, part);
             else if (prop.value.kind === "default") write(prop.value.target, prop.value.value);
-            else throw new CompileError(`the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+            else throw new CompileError("E0003", `the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
           }
           return;
         }
@@ -1687,7 +1687,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           }
           if (q.kind === "array") return { ...q, id: nextId(ids), elements: q.elements.map((x) => x && shape(x)), rest: q.rest && shape(q.rest) };
           if (q.kind === "object") return { ...q, id: nextId(ids), props: q.props.map((x) => ({ ...x, id: nextId(ids), value: shape(x.value) })), rest: q.rest && shape(q.rest) };
-          throw new CompileError("this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
+          throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
         };
         if (p.kind === "array") {
           p.elements.forEach((q, i) => q && reads.push(declare({ id: nextId(ids), kind: "array", elements: [...Array<undefined>(i).fill(undefined), shape(q)], rest: undefined, ...span }, whole, q)));
@@ -1766,7 +1766,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
       // A place is read part by part where it is, so only the parts named move out of it, as in
       // Rust; any other value goes to a variable named for the pattern, as messages show it.
-      if (!d.init) throw new CompileError("a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
+      if (!d.init) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
       const init = d.init;
       const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
       // A getter along the path runs each time the path is read, so its result is kept once.
@@ -1822,13 +1822,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       };
       if (pattern.kind === "object") {
         if (typeof whole === "string" || (whole.kind !== "object" && whole.kind !== "class")) {
-          throw new CompileError(`'{ ... }' destructures an object or an instance, not '${show(destructuring)}'`, pattern.start, pattern.end);
+          throw new CompileError("E0003", `'{ ... }' destructures an object or an instance, not '${show(destructuring)}'`, pattern.start, pattern.end);
         }
         const taken = new Set<string>();
         for (const p of pattern.props) {
           if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
           const f = field(whole, p.key);
-          if (!f) throw new CompileError(`property '${p.key}' does not exist on type '${show(whole)}'`, p.start, p.end);
+          if (!f) throw new CompileError("E0502", `property '${p.key}' does not exist on type '${show(whole)}'`, p.start, p.end);
           taken.add(p.key);
           part(p.value, { id: nextId(ids), kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, f.type);
         }
@@ -1841,7 +1841,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       } else if (isTuple(whole)) {
         const elements = elementsOf(whole as ObjectType);
         const many = (whole as ObjectType).rest;
-        if (pattern.elements.length > elements.length && many === undefined) throw new CompileError(`tuple type '${show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
+        if (pattern.elements.length > elements.length && many === undefined) throw new CompileError("E0117", `tuple type '${show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
         // A rest tuple's `...rest` takes its array where its fixed elements end, or a copy of the
         // part after the names taken from it, as an array pattern's rest is, when they copy.
         const later = pattern.elements.length - elements.length;
@@ -1853,7 +1853,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // `.at(i)` on the rest, which an array pattern's default reads too.
           if (i >= elements.length && p.kind === "default") {
             // Read with `.at(i)`, a value that doesn't copy would be copied where `t[i]` moves it.
-            if (!isCopy(many!)) throw new CompileError(`a default past a tuple's fixed elements would take a '${show(many!)}' out of the tuple's rest when it is there, leaving a hole; destructure without the default, or index it and clone`, p.start, p.end);
+            if (!isCopy(many!)) throw new CompileError("E0117", `a default past a tuple's fixed elements would take a '${show(many!)}' out of the tuple's rest when it is there, leaving a hole; destructure without the default, or index it and clone`, p.start, p.end);
             const array: Expr = { id: nextId(ids), kind: "member", object: from(p), name: "...", optional: false, ...at };
             restStarts.set(array, elements.length);
             const read: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ id: nextId(ids), kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
@@ -1870,7 +1870,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         }
       } else if (typeof whole !== "string" && whole.kind === "array") {
         // An array's elements are read as `xs[i]`, which a value that moves would leave a hole in.
-        if (!isCopy(whole.element)) throw new CompileError(`an array pattern reads each element as 'xs[i]', and a '${show(whole.element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);
+        if (!isCopy(whole.element)) throw new CompileError("E0202", `an array pattern reads each element as 'xs[i]', and a '${show(whole.element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);
         pattern.elements.forEach((p, i) => {
           if (!p) return;
           const at = { start: p.start, end: p.end };
@@ -1886,7 +1886,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const slice: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ id: nextId(ids), kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
           parts.push([pattern.rest, slice, whole]);
         }
-      } else throw new CompileError(`'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(destructuring)}'`, pattern.start, pattern.end);
+      } else throw new CompileError("E0003", `'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${show(destructuring)}'`, pattern.start, pattern.end);
       const lets: Stmt[] = parts.map(([target, init]): Stmt => {
         const at = { start: target.start, end: target.end };
         const declarator: Declarator = { id: nextId(ids), target, type: undefined, init, ...at };
@@ -1939,7 +1939,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const object = init.kind === "index" || init.kind === "member" ? init.object : init;
       const whole = value(object);
       const element = isRef(whole) ? whole.to : whole;
-      if (init.kind === "index" && !isTuple(element)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${show(element)}'`, d.start, d.end);
+      if (init.kind === "index" && !isTuple(element)) throw new CompileError("E0801", `only tuples, like '[i64, string]', can be destructured so far, not '${show(element)}'`, d.start, d.end);
       const type = value(init);
       const name = (d.target as Extract<Pattern, { kind: "ident" }>).name;
       // A `let` part may change, or be pointed elsewhere when it is borrowed, as a `let` loop
@@ -1958,17 +1958,17 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function rewritten(l: Local, at: Expr) {
       const outside = captures?.get(l);
       if (outside && outside !== "this" && outer!.narrowed(outside)) {
-        throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
+        throw new CompileError("E0109", `can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
       }
       const from = facts.findIndex((f) => f.has(l));
       if (from < 0) return;
       // Inside a larger expression, a condition could still prove the member it had.
       if (at !== whole) {
-        throw new CompileError(`can't give '${l.name}' another member inside a larger expression while a check narrows it; assign it as a statement of its own`, at.start, at.end);
+        throw new CompileError("E0109", `can't give '${l.name}' another member inside a larger expression while a check narrows it; assign it as a statement of its own`, at.start, at.end);
       }
       changed.push(l);
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
-        throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
+        throw new CompileError("E0109", `can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
       }
       for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l, l.type);
     }
@@ -2028,13 +2028,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const nested = nestedFunctions.get(e);
       if (nested !== undefined) {
         const self = [...inner.captures].find(([, from]) => from === "this");
-        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
+        if (self) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
         // An async one takes its own copy of what it uses when it is made, which a later change
         // to a `let` wouldn't reach, as it would in JavaScript.
         const changing = e.async ? [...inner.captures].find(([, from]) => from !== "this" && from.mutable) : undefined;
-        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses!.get(changing[0]) ?? e).start, (inner.captureUses!.get(changing[0]) ?? e).end);
+        if (changing) throw new CompileError("E0210", `the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses!.get(changing[0]) ?? e).start, (inner.captureUses!.get(changing[0]) ?? e).end);
         const moved = [...inner.moved!][0];
-        if (moved) throw new CompileError(`the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
+        if (moved) throw new CompileError("E0202", `the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
       }
       // A shared value's `update` callback lends its parameter only through its fields.
       if (f.closure?.expected && sharedCallbacks.has(f.closure.expected)) {
@@ -2042,7 +2042,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const held = from === "this" ? undefined : typeof from.type !== "string" && from.type.kind === "ref" ? from.type.to : from.type;
           if (from !== "this" && from.param && held !== undefined && interiorMutable(held)) {
             const at = inner.captureUses!.get(alias) ?? e;
-            throw new CompileError(`a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
+            throw new CompileError("E0304", `a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
           }
         }
       }
@@ -2061,20 +2061,20 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // One throwing what the function type it is given as doesn't take can't be given as it.
       if (expected && throws && e.throws && !openThrows.has(expected) && !(expected.throws && fits(throws, expected.throws))) {
         const takes = expected.throws ? `which throws '${show(expected.throws)}'` : "which throws nothing";
-        throw new CompileError(`this closure throws '${show(throws)}', but it is given as '${show(expected)}', ${takes}; catch it inside the closure with try/catch`, e.throws.start, e.throws.end);
+        throw new CompileError("E0602", `this closure throws '${show(throws)}', but it is given as '${show(expected)}', ${takes}; catch it inside the closure with try/catch`, e.throws.start, e.throws.end);
       }
       // An async one's future throws, which a function type giving a Promise can't say yet.
       const failing = inner.future?.throws;
       if (expected && failing && !openThrows.has(expected) && promiseElement(expected.returns) !== undefined) {
         const at = e.throws ?? [...inner.raises.keys()][0] ?? e;
-        throw new CompileError(`this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+        throw new CompileError("E0602", `this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
       }
       // Each call's future works on its own copy of the captures, so a change would be lost.
       const changed = e.async ? [...inner.changed!][0] : undefined;
       if (changed) {
         const at = inner.captureUses!.get(changed) ?? e;
-        if (timerWrappers.has(e)) throw new CompileError(`a timer's function owns what it captures, so changing '${changed.name}' would change only its own copy; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
-        throw new CompileError(`this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
+        if (timerWrappers.has(e)) throw new CompileError("E0210", `a timer's function owns what it captures, so changing '${changed.name}' would change only its own copy; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
+        throw new CompileError("E0210", `this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
       }
       // Its future holds the captures as it holds parameters, for what crosses threads.
       if (inner.future) {
@@ -2092,7 +2092,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const given = expected?.params[i];
       if (expected && !given && !p.type) {
         const n = expected.params.length;
-        throw new CompileError(`'${show(expected)}' passes ${n} argument${n === 1 ? "" : "s"}, so this closure can't take '${paramName(p)}'`, p.start, p.end);
+        throw new CompileError("E0506", `'${show(expected)}' passes ${n} argument${n === 1 ? "" : "s"}, so this closure can't take '${paramName(p)}'`, p.start, p.end);
       }
       if (p.comptime) throw unsupported("comptime parameters on closures", p);
       if (p.rest) throw unsupported("rest parameters on arrow functions", p);
@@ -2132,7 +2132,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             let root: Expr = s.expr.target;
             while (root.kind === "member") root = root.object;
             if (s.expr.op !== "=" || (root.kind !== "ident" && root.kind !== "this")) {
-              throw new CompileError("'yield' can only be assigned with '=' to a variable or a field for now; yield into a 'const' first, then use it", s.expr.start, s.expr.end);
+              throw new CompileError("E0801", "'yield' can only be assigned with '=' to a variable or a field for now; yield into a 'const' first, then use it", s.expr.start, s.expr.end);
             }
             yieldable.add(s.expr.value);
           }
@@ -2141,7 +2141,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             let root: Expr = s.expr.target;
             while (root.kind === "member") root = root.object;
             if (s.expr.op !== "=" || (root.kind !== "ident" && root.kind !== "this")) {
-              throw new CompileError("'await' can only be assigned with '=' to a variable or a field for now; await into a 'const' first, then use it", s.expr.start, s.expr.end);
+              throw new CompileError("E0801", "'await' can only be assigned with '=' to a variable or a field for now; await into a 'const' first, then use it", s.expr.start, s.expr.end);
             }
             awaiting(s.expr.value);
           }
@@ -2156,23 +2156,23 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const executor = callee === undefined ? undefined : lower(callee);
             if (typeof executor !== "string" && executor?.kind === "closure") {
               const written = closureBodies.get(executor)!.body;
-              throw new CompileError("an executor runs at once and what it gives is dropped, so the Promise it gives would never run; keep 'resolve' and await that call beside this Promise, as in 'Promise.all([promise, later(resolve)])'", written.start, written.end);
+              throw new CompileError("E0305", "an executor runs at once and what it gives is dropped, so the Promise it gives would never run; keep 'resolve' and await that call beside this Promise, as in 'Promise.all([promise, later(resolve)])'", written.start, written.end);
             }
             // `spawn` runs only an async function's call, and only inside an async function.
             const spawnable = f.async === true && !pausing && !boxed && made.kind === "future" && !leafOf.has(made);
-            throw new CompileError(`this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'${spawnable ? ", or wrap the call in 'spawn(...)' for fire-and-forget" : ""}`, s.expr.start, s.expr.end);
+            throw new CompileError("E0302", `this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'${spawnable ? ", or wrap the call in 'spawn(...)' for fire-and-forget" : ""}`, s.expr.start, s.expr.end);
           }
           // Past an assertion its condition holds, as TypeScript's `asserts cond` says.
           if (s.expr.kind === "call" && asserts.has(s.expr)) return proves(s.expr.args[0]!).yes;
           return;
         case "let": {
-          if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
+          if (s.keyword === "var") throw new CompileError("E0802", "'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
           const d = s.declarations[0]!;
           if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return lift(s, d.target.name, arrowFunction(ids, d.target.name, d.init, d));
           if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
           if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
-          if (!d.init && s.keyword === "const") throw new CompileError("a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
+          if (!d.init && s.keyword === "const") throw new CompileError("E0406", "a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
           if (!d.init) return unassigned(s, d, d.target.name);
           if (isAwait(d.init)) awaiting(d.init);
           if (d.init.kind === "yield") yieldable.add(d.init);
@@ -2185,13 +2185,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (annotated) expect(d.init, annotated);
           const type = value(d.init);
           if (annotated) coerce(d.init, type, annotated, `type '${show(type)}' is not assignable to type '${show(annotated)}'`);
-          if (family && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to type '${show(family)}': it takes a generic function, one that works for every type`, d.init.start, d.init.end);
+          if (family && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError("E0101", `type '${show(type)}' is not assignable to type '${show(family)}': it takes a generic function, one that works for every type`, d.init.start, d.init.end);
           // An interface describes the value, which keeps its own concrete type.
           // A `let` may later hold another member of an enum, so it holds the enum.
           const widened = s.keyword === "let" && !annotated ? widenLet(type) : type;
           if (widened !== type) coerce(d.init, type, widened, "");
           if (!annotated && typeof widened !== "string" && widened.kind === "array" && widened.element === "never") {
-            throw new CompileError(`an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
+            throw new CompileError("E0104", `an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
           }
           // So does a regex given as a 'RegExp', which keeps its pattern's captures.
           const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
@@ -2271,7 +2271,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
         case "forOf": {
           if (s.await) {
-            if (!f.async || timerMains.has(f as Func)) throw new CompileError("'for await' can only be used inside an 'async' function", s.start, s.end);
+            if (!f.async || timerMains.has(f as Func)) throw new CompileError("E0301", "'for await' can only be used inside an 'async' function", s.start, s.end);
             if (targets.some((t) => t.kind === "arm")) throw unsupported("'for await' loops inside match arms", s);
             if (finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
           }
@@ -2280,7 +2280,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const d = left.declarations[0]!;
           if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) loopPattern(s, d, d.target);
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
-          if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
+          if (d.type) throw new CompileError("E0004", "a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
           const object = isRef(through) ? through.to : through;
           if (s.await) {
@@ -2295,7 +2295,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // A getter's result is made for the read, so the walk ends at it.
           while (!lent(root) && ((root.kind === "member" && !calls.has(root)) || root.kind === "index" || root.kind === "nonNull")) root = root.kind === "nonNull" ? root.expr : root.object;
           if (root !== s.right && !lent(root) && root.kind !== "ident" && root.kind !== "this" && !stringLike(object)) {
-            throw new CompileError("this loop would read from a value made just for it, which is gone before the loop's first pass; give the value a name first, as in 'const xs = ...;'", s.right.start, s.right.end);
+            throw new CompileError("E0212", "this loop would read from a value made just for it, which is gone before the loop's first pass; give the value a name first, as in 'const xs = ...;'", s.right.start, s.right.end);
           }
           // A string gives each of its code points, as a string of its own.
           if (stringLike(object)) {
@@ -2310,7 +2310,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // loop ends, the loop takes an owned generator over; one behind a `Mut` is lent.
           const yields = yieldsOf(object);
           if (yields !== undefined) {
-            if (isRef(through) && !through.mutable) throw new CompileError("a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+            if (isRef(through) && !through.mutable) throw new CompileError("E0206", "a 'for...of' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
             const error = generatorThrows(object);
             if (error) raise(s.right, error, "this generator");
             scopes.push(new Map());
@@ -2338,8 +2338,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             scopes.pop();
             return;
           }
-          if (yieldsOf(object, true) !== undefined) throw new CompileError("an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
-          if (typeof object === "string" || object.kind !== "array") throw new CompileError(`'for...of' needs an array, a Map, a Set, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
+          if (yieldsOf(object, true) !== undefined) throw new CompileError("E0119", "an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
+          if (typeof object === "string" || object.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string or a generator, not '${show(object)}'`, s.right.start, s.right.end);
           if (object !== through) coercions.set(s.right, object);
           scopes.push(new Map());
           declare(d.target.name, isCopy(object.element) ? object.element : refType(object.element, false), left.keyword === "let", false, left);
@@ -2356,7 +2356,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const union = typeof type !== "string" && type.kind === "union" ? type : undefined;
           if (typeof type !== "string" && !union && type.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
           const defaults = s.cases.filter((c) => !c.test);
-          if (defaults.length > 1) throw new CompileError("a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
+          if (defaults.length > 1) throw new CompileError("E0608", "a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
           // The case bodies share one scope, as in JavaScript, but any case may be entered
           // directly, skipping the bodies before it, so a binding one case declares is usable
           // only in that case.
@@ -2376,7 +2376,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               if (test && test !== type && isInteger(test) && !literalOnly(s.discriminant, false) && adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(type, test)) {
-                throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
+                throw new CompileError("E0112", `type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
               const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
@@ -2391,7 +2391,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         }
         case "labeled": {
           if (targets.some((t) => t.label === s.label)) {
-            throw new CompileError(`duplicate label '${s.label}'`, s.start, s.start + s.label.length);
+            throw new CompileError("E0402", `duplicate label '${s.label}'`, s.start, s.start + s.label.length);
           }
           let body = s.body;
           while (body.kind === "labeled") body = body.body;
@@ -2403,7 +2403,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         case "continue": {
           const target = jumpTarget(s);
           if (floors.length > 0 && targets.findIndex((t) => t.stmt === target) < floors.at(-1)!) {
-            throw new CompileError(`'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
+            throw new CompileError("E1102", `'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
           }
           jumps.set(s, target);
           (s.kind === "break" ? broken : continued).add(target);
@@ -2422,12 +2422,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             return;
           }
           if (s.finalizer) finalizing++;
-          if (s.paramType) throw new CompileError("a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
+          if (s.paramType) throw new CompileError("E0004", "a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
           // What the block raises goes to the catch, which takes the union of it.
           handlers.push([]);
           scoped(s.block);
           const sites = handlers.pop()!;
-          if (sites.length === 0) throw new CompileError("nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+          if (sites.length === 0) throw new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
           const caught = unionType(sites.map(([, t]) => t));
           for (const [at, from] of sites) instance.raises.set(at, { from, to: caught });
           instance.caught.set(s, caught);
@@ -2448,25 +2448,25 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // A `return` in a match arm gives the arm its value, and never leaves the function.
           const arm = targets.findLast((t) => t.kind === "arm");
           if (floors.length > 0 && (!arm || targets.indexOf(arm) < floors.at(-1)!)) {
-            throw new CompileError("'return' can't leave a comptime block, which runs while compiling; give a value with a 'comptime' expression instead", s.start, s.end);
+            throw new CompileError("E1102", "'return' can't leave a comptime block, which runs while compiling; give a value with a 'comptime' expression instead", s.start, s.end);
           }
           if (arm) {
             jumps.set(s, arm.stmt);
-            if (arm.wanted && !s.value) throw new CompileError("this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
+            if (arm.wanted && !s.value) throw new CompileError("E0605", "this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
             // In TypeScript this would leave the function, which a return in an arm never does.
             if (!arm.wanted && s.value) {
-              throw new CompileError("this match's value isn't used, so a 'return' in its arm can't give one, and it never leaves the function; return after the match instead", s.start, s.end);
+              throw new CompileError("E0605", "this match's value isn't used, so a 'return' in its arm can't give one, and it never leaves the function; return after the match instead", s.start, s.end);
             }
             if (s.value) arm.gives!.push([s.value, arm.wanted ? value(s.value) : result(s.value)]);
             return;
           }
           if (generator) {
-            if (s.value) throw new CompileError("a generator can't return a value yet; 'return;' ends it", s.value.start, s.value.end);
+            if (s.value) throw new CompileError("E0801", "a generator can't return a value yet; 'return;' ends it", s.value.start, s.value.end);
             return;
           }
           if (s.value && isAwait(s.value)) awaiting(s.value);
-          if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
-          if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
+          if (f.self?.constructor && s.value) throw new CompileError("E0605", "a constructor can't return a value", s.start, s.end);
+          if (unset.size > 0) throw new CompileError("E0605", "a constructor can't return before every field is assigned", s.start, s.end);
           if (declared && s.value) expect(s.value, declared);
           // An arrow's expression body may be a call returning nothing.
           const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? result(s.value) : value(s.value);
@@ -2478,11 +2478,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const expected = declared ?? inferred;
           const message = `type '${show(type)}' is not assignable to return type '${show(expected ?? type)}'`;
           if (expected && s.value) coerce(s.value, type, expected, message);
-          else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
+          else if (expected && type !== expected) throw new CompileError("E0101", message, s.start, s.end);
           const passedOn = typeof type !== "string" && type.kind === "param" && type.bound?.kind === "function" && type.bound.generic !== undefined;
-          if (family && !passedOn && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError(`type '${show(type)}' is not assignable to return type '${show(family)}': it takes a generic function, one that works for every type`, (s.value ?? s).start, (s.value ?? s).end);
+          if (family && !passedOn && !(typeof type !== "string" && type.kind === "closure" && type.generic)) throw new CompileError("E0101", `type '${show(type)}' is not assignable to return type '${show(family)}': it takes a generic function, one that works for every type`, (s.value ?? s).start, (s.value ?? s).end);
           const reason = trait && unsatisfied(type, trait, members, s.value ?? s);
-          if (reason) throw new CompileError(`type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
+          if (reason) throw new CompileError("E0101", `type '${show(type)}' is not assignable to return type '${trait!.name}': ${reason}`, (s.value ?? s).start, (s.value ?? s).end);
           inferred = expected ?? type;
           return;
         }
@@ -2495,9 +2495,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const yields = yieldsOf(object, true);
       const channel = typeof object !== "string" && object.kind === "block" && object.which === "Channel" ? lower(object.of) : undefined;
       if (yields === undefined && channel === undefined) {
-        throw new CompileError(`'for await' loops over an async generator or a Channel, not '${show(through)}'`, s.right.start, s.right.end);
+        throw new CompileError("E0119", `'for await' loops over an async generator or a Channel, not '${show(through)}'`, s.right.start, s.right.end);
       }
-      if (yields !== undefined && isRef(through) && !through.mutable) throw new CompileError("a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
+      if (yields !== undefined && isRef(through) && !through.mutable) throw new CompileError("E0206", "a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
       const error = generatorThrows(object);
       if (error) raise(s.right, error, "this generator");
       scopes.push(new Map());
@@ -2512,15 +2512,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // a statement of its own, or as all of a declaration's initializer or an assignment's value,
     // so nothing the statement made is pending across it. Its value is what `next(x)` sends.
     function yielding(e: Extract<Expr, { kind: "yield" }>): Type {
-      if (!generator) throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
+      if (!generator) throw new CompileError("E0606", "'yield' can only be used inside a 'function*'", e.start, e.end);
       if (yieldable.has(e) && f.async) throw unsupported("values sent into an async generator's 'next'", e);
       if (yieldable.has(e) && sends === undefined) {
-        throw new CompileError(`this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<${yielded ? show(yielded) : "T"}, void, string>'`, e.start, e.end);
+        throw new CompileError("E0606", `this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<${yielded ? show(yielded) : "T"}, void, string>'`, e.start, e.end);
       }
       if (targets.some((t) => t.kind === "arm")) throw unsupported("'yield' inside match arms", e);
       if (finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
       if (e.delegate) throw unsupported("'yield*'", e);
-      if (!e.value) throw new CompileError("a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
+      if (!e.value) throw new CompileError("E0606", "a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
       if (yielded) expect(e.value, yielded);
       const t = value(e.value);
       if (!yielded) yielded = widenLet(t);
@@ -2561,17 +2561,17 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const found = targets.findLast((t) => t.kind === "arm" || fits(t));
       // A match arm is a body of its own, as an arrow's is.
       if (found?.kind === "arm" && targets.some(fits)) {
-        throw new CompileError(`'${s.kind}' can't leave a match arm, which is a body of its own like an arrow's; 'return' a value and act on it after the match`, s.start, s.end);
+        throw new CompileError("E0604", `'${s.kind}' can't leave a match arm, which is a body of its own like an arrow's; 'return' a value and act on it after the match`, s.start, s.end);
       }
       const target = found?.kind === "arm" ? undefined : found;
       if (s.label === undefined) {
         if (target) return target.stmt;
         const message = s.kind === "break" ? "'break' can only be used inside a loop or 'switch'" : "'continue' can only be used inside a loop";
-        throw new CompileError(message, s.start, s.end);
+        throw new CompileError("E0604", message, s.start, s.end);
       }
-      if (!target) throw new CompileError(`cannot find label '${s.label}'`, s.start, s.end);
+      if (!target) throw new CompileError("E0604", `cannot find label '${s.label}'`, s.start, s.end);
       if (s.kind === "break") return target.stmt;
-      if (!target.loop) throw new CompileError("'continue' can only jump to a label on a loop", s.start, s.end);
+      if (!target.loop) throw new CompileError("E0604", "'continue' can only jump to a label on a loop", s.start, s.end);
       return target.loop;
     }
 
@@ -2591,7 +2591,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function declare(name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
       const scope = scopes[scopes.length - 1]!;
       // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
-      if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
+      if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError("E0402", `cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = { name, type, mutable, param, id: nextLocal++ };
       depths.set(local, scopes.length);
       scope.set(name, local);
@@ -2656,17 +2656,17 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function lifted(key: Stmt | Expr, name: string, fn: Func, who: string): Func {
       const own = fn as Extract<Stmt, { kind: "function" }>;
       if (holdsNode(fn.body, (n) => n.kind === "this")) {
-        throw new CompileError(`${who} is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
+        throw new CompileError("E0409", `${who} is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
       }
       // It is checked apart from the body around it, so a name that body declares anywhere,
       // before or after, a sibling generic function or a type parameter included, would mean
       // something else inside it.
       const around = new Set([...declaredIn(f), ...(f.scope?.keys() ?? []), ...scopes.flatMap((s) => [...s.keys()])]);
       for (const n of freeNames(own)) {
-        if (n !== name && (around.has(n) || lookup(n))) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
+        if (n !== name && (around.has(n) || lookup(n))) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
       }
       const typed = holdsNode([fn.params, fn.returnType, fn.body], (n) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name));
-      if (typed) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
+      if (typed) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
       let lifted = liftedFunctions.get(key);
       if (!lifted) {
         lifted = { name, fn: { ...fn, id: nextId(ids), name: `${f.name}.${name || "arrow"}#${counts.lifts++}` } };
@@ -2701,7 +2701,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
       else if (f.closure!.move && !(isRef(from.type) && (path || throughMut))) {
         if (outer!.constant(from)) {
-          throw new CompileError(`cannot ${action} '${from.name}${path}' in this closure because '${from.name}' is a constant; declare it with 'let'`, target.start, target.end);
+          throw new CompileError("E0207", `cannot ${action} '${from.name}${path}' in this closure because '${from.name}' is a constant; declare it with 'let'`, target.start, target.end);
         }
         return;
       }
@@ -2734,15 +2734,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (handler) return void handler.push([at, type]);
       // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
       if (f.comptime || comptimeDepth > 0) return;
-      if (built) throw new CompileError("a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
+      if (built) throw new CompileError("E0602", "a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
       if (inferring) return void inferring.push([at, type]);
       if (!errorType && contextual) {
         const does = "kind" in at && at.kind === "throw" ? `this closure throws '${show(widenLet(type))}'` : `${what} can throw '${show(widenLet(type))}'`;
-        throw new CompileError(`${does}, but the closure is given as '${show(contextual)}', which throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+        throw new CompileError("E0602", `${does}, but the closure is given as '${show(contextual)}', which throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
       }
       if (!errorType) {
         const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${show(type)}'`;
-        throw new CompileError(`${who()} must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
+        throw new CompileError("E0602", `${who()} must declare 'throws ${show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
       }
       if (fits(type, errorType)) return void instance.raises.set(at, { from: type, to: errorType });
       // An error the declared type doesn't take may be wrapped by a class of it that
@@ -2753,10 +2753,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${classes[0]!.name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
-        throw new CompileError(`${does}, which isn't the '${show(errorType)}' that ${who()} throws; ${hint}`, at.start, at.end);
+        throw new CompileError("E0602", `${does}, which isn't the '${show(errorType)}' that ${who()} throws; ${hint}`, at.start, at.end);
       }
       if (wrappers.length > 1) {
-        throw new CompileError(`${does}, which ${wrappers.map((w) => `'${w.wrapper.name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
+        throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${w.wrapper.name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
       }
       instance.raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
     }
@@ -2861,7 +2861,7 @@ export function unreached(equalities: Tables["equalities"], compiled: Instance[]
     // The name the call wrote, rather than the prelude function it may run.
     const callee = at.kind === "call" || at.kind === "new" ? at.callee : undefined;
     const named = callee?.kind === "ident" || callee?.kind === "member" ? callee.name : target.body.name.replace(/#.*$/, "");
-    throw new CompileError(`a value of the abstract class '${abstract?.name}' can't reach '${named}'${through} here yet; pass a subclass's value instead, or give '${member}' to each subclass`, at.start, at.end);
+    throw new CompileError("E0701", `a value of the abstract class '${abstract?.name}' can't reach '${named}'${through} here yet; pass a subclass's value instead, or give '${member}' to each subclass`, at.start, at.end);
   }
 }
 
