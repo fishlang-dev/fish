@@ -156,7 +156,7 @@ function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
 }
 
 // Every name written in a piece of syntax.
-function identifiers(node: unknown, found = new Set<string>()): Set<string> {
+function identifiers(node: unknown, found: Set<string> = new Set<string>()): Set<string> {
   if (Array.isArray(node)) for (const x of node) identifiers(x, found);
   else if (node && typeof node === "object") {
     const n = node as { kind?: string; name?: unknown };
@@ -329,7 +329,7 @@ const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
 const timerMains = new WeakNodeSet<Func>();
 
 // Whether a piece of syntax holds a node `found` picks out.
-export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen = new Set<unknown>()): boolean {
+export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen: Set<unknown> = new Set<unknown>()): boolean {
   if (!node || typeof node !== "object" || seen.has(node)) return false;
   seen.add(node);
   if (Array.isArray(node)) return node.some((x) => holdsNode(x, found, seen));
@@ -667,7 +667,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const closureBodies = new Map<ClosureType, Instance>();
 
   // A generic class's constructor parameters, its base's when it declares no constructor.
-  function templateParams(name: string, seen = new Set<string>()): Param[] | undefined {
+  function templateParams(name: string, seen: Set<string> = new Set<string>()): Param[] | undefined {
     const t = templates.get(name);
     if (!t || seen.has(name)) return undefined;
     const ctor = t.members.find((m) => m.kind === "constructor");
@@ -1590,7 +1590,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
 
     // Checks a list of statements in order. What an `if` that leaves early proves holds for
     // the statements after it.
-    function statements(list: Stmt[], each = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
+    function statements(list: Stmt[], each: (s: Stmt, check: (s: Stmt) => Facts | undefined) => Facts | undefined = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)) {
       separate(list);
       hoist(list);
       const before = facts.length;

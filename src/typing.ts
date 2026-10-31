@@ -298,7 +298,7 @@ export const callableOf = new WeakMap<InterfaceType, FunctionType>();
 // Why a type can't cross between Fish and JS yet, when it can't: what crosses is strings,
 // booleans, numbers, null, literals, unions and Options of them, arrays and tuples of them,
 // copied across, and opaque JS values.
-export function uncrossable(t: Type, within = new Set<Type>()): string | undefined {
+export function uncrossable(t: Type, within: Set<Type> = new Set<Type>()): string | undefined {
   // An empty array's element type, `never`, holds no value to cross.
   if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return undefined;
   if (typeof t === "string") return t === "void" ? "'void' gives no value" : "Fish has no JS form for it";
@@ -476,7 +476,7 @@ export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.ki
 // boolean, empty, a literal, a JS value or handle, and unions, arrays, tuples and objects of them.
 // A Fish type holding itself has no JS form yet, as converting it would never end: `within` is
 // the types the walk is inside.
-export function jsConverts(t: Type, within = new Set<Type>()): boolean {
+export function jsConverts(t: Type, within: Set<Type> = new Set<Type>()): boolean {
   // An empty array's element type, `never`, holds no value to convert.
   if (t === "string" || t === "boolean" || t === "null" || t === "never" || isNumeric(t)) return true;
   if (typeof t === "string" || within.has(t)) return false;
@@ -733,7 +733,7 @@ export const ANY_REGEX: RegexType = { kind: "regex", source: "", pattern: "", fl
 
 const regexes = new Map<string, RegexType>();
 
-export function regexType(pattern: string, flags: string, captures: RegexType["captures"], source = pattern): RegexType {
+export function regexType(pattern: string, flags: string, captures: RegexType["captures"], source: string = pattern): RegexType {
   const key = `regex ${flags} ${pattern}`;
   let t = regexes.get(key);
   if (!t) {
@@ -802,7 +802,7 @@ export function partOfItself(type: Type, to: Type): boolean {
 // The part of a type that keeps `===` from comparing its values, or undefined when every part
 // compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
 // class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
-export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
+export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen: Set<Type> = new Set<Type>()): Type | undefined {
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
   const part = (u: Type) => unequal(u, eq, seen);
@@ -840,7 +840,7 @@ export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, se
 // The part of a type that `console.log` can't print as Node's util.inspect would, or undefined:
 // every value but functions, handles and other runtime objects prints, a type parameter in each
 // instance once it is concrete.
-export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined {
+export function uninspectable(t: Type, seen: Set<Type> = new Set<Type>()): Type | undefined {
   if (typeof t === "string") return t === "void" ? t : undefined;
   if (seen.has(t)) return undefined;
   seen.add(t);
@@ -882,7 +882,7 @@ export function uninspectable(t: Type, seen = new Set<Type>()): Type | undefined
 // undefined when every part is Json: booleans, numbers, strings and literals, and objects,
 // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
 // `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
-export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen = new Set<Type>()): Type | undefined {
+export function unjson(t: Type, json: (t: ClassType | VariantType) => boolean, seen: Set<Type> = new Set<Type>()): Type | undefined {
   // JavaScript throws for a bigint, which JSON has no number for.
   if (typeof t === "string") return t === "void" || t === "never" || t === "bigint" ? t : undefined;
   if (seen.has(t)) return undefined;
@@ -1246,7 +1246,7 @@ export function isCopy(t: Type): boolean {
 }
 
 // Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
-export function holdsMut(t: Type, seen = new Set<Type>()): boolean {
+export function holdsMut(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
   if (typeof t === "string" || seen.has(t)) return false;
   seen.add(t);
   const inner = (u: Type) => holdsMut(u, seen);
@@ -1264,7 +1264,7 @@ export function holdsMut(t: Type, seen = new Set<Type>()): boolean {
 
 // Whether a value of `t` holds a reference anywhere, which only lifetimes could keep valid. A
 // class met again inside itself adds nothing; one that contains itself is refused elsewhere.
-export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
+export function holdsRef(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
   if (typeof t === "string" || seen.has(t)) return false;
   seen.add(t);
   const holds = (u: Type) => holdsRef(u, seen);
@@ -1284,7 +1284,7 @@ export function holdsRef(t: Type, seen = new Set<Type>()): boolean {
 
 // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
 // reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
-export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen = new Set<Type>()): boolean {
+export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen: Set<Type> = new Set<Type>()): boolean {
   const holds = (u: Type) => holdsPart(u, found, throughRefs, seen);
   if (found(t)) return true;
   if (typeof t === "string") return false;
@@ -1466,7 +1466,7 @@ export function keyOf(t: Type): string {
 }
 
 // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
-export function tupleType(elements: Type[], required = elements.length, rest?: Type): ObjectType {
+export function tupleType(elements: Type[], required: number = elements.length, rest?: Type): ObjectType {
   const key = `tuple ${elements.map(keyOf).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${keyOf(rest)}`}`;
   let t = interned.get(key);
   if (!t) {

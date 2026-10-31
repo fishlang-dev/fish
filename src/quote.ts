@@ -297,7 +297,7 @@ function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, st
 // Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`
 // gives the bindings of the quotes spliced in, and gets this quote's, with theirs; `free` gets
 // the names it leaves free.
-export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope = new Map<string, string>(), free: Free = new Map()): V {
+export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
     const t = unfolded(type);

@@ -557,7 +557,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const t = llvm(type);
     const args = e.args.map((a) => value(a));
     const r = () => temp();
-    const call = (fn: string, xs: string[], of = t) => {
+    const call = (fn: string, xs: string[], of: string = t) => {
       const result = r();
       intrinsics.add(`declare ${of} ${fn}(${xs.map(() => of).join(", ")})`);
       emit(`${result} = call ${of} ${fn}(${xs.map((x) => `${of} ${x}`).join(", ")})`);
@@ -6065,7 +6065,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   // Releases the values made since `mark` that nothing took over, newest first.
-  function settle(mark = floor) {
+  function settle(mark: number = floor) {
     for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
   }
 
@@ -6568,7 +6568,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
 
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
   // Arguments past `taken` run for their effects only.
-  function argValues(args: Expr[], target: Instance, taken = args.length): string[] {
+  function argValues(args: Expr[], target: Instance, taken: number = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
     const passed = (i: number) => !target.body.params[i]?.comptime;
     const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));

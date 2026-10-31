@@ -890,7 +890,7 @@ function inferredText(text: string, bound: Type): Type | undefined {
 }
 
 // The names a type pattern declares with `infer`.
-function inferNames(n: unknown, names = new Set<string>()): Set<string> {
+function inferNames(n: unknown, names: Set<string> = new Set<string>()): Set<string> {
   if (!n || typeof n !== "object") return names;
   if (Array.isArray(n)) n.forEach((m) => inferNames(m, names));
   else if ((n as { kind?: string }).kind === "infer") names.add((n as { name: string }).name);

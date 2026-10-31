@@ -126,7 +126,7 @@ const fileOf = (program: unknown[], nodes: Node[], src: string, tokens: Token[])
 
 // The reject rules' hits in a file's tree, in no particular order. The walk keeps its own stack,
 // so a deeply nested file can't overflow the call stack.
-export function rejects(program: unknown[], nodes = everyNode(program)): Hit[] {
+export function rejects(program: unknown[], nodes: Node[] = everyNode(program)): Hit[] {
   const declared = bindings(nodes);
   // A class with its own member named `prototype` reads it as a field, not the JS prototype.
   const ownPrototype = new Set(nodes.flatMap((n) => (n.kind === "class" && typeof n.name === "string" && (n.members as Node[]).some((m) => OWN_MEMBERS.has(m.kind) && m.name === "prototype") ? [n.name] : [])));
@@ -590,7 +590,7 @@ function objectTypes(nodes: Node[]): Map<string, boolean> {
 
 // Whether a parameter's type is an object, which a function borrows rather than copies: an
 // object type, an array or tuple, or a name that isn't a primitive, an enum or a type parameter.
-function objectLike(t: Node, declared: Map<string, boolean>, generic = new Set<string>()): boolean {
+function objectLike(t: Node, declared: Map<string, boolean>, generic: Set<string> = new Set<string>()): boolean {
   if (t.kind === "object" || t.kind === "array" || t.kind === "tuple") return true;
   if (t.kind !== "ref") return false;
   const name = t.name as string;
@@ -685,7 +685,7 @@ function changes(x: Node, root: (r: unknown) => boolean, params: Map<Node, Set<n
 // A5 and A6: each object parameter used only through its fields and as an argument, borrowed as
 // `Mut<T>` when the file finds it changed and `Ref<T>` otherwise, marked for review. A parameter
 // used any other way, as a value stored or returned, is the function's to own, and keeps its type.
-function ownership(f: File, n: Node, declared: Map<string, boolean>, changedParams = new Set<number>()): Hit[] {
+function ownership(f: File, n: Node, declared: Map<string, boolean>, changedParams: Set<number> = new Set<number>()): Hit[] {
   const hits: Hit[] = [];
   const generic = new Set(((n.typeParams ?? []) as { name: string }[]).map((p) => p.name));
   const body = everyNode([n.body]);

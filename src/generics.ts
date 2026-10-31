@@ -407,7 +407,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   }
 
   // A member of a generic class's instance runs with the class's type arguments in scope.
-  function instanceOf(f: Body, bindings = f.scope ?? new Map<string, Type>()): Instance {
+  function instanceOf(f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
     let byKey = instances.get(f);
     if (!byKey) instances.set(f, byKey = new Map());
@@ -534,7 +534,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
 
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
   // body sees.
-  function paramTypes(instance: Instance, scope = instance.bindings): Type[] {
+  function paramTypes(instance: Instance, scope: Map<string, Type> = instance.bindings): Type[] {
     const f = instance.body;
     const implicit = implicitOf(f);
     return signing(f, () => withScope(scope, () => f.params.map((p, i) =>
@@ -830,7 +830,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
 
   // A class with no constructor of its own takes its base's parameters, so its type arguments
   // are inferred through the base's, as its `extends` clause passes them on.
-  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen = new NodeSet<ClassNode>()): Map<string, Type> {
+  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen: NodeSet<ClassNode> = new NodeSet<ClassNode>()): Map<string, Type> {
     const names = new Set(template.typeParams.map((p) => p.name));
     const bindings = new Map<string, Type>();
     const ctor = template.members.find((m) => m.kind === "constructor");

@@ -354,7 +354,7 @@ export function fieldError(file: string, field: "entry" | "lib", message: string
 }
 
 // Has a compile error found in the manifest at `file` render against that file.
-export function inManifest(e: unknown, file: string, src = readFileSync(file, "utf8")): unknown {
+export function inManifest(e: unknown, file: string, src: string = readFileSync(file, "utf8")): unknown {
   if (e instanceof CompileError && e.sources.length === 0) e.sources = [{ base: 0, src, file: relative(process.cwd(), file) || file }];
   return e;
 }
