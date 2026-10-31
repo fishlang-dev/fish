@@ -11,7 +11,7 @@ import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 type Body = Extract<Expr, { kind: "arrow" | "function" }>;
 // `index` is the test's place in the harness's numbering; `module` is the file declaring it.
-export type Test = { name: string; module: Module; index: number; async: boolean };
+export type Test = { name: string; module: Module; index: usize; async: boolean };
 
 const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal`;
 
@@ -116,11 +116,11 @@ type Outcome = { passed: boolean; output: string };
 
 // Ends every test running now, along with anything it started: `running` holds the process
 // groups of a run's tests while they run.
-export function stopTests(running: Set<number>) {
+export function stopTests(running: Set<i32>) {
   for (const group of running) ended(running, group);
 }
 
-function ended(running: Set<number>, group: number) {
+function ended(running: Set<i32>, group: i32) {
   running.delete(group);
   try {
     process.kill(-group, "SIGKILL");
@@ -132,7 +132,7 @@ function ended(running: Set<number>, group: number) {
 // Runs `test` in a process group of its own, failing it when it exits with anything but 0 or runs
 // past the limit. Once it exits, the rest of its group is killed: a child it left behind would
 // otherwise hold its output open, and the verdict is the test's own.
-async function run(running: Set<number>, binary: string, test: Test, cwd: string): Promise<Outcome> {
+async function run(running: Set<i32>, binary: string, test: Test, cwd: string): Promise<Outcome> {
   const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
   running.add(child.pid);
   const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -156,7 +156,7 @@ async function run(running: Set<number>, binary: string, test: Test, cwd: string
 // reports them in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the
 // counts, noting each test's process group in `running` while it runs. Gives the exit code, 1 when
 // any failed.
-export async function runTests(running: Set<number>, binary: string, tests: Test[], cwd: string): Promise<number> {
+export async function runTests(running: Set<i32>, binary: string, tests: Test[], cwd: string): Promise<i64> {
   const outcomes = tests.map(() => Promise.withResolvers<Outcome>());
   let next = 0;
   const worker = async () => {

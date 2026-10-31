@@ -250,9 +250,9 @@ export function buildTests(session: Session, dir: string, out: string): Test[] {
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
-async function testPackage(session: Session, dir: string, filter: string | undefined): Promise<number> {
+async function testPackage(session: Session, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
-  const running = new Set<number>();
+  const running = new Set<i32>();
   // Interrupted, the tests running and what they started end, and the build is removed.
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
     process.on(signal, () => {
@@ -287,7 +287,7 @@ async function testPackage(session: Session, dir: string, filter: string | undef
 // With `fixing`, each file's auto fixes are written first, a `.ts` file moving to its `.fsh` name,
 // and what is left is reported. Gives the exit code: 1 when anything is to change or couldn't be
 // read or written, else 0.
-function lintPaths(paths: string[], fixing: boolean): number {
+function lintPaths(paths: string[], fixing: boolean): i64 {
   let code = 0;
   const problem = (message: string) => {
     console.error(message.replace(/^fishc fmt/, "fishc lint"));
@@ -407,7 +407,7 @@ function fixes(path: string): boolean {
 
 // The file's text with its auto fixes, or undefined, said, when a fix left text that doesn't
 // parse, which would be the lint's mistake.
-function fixedText(src: string, shown: string, fsh: Imported): { text?: string; fixed: number } {
+function fixedText(src: string, shown: string, fsh: Imported): { text?: string; fixed: usize } {
   try {
     return fix(src, fsh);
   } catch (e) {

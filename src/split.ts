@@ -55,7 +55,7 @@ function declaration(item: Item): string {
 }
 
 // The index of the bracket closing the one at `open`.
-function closing(text: string, open: number): number {
+function closing(text: string, open: usize): usize {
   let depth = 0;
   for (let i = open; i < text.length; i++) {
     if ("([{<".includes(text[i]!)) depth++;
