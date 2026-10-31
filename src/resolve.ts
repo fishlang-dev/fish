@@ -37,19 +37,19 @@ export function paramName(p: Param): string {
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
 
 export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
-  if (BUILT_IN_TYPES.has(name)) throw new CompileError(`'${name}' is a built-in type`, at.start, at.end);
-  if (STD_CLASSES.has(name) && namespaces.some((n) => n.has(name))) throw new CompileError(`'${name}' is a std class; give yours another name`, at.start, at.end);
-  if (namespaces.some((n) => n.has(name))) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
+  if (BUILT_IN_TYPES.has(name)) throw new CompileError("E0407", `'${name}' is a built-in type`, at.start, at.end);
+  if (STD_CLASSES.has(name) && namespaces.some((n) => n.has(name))) throw new CompileError("E0407", `'${name}' is a std class; give yours another name`, at.start, at.end);
+  if (namespaces.some((n) => n.has(name))) throw new CompileError("E0402", `duplicate type name '${name}'`, at.start, at.end);
 }
 
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
 export function storable(typing: Typing, written: Type, at: Span): Type {
   const { stored } = typing;
-  if (typeof written !== "string" && written.kind === "function" && written.generic) throw new CompileError(familyHeld("a field"), at.start, at.end);
+  if (typeof written !== "string" && written.kind === "function" && written.generic) throw new CompileError("E0115", familyHeld("a field"), at.start, at.end);
   const type = stored(written);
   if (typeof type !== "string" && type.kind === "interface") {
-    throw new CompileError(`a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
+    throw new CompileError("E0115", `a field can't have the interface type '${type.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (typeof type !== "string" && type.kind === "closure") throw unsupported("functions stored in fields", at);
   // A reference or nothing is only a variable's, a parameter's or a result's.
@@ -157,7 +157,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const data = info.data!;
     if (args.length !== data.params.length) {
       const n = data.params.length;
-      throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
+      throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
     }
     const key = args.map(keyOf).join(",");
     const made = data.instances.get(key);
@@ -169,7 +169,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (!back) enumBlocks.set(`${data.id} ${key}`, back = recursiveType(shown, args));
       return { type: back, variants: new Map() };
     }
-    if (making.has(data)) throw new CompileError(`enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
+    if (making.has(data)) throw new CompileError("E0707", `enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
     making.set(data, key);
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
@@ -218,7 +218,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
-    if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
+    if (!p.type) throw new CompileError("E0104", `parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     // A parameter with a default is optional to callers, and holds its declared type in the body.
     const lowered = defaulted.get(p);
     if (lowered) {
@@ -226,19 +226,19 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const low = lower(declared);
       const kind = typeof low === "string" ? undefined : low.kind;
       if (kind && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
-        throw new CompileError(`defaults on parameters of type '${show(declared)}' are not supported yet`, p.start, p.end);
+        throw new CompileError("E0801", `defaults on parameters of type '${show(declared)}' are not supported yet`, p.start, p.end);
       }
-      if (holdsNull(declared) && !lowered.empty) throw new CompileError(`a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
+      if (holdsNull(declared) && !lowered.empty) throw new CompileError("E0801", `a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
       declaredTypes.set(p, declared);
     }
     // A call may leave out an optional parameter, which is then empty.
     const type = p.optional ? unionType([unionMember(p.type), "null"]) : resolveType(p.type);
-    if (p.rest && (typeof type === "string" || type.kind !== "array")) throw new CompileError(`a rest parameter takes an array of the values, as in '...${name}: ${show(type)}[]'`, p.type.start, p.type.end);
+    if (p.rest && (typeof type === "string" || type.kind !== "array")) throw new CompileError("E0408", `a rest parameter takes an array of the values, as in '...${name}: ${show(type)}[]'`, p.type.start, p.type.end);
     // A comptime parameter makes an instance per value, so its type is one whose values compare.
     const keyed = (t: Type): boolean => isInteger(t) || t === "boolean" || t === "string" || (typeof t !== "string" && (t.kind === "literal" || (t.kind === "union" && t.members.every(keyed))));
     // A tag's strings, `TemplateStringsArray`, are an array of strings.
     const strings = typeof type !== "string" && type.kind === "array" && type.element === "string";
-    if (p.comptime && (p.optional || !(keyed(type) || strings))) throw new CompileError(`a comptime parameter takes an integer, a boolean, a string, an enum member or a string array, not '${show(type)}'`, p.type.start, p.type.end);
+    if (p.comptime && (p.optional || !(keyed(type) || strings))) throw new CompileError("E1102", `a comptime parameter takes an integer, a boolean, a string, an enum member or a string array, not '${show(type)}'`, p.type.start, p.type.end);
     return type;
   }
 
@@ -255,7 +255,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // An async function's error comes at the `await`, with its future, not from the call.
     if (promiseElement(returns) !== undefined) throw unsupported("function types giving a Promise that throw", t.throws);
     const error = resolveType(t.throws);
-    if (error === "void") throw new CompileError("a function can't throw 'void'; throw a value", t.throws.start, t.throws.end);
+    if (error === "void") throw new CompileError("E0118", "a function can't throw 'void'; throw a value", t.throws.start, t.throws.end);
     if (holdsRef(error)) throw unsupported("errors holding references", t.throws);
     return error;
   }
@@ -265,29 +265,29 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   function array(element: Type, at: TypeNode): Type {
     if (holdsRef(element)) throw unsupported("arrays of references", at);
     if (typeof element !== "string" && element.kind === "closure") throw unsupported("arrays of functions", at);
-    if (typeof element !== "string" && element.kind === "function" && element.generic) throw new CompileError(familyHeld("an array"), at.start, at.end);
+    if (typeof element !== "string" && element.kind === "function" && element.generic) throw new CompileError("E0115", familyHeld("an array"), at.start, at.end);
     if (typeof element !== "string" && element.kind === "function") return arrayType(stored(element));
     if (typeof element !== "string" && element.kind === "interface" && stored(element) !== element) return arrayType(stored(element));
     // An interface describes values of many types, each laid out its own way, so an array of
     // them has no one element size.
     if (typeof element !== "string" && element.kind === "interface") {
-      throw new CompileError(`an array can't hold the interface type '${element.name}' directly, since its values may each be a different type; use 'Dyn<${element.name}>[]' to hold any of them`, at.start, at.end);
+      throw new CompileError("E0115", `an array can't hold the interface type '${element.name}' directly, since its values may each be a different type; use 'Dyn<${element.name}>[]' to hold any of them`, at.start, at.end);
     }
     return arrayType(element);
   }
 
   // `FixedArray<T, N>`: N elements of T held inline, N a number written in place.
   function fixedArray(t: Extract<TypeNode, { kind: "ref" }>): Type {
-    if (t.args.length !== 2) throw new CompileError("'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
+    if (t.args.length !== 2) throw new CompileError("E0116", "'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
     const [of, n] = t.args as [TypeNode, TypeNode];
-    if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("a FixedArray's length can't be negative", n.start, n.end);
+    if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("E0116", "a FixedArray's length can't be negative", n.start, n.end);
     const size = n.kind === "literal" && n.value.kind === "int" ? n.value.value : undefined;
-    if (size === undefined) throw new CompileError("a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
+    if (size === undefined) throw new CompileError("E0116", "a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
     const element = storable(typing, resolveType(of), of);
     if (holdsRef(element)) throw unsupported("fixed arrays of references", of);
     // Its elements live where it does, often the stack, so all of them together are limited.
-    if (size * BigInt(byteSize(element)) > 65536n) throw new CompileError("a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
-    if (typeof element !== "string" && element.kind === "interface") throw new CompileError(`a FixedArray can't hold the interface type '${element.name}' directly; use 'Dyn<${element.name}>'`, of.start, of.end);
+    if (size * BigInt(byteSize(element)) > 65536n) throw new CompileError("E0116", "a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
+    if (typeof element !== "string" && element.kind === "interface") throw new CompileError("E0115", `a FixedArray can't hold the interface type '${element.name}' directly; use 'Dyn<${element.name}>'`, of.start, of.end);
     return fixedType(element, Number(size));
   }
 
@@ -313,7 +313,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const holes = t.types.map(resolveType);
       return standIn(typing, holes, "a template literal type", t, false, () => deferring > 0) ?? templateType(t.quasis, holes, t, t.types);
     }
-    if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
+    if (t.kind === "infer") throw new CompileError("E0114", `'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       const rest = t.params.find((p) => p.rest);
@@ -344,10 +344,10 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const fixed = rest < 0 ? t.elements : t.elements.slice(0, rest);
       const required = fixed.findIndex((e) => e.optional);
       const late = required < 0 ? undefined : fixed.slice(required).find((e) => !e.optional);
-      if (late) throw new CompileError("a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
+      if (late) throw new CompileError("E0117", "a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
       if (rest >= 0 && required >= 0) throw unsupported("tuple types with both optional and rest elements", t.elements[rest]!);
       const many = rest < 0 ? undefined : resolveType(t.elements[rest]!.type);
-      if (many !== undefined && (typeof many === "string" || many.kind !== "array")) throw new CompileError(`a tuple's rest element is an array type, like '...${show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
+      if (many !== undefined && (typeof many === "string" || many.kind !== "array")) throw new CompileError("E0117", `a tuple's rest element is an array type, like '...${show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
       return tupleType(fixed.map((e) => (e.optional ? unionType([storable(typing, resolveType(e.type), e), "null"]) : storable(typing, resolveType(e.type), e))), required < 0 ? undefined : required, many === undefined ? undefined : (many as ArrayType).element);
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
@@ -359,7 +359,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const bound = scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
     if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
-      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string" | "bigint");
     }
@@ -369,52 +369,52 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     if (t.name === "Ref" || t.name === "Mut") return reference(t);
     if (t.name === "never" && t.args.length === 0) return "never";
     if (t.name === "null" || t.name === "undefined") {
-      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       return "null";
     }
     if (t.name === "Ptr" || t.name === "MutPtr") {
-      if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it points to, like '${t.name}<u8>'`, t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it points to, like '${t.name}<u8>'`, t.start, t.end);
       return pointerType(resolveType(t.args[0]!), t.name === "MutPtr");
     }
     if (INTERIORS.has(t.name)) {
-      if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
       return interior(typing, t.name as InteriorType["which"], resolveType(t.args[0]!), t);
     }
     if (t.name === "Dyn") {
       const of = t.args.length === 1 ? resolveType(t.args[0]!) : undefined;
       if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined) {
-        throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
+        throw new CompileError("E0116", "'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
       }
       return dynType(of);
     }
     if (t.name === "RegExp") {
-      if (t.args.length !== 0) throw new CompileError("'RegExp' takes no type arguments", t.start, t.end);
+      if (t.args.length !== 0) throw new CompileError("E0508", "'RegExp' takes no type arguments", t.start, t.end);
       return ANY_REGEX;
     }
     if (t.name === "Semaphore" || t.name === "Permit" || t.name === "AbortController" || t.name === "AbortSignal" || t.name === "TcpListener" || t.name === "TcpStream" || t.name === "JsValue") {
-      if (t.args.length !== 0) throw new CompileError(`'${t.name}' takes no type arguments`, t.start, t.end);
+      if (t.args.length !== 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
       return blockType(t.name);
     }
     if (t.name === "Channel") {
-      if (t.args.length !== 1) throw new CompileError("'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
       return channel(typing, resolveType(t.args[0]!), t);
     }
     if (t.name === "Map" || t.name === "Set") {
       const set = t.name === "Set";
-      if (t.args.length !== (set ? 1 : 2)) throw new CompileError(set ? "'Set' takes the type of its members, like 'Set<string>'" : "'Map' takes its key and value types, like 'Map<string, i64>'", t.start, t.end);
+      if (t.args.length !== (set ? 1 : 2)) throw new CompileError("E0116", set ? "'Set' takes the type of its members, like 'Set<string>'" : "'Map' takes its key and value types, like 'Map<string, i64>'", t.start, t.end);
       return collection(typing, resolveType(t.args[0]!), set ? "void" : resolveType(t.args[1]!), set, t);
     }
     if (t.name === "shared") {
-      if (t.args.length !== 1) throw new CompileError("'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
       return shareable(typing, resolveType(t.args[0]!), t);
     }
     // A `JoinHandle<T>` written out is one whose task can't throw.
     if (t.name === "JoinHandle") {
-      if (t.args.length !== 1) throw new CompileError("'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
       return handleType(heldArgument(resolveType(t.args[0]!)), undefined);
     }
     if (t.name === "Promise") {
-      if (t.args.length !== 1) throw new CompileError("'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
       const gives = heldArgument(resolveType(t.args[0]!));
       if (holdsPattern(gives)) throw unsupported("template literal pattern types in promises", t);
       return promiseInterface(gives);
@@ -422,7 +422,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // `Generator<T, R, N>`: what it yields, what it returns, which is nothing yet, and what
     // `next(x)` sends it.
     if (t.name === "Generator" || t.name === "AsyncGenerator") {
-      if (t.args.length < 1 || t.args.length > 3) throw new CompileError(`'${t.name}' takes the type it yields, like '${t.name}<i64>', then optionally 'void' and the type 'next' sends`, t.start, t.end);
+      if (t.args.length < 1 || t.args.length > 3) throw new CompileError("E0116", `'${t.name}' takes the type it yields, like '${t.name}<i64>', then optionally 'void' and the type 'next' sends`, t.start, t.end);
       const returned = t.args[1];
       if (returned && resolveType(returned) !== "void" && !(returned.kind === "ref" && returned.name === "undefined")) throw unsupported("generator return values", returned);
       const sends = t.args[2] && resolveType(t.args[2]);
@@ -432,7 +432,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       return t.name === "Generator" ? generatorInterface(yields, sends) : asyncGeneratorInterface(yields);
     }
     if (t.name === "Option") {
-      if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
       return unionType([unionMember(t.args[0]!, true), "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
@@ -446,7 +446,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     }
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);
-    if (named?.abstract) throw new CompileError(`'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
+    if (named?.abstract) throw new CompileError("E0701", `'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
     if (named) return named;
     const [owner, name] = t.name.split(".");
     const e = enums.get(owner!);
@@ -466,7 +466,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const utility = UTILITIES.get(t.name);
     if (utility) {
       const [count, apply, example] = utility;
-      if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
+      if (args.length !== count) throw new CompileError("E0106", `'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
       // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
       const shapes = args.map(jsShape);
       if (shapes.some((x) => x !== undefined)) {
@@ -475,23 +475,23 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       }
       return apply(args, t, t.args);
     }
-    throw new CompileError(`cannot find type '${t.name}'${didYouMean(t.name, [...scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...typeNames(t.start)])}`, t.start, t.end);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
   // `Ref<T, A>` also names the lifetime parameter it lives for, checked by the function.
   function reference(t: Extract<TypeNode, { kind: "ref" }>): Type {
     if (t.args.length !== 1 && t.args.length !== 2) {
-      throw new CompileError(`type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
+      throw new CompileError("E0209", `type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
     }
     const to = resolveType(t.args[0]!);
-    if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
+    if (to === "void") throw new CompileError("E0118", "there is no 'void' value to borrow", t.start, t.end);
     if (typeof to !== "string" && to.kind === "function") throw unsupported("references to functions", t);
     // A type parameter standing for a reference makes one too.
     const real = lower(to);
     if (typeof real !== "string" && real.kind === "ref") throw unsupported("references to references", t);
     const life = t.args[1];
-    if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
+    if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("E0209", "a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
     return refType(to, t.name === "Mut", life?.name);
   }
 
@@ -506,14 +506,14 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   // a member, and neither can `void`.
   function unionMember(node: TypeNode, option = false): Type {
     const t = resolveType(node);
-    if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
-    if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
+    if (t === "void") throw new CompileError("E0118", "'void' can't be a union member", node.start, node.end);
+    if (typeof t !== "string" && t.kind === "interface") throw new CompileError("E0115", `an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
     // A generic alias checked before any use holds its parameters anywhere; each use gives them types.
     // Std's own helpers, like the generators' 'find', return one only to give back a value
     // they hold or nothing, which needs no narrowing against the placeholder.
     if (typeof t !== "string" && t.kind === "param" && deferring === 0 && node.start < STD_BASE) throw unsupported("unions holding a type parameter", node);
     // A union holds a value, so a function type in one is a stored callable.
-    if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
+    if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError("E0115", familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
     if (holdsRef(t) && !(option && typeof t !== "string" && t.kind === "ref")) throw unsupported("unions holding references", node);
     return t;
@@ -525,7 +525,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const digits = negative ? e.operand : e;
     if (digits.kind !== "int") throw unsupported("literal types of this kind", e);
     const value = negative ? -digits.value : digits.value;
-    if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
+    if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("E0110", "integer literal does not fit in i64", e.start, e.end);
     return literalType(value);
   }
 
@@ -549,7 +549,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const same = found.methods.find((x) => x.name === m.name);
       if (!same) found.methods.push(m);
       else if (shapeKey(same.returns) !== shapeKey(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => shapeKey(p) !== shapeKey(m.params[i]!))) {
-        throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
+        throw new CompileError("E0114", `method '${m.name}' has different types on each side of '&'`, from.start, to.end);
       }
     }
     return found;
@@ -559,7 +559,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   // interface is one interface per list of type arguments, its members seeing them.
   function interfaceOf(i: Interface, args: Type[] = [], at: Span = i): InterfaceType {
     if (args.length !== i.typeParams.length) {
-      throw new CompileError(`interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     // Every copy of a package's interface, one per import of it, is one type.
     const owner = i.jsSource ?? i;
@@ -568,7 +568,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const key = args.map(keyOf).join(",");
     const found = byArgs.get(key);
     if (found) return found;
-    if (byArgs.size > 64) throw new CompileError(`instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    if (byArgs.size > 64) throw new CompileError("E0113", `instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     const t = interfaceType(args.length > 0 ? `${i.name}<${args.map(show).join(", ")}>` : i.name);
     if (args.length > 0) t.generic = { name: i.name, args };
     byArgs.set(key, t);
@@ -587,15 +587,15 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
         return;
       }
       if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
-        if ((at as { kind?: string }).kind === "method" && t.methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
-        throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
+        if ((at as { kind?: string }).kind === "method" && t.methods.some((m) => m.name === name)) throw new CompileError("E0402", `'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
+        throw new CompileError("E0402", `duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
     };
     for (const node of i.extends) {
       // A package's interface or class extends another's shape, which a JS handle holds.
       const resolved = resolveType(node);
       const base = jsShape(resolved) ?? resolved;
-      if (typeof base === "string" || (base.kind !== "interface" && !(i.js && base.kind === "object"))) throw new CompileError("an interface can only extend interfaces", node.start, node.end);
+      if (typeof base === "string" || (base.kind !== "interface" && !(i.js && base.kind === "object"))) throw new CompileError("E0702", "an interface can only extend interfaces", node.start, node.end);
       for (const f of base.fields) add(f.name, node), t.fields.push(f), inherited.add(f.name);
       if (base.kind === "interface") for (const m of base.methods) add(m.name, node), t.methods.push(m), inherited.add(m.name);
     }
@@ -626,7 +626,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
         if (m.optional) throw unsupported("optional methods", m);
-        if (!m.returns) throw new CompileError(`method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
+        if (!m.returns) throw new CompileError("E0104", `method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
         const first = m.params[0];
         const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
@@ -655,7 +655,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   // compiler puts a pointer, a recursive type standing for the alias's type.
   function aliasType(a: TypeAlias, args: Type[], at: Span): Type {
     if (args.length !== a.typeParams.length) {
-      throw new CompileError(`type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0106", `type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     const key = `${a.name}<${args.map(keyOf).join(",")}>`;
     const done = resolved.get(key);
@@ -665,7 +665,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const open = deferring > 0 && resolving.size > 0 ? args.map((t) => openParam(typing, t, true)).find((t) => t) : undefined;
     if (open) return open;
     if (layouts.some((s) => s.has(key))) {
-      throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
+      throw new CompileError("E0113", `type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
     if (resolving.has(key)) {
       let back = recursives.get(key);
@@ -677,8 +677,8 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // A type that branches as it recurses grows exponentially, so the whole program's type
     // evaluation has a budget, as TypeScript caps instantiations.
     if (resolving.size === 0) computed = 0;
-    if (++computed > 20_000) throw new CompileError(`computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
-    if (resolving.size > 64) throw new CompileError(`type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
+    if (++computed > 20_000) throw new CompileError("E0113", `computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
+    if (resolving.size > 64) throw new CompileError("E0113", `type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
     resolving.add(key);
     let type: Type;
     try {
@@ -691,7 +691,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // Only a structure can hold a type again: `type A = B | null` with `type B = A` would be a
     // name for nothing but itself.
     if (back && (type === back || (typeof type !== "string" && type.kind === "union" && type.members.includes(back)))) {
-      throw new CompileError(`type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
+      throw new CompileError("E0113", `type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
     }
     if (back) {
       standsFor(back, type);
@@ -707,7 +707,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   function mapped(t: Extract<TypeNode, { kind: "mapped" }>): Type {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? resolveType(t.constraint.type) : undefined;
     const keys = resolveType(t.constraint);
-    if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
+    if (!t.type) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
     const held = standIn(typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => deferring > 0);
     if (held) {
       withScope(new Map([...scope, [t.name, held]]), () => (t.as && resolveType(t.as), resolveType(t.type!)));
@@ -723,7 +723,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const from = source.find((f) => f.name === key);
       const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
       for (const name of names) {
-        if (fields.some((f) => f.name === name)) throw new CompileError(`two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
+        if (fields.some((f) => f.name === name)) throw new CompileError("E0114", `two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
         const field = t.optional === "+" ? optionalField(name, value)
           : t.optional === "-" ? { name, type: from?.optional === "added" ? withoutNull(value) : value }
           : from?.optional && from.optional !== "undefined" ? kept(name, value, from.optional)
@@ -780,7 +780,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const found = new Map<string, Type>();
     if (!matches(t.extends, check, found)) return resolveType(t.else);
     for (const name of names) {
-      if (!found.has(name)) throw new CompileError(`'infer ${name}' matched nothing in '${show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
+      if (!found.has(name)) throw new CompileError("E0114", `'infer ${name}' matched nothing in '${show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
     }
     return withScope(new Map([...scope, ...found]), () => resolveType(t.then));
   }
@@ -873,7 +873,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   function member(m: TypeMember): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
+    if (!m.type) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
     const f: Field = m.optional ? optionalField(m.name, unionMember(m.type)) : withoutUndefined(ids, m.type) ? { name: m.name, type: resolveType(m.type), optional: "undefined" } : { name: m.name, type: resolveType(m.type) };
@@ -941,7 +941,7 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
       continue;
     }
     if (g.type !== f.type && !both) {
-      throw new CompileError(`property '${f.name}' has type '${show(g.type)}' on one side of '&' and '${show(f.type)}' on the other`, from.start, to.end);
+      throw new CompileError("E0114", `property '${f.name}' has type '${show(g.type)}' on one side of '&' and '${show(f.type)}' on the other`, from.start, to.end);
     }
     const type = both ? merged(typing, g.type as ObjectType, f.type as ObjectType, from, to) : f.type;
     fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }), ...(g.optional && f.optional && { optional: f.optional }) };
@@ -961,7 +961,7 @@ export function unboxedClosure(typing: Typing, t: Type, at: Span) {
   if (typeof t === "string" || t.kind !== "param" || t.concrete === undefined) return;
   const c = lower(t);
   if (typeof c === "string" || (c.kind !== "closure" && c.kind !== "function") || c.generic) return;
-  throw new CompileError(`'${t.name}' is a closure's own type here, which a type argument can't hold; write '${t.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${t.name}>'`, at.start, at.end);
+  throw new CompileError("E0115", `'${t.name}' is a closure's own type here, which a type argument can't hold; write '${t.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${t.name}>'`, at.start, at.end);
 }
 
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
@@ -972,12 +972,12 @@ export function interior(typing: Typing, which: InteriorType["which"], given: Ty
   const of = heldArgument(given);
   const held = lower(of);
   if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
-    throw new CompileError(`'Atomic' holds integers of up to 64 bits, not '${show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
+    throw new CompileError("E0116", `'Atomic' holds integers of up to 64 bits, not '${show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
   }
   if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && held.kind === "param")) {
-    throw new CompileError(`'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
+    throw new CompileError("E0116", `'Atomic' holds an integer or a boolean, not '${show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
-  if (holdsRef(of)) throw new CompileError(`'${which}' can't hold a reference yet ('${show(of)}')`, at.start, at.end);
+  if (holdsRef(of)) throw new CompileError("E0801", `'${which}' can't hold a reference yet ('${show(of)}')`, at.start, at.end);
   // Its methods take and give its value as lowered, which would let a plain string in.
   if (holdsPattern(of)) throw unsupported(`template literal pattern types in '${which}' values`, at);
   abstractless(typing, of, `'${which}'`, at);
@@ -991,7 +991,7 @@ function abstractless(typing: Typing, of: Type, holder: string, at: Span) {
   const { lower, show } = typing;
   let found: Type | undefined;
   holdsPart(lower(of), (u) => typeof u !== "string" && (u.kind === "interface" || u.kind === "function") && (found = u) !== undefined);
-  if (found) throw new CompileError(`${holder} can't hold a '${show(found)}' yet: name a concrete type`, at.start, at.end);
+  if (found) throw new CompileError("E0801", `${holder} can't hold a '${show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
@@ -1008,10 +1008,10 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
     blocker = u;
     return true;
   });
-  if (holdsHandle(held)) throw new CompileError("a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
+  if (holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
   if (blocker) {
     const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from one place, which other threads can't keep alive";
-    throw new CompileError(`a 'shared' value is used from many threads at once, so it can't hold a '${show(blocker)}', which ${why}`, at.start, at.end);
+    throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${show(blocker)}', which ${why}`, at.start, at.end);
   }
   return sharedType(of);
 }
@@ -1024,7 +1024,7 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
   const of = heldArgument(given);
   const held = lower(of);
   if (typeof held !== "string" && held.kind === "union" && held.members.includes("null") || held === "null") {
-    throw new CompileError(`a 'Channel' can't carry '${show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(held)} }>'`, at.start, at.end);
+    throw new CompileError("E0116", `a 'Channel' can't carry '${show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${show(held)} }>'`, at.start, at.end);
   }
   abstractless(typing, of, "a 'Channel'", at);
   if (holdsPattern(of)) throw unsupported("template literal pattern types in channels", at);
@@ -1034,7 +1034,7 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
     blocker = u;
     return true;
   });
-  if (blocker) throw new CompileError(`a 'Channel' carries values to other tasks, so it can't carry a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
+  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
   return blockType("Channel", of);
 }
 
@@ -1057,11 +1057,11 @@ function keyable(typing: Typing, t: Type): boolean {
 export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span): MapType {
   const { show, holdsRef, lower, mapType, stored, heldArgument } = typing;
   const what = set ? "a 'Set'" : "a 'Map'";
-  if (!keyable(typing, key)) throw new CompileError(`${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
+  if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (holdsRef(value)) throw unsupported("maps of references", at);
   const v = lower(value);
   if (typeof v !== "string" && (v.kind === "closure" || v.kind === "function") && v.generic) throw unsupported("maps of generic functions", at);
-  if (typeof v !== "string" && v.kind === "interface") throw new CompileError(`a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
+  if (typeof v !== "string" && v.kind === "interface") throw new CompileError("E0115", `a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
   unboxedClosure(typing, value, at);
   return mapType(key, stored(heldArgument(value)), set);
 }
@@ -1081,7 +1081,7 @@ const MEMBER_FORMS = {
 // Fields with their source spans, checked for a name given twice.
 export function fields(list: Field[], at: Span[]): Field[] {
   list.forEach((f, i) => {
-    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError(`duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
+    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError("E0402", `duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
   });
   return list;
 }

@@ -95,7 +95,7 @@ export function intoMember({ show }: Typing, target: Expr, types: NodeMap<Expr, 
     const text = typeof object !== "string" && object?.kind === "union" && object.members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string");
     if (typeof object !== "string" && object?.kind === "union" && !text) {
       const what = action === "assign to" ? `assign to '${e.name}'` : `${action} '${e.name}'`;
-      throw new CompileError(`can't ${what} through '${show(object)}'; narrow it to one member first`, target.start, target.end);
+      throw new CompileError("E0109", `can't ${what} through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
   }
 }
@@ -114,13 +114,13 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   const left = value(e.left);
   const held = typeof left !== "string" && left.kind === "ref" ? left.to : left;
   if (typeof held !== "string" && held.kind === "dyn") {
-    throw new CompileError(`a '${show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
+    throw new CompileError("E0109", `a '${show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
   }
   const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
   // `Map`, `Set` and `Array` aren't classes in Fish; testing for one picks a union's member.
   if (!c && e.right.kind === "ident" && ["Map", "Set", "Array"].includes(e.right.name)) {
     if (typeof held === "string" || held.kind === "literal" || held.kind === "pattern") {
-      throw new CompileError(`'instanceof' tests an object, and a '${show(held)}' is never a ${e.right.name}`, e.start, e.end);
+      throw new CompileError("E0109", `'instanceof' tests an object, and a '${show(held)}' is never a ${e.right.name}`, e.start, e.end);
     }
     kindTests.set(e, e.right.name as Kind);
     return "boolean";
@@ -133,9 +133,9 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
     for (let x: Type | undefined = m; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x.generic?.name === name) return [x];
     return [];
   }))];
-  if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
+  if (instances.length > 1) throw new CompileError("E0109", `'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c ?? instances[0];
-  if (!tested) throw new CompileError("the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
+  if (!tested) throw new CompileError("E0109", "the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
   types.set(e.right, tested);
   return "boolean";
 }
@@ -145,7 +145,7 @@ export function bothSides({ show, unionType }: Typing, e: Extract<Expr, { kind: 
   const both = [then, otherwise];
   if (both.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
   if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
-    throw new CompileError(`both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
+    throw new CompileError("E0109", `both sides of '?:' must have the same type, not '${show(then)}' and '${show(otherwise)}'`, e.start, e.end);
   }
   const union = unionType(both);
   coerce(e.then, then, union, `type '${show(then)}' is not assignable to type '${show(union)}'`);
@@ -184,9 +184,9 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
       shape.apply(coercions);
       into = [to.members[shapes.indexOf(shape)]!];
     }
-    if (into.length === 0) throw new CompileError(message, e.start, e.end);
+    if (into.length === 0) throw new CompileError("E0101", message, e.start, e.end);
     if (into.length > 1) {
-      throw new CompileError(`type '${show(source)}' fits more than one member of '${show(to)}': ${into.map((m) => `'${show(m)}'`).join(" and ")}`, e.start, e.end);
+      throw new CompileError("E0109", `type '${show(source)}' fits more than one member of '${show(to)}': ${into.map((m) => `'${show(m)}'`).join(" and ")}`, e.start, e.end);
     }
     if (sources.length === 1) excess(e, into[0]!);
   }
@@ -199,10 +199,10 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
   if (!test) return undefined;
   const tested = value(test.operand);
   const held = typeof tested !== "string" && tested.kind === "ref" ? tested.to : tested;
-  if (typeof held !== "string" && held.kind === "union" && held.members.some(isPlainJs)) throw new CompileError(`'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
+  if (typeof held !== "string" && held.kind === "union" && held.members.some(isPlainJs)) throw new CompileError("E1005", `'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
   const names = isPlainJs(held) ? JS_TYPEOF : TYPEOF;
   if (test.name.kind !== "string" || !names.has(test.name.value)) {
-    throw new CompileError(`'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
+    throw new CompileError("E0109", `'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
   }
   return "boolean";
 }
@@ -220,7 +220,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: 
   if (!isUnion(left) && !isUnion(right)) return undefined;
   if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);
   if (!comparable(left, right)) {
-    throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
+    throw new CompileError("E0112", `this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
 }

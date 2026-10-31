@@ -554,8 +554,8 @@ async function main() {
 });
 
 test("no class extends a Rust type", () => {
-  expect(refused(handles(`class Mine extends Counter {\n  constructor() {\n    super(1);\n  }\n}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error: a class can't extend the Rust type 'Counter'; hold one in a field instead");
-  expect(refused(handles(`class Mine extends Bare {}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error: a class can't extend the Rust type 'Bare'; hold one in a field instead");
+  expect(refused(handles(`class Mine extends Counter {\n  constructor() {\n    super(1);\n  }\n}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error[E1004]: a class can't extend the Rust type 'Counter'; hold one in a field instead");
+  expect(refused(handles(`class Mine extends Bare {}\nfunction main() {}\n`))).toBe("src/main.fsh:2:20: error[E1004]: a class can't extend the Rust type 'Bare'; hold one in a field instead");
 });
 
 test("a static and a method naming one Rust function are refused, and so is a Dyn of a Rust type", () => {

@@ -301,7 +301,7 @@ function main() {
 });
 
 test("a compound assignment to a handle's property waits", () => {
-  expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error: compound assignments to a package's properties are not supported yet");
+  expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error[E0801]: compound assignments to a package's properties are not supported yet");
 });
 
 test("results of every type the checker lets cross are read as declared", () => {
@@ -331,7 +331,7 @@ test("a result no member of its declared union takes panics", () => {
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
   expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a JS value isn't supported yet");
-  expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
+  expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error[E1101]: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
 });
 
 test("a union's members of one JS kind are told apart by what they hold", () => {

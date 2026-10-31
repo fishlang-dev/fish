@@ -562,7 +562,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (!part) return;
     const inside = part === type ? "" : ` (in '${show(type)}')`;
     const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
-    throw new CompileError(what, at.start, at.end);
+    throw new CompileError("E1102", what, at.start, at.end);
   }
 
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward

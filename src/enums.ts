@@ -27,7 +27,7 @@ export function declareEnum(compilation: Compilation, node: EnumNode, evaluate: 
   if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node, counts.enums++);
   const seen = new Set<string>();
   for (const m of node.members) {
-    if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
+    if (seen.has(m.name)) throw new CompileError("E0707", `duplicate enum member '${m.name}'`, m.start, m.end);
     seen.add(m.name);
   }
   const id = counts.enums++;
@@ -40,7 +40,7 @@ export function declareEnum(compilation: Compilation, node: EnumNode, evaluate: 
     if (settled) return settled;
     if (members) {
       const [start, end] = innermost(compilation, node);
-      throw new CompileError(`enum '${node.name}' is used while its members are being computed; give its members values that don't depend on the enum itself`, start, end);
+      throw new CompileError("E0707", `enum '${node.name}' is used while its members are being computed; give its members values that don't depend on the enum itself`, start, end);
     }
     members = new Unsettled(compilation, node, seen);
     // A failed settle starts again from nothing, since the checker may retry the pass that read it.
@@ -79,7 +79,7 @@ class Unsettled extends Map<string, LiteralType> {
   ready(name: string) {
     if (!this.names.has(name) || super.has(name)) return;
     const [start, end, member] = innermost(this.compilation, this.node);
-    throw new CompileError(`enum member '${member}' uses '${this.node.name}.${name}', which isn't computed yet; an initializer can only use members declared before it, and no value can depend on itself`, start, end);
+    throw new CompileError("E0707", `enum member '${member}' uses '${this.node.name}.${name}', which isn't computed yet; an initializer can only use members declared before it, and no value can depend on itself`, start, end);
   }
 }
 
@@ -92,9 +92,9 @@ function settle(compilation: Compilation, node: EnumNode, id: number, members: M
   for (const m of node.members) {
     let value: bigint | string | undefined = m.init ? literal(m.init) : next;
     if (m.init && value === undefined) value = computed(compilation, node, m, m.init, evaluate);
-    if (value === undefined) throw new CompileError(`enum member '${m.name}' must have an initializer`, m.start, m.end);
+    if (value === undefined) throw new CompileError("E0707", `enum member '${m.name}' must have an initializer`, m.start, m.end);
     if (typeof value === "bigint" && (value > I64_MAX || value < -I64_MAX - 1n)) {
-      throw new CompileError(`enum member '${m.name}' is ${value}, which does not fit in i64`, m.start, m.end);
+      throw new CompileError("E0707", `enum member '${m.name}' is ${value}, which does not fit in i64`, m.start, m.end);
     }
     members.set(m.name, literalType(value, { enum: node.name, member: m.name, id }));
     next = typeof value === "bigint" ? value + 1n : undefined;
@@ -116,8 +116,8 @@ function computed({ enumInits, ids }: Compilation, node: EnumNode, m: EnumMember
     enumInits.pop();
   }
   if (typeof value === "bigint" || typeof value === "string") return value;
-  if (typeof value === "number") throw new CompileError(`enum member '${m.name}' is ${value}, a float; a numeric enum holds i64 values, so give it an integer`, init.start, init.end);
-  throw new CompileError(`enum member '${m.name}' must be an integer or a string`, init.start, init.end);
+  if (typeof value === "number") throw new CompileError("E0707", `enum member '${m.name}' is ${value}, a float; a numeric enum holds i64 values, so give it an integer`, init.start, init.end);
+  throw new CompileError("E0707", `enum member '${m.name}' must be an integer or a string`, init.start, init.end);
 }
 
 // A copy of an initializer with the enum's own bare member names qualified. Functions inside
@@ -143,9 +143,9 @@ function qualified(ids: Ids, node: unknown, enumName: string, names: Set<string>
 function dataEnum(node: EnumNode, id: number): EnumInfo {
   const seen = new Set<string>();
   for (const m of node.members) {
-    if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
+    if (seen.has(m.name)) throw new CompileError("E0707", `duplicate enum member '${m.name}'`, m.start, m.end);
     seen.add(m.name);
-    if (m.init) throw new CompileError(`enum '${node.name}' mixes members with values and members holding data; split it into two enums`, m.start, m.end);
+    if (m.init) throw new CompileError("E0707", `enum '${node.name}' mixes members with values and members holding data; split it into two enums`, m.start, m.end);
   }
   const params = node.typeParams.map((p) => p.name);
   const derives = node.derives ?? [];

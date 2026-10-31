@@ -31,7 +31,7 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
     const open = openParam(typing, t, deep);
     if (!open) continue;
     if (deferring()) return open;
-    throw new CompileError(`${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+    throw new CompileError("E0114", `${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
   }
   return undefined;
 }
@@ -47,14 +47,14 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
     if (typeof t !== "string" && t.kind === "object") return t.fields;
     if (typeof t !== "string" && t.kind === "class") {
-      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while the field types of '${t.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
+      if (!layout(t)) throw new CompileError("E0114", `${what} of '${t.name}' is needed while the field types of '${t.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
       return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return fieldsOf(t.concrete, what, at);
     if (typeof t !== "string" && t.kind === "interface") {
-      throw new CompileError(`${what} takes an object type or a class, not the interface '${show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
+      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
     }
-    throw new CompileError(`${what} takes an object type or a class, not '${show(t)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes an object type or a class, not '${show(t)}'`, at.start, at.end);
   }
 
   // The keys a type names: a string literal, or a union of them.
@@ -64,7 +64,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     if (members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string")) {
       return members.map((m) => (m as { value: string }).value);
     }
-    throw new CompileError(`${what} takes keys written as string literals, like '"a" | "b"', not '${show(k)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes keys written as string literals, like '"a" | "b"', not '${show(k)}'`, at.start, at.end);
   }
 
   // `keyof T`: the union of T's field names.
@@ -72,7 +72,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     const held = standIn(typing, [t], "'keyof'", at, false, deferring);
     if (held) return held;
     const fields = fieldsOf(t, "'keyof'", at);
-    if (fields.length === 0) throw new CompileError(`'${show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
+    if (fields.length === 0) throw new CompileError("E0114", `'${show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
     return unionType(fields.map((f) => literalType(f.name)));
   }
 
@@ -84,12 +84,12 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return indexedType(t.concrete, k, at, keyAt);
     if (typeof t !== "string" && t.kind === "array") {
       if (isNumeric(k)) return t.element;
-      throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
+      throw new CompileError("E0114", `an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
     }
     const fields = fieldsOf(t, "an indexed access type", at);
     return unionType(keysOf(k, "an indexed access type", keyAt).map((name) => {
       const found = fields.find((f) => f.name === name);
-      if (!found) throw new CompileError(`'${name}' isn't a field of '${show(t)}'`, keyAt.start, keyAt.end);
+      if (!found) throw new CompileError("E0114", `'${name}' isn't a field of '${show(t)}'`, keyAt.start, keyAt.end);
       return found.type;
     }));
   }
@@ -97,7 +97,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   // `Record<K, V>`: an object type with a field of type V for each key K names.
   const recordType: Utility = ([k, v], at, [keyAt]) => {
     if (k === "string") {
-      throw new CompileError(`'Record<string, ${show(v!)}>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<"a" | "b", ${show(v!)}>'`, at.start, at.end);
+      throw new CompileError("E0114", `'Record<string, ${show(v!)}>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<"a" | "b", ${show(v!)}>'`, at.start, at.end);
     }
     return objectType(keysOf(k!, "'Record'", keyAt!).map((name) => ({ name, type: v! })));
   };
@@ -115,7 +115,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   const pickType: Utility = ([t, k], at, [, keyAt]) => {
     const fields = fieldsOf(t!, "'Pick'", at);
     const names = keysOf(k!, "'Pick'", keyAt!);
-    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError(`'${name}' isn't a field of '${show(t!)}', so 'Pick' can't keep it`, keyAt!.start, keyAt!.end);
+    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError("E0114", `'${name}' isn't a field of '${show(t!)}', so 'Pick' can't keep it`, keyAt!.start, keyAt!.end);
     return objectType(fields.filter((f) => names.includes(f.name)));
   };
 
@@ -146,7 +146,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     const f = given!;
     if (typeof f !== "string" && f.kind === "param" && f.concrete) return returnType([f.concrete], at, []);
     if (typeof f !== "string" && (f.kind === "function" || f.kind === "closure")) return f.returns;
-    throw new CompileError(`'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${show(f)}'`, at.start, at.end);
+    throw new CompileError("E0114", `'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${show(f)}'`, at.start, at.end);
   };
 
   // `Awaited<T>`: what awaiting a T gives, through promises of promises; any other type is itself.
@@ -170,11 +170,11 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
         if (typeof m !== "string" && m.kind === "literal") return { quasis: [String(m.value)], holes: [] };
         if (m === "string" || isNumeric(m)) return { quasis: ["", ""], holes: [m] };
         if (typeof m !== "string" && m.kind === "pattern") return { quasis: m.quasis, holes: m.holes };
-        throw new CompileError(`a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
+        throw new CompileError("E0114", `a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
       });
-      if (spelled.length * pieces.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
+      if (spelled.length * pieces.length > 10_000) throw new CompileError("E0114", "this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
       spelled = spelled.flatMap((s) => pieces.map((p) => join(join(s, p), { quasis: [quasis[i + 1]!], holes: [] })));
-      if (spelled.some((s) => s.quasis.some((q) => q.length > 100_000))) throw new CompileError("this template literal type spells a string longer than 100000 characters", at.start, at.end);
+      if (spelled.some((s) => s.quasis.some((q) => q.length > 100_000))) throw new CompileError("E0114", "this template literal type spells a string longer than 100000 characters", at.start, at.end);
     });
     return kept(spelled.map((s) => (s.holes.length === 0 ? literalType(s.quasis[0]!) : patternType(s.quasis, s.holes))));
   }
@@ -187,7 +187,7 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   // `Uppercase<S>` and its kin: each string literal of S changed as JavaScript changes it.
   const intrinsic = (what: string, change: (s: string) => string): Utility => ([s], at) => kept(membersOf(s!, `'${what}'`, at).map((m) => {
     if (typeof m !== "string" && m.kind === "literal" && typeof m.value === "string") return literalType(change(m.value));
-    throw new CompileError(`'${what}' takes string literals, like '${what}<"a" | "b">', not '${show(m)}'`, at.start, at.end);
+    throw new CompileError("E0114", `'${what}' takes string literals, like '${what}<"a" | "b">', not '${show(m)}'`, at.start, at.end);
   }));
 
   // The utility types by name, and how many type arguments each takes.

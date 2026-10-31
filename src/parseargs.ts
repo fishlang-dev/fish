@@ -11,23 +11,23 @@ const OPTION_KEYS = ["type", "short", "multiple", "default"];
 // read, the options as specs, the two settings Fish reads, and a builder of the values typed as
 // @types/node types them, a field per option, optional unless it has a default.
 export function parseArgsArgs(ids: Ids, e: Call): Expr[] {
-  if (e.args.length > 1) throw new CompileError("'parseArgs' takes one config object", e.args[1]!.start, e.args.at(-1)!.end);
+  if (e.args.length > 1) throw new CompileError("E0504", "'parseArgs' takes one config object", e.args[1]!.start, e.args.at(-1)!.end);
   const config = e.args[0];
   if (config !== undefined && config.kind !== "object") throw literalOnly(config, "its config");
   const settings = new Map<string, Expr>();
   for (const p of config?.props ?? []) {
     const key = keyOf(p, "its config");
-    if (!SETTINGS.includes(key)) throw new CompileError(`'${key}' isn't a parseArgs setting; they are ${SETTINGS.join(", ")}`, p.start, p.end);
+    if (!SETTINGS.includes(key)) throw new CompileError("E0504", `'${key}' isn't a parseArgs setting; they are ${SETTINGS.join(", ")}`, p.start, p.end);
     settings.set(key, p.kind === "shorthand" ? { id: nextId(ids), kind: "ident", name: p.name, start: p.start, end: p.end } : (p as Extract<ObjectProp, { kind: "property" }>).value);
   }
   const flag = (name: string, fallback: boolean): boolean => {
     const v = settings.get(name);
     if (v === undefined) return fallback;
-    if (v.kind !== "bool") throw new CompileError(`'parseArgs' takes '${name}' as true or false written in the call, so its result's type is known while compiling`, v.start, v.end);
+    if (v.kind !== "bool") throw new CompileError("E0504", `'parseArgs' takes '${name}' as true or false written in the call, so its result's type is known while compiling`, v.start, v.end);
     return v.value;
   };
-  if (!flag("strict", true)) throw new CompileError("'strict: false' in parseArgs isn't supported yet; its values would have no type", settings.get("strict")!.start, settings.get("strict")!.end);
-  if (flag("tokens", false)) throw new CompileError("'tokens: true' in parseArgs isn't supported yet", settings.get("tokens")!.start, settings.get("tokens")!.end);
+  if (!flag("strict", true)) throw new CompileError("E0801", "'strict: false' in parseArgs isn't supported yet; its values would have no type", settings.get("strict")!.start, settings.get("strict")!.end);
+  if (flag("tokens", false)) throw new CompileError("E0801", "'tokens: true' in parseArgs isn't supported yet", settings.get("tokens")!.start, settings.get("tokens")!.end);
   const options = settings.get("options");
   if (options !== undefined && options.kind !== "object") throw literalOnly(options, "'options'");
   const defaults: Expr[] = [];
@@ -37,29 +37,29 @@ export function parseArgsArgs(ids: Ids, e: Call): Expr[] {
   const names = new Set<string>();
   (options?.props ?? []).forEach((p, i) => {
     const name = keyOf(p, "'options'");
-    if (names.has(name)) throw new CompileError(`the option '${name}' is given twice`, p.start, p.end);
+    if (names.has(name)) throw new CompileError("E0504", `the option '${name}' is given twice`, p.start, p.end);
     names.add(name);
     const option = p.kind === "property" ? p.value : undefined;
     if (option?.kind !== "object") throw literalOnly(option ?? p, `the option '${name}'`);
     const set = new Map<string, Expr>();
     for (const q of option.props) {
       const key = keyOf(q, `the option '${name}'`);
-      if (!OPTION_KEYS.includes(key) || q.kind !== "property") throw new CompileError(`'${key}' isn't an option setting; they are ${OPTION_KEYS.join(", ")}`, q.start, q.end);
+      if (!OPTION_KEYS.includes(key) || q.kind !== "property") throw new CompileError("E0504", `'${key}' isn't an option setting; they are ${OPTION_KEYS.join(", ")}`, q.start, q.end);
       set.set(key, q.value);
     }
     const type = set.get("type");
-    if (type?.kind !== "string" || (type.value !== "string" && type.value !== "boolean")) throw new CompileError(`the option '${name}' needs 'type: "string"' or 'type: "boolean"'`, (type ?? p).start, (type ?? p).end);
+    if (type?.kind !== "string" || (type.value !== "string" && type.value !== "boolean")) throw new CompileError("E0504", `the option '${name}' needs 'type: "string"' or 'type: "boolean"'`, (type ?? p).start, (type ?? p).end);
     const short = set.get("short");
     if (short !== undefined && (short.kind !== "string" || short.value.length !== 1 || short.value === "-")) {
-      throw new CompileError(`the option '${name}' takes 'short' as one character written in the call, like short: "v"`, short.start, short.end);
+      throw new CompileError("E0504", `the option '${name}' takes 'short' as one character written in the call, like short: "v"`, short.start, short.end);
     }
     const multiple = set.get("multiple");
-    if (multiple !== undefined && multiple.kind !== "bool") throw new CompileError(`the option '${name}' takes 'multiple' as true or false written in the call`, multiple.start, multiple.end);
+    if (multiple !== undefined && multiple.kind !== "bool") throw new CompileError("E0504", `the option '${name}' takes 'multiple' as true or false written in the call`, multiple.start, multiple.end);
     const many = multiple?.value === true;
     const text = type.value === "string";
     const fallback = set.get("default");
     if (fallback && wrongDefault(fallback, type.value, many)) {
-      throw new CompileError(`the option '${name}' gives a ${type.value}${many ? " array" : ""}, so its default is ${many ? `a ${type.value}[]` : `a ${type.value}`} too`, fallback.start, fallback.end);
+      throw new CompileError("E0504", `the option '${name}' gives a ${type.value}${many ? " array" : ""}, so its default is ${many ? `a ${type.value}[]` : `a ${type.value}`} too`, fallback.start, fallback.end);
     }
     specs.push(`{ name: ${JSON.stringify(name)}, short: ${JSON.stringify(short?.kind === "string" ? short.value : "")}, text: ${text}, multiple: ${many} }`);
     const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
@@ -90,14 +90,14 @@ function wrongDefault(v: Expr, type: string, many: boolean): boolean {
 }
 
 function literalOnly(at: Span, what: string): CompileError {
-  return new CompileError(`'parseArgs' takes ${what} as an object literal written in the call, so its result's type is known while compiling`, at.start, at.end);
+  return new CompileError("E0504", `'parseArgs' takes ${what} as an object literal written in the call, so its result's type is known while compiling`, at.start, at.end);
 }
 
 function keyOf(p: ObjectProp, within: string): string {
   if (p.kind === "shorthand") return p.name;
   if ((p.kind === "property" || p.kind === "method") && typeof p.key === "string") return p.key;
   if (p.kind === "property" && typeof p.key !== "string" && p.key.kind === "string") return p.key.value;
-  throw new CompileError(`'parseArgs' takes ${within} with its keys written as names`, p.start, p.end);
+  throw new CompileError("E0504", `'parseArgs' takes ${within} with its keys written as names`, p.start, p.end);
 }
 
 // Generated nodes take the call's span, so a message about one points at the call.
